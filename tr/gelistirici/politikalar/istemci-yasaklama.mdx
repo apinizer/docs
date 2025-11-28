@@ -1,6 +1,152 @@
 ---
 title: 'İstemci Yasaklama'
-description: 'Description of your new file.'
+description: 'Kimlik bazlı istemci taleplerini eşik aşımı durumunda otomatik olarak geçici yasaklar'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- Artan kötüye kullanım ya da hata oranlarını saptayarak istemciyi kaynak tüketiminden geçici olarak uzaklaştırmak.
+- Kimliksel değişkenlerle (header, query, JWT vs.) her isteği ilişkilendirip hedefli ban politikaları yürütmek.
+- Eşik penceresi ve ban süresi parametreleriyle `API Proxy (API Vekil Sunucusu)` altyapısında sistemsel istikrarı korumak.
+- Assertion Condition yapılandırması sayesinde belirli hata desenlerinde aksiyon alarak işletme kurallarını enforce etmek.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: IP İstemci Yasaklama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Kimlik ve Eşik Değerlendirmesi**: İstekten seçilen `clientIdentityVariableList` değerleri bir anahtar oluşturur, `assertionCondition` sağlanırsa pencere içindeki talepler/yanıtlar `thresholdCalculationType`'a göre sayılır.
+4. **Karar Verme**:
+   - **Eşleşme Var**: Eşik değerini aşan anahtar için `banTimeInSeconds` boyunca bloklama başlatılır, `enableRetryAfterHeader` aktifse Retry-After header döner.
+   - **Eşleşme Yok**: İstek olağan akışında devam eder, sayaçlar güncellenmez.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Çoklu Kimlik Tespiti**: Birden fazla değişken seçilerek istemci kimliği birleşik anahtar üzerinden hesaplanır ve segmentasyon desteklenir.
+- **Uyarlanabilir Eşik Yönetimi**: `thresholdWindowInSeconds` ve `thresholdCountPerWindow` parametreleriyle sabit veya yüzdesel (EnumErrorThresholdType) eşikler tanımlanır.
+- **Dinamik Ban Süreleri**: `banTimeInSeconds` alanıyla saniye bazlı yasaklama süresi belirlenir; `ignoreWhenKeyIsEmpty` seçeneği boş anahtarları yok sayar.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Assertion Condition ile İnce Ayrışım**: Assertion Query Builder üzerinden hata/yanıt içeriklerine göre ban tetikleyebilirsiniz. Koşullar sağlanmadığında sayaçlar güncellenmez, yalancı pozitifler engellenir; kurallar değiştikçe koşulları versiyonlayarak güncelleyin.
+- **Retry-After Başlık Yönetimi**: `enableRetryAfterHeader` anahtarı aktif olduğunda hata yanıtlarına otomatik Retry-After eklenir. Değer, `banTimeInSeconds` ile eşleşir ve istemcilere bekleme süresini iletir; kuyruklu sistemlerde yeniden deneme stratejisini standartlaştırır.
+- **Çoklu Eşik Tipi Senaryosu**: COUNT modu ardışık istek sayısını sayarken PERCENT modu hata oranlarına odaklanır. Aynı politika içinde pencere süresiyle değişen iki farklı key seti yönetilebilir, trafik profilinize göre mod switch edilerek performans optimize edilir.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export edip farklı ortamlara (Development, Test, Production) import ederek versiyon kontrolü ve yedekleme yapabilirsiniz.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetip Proxy Group'lara toplu politika atayarak merkezi güncelleme ve deploy işlemlerini hızlandırabilirsiniz.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy ederek hangi API Proxy'lerde kullanıldığını Policy Usage üzerinden izleyebilir, Proxy Group ve Policy Group kullanım raporlarını değerlendirebilirsiniz.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Mobil İstemci Aşırı İstek | Aynı cihazdan 1 dakikada 120 çağrı geliyor. | `thresholdWindowInSeconds=60`, `thresholdCountPerWindow=100`, `banTimeInSeconds=300`. | 60 saniyede 100 üzeri istek yapan cihaz 5 dakika boyunca 429 alır. |
+| Hata Odaklı Ban | Bir endpoint 500 döndüğünde art arda tekrar deniyor. | `thresholdCalculationType=PERCENT`, `assertionCondition`: statusCode=500, pencere=120 sn, eşik=%50. | Hata oranı %50 üzerine çıkınca istemci 2 dakika engellenir ve kaynak korunur. |
+| API Anahtarı Paylaşımı | Aynı API Key birden fazla IP'den kullanılıyor. | `clientIdentityVariableList`: X-API-Key + X-Forwarded-For, pencere=30 sn, eşik=20. | Paylaşım tespit edilen anahtar kısa süreli askıya alınır. |
+| Retry-After Sinyali | Tüketicilere bekleme süresi bildirilmiyor. | `enableRetryAfterHeader=true`, `banTimeInSeconds=120`. | Ban yanıtlarında Retry-After=120 gönderilir, istemci backoff uygular. |
+| Boş Kimlikte Pas Geç | Bazı isteklerde kimlik header'ı eksik. | `ignoreWhenKeyIsEmpty=true`, `assertionCondition` boş. | Kimlik bulunamayan istekler ban hesaplamasına dahil edilmez, yanlış pozitifler engellenir. |
+| Ortam Bazlı Uygulama | Sadece Canlı Ortamda sert limit istiyorsunuz. | Condition: Header X-Environment equals production. | Politika yalnızca Canlı Ortam çağrılarını kısıtlar, diğer ortamlarda devre dışı kalır. |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir.
+
+### Yeni İstemci Yasaklama Politikası Oluşturma
+
+![İstemci Yasaklama Politikası Oluşturma](image-2025-11-7_12-6-50.png)
+
+### Yapılandırma Adımları
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → Client Ban** bölümüne gidin.<br/>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br/><br/>**Name (İsim) Zorunlu:** Örnek: `Production_IP_Whitelist`<br/>- Benzersiz isim girin, boşlukla başlamaz.<br/>- Sistem otomatik kontrol eder: Yeşil tik: kullanılabilir Kırmızı çarpı: mevcut isim.<br/><br/>**Description (Açıklama):** Örnek: "Prod ortamı için yalnızca kurum içi ve partner sistemlerinden gelen isteklere izin verir."<br/>- Maks. 1000 karakter.<br/>- Politikanın amacını açıklayın. |
+| **Adım 3: İstemci Kimliği Parametreleri** | - **Client Identity Variables** tablosunda kimliği tanımlayan değişkenleri seçin (header, query, JWT claim vb.).<br/>- Değişkenleri Variable dialog ile projeden ekleyin; gerekirse çıkarın.<br/>- Seçim yapılmadıysa politika kaydedilemez. |
+| **Adım 4: Eşik ve Yasak Zamanlaması** | - `thresholdWindowInSeconds` ve `thresholdCountPerWindow` değerlerini saniye ve adet bazında girin.<br/>- `thresholdCalculationType` için COUNT veya PERCENT modunu seçin.<br/>- `banTimeInSeconds` ile yasak süresini belirleyin; `enableRetryAfterHeader`/`ignoreWhenKeyIsEmpty` toggle'larını ihtiyaca göre açın. |
+| **Adım 5: Assertion Condition Tanımı** | - Assertion Query Builder'da ban hesaplamasına dahil edilecek olayları tanımlayın (örn: statusCode, header, body).<br/>- Tanım boş bırakılırsa tüm istekler pencereye dahil edilir.<br/>- Koşula uyum sağlayan kayıtlar sayaçta tutulur. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br/>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br/>**Örnekler:**<br/>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br/>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br/>- Endpoint bazlı: `Path = /api/admin/*`<br/>Koşul tanımlamazsa politika her zaman aktif<br/>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br/>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br/>**Varsayılan:**<br/>```json\n{ \n  "statusCode": 403, \n  "message": "[Default hata mesajı]" \n}\n```<br/>**Özel:**<br/>```json\n{ \n  "statusCode": 403, \n  "errorCode": "[CUSTOM_ERROR_CODE]", \n  "message": "[Özel mesaj]" \n}\n``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br/>**Kontrol Listesi:** Benzersiz isim Zorunlu alanlar dolu En az bir IP veya grup mevcut<br/>**Sonuç:**<br/>- Politika listeye eklenir.<br/>- API'lere bağlanabilir.<br/>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politika-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politika-export)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politika-api-baglama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Kullanım Adımları |
+|---------|-------------------------------|
+| **Koşullu Ban Senaryosu** | - API yanıt gövdesinde hata kodunu Query Builder ile kontrol edin.<br/>- Belirli hata mesajlarında assertionCondition üzerinden sayaç güncelleyin.<br/>- Ban süresini iş gereksinimine göre düzenleyin ve kaydedin. |
+| **Çok Katmanlı Kimlik Anahtarı** | - Variable dialog ile kullanıcı ID, cihaz ID ve IP değişkenlerini seçin.<br/>- Listeye eklenen değişkenlerin sırasını gözden geçirerek anahtar kombinasyonunu belirleyin.<br/>- Gereksiz değişkenleri çıkararak hedefli ban stratejisi oluşturun. |
+| **Oran Bazlı Limit Konfigürasyonu** | - `thresholdCalculationType=PERCENT` seçin.<br/>- Pencere süresi ve hata yüzdesini belirleyin (örn. 120 sn, %40).<br/>- Assertion koşulunu 5xx/429 status kodlarına göre tanımlayıp kaydedin. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Kimlik Stratejisi** | **Kötü:** Tek başına IP adresini kullanmak.<br/>**İyi:** IP + API Key kombinasyonunu değerlendirmek.<br/>**En İyi:** Cihaz ID, kullanıcı ID ve IP gibi çoklu değişkenle benzersiz anahtar oluşturmak. |
+| **Eşik Tasarımı** | **Kötü:** Rastgele eşik değerleri belirlemek.<br/>**İyi:** Ortalama trafik değerlerine göre eşik tanımlamak.<br/>**En İyi:** Trafik analitiğini kullanarak pencere ve eşikleri periyodik olarak gözden geçirmek. |
+| **Retry-After Mesajı** | **Kötü:** Client'a bekleme süresini bildirmemek.<br/>**İyi:** Sabit hata mesajı göstermek.<br/>**En İyi:** Retry-After başlığı ve detaylı hata açıklamasıyla istemci davranışını yönlendirmek. |
+| **Assertion Condition Kullanımı** | **Kötü:** Assertion boş bırakıp tüm istekleri saymak.<br/>**İyi:** Yalnızca belirli status kodlarını hedeflemek.<br/>**En İyi:** Hem status hem de header/body kontrolleriyle doğru sinyalleri saymak. |
+| **Deploy Süreci** | **Kötü:** Canlı Ortamda doğrudan değişiklik yapmak.<br/>**İyi:** Test ortamında manuel doğrulama yapmak.<br/>**En İyi:** Export/Import ve pipeline tabanlı deploy ile kontrollü geçiş uygulamak. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Kimlik Doğruluğu** | `clientIdentityVariableList` için doğrulanmamış header değerlerini seçerken sahtecilik riskini analiz edin. |
+| **API Anahtarı Koruması** | Paylaşılan anahtarlar için düşük eşik ve kısa ban süreleri belirleyin; uyarı loglarını devreye alın. |
+| **Hata Mesajları** | Yasak almış istemcilere iç mimariyi açığa çıkaran mesajları göstermeyin. Genel ama aksiyon öneren metin yazın. |
+| **Koşul Yönetimi** | Canlı Ortam koşulunu atlamayın, aksi halde Geliştirme trafiği yanlışlıkla banlanabilir. |
+| **Monitor ve Alarm** | Ban sayısını izleyerek anormal dalgalanmaları tespit edin; threshold ayarlarını güncel tutun. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Yanlış Kimlik Değişkeni** | **Neden kaçınılmalı:** Kullanıcıyı yanlış kişiye uygulayabilirsiniz.<br/>**Alternatif:** Doğrulanmış ve stabil değişkenleri seçin. |
+| **Aşırı Uzun Ban Süresi** | **Neden kaçınılmalı:** Meşru kullanıcılar uzun süre engellenir.<br/>**Alternatif:** İlk banlarda kısa, tekrarında kademeli artış uygulayın. |
+| **Eşiklerin Çok Düşük Olması** | **Neden kaçınılmalı:** Normal trafiği engelleyip hizmet kesintisine yol açar.<br/>**Alternatif:** Trafik ölçümlerine göre makul eşikler kullanın. |
+| **Retry-After Kapalı Kalması** | **Neden kaçınılmalı:** İstemci ne kadar bekleyeceğini bilmez ve spam şekilde tekrar dener.<br/>**Alternatif:** `enableRetryAfterHeader`'i aktif ederek bekleme süresini bildirin. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+|--------|--------------|
+| **Kimlik Anahtarı Karmaşıklığı** | **Öneri:** Gereksiz değişkenleri çıkarın, minimum ama yeterli kombinasyon kullanın.<br/>**Etki:** Hash hesaplamaları hızlanır, bellek kullanımı azalır. |
+| **Pencere Süresi** | **Öneri:** Çok kısa pencereler yerine gerçekçi trafik aralıkları belirleyin.<br/>**Etki:** Sayaç güncellemeleri azalır, performans dengelenir. |
+| **Threshold Calculation Type** | **Öneri:** COUNT modu yüksek trafikte, PERCENT modu dalgalı trafikte kullanın.<br/>**Etki:** Yanlış ban olasılığı düşer, kaynak tüketimi optimize olur. |
+| **Assertion Condition Karmaşıklığı** | **Öneri:** Gereksiz nested koşullardan kaçının.<br/>**Etki:** Query Builder değerlendirmesi hızlanır. |
+| **Loglama Stratejisi** | **Öneri:** Ban olaylarını özet loglarla kaydedin.<br/>**Etki:** Aşırı log üretimi önlenir, analitik kolaylaşır. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|-----------|-----------|
+| **Genel** | Bu politika Rate Limiting ile aynı mı? | Hayır; Rate Limiting isteği sınırlandırır, İstemci Yasaklama Politikası eşik aşıldığında belirli süre boyunca istemciyi tamamen engeller. |
+| **Genel** | Global mi local mi kullanmalıyım? | Birden fazla API aynı kuralı paylaşıyorsa global, tek API özelse local politika tercih edin. |
+| **Teknik** | `thresholdCalculationType=PERCENT` nasıl çalışır? | Pencere içinde değerlendirilen olayların belirli yüzdesi koşulu sağladığında ban tetiklenir; sayaç `assertionCondition` ile filtrelenir. |
+| **Teknik** | Boş kimlik değerleri neden problem? | Boş değerler tüm kullanıcıları aynı anahtarda birleştirir; `ignoreWhenKeyIsEmpty` ile bu durum pas geçilebilir. |
+| **Kullanım** | Retry-After başlığını özelleştirebilir miyim? | Başlık değeri otomatik olarak `banTimeInSeconds`'tan alınır; özel mesaj için Error Message sekmesini kullanabilirsiniz. |
+| **Kullanım** | Ban'a takılan istemciyi nasıl serbest bırakırım? | Ban süresini düşürebilir, politikayı pasifleştirebilir veya parametreleri güncelleyip yeniden deploy edebilirsiniz. |

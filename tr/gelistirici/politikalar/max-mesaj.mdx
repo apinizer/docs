@@ -1,6 +1,149 @@
 ---
-title: "Maksimum Mesaj Uzunluğu (Max. Message Size)"
-description: 'Description of your new file.'
+title: 'Maksimum Mesaj Uzunluğu (Max. Message Size)'
+description: 'Gelen istek gövdesinin byte cinsinden üst sınırını denetleyerek aşımı engeller'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- API Proxy (API Vekil Sunucusu) üzerinden gelen isteklerin gövde büyüklüğünü sınırlandırarak sistem kaynaklarını korur.
+- Yüksek boyutlu isteklerin servis performansını düşürmesini ve beklenmedik zaman aşımı sorunlarını engeller.
+- Tanımlı güvenilir sınırların dışında kalan veri transferlerini erken aşamada durdurup backend servislerini korur.
+- İsteğe bağlı hata mesajı özelleştirme ile istemci tarafında hızlı hata ayıklamayı destekler.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: IP Maksimum Mesaj Boyutu politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Mesaj Boyutu Ölçümü**: İstek gövdesinin byte cinsinden uzunluğu okunur ve tanımlanan `size` değeri ile karşılaştırılır.
+4. **Karar Verme**:
+   - **Eşleşme Var**: İstek boyutu tanımlanan limitten küçükse iletim devam eder.
+   - **Eşleşme Yok**: Boyut limiti `>= size` olduğunda istek engellenir ve yapılandırılmış hata mesajı döner.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür. Varsayılan olarak 403 ERR-027 kodu gönderilir.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Byte Bazlı Mesaj Kısıtlama**: İstek gövdesi uzunluğunu byte cinsinden ölçerek tanımlanan limite ulaşıldığında işlemi durdurur.
+- **Anlık Engelleme Mekanizması**: Limit aşımı tespit edilir edilmez zinciri keserek backend servislerine yük binmesini önler.
+- **gRPC Uyumlu Doğrulama**: `availableForGrpc()` desteği sayesinde hem HTTP hem gRPC çağrılarında aynı kural seti kullanılabilir.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Koşula Göre Limit Belirleme**: Query Builder ile belirli endpoint, header, method veya kullanıcı segmentlerine özel farklı limitler tanımlanabilir.
+- **Hata Mesajı Lokalizasyonu**: Özel hata kodu ve mesajlarıyla istemci tarafında anlaşılır geri bildirim sağlanır, çoklu dil desteğiyle uyumludur.
+- **Politika Kullanım Takibi**: Kullanıldığı API Proxy'ler, Proxy Group'lar ve Policy Group'lar tek ekran üzerinden izlenebilir.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Büyük JSON İstek Engelleme | Mikroservis 1 MB üzeri JSON istekleri işleyemiyor | `size = 1048576` tanımla | 1 MB ve üzeri istekler 403 ERR-027 dönüşüyle bloke edilir |
+| Dosya Yükleme Kısıtı | API Proxy yalnızca metadata kabul ediyor | `size = 65536` değerine çek | 64 KB üzerindeki multipart gövdeler reddedilir |
+| gRPC Çağrılarında Limit | gRPC isteğinde beklenmedik büyük payload geliyor | Policy'i gRPC için aktive et, limit 200 KB | Büyük gRPC mesajları Gateway'de durdurulur |
+| Çevrimdışı Koşullu Limit | Sadece `/legacy/*` endpoint için 200 KB sınırı gerekiyor | Query Builder'da Path koşulu ekle, `size = 204800` | Diğer endpointler etkilenmeden legacy rotalar sınırlandırılır |
+| Test Ortamı Farklı Limiti | Test API'si 512 KB, Canlı 256 KB olmalı | Testte local politika `size = 524288`, canlıda global `size = 262144` | Ortama özgü limitler sorunsuz uygulanır |
+| DDoS Önleme | Saldırı sırasında binlerce büyük istek geliyor | Policy'i global olarak aktive et, limit 100 KB | Kaynak tüketimi artmadan Gateway 403 ile yanıtlar |
+| Mesaj Boyutu Uyarısı (opsiyonel) | Limit aşımında özel hata kodu isteniyor | Error Message tabında `errorCode=PAYLOAD_LIMIT` tanımla | İstemci özel hata kodunu loglayarak müdahale eder |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni Maksimum Mesaj Boyutu Politikası Oluşturma
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Geliştirme → Global Settings → Global Policies → Maksimum Mesaj Boyutu** bölümüne gidin.<br>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br><br>**Name (İsim) Zorunlu:** Örnek: `Production_MaxPayload`<br>- Benzersiz isim girin, boşlukla başlamaz.<br>- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br><br>**Description (Açıklama):** Örnek: "JSON POST istekleri için 512 KB üst sınır."<br>- Maks. 1000 karakter.<br>- Politikanın amacını açıklayın. |
+| **Adım 3: Maksimum Mesaj Uzunluğu (byte) Değerini Belirleme** | - **Maksimum Mesaj Uzunluğu (byte)** alanına istek gövdesinin izin verilen üst sınırını girin.<br>- Minimum değer 1'dir; değer >= 1 olmalıdır.<br>- Limitin kendisi de dahil (>= size) engelleneceğini unutmayın. |
+| **Adım 4: Global Politika Olarak Paylaşma (İsteğe Bağlı)** | - **Add to Global** anahtarını aktif ederek politikayı tüm projeler için kullanılabilir hale getirebilirsiniz.<br>- Lokal çalışma sırasında devre dışı bırakarak sadece ilgili API'de kullanabilirsiniz. |
+| **Adım 5: Kullanımda Olan Politikayı Yeniden Adlandırma (İsteğe Bağlı)** | - Var olan global politika üzerinde değişiklik yaparken kullanımda olan API Proxy'ler için sistem uyarı verir.<br>- Yeni isim veya ID üretmek gerektiğinde politikayı kopyalayıp local olarak kaydedin. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br><br>**Örnekler:**<br>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br>- Endpoint bazlı: `Path = /api/admin/*`<br><br>Koşul tanımlamazsa politika her zaman aktif<br><br>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br><br>**Varsayılan:**<br>```json<br>{<br>  "statusCode": 403,<br>  "message": "Permissible Max. Size Policy Validation failed! Permissible max. size of request must be ( {0} ) but found ( {1} ) !"<br>}<br>```<br><br>**Özel:**<br>```json<br>{<br>  "statusCode": 403,<br>  "errorCode": "PAYLOAD_LIMIT",<br>  "message": "İstek gövdesi 256 KB sınırını aştı."<br>}<br>``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br><br>**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir limit değeri tanımlandı.<br><br>**Sonuç:**<br>- Politika listeye eklenir.<br>- API'lere bağlanabilir.<br>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politikayı-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politikayı-dışa-içe-aktarma)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politikayı-apiye-bağlama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Koşula Bağlı Limit Farklılaştırma** | - Query Builder'da method, path veya header bazlı koşullar tanımlayın.<br>- Her koşul için farklı `size` değeri içeren klon politikalar oluşturun.<br>- Yüksek hacimli endpoint'lerde daha düşük limitlerle DoS riskini azaltın. |
+| **gRPC Mesaj Denetimi** | - `availableForGrpc()` sayesinde aynı politikayı gRPC servislerine atayın.<br>- gRPC mesaj büyüklükleri string uzunluğu üzerinden doğrulanır.<br>- Gateway katmanında erken kesme yapılarak backend gRPC servisleri korunur. |
+| **Global Politika Kullanım Analizi** | - Detay sayfasındaki Usage sekmeleri ile politika kullanım haritasını inceleyin.<br>- Yoğun kullanılan API Proxy'lerde limit değişiminden önce etki analizini yapın.<br>- Deploy sonrası listeye dönerek güncel kullanım durumunu doğrulayın. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Payload Planlama** | **Kötü:** Limit değeri servis kapasitesinden yüksek bırakmak.<br>**İyi:** Ortalama payload boyutuna göre limit belirlemek.<br>**En İyi:** Gerçek üretim izlerine göre periyodik limit güncellemesi yapmak. |
+| **Ortam Yönetimi** | **Kötü:** Geliştirme ve Canlı aynı limiti kullanmak.<br>**İyi:** Test ortamında daha yüksek tolerans tanımak.<br>**En İyi:** Ortam bazlı local politikalar tanımlayarak farklı limitler uygulamak. |
+| **Koşul Modelleme** | **Kötü:** Tüm istekleri tek politikaya bağlamak.<br>**İyi:** Hassas endpoint'ler için ayrı politika oluşturmak.<br>**En İyi:** Query Builder ile method/path bazlı limitleri ayrıştırmak. |
+| **Hata Mesajı Yönetimi** | **Kötü:** Varsayılan mesajı tüm istemcilerle paylaşmak.<br>**İyi:** Mesajı Türkçe ve İngilizce olarak özelleştirmek.<br>**En İyi:** İstemcinin beklediği formatta (JSON/Plain) hata mesajı üretmek. |
+| **Sürüm Kontrolü** | **Kötü:** Değişiklikleri kaydetmeden önce export almamak.<br>**İyi:** Her büyük değişiklik sonrası export etmek.<br>**En İyi:** Export dosyalarını versiyonlayıp CI/CD sürecine dahil etmek. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **DoS Koruması** | Limitleri düşük tutarak büyük payload'ların kaynak tüketmesini engelleyin; anlık saldırı durumunda limitleri düşürmeyi değerlendirin. |
+| **Hata Bilgisi Sızması** | Özel hata mesajı verirken sistem iç detaylarını paylaşmayın; sadece limit ve tespit edilen boyutu belirtin. |
+| **Log Yönetimi** | Limit aşımını güvenlik loguna yazın; istemci IP ve endpoint bilgilerini koruyun. |
+| **Koşul Güvenliği** | Koşullar oluştururken wildcard kullanımlarını minimumda tutun; hassas rotaları ayrı politikalarla yönetin. |
+| **gRPC Kanal Koruması** | Büyük mesajları kabul eden gRPC servislerinde politikayı zorunlu kılın; saldırı yüzeyini daraltın. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Aşırı Düşük Limitler** | **Neden kaçınılmalı:** Gerçek kullanıcı istekleri de engellenebilir.<br>**Alternatif:** Ortalama payload ölçümlerine göre limit tanımlayın. |
+| **Koşulsuz Global Limit** | **Neden kaçınılmalı:** Tüm API Proxy'ler aynı limiti paylaşır, esneklik azalır.<br>**Alternatif:** Politika grupları veya local politikalarla farklılaştırın. |
+| **Log Tutmamak** | **Neden kaçınılmalı:** Limit aşımının kaynağı tespit edilemez.<br>**Alternatif:** Gateway loglarına hata kodu ve payload boyutunu ekleyin. |
+| **Import Sonrası Doğrulama Yapmamak** | **Neden kaçınılmalı:** Yanlış limit değerleri Canlı Ortam'da kalabilir.<br>**Alternatif:** Import sonrası değerleri ve koşulları manuel kontrol edin. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+|--------|--------------|
+| **Gateway Bellek Kullanımı** | **Öneri:** Limit değerini servis kapasitesine göre ayarlayın.<br>**Etki:** Gereksiz büyük payload'lar parse edilmeden engellenir. |
+| **Throughput** | **Öneri:** Limit aşımında hata mesajını hafif tutun.<br>**Etki:** Ağ üzerinden geri dönüş süresi kısalır. |
+| **İzleme** | **Öneri:** Limit aşım oranını metrik olarak toplayın.<br>**Etki:** Anormallikler erken fark edilir. |
+| **Koşul Evaluasyonu** | **Öneri:** Query Builder koşullarını optimize edin, gereksiz regex kullanmayın.<br>**Etki:** İstek başına değerlendirme süresi düşer. |
+| **Cache Entegrasyonu** | **Öneri:** Limit aşımı yapan istemcileri kısa süreli Cache ile takip edin.<br>**Etki:** Tekrarlayan ihlallerde ek koruma katmanı sağlar. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|----------|-----------|
+| **Genel** | Maksimum Mesaj Boyutu politikası neyi kısıtlar? | İstek gövdesinin byte cinsinden uzunluğunu sınırlar; limit aşılırsa istek 403 ile reddedilir. |
+| **Genel** | Limit değeri hangi formatta girilmeli? | Değer decimal formatta ve byte cinsinden girilir; minimum 1 olmalıdır. |
+| **Teknik** | Limit eşit olduğunda istek kabul edilir mi? | Hayır. Gövde uzunluğu `>= size` olduğunda politika isteği engeller. |
+| **Teknik** | gRPC çağrılarında da çalışır mı? | Evet, `availableForGrpc()` özelliği sayesinde gRPC mesajları da doğrulanır. |
+| **Kullanım** | Farklı endpoint'ler için farklı limitler nasıl tanımlanır? | Query Builder'da endpoint bazlı koşullar oluşturup her koşul için ayrı politika atayın. |
+| **Kullanım** | Varsayılan hata mesajını nasıl değiştirebilirim? | Error Message Customization sekmesinden durum kodu, hata kodu ve mesaj alanlarını düzenleyebilirsiniz. |
