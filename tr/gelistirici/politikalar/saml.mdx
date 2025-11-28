@@ -1,6 +1,137 @@
 ---
-title: 'SAML Kimlik Doğrulama'
-description: 'Geliştirilmiş JSON Schema validation, Draft-07 desteği, Custom error messages, Conditional validation'
+title: 'SAML Kimlik Doğrulama (SAML Validation)'
+description: 'Gelen SAML mesajlarının imza doğrulamasını JKS key store ile yapar ve isteğe bağlı olarak SAML bloklarını temizler'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- API Proxy (API Vekil Sunucusu) akışlarından geçen SAML assertion'larını doğrulayarak kimlik federasyonunu merkezileştirir.
+- Kullanıcı veya sistem SSO taleplerinde yalnızca güvenilir imzacıların kabul edilmesini sağlayarak erişim güvenliğini artırır.
+- JKS tabanlı key store yönetimi sayesinde sertifika rotasyonlarının merkezi olarak kontrol edilmesine imkân tanır.
+- XPath tabanlı temizleme ile doğrulanan SAML bloklarının aşağı akış servislerine sızmasını engeller ve veri gizliliğini korur.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: SAML Doğrulama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **SAML Doğrulama Kontrolü**: İstek gövdesindeki SAML assertion seçili key store'daki sertifikalarla imza doğrulamasından geçirilir; gerekli ise XPath ifadesiyle ilgili XML düğümü temizlenir.
+4. **Karar Verme**:
+   - **Eşleşme Var**: İmza doğrulanırsa istek, güncellenmiş payload ile akışın bir sonraki adımına yönlendirilir.
+   - **Eşleşme Yok**: İmza doğrulaması başarısızsa veya key store bulunamazsa istek durdurulur ve özelleştirilebilir hata yanıtı döndürülür.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Key Store Doğrulaması**: JKS formatındaki key store içindeki sertifikalarla SAML imza doğrulaması gerçekleştirir; key store seçilmeden kayıt yapılamaz.
+- **Bilinmeyen İmzacı Toleransı**: `allowUnknownSigner` seçeneğiyle bilinen CA zincirine bağlı olmayan sertifikaların kontrollü biçimde kabul edilmesini sağlar.
+- **XPath Tabanlı SAML Temizleme**: `clearSaml` ve `clearSamlPath` alanlarıyla doğrulama sonrası mesaj gövdesindeki SAML bloklarını temizleyerek veri sızıntısını engeller.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Dinamik Key Store Yönetimi**: Yapılandırma ekranından yeni key store oluşturma dialog'u çağırarak sertifika setlerini anında üzerinde çalıştığınız projeye ekler.
+- **XPath Test Otomasyonu**: Test Transformation Data bileşeniyle `clearSamlPath` ifadesini gerçek veri örnekleri üzerinde test ederek yanlış temizleme riskini azaltır.
+- **Varsayılan İmza Düğümü Algısı**: `clearSamlPath` aktif edildiğinde varsayılan imza düğümü XPath'i otomatik atanır ve ihtiyaç halinde özelleştirilebilir.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Kurumsal SSO Entegrasyonu | Kurum içi IdP'den gelen SAML assertion'ları mikroservislere yönlendirilecek | Key store olarak kurumsal CA sertifikası seçilir, `clearSaml` kapalı tutulur | Doğrulanan SAML assertion diğer Policy adımlarına geçer |
+| SaaS Yetkilendirme Geçidi | SaaS sağlayıcısından gelen SAML'de üçüncü taraf sertifikalar mevcut | `allowUnknownSigner` aktif edilir, condition ile ilgili endpoint hedeflenir | Yetkisiz sertifikalar kabul edilir ancak diğer koşullar sağlanmazsa reddedilir |
+| SAML Veri Maskesi | Mesaj gövdesinde SAML assertion kalmaması gerekiyor | `clearSaml` aktif, `clearSamlPath` firma standardına göre güncellenir | Doğrulama sonrası SAML bloğu temizlenmiş payload downstream servise gider |
+| Test Ortamı Doğrulama | Geliştirme ortamında self-signed sertifika kullanılıyor | Ayrı bir test key store import edilir, condition ile ortam header'ına bağlanır | Sadece test isteğinde self-signed kabul edilir, canlıda reddedilir |
+| Key Store Rotasyonu | Sertifikaların periyodik yenilenmesi gerekiyor | Yeni key store import edilir, eski key store condition ile devre dışı bırakılır | Kesinti olmadan sertifika geçişi yapılır |
+| Hata Mesajı Lokalizasyonu | Farklı istemcilere özel hata mesajı gösterilecek | Error Message Customization sekmesinde locale bazlı mesajlar tanımlanır | İstemci diline göre özelleştirilmiş 4xx yanıtları döner |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni SAML Doğrulama Politikası Oluşturma
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → SAML Doğrulama** bölümüne gidin.<br>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br><br>**Name (İsim) Zorunlu:** Örnek: `Production_SAMLValidation`<br>- Benzersiz isim girin, boşlukla başlamaz.<br>- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br><br>**Description (Açıklama):** Örnek: "Kurumsal IdP SAML doğrulaması"<br>- Maks. 1000 karakter.<br>- Politikanın amacını açıklayın. |
+| **Adım 3: Key Store ve İmza Doğrulama Yapılandırması** | - Gerekli JKS key store'u seçin veya yeni key store oluştur dialog'unu açın.<br>- Key store seçilmeden kayıt işlemi tamamlanmaz.<br>- `AllowUnknownSigner` seçeneğini gereksinime göre aktif edin. |
+| **Adım 4: SAML Temizleme Ayarları (Varsa)** | - `clearSaml` seçeneğini açarak doğrulanan SAML düğümünü temizleyin.<br>- `clearSamlPath` alanını kendi XML yapınıza göre güncelleyin; gerekirse varsayılan XPath'i koruyun. |
+| **Adım 5: XPath Testi ve Varsayılanları (Varsa)** | - Test Transformation Data bileşeniyle `clearSamlPath` ifadesini örnek payload üzerinde çalıştırın, yanlış düğüm silinmesini engelleyin. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br><br>**Örnekler:**<br>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br>- Endpoint bazlı: `Path = /api/admin/*`<br><br>Koşul tanımlamazsa politika her zaman aktif<br><br>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br><br>**Varsayılan:**<br>```json<br>{<br>  "statusCode": 500,<br>  "message": "SAML 2.0 Validation policy failed! Error message is: {0}"<br>}<br>```<br><br>**Özel:**<br>```json<br>{<br>  "statusCode": 403,<br>  "errorCode": "SAML_VALIDATION_FAILED",<br>  "message": "SAML imza doğrulaması başarısız oldu."<br>}<br>``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br><br>**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir SAML doğrulama gerekliliği (key store seçimi, opsiyonel XPath) mevcut<br><br>**Sonuç:**<br>- Politika listeye eklenir.<br>- API'lere bağlanabilir.<br>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politikayı-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politikayı-dışa-içe-aktarma)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politikayı-apiye-bağlama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Key Store Diyalog Entegrasyonu** | - Key store listeleme alanından yeni kayıt oluşturma butonunu açın.<br>- Yeni JKS dosyasını içeri aktarın ve zorunlu alanları doldurun.<br>- Oluşan key store otomatik olarak politika formuna set edilir. |
+| **XPath Temizleme Testi** | - `clearSamlPath` alanını doldurduktan sonra test butonuna basın.<br>- Örnek XML verisiyle XPath sonucu önizleyin.<br>- Yanlış düğüm seçimi tespit edilirse XPath'i güncelleyin. |
+| **Global Politika Lokalizasyonu** | - Detay ekranından **Localize** butonuna tıklayın.<br>- Local kopyada koşulları ve key store'u yeni ortama göre düzenleyin.<br>- Gerekiyorsa global sürümü güncelleyip yeniden deploy edin. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Key Store Yönetimi** | **Kötü:** Key store'u manuel kopyalanmış JKS dosyalarıyla güncellemek.<br>**İyi:** Her ortama ait ayrı JKS sürümü tutmak.<br>**En İyi:** Otomatik sertifika rotasyonu ve expiration takibi için merkezi key store yönetimi kullanmak. |
+| **XPath Bakımı** | **Kötü:** Varsayılan XPath'i her payload için değiştirmeden bırakmak.<br>**İyi:** XPath'i gerçek XML yapısına göre uyarlamak.<br>**En İyi:** Test Transformation Data ile her değişiklikte doğrulamak ve sürüm kontrolünde saklamak. |
+| **Hata Mesajı Tasarımı** | **Kötü:** Genel 500 mesajı döndürmek.<br>**İyi:** 401/403 kodlarına özel açıklamalar eklemek.<br>**En İyi:** Hata kodlarını istemci türüne göre özelleştirip lokalizasyon yapmak. |
+| **Koşul Tasarımı** | **Kötü:** Politikanın tüm trafiğe uygulanması.<br>**İyi:** Endpoint bazlı koşullar tanımlamak.<br>**En İyi:** Ortam, istemci ve Method bazlı birleşik koşullar ile granular kontrol sağlamak. |
+| **Ortamlar Arası Taşıma** | **Kötü:** Production key store'u Geliştirme ortamına kopyalamak.<br>**İyi:** Ortam bazlı key store setleri hazırlamak.<br>**En İyi:** Export/Import süreçlerinde isimlendirme standardı ve bağımlılık kontrolü uygulamak. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Sertifika Yaşam Döngüsü** | JKS dosyalarının son kullanma tarihini takip edin, expiration yaklaşınca önceden yenileyin |
+| **İmza Doğrulama Politikaları** | `allowUnknownSigner` özelliğini sadece geçici gereksinimlerde açın, aksi halde güvenilmeyen sertifikalar kabul edilebilir. |
+| **SAML Veri Sızıntısı** | `clearSaml` ve `clearSamlPath` kullanarak doğrulanan SAML assertion'larının downstream servislere sızmasını engelleyin. |
+| **Key Store Güvenliği** | Key store parolalarını Secret Manager'da saklayın, JKS dosyalarını sürüm kontrolüne eklemeyin. |
+| **Hata Mesajı Güvenliği** | Hata mesajlarında hassas bilgiler (sertifika detayları, XPath ifadeleri) göstermeyin. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **allowUnknownSigner'ı Her Zaman Açık Tutmak** | **Neden kaçınılmalı:** Güvenilmeyen sertifikaların kabul edilmesi güvenlik açığı oluşturur.<br>**Alternatif:** Sadece test ortamlarında veya geçici gereksinimlerde kullanın, production'da kapatın. |
+| **XPath'i Test Etmeden Kullanmak** | **Neden kaçınılmalı:** Yanlış düğüm silinmesi mesaj bütünlüğünü bozabilir.<br>**Alternatif:** Test Transformation Data ile her XPath değişikliğini doğrulayın. |
+| **Key Store'u Ortamlar Arası Paylaşmak** | **Neden kaçınılmalı:** Güvenlik riski ve sertifika karışıklığı oluşturur.<br>**Alternatif:** Her ortam için ayrı key store kullanın ve export/import ile taşıyın. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|----------|-----------|
+| **Genel** | SAML Doğrulama nedir? | SAML assertion'larının imza doğrulamasını yapan ve isteğe bağlı olarak SAML bloklarını temizleyen bir güvenlik politikasıdır. |
+| **Genel** | Hangi SAML versiyonları destekleniyor? | SAML 2.0 assertion'ları desteklenir. |
+| **Teknik** | Key store zorunlu mu? | Evet, key store seçilmeden politika kaydedilemez. |
+| **Teknik** | allowUnknownSigner ne zaman kullanılmalı? | Sadece test ortamlarında veya geçici gereksinimlerde kullanılmalı, production'da kapatılmalıdır. |
+| **Kullanım** | clearSaml ve clearSamlPath arasındaki fark nedir? | `clearSaml` varsayılan XPath ile temizleme yapar, `clearSamlPath` özel XPath ifadesi kullanır. |
+| **Kullanım** | XPath'i nasıl test edebilirim? | Test Transformation Data bileşeniyle örnek XML verisi üzerinde XPath ifadesini test edebilirsiniz. |
