@@ -1,6 +1,138 @@
 ---
 title: 'Plain-Text Kimlik Doğrulama'
-description: 'Geliştirilmiş JSON Schema validation, Draft-07 desteği, Custom error messages, Conditional validation'
+description: 'Gelen Plain Text Authentication kimlik bilgilerini doğrular, rol bazlı yetkilendirme uygular'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- Plain Text Authentication başlığı taşıyan istekleri değerlendirerek, API Proxy (API Vekil Sunucusu) katmanında merkezi kimlik doğrulaması sağlar.
+- Kurumsal kimlik servisleri (Database, LDAP, API, Secret Manager) ile entegre olup erişim politikasını kod değişikliği olmaksızın yönetilebilir hale getirir.
+- Rol tabanlı yetkilendirme ve header enjeksiyonu ile uygulama katmanına gerekli kullanıcı/rol bilgisini güvenli şekilde aktarır.
+- Hata mesajı özelleştirmesi ve koşul bazlı etkinleştirme sayesinde farklı endpoint veya ortam senaryoları için esnek davranış sunar.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: Plain Text Authentication politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Kimlik Bilgisi Doğrulama**: Authorization header'daki Plain Text kimlik bilgisi çözülür, seçilen kimlik sağlayıcı (Database/LDAP/API/Secret Manager) üzerinden kullanıcı adı ve opsiyonel olarak parola kontrol edilir; gerekirse kayıtlı IP adresi eşleştirilir.
+4. **Karar Verme**:
+   - **Eşleşme Var**: Kullanıcı yetkilendirme kurallarıyla uyuşur, isteğe kullanıcı/rol header'ları eklenir, backend'e yönlendirilir.
+   - **Eşleşme Yok**: Yetkilendirme başarısız olur, politika hata mesajı tetiklenir, isteğe izin verilmez.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Kimlik Sağlayıcı Esnekliği**: Database, LDAP, harici API veya Secret Manager tabanlı kimlik servisleriyle çalışır; seçilen kaynak değiştiğinde politika otomatik güncellenir.
+- **Kimlik Bilgisi Değişkenleri Yönetimi**: Kullanıcı adı ve parola için proje değişkenlerini bağlayarak gizli değerleri merkezi olarak yönetir.
+- **Header Yönetimi**: Doğrulanan kullanıcıyı `X-Authenticated-UserId` gibi özelleştirilebilir başlıklara ekler veya upstream'e geçmeden Authorization header'ını temizler.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Rol Bazlı Yetkilendirme**: Rol gruplarını seçerek ALL/ANY mantığıyla kullanıcı erişimini sınırlar, isteğe rol listesi header'ı ekler.
+- **Metot Bazında Yetki Kuralları**: API metodları bazında rol setleri ve yetkilendirme tipi tanımlayarak hassas endpoint'lere daha sıkı kontrol uygular.
+- **Secret Manager Entegrasyonu**: Secret Manager seçildiğinde IP kontrolü ve otomatik değişken eşleşmesiyle sıfır kodlu güvenlik sağlar.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Üretim LDAP Doğrulaması | Kurumsal LDAP ile giriş yapan kullanıcıları doğrulama ihtiyacı | Authentication provider olarak LDAP seçilir, `checkPassword` aktif edilir, roller LDAP üzerinden çekilir | Geçerli kullanıcı/şifre kombinasyonu olmayan istekler 401 döner, başarılı olanlar yetkili ise 200 alır |
+| Secret Manager ile Makine Hesapları | Makine-makine entegrasyonunda paylaşılan sırlar Secret Manager'da saklanıyor | `enumPolicyAuthenticationType SECRET_MANAGER`, username/password değişkenleri otomatik çekilir, `checkClientIpAddress` aktif edilir | Yanlış IP'den gelen veya eşlenmemiş sır kullanan istekler 403 ile reddedilir |
+| Database Kullanıcı Havuzu | Uygulama veritabanında tutulan kullanıcı listesiyle doğrulama | Database provider seçilir, rol tabloları bağlanır, `addRolesToHeader` aktif edilir | Backend servisleri header üstünden rol bilgisine erişerek yetkilendirme yapar |
+| Harici API ile Kimlik Kontrolü | Kimlik doğrulaması üçüncü taraf REST servisine devredilmiş | API provider seçilir, servis endpoint'i tanımlanır, başarısız cevaplar için özel hata mesajı düzenlenir | Harici API "fail" dönerse politika 401 yanıtlar, başarılı ise header'lara kullanıcı ID eklenir |
+| Rol Bazlı Yetki Modülü | Belirli endpoint'lere sadece belirtilen roller erişsin | Authorization modülü açılır, rol setleri ve ALL şartı atanır, yetkisiz mesaj özelleştirilir | Gerekli role sahip olmayan kullanıcılara 403 ve özel mesaj döner |
+| Metot Özel Yetki | `/admin/*` metodları sadece belirli role açık | Method Access aktif edilir, ilgili API metodlarına rol listesi bağlanır | Sadece tanımlanan rol listesine sahip kullanıcılar metodu çağırabilir |
+| API Proxy Grubunda Standartlaştırma (opsiyonel) | Aynı güvenlik politikasını çoklu API Proxy üzerinde uygulama | Politika Policy Group'a eklenir, Proxy Group'a bağlanır, merkezi deploy yapılır | Tüm bağlı API Proxy örnekleri aynı Plain Text Authentication kuralını kullanır |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni Plain Text Authentication Politikası Oluşturma
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → Plain Text Authentication** bölümüne gidin.<br>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br><br>**Name (İsim) Zorunlu:** Örnek: `Production_PlainTextAuth`<br>- Benzersiz isim girin, boşlukla başlamaz.<br>- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br><br>**Description (Açıklama):** Örnek: "Üretim servisi için Plain Text Authentication kuralı"<br>- Maks. 1000 karakter.<br>- Politikanın amacını açıklayın. |
+| **Adım 3: Kimlik Sağlayıcıyı Seçme** | **Identity Role Group:**<br>- **-Select** butonuyla Database, LDAP, Secret Manager veya harici API sağlayıcısını seçin.<br>- Seçimi temizlemek için çarpı butonunu kullanın.<br>- Secret Manager seçildiğinde politika otomatik olarak bu kaynağa bağlanır. |
+| **Adım 4: Kimlik Bilgisi Değişkenlerini Atama** | **Username Variable:** Proje değişkenlerinden kullanıcı adı girdisini bağlayın. Güncelle veya farklı değişken seç seçenekleriyle değişiklik yapın.<br><br>**Password Variable:** `checkPassword` işaretliyse zorunlu olur; seçilen değişken gizli değeri tutar. |
+| **Adım 5: İstek İşleme Seçenekleri** | **Check Password:** Kapalıysa sadece kullanıcı adı doğrulanır, parolaya bakılmaz.<br><br>**Check Client IP Address:** Secret Manager senaryolarında IP eşlemesini zorlar.<br><br>**Clear Authorization Header:** Doğrulama sonrası Authorization header'ını target servise iletmeden temizler.<br><br>**Add User To Header:** Kullanıcı adını `X-Authenticated-UserId` (değiştirilebilir) başlığıyla iletir. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br><br>**Örnekler:**<br>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br>- Endpoint bazlı: `Path = /api/admin/*`<br><br>Koşul tanımlamazsa politika her zaman aktif<br><br>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br><br>**Varsayılan:**<br>```json<br>{<br>  "statusCode": 401,<br>  "message": "Authentication policy failed! Error message is: {0}"<br>}<br>```<br><br>**Özel:**<br>```json<br>{<br>  "statusCode": 403,<br>  "errorCode": "AUTH_FAILED",<br>  "message": "Kimlik doğrulama başarısız oldu."<br>}<br>``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br><br>**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir kimlik sağlayıcı seçilmiş.<br><br>**Sonuç:**<br>- Politika listeye eklenir.<br>- API'lere bağlanabilir.<br>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politikayı-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politikayı-dışa-içe-aktarma)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politikayı-apiye-bağlama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Secret Manager Tabanlı Doğrulama** | - Secret Manager seçildiğinde kimlik bilgileri otomatik eşlenir.<br>- `checkClientIpAddress` ile token başına IP sınırı uygulanır.<br>- Şifre rotasyonu yapıldığında politika otomatik güncellenir. |
+| **Hybrid Yetkilendirme Yapısı** | - Authentication kaynağı ile Authorization kaynağı farklı seçilebilir (ör: LDAP + Database).<br>- Ayrı provider seçimi Authorization Configuration bileşeninden yapılır.<br>- Roller MultiSelect ile tanımlanır, ALL/ANY seçicisi uygulanır. |
+| **Metot Bazlı Kısıtlama Motoru** | - `enableMethodAccess` aktif edildiğinde API metodları listelenir.<br>- Her metod için rol listesi ve yetkilendirme tipi atanır.<br>- Reverse Proxy dışındaki API Proxy modlarında istek bazlı kurallar uygulanır. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Kimlik Sağlayıcı Seçimi** | **Kötü:** Tüm senaryolar için tek sağlayıcı kullanmak.<br>**İyi:** Senaryoya göre uygun sağlayıcı seçmek (LDAP kurumsal, Secret Manager M2M).<br>**En İyi:** Hybrid yapı ile authentication ve authorization kaynaklarını ayırmak. |
+| **Parola Kontrolü** | **Kötü:** Parola kontrolünü devre dışı bırakmak.<br>**İyi:** Hassas endpoint'lerde parola kontrolünü aktif tutmak.<br>**En İyi:** Secret Manager ile otomatik parola rotasyonu. |
+| **IP Kontrolü** | **Kötü:** IP kontrolünü hiç kullanmamak.<br>**İyi:** Secret Manager akışlarında IP kontrolünü aktif tutmak.<br>**En İyi:** Dinamik IP'ler için whitelist yönetimi. |
+| **Header Yönetimi** | **Kötü:** Kullanıcı bilgisini header'a eklememek.<br>**İyi:** Downstream servislere kullanıcı bilgisini header ile iletmek.<br>**En İyi:** Rol bilgilerini de header'a ekleyerek yetkilendirme kolaylaştırmak. |
+| **Deployment Süreci** | **Kötü:** Canlı ortamda doğrudan değişiklik yapmak.<br>**İyi:** Test ortamında kimlik doğrulama akışlarını denemek.<br>**En İyi:** Blue/Green deployment ile kesintisiz güncelleme. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Parola Güvenliği** | Parolaları HTTPS üzerinden iletin, parola kontrolünü aktif tutun ve Secret Manager kullanın. |
+| **IP Kontrolü** | Secret Manager akışlarında IP kontrolünü aktif tutarak kimlik bilgisi paylaşımı riskini azaltın. |
+| **Header Güvenliği** | Authorization header'ını backend'e göndermeden önce temizleyin, kullanıcı bilgisini özel header ile iletin. |
+| **Loglama** | Kimlik doğrulama hatalarını güvenli loglarda saklayın, hassas bilgileri maskeli tutun. |
+| **Yetkilendirme** | Method bazlı yetkilendirme ile granular erişim kontrolü sağlayın. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Parola Kontrolünü Devre Dışı Bırakma** | **Neden kaçınılmalı:** Güvenlik açığı oluşturur, sadece kullanıcı adı kontrolü yetersizdir.<br>**Alternatif:** Hassas endpoint'lerde parola kontrolünü her zaman aktif tutun. |
+| **IP Kontrolünü Kullanmamak** | **Neden kaçınılmalı:** Kimlik bilgisi paylaşımı riski artar.<br>**Alternatif:** Özellikle Secret Manager akışlarında IP kontrolünü aktif tutun. |
+| **Authorization Header'ını Temizlememek** | **Neden kaçınılmalı:** Backend servislerine hassas bilgi sızıntısı olabilir.<br>**Alternatif:** Clear Authorization Header seçeneğini aktif tutun. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|----------|-----------|
+| **Genel** | Plain Text Authentication nedir? | Authorization header'ında düz metin (plain text) formatında kullanıcı adı ve parola gönderilen kimlik doğrulama yöntemidir. |
+| **Genel** | Hangi kimlik sağlayıcılar destekleniyor? | Database, LDAP, Secret Manager ve harici API sağlayıcıları desteklenir. |
+| **Teknik** | Parola kontrolü nasıl çalışır? | `checkPassword` aktif edildiğinde, seçilen kimlik sağlayıcı üzerinden kullanıcı adı ve parola doğrulanır. |
+| **Teknik** | IP kontrolü zorunlu mu? | Hayır, ancak Secret Manager akışlarında özellikle önerilir. |
+| **Kullanım** | Farklı endpoint'ler için farklı kimlik sağlayıcıları nasıl kullanılır? | Query Builder'da endpoint bazlı koşullar oluşturup her koşul için ayrı politika atayın. |
+| **Kullanım** | Varsayılan hata mesajını nasıl değiştirebilirim? | Error Message Customization sekmesinden durum kodu, hata kodu ve mesaj alanlarını düzenleyebilirsiniz. |

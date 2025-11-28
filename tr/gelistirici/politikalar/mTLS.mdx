@@ -1,6 +1,137 @@
 ---
 title: 'mTLS Kimlik Doğrulama'
-description: 'Description of your new file.'
+description: 'İstemci TLS sertifikalarını doğrulayarak güvenli karşılıklı kimlik doğrulama sağlar'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- Kurumsal API Proxy (API Vekil Sunucusu) trafiğinde istemci sertifikasını zorunlu kılarak kimlik doğrulama yapmak ve sadece yetkili istemcilerin erişimini sağlamak.
+- Sertifika hiyerarşisinin güvenilir Certificate Authority (CA) zincirleri ile uyuştuğunu doğrulayarak sahte sertifika riskini ortadan kaldırmak.
+- İstemci sertifikasını önceden tanımlı Issuer ACL listeleriyle eşleştirip, belirli kurum veya cihazlara özel erişim stratejisi oluşturmak.
+- Yetkilendirme modülüyle birlikte çalışarak sertifikadan elde edilen kimliği politikaya bağlı rol kontrolleriyle pekiştirmek.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: mTLS Kimlik Doğrulama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Sertifika ve Issuer Doğrulaması**: mTLS handshake tamamlandıktan sonra istemci sertifikasının geçerlilik tarihleri, imzası ve tanımlı issuer listesi doğrulanır; isteğe bağlı olarak Issuer ACL kayıtlarıyla eşleşme aranır.
+4. **Karar Verme**:
+   - **Eşleşme Var**: Sertifika kabul edilir, gerekirse kimlik bilgisi ve roller header alanlarına eklenir, isteğin yönlendirilmesine izin verilir.
+   - **Eşleşme Yok**: Sertifika veya issuer doğrulaması başarısız olur, isteğin yönlendirilmesi durdurulur ve yapılandırılmış hata yanıtı döndürülür.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Sertifika Issuer Doğrulama**: Gelen istemci sertifikasının issuer bilgilerini kayıtlı CA zinciri ve Issuer ACL listeleriyle karşılaştırır.
+- **Dinamik Sertifika Geçerlilik Kontrolü**: Sertifikanın tarih ve imza bütünlüğünü her istek için kontrol ederek geçersiz sertifikaları anında reddeder.
+- **ACL Tabanlı Erişim**: Issuer bazlı erişim kontrollerini IP denetimi ile genişleterek belirli ağ segmentlerine özgü izinler tanımlar.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Header Enjeksiyonu Yönetimi**: Sertifika öznesinden çıkarılan kullanıcı kimliğini ve rolleri özel header alanlarına yazarak downstream servislerine aktarır.
+- **Yetkilendirme Servisi Entegrasyonu**: API, veritabanı veya Secret Manager kaynaklı yetkilendirme akışlarını devreye alarak mTLS kimlik doğrulamayı rol tabanlı erişimle birleştirir.
+- **Metot Bazlı Yetki Kısıtları**: HTTP metoduna göre erişim kuralları tanımlayarak hassas operasyonları granular düzeyde kontrol eder.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Finans Kurumsal Erişim | Finansal servisler sadece şirket laptoplarından çağrılıyor | Issuer ACL'e kurum CA sertifikası eklenir, `validateCertificatesIssuer` ve `validateACLForIssuer` aktif edilir | Kurumsal cihazlardan gelen istekler kabul edilir, diğerleri 403 döner |
+| IoT Cihaz Kimliği | Edge gateway'ler sertifika ile bağlanıyor | `validateCertificate` açık, ACL'de cihaz sertifikaları listelenir | İzinli cihaz sertifikaları yönlendirilir, süresi geçmiş sertifikalar 401 alır |
+| Partner API Erişimi | Dış partnerlere sınırlı endpoint erişimi | Query Builder'da path koşulu, ACL'de partner issuer sertifikası | Partner sertifikası eşleşirse sadece tanımlı endpoint erişimi sağlanır |
+| Çoklu Ortam Yönetimi | Test ortamı için gevşek kontrol, canlıda sıkı kontrol | Geliştirme ortamında `validateACLForIssuer` pasif, canlıda aktif | Geliştirme ortamı esnek kalır, Canlı Ortam'da sadece tanımlı sertifikalar kabul edilir |
+| Rol Bazlı Yetki | Aynı sertifikayla farklı servis rolleri uygulanacak | `enableAuthorization` aktif, roller header'a yazılır | Downstream servis rol header'ını okuyarak yetki verir |
+| IP Kısıtlaması | Sertifika paylaşımı riskine karşı IP eşlemesi | `checkClientIpAddress` etkin, ACL'de IP eşleşmesi aranır | Sertifika-IP eşleşmeyen istekler reddedilir |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni mTLS Kimlik Doğrulama Politikası Oluşturma
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → mTLS Kimlik Doğrulama Politikası** bölümüne gidin.<br>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br><br>**Name (İsim) Zorunlu:** Örnek: `Production_mTLSAuth`<br>- Benzersiz isim girin, boşlukla başlamaz.<br>- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br><br>**Description (Açıklama):** Örnek: "Kurumsal istemciler için mTLS kimlik doğrulaması"<br>- Maks. 1000 karakter.<br>- Politikanın amacını açıklayın. |
+| **Adım 3: Sertifika Doğrulama Parametreleri** | - **Validate Certificates Issuer**: CA zincirinin tanımlı issuer kayıtlarıyla eşleşmesini zorunlu kılar.<br>- **Validate Certificate**: Sertifikanın geçerlilik tarihlerini ve imzasını kontrol eder.<br>- **Validate ACL For Issuer**: Issuer bazlı ACL tablosunu devreye alır; Issuer listesi olmadığı durumda Uyarı: Politika 401 döndürebilir. |
+| **Adım 4: ACL ve IP Eşlemesi** | - **Check Client IP Address**: Sertifika ile kayıtlı istemci IP'sinin eşleşmesini arar.<br>- Issuer ACL yönetim ekranından yetkili IP bloklarını tanımlayın.<br>- Sertifika paylaşımı riskine karşı IP kontrolünü etkin tutun. |
+| **Adım 5: Header ve Yetkilendirme Ayarları** | - **Add User To Header**: Sertifika öznesinden çıkarılan kullanıcı kimliğini `User Header Name` alanına yazar.<br>- **User Header Name**: Varsayılan `X-Authenticated-UserId`, ihtiyaç halinde özelleştirin.<br>- **Enable Authorization**: Roller ve metot bazlı kontrolleri aktif eder; Authorization sekmesindeki kaynak ve roller tanımlanmalıdır. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br><br>**Örnekler:**<br>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br>- Endpoint bazlı: `Path = /api/admin/*`<br><br>Koşul tanımlamazsanız politika her zaman aktiftir<br><br>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br><br>**Varsayılan:**<br>```json<br>{<br>  "statusCode": 401,<br>  "message": "mTLS Authentication policy failed! Certificate(s) is missing!"<br>}<br>```<br><br>**Özel:**<br>```json<br>{<br>  "statusCode": 403,<br>  "errorCode": "CERTIFICATE_INVALID",<br>  "message": "İstemci sertifikası geçersiz veya eksik."<br>}<br>``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br><br>**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir issuer veya ACL girdisi mevcut.<br><br>**Sonuç:**<br>- Politika listeye eklenir.<br>- API'lere bağlanabilir.<br>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politikayı-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politikayı-dışa-içe-aktarma)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politikayı-apiye-bağlama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Issuer ACL Yönetimi** | - Issuer başına birden fazla Subject Alternative Name kaydı yapılabilir.<br>- ACL kayıtlarını ortam bazlı filtreleyin.<br>- Öneri: ACL değişikliklerinden sonra test API çağrısı yapın. |
+| **Secret Manager ile Yetkilendirme** | - `useSecretManagerForAuthorization` seçildiğinde kimlik bilgileri güvenle saklanır.<br>- Secret güncellemelerinde politikayı yeniden deploy edin.<br>- Rotasyon sonrası eski secret'ları silin. |
+| **Metot Bazlı Yetki Politikaları** | - HTTP metoduna göre allow/deny kuralları tanımlayın.<br>- `policyAuthorizationMethodDefList` içerisinde endpoint + metod eşlemesi girin.<br>- Tüm değişikliklerden sonra Postman koleksiyonu ile doğrulama önerilir. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Sertifika Yönetimi** | **Kötü:** CA listelerini manuel güncellemeyi unutmak.<br>**İyi:** CA yenilendiğinde Issuer ACL'i güncellemek.<br>**En İyi:** Otomatik CA senkronizasyon pipeline'ı kurmak. |
+| **Yetkilendirme Entegrasyonu** | **Kötü:** `enableAuthorization` açıkken rol listelerini boş bırakmak.<br>**İyi:** Roller için minimum yetki prensibini uygulamak.<br>**En İyi:** Roller değiştirildiğinde CI/CD içinde otomatik test çalıştırmak. |
+| **Header Kullanımı** | **Kötü:** Downstream servislerin `X-Authenticated-UserId` header'ını doğrulamaması.<br>**İyi:** Header doğrulamasını gateway arkasındaki servislerde uygulamak.<br>**En İyi:** Header imza mekanizması eklemek. |
+| **Koşul Yönetimi** | **Kötü:** Tüm endpoint'lere politikayı koşulsuz uygulamak.<br>**İyi:** Hassas endpoint'leri Query Builder ile hedeflemek.<br>**En İyi:** Koşulları ortam ve versiyon bazlı yapılandırmak. |
+| **Deployment Süreci** | **Kötü:** Canlı ortamda doğrudan değişiklik yapmak.<br>**İyi:** Test ortamında sertifika senaryolarını denemek.<br>**En İyi:** Blue/Green deployment planı oluşturmak. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Sertifika İptal Listesi** | CRL/OCSP kontrolleri gateway dışında yapılıyorsa periyodik olarak güncelleyin. |
+| **Issuer ACL Sertliği** | Issuer ACL'i boş bırakmak istemci doğrulamasını zayıflatır. Mutlaka yetkili issuer ekleyin. |
+| **Header Koruması** | Downstream servislerde header spoofing'e karşı imza veya mTLS termination sonrası güvenli iletişim kullanın. |
+| **IP Eşleşmesi** | `checkClientIpAddress` devredeyse dinamik IP kullanan istemciler için whitelist'i güncel tutun. |
+| **Loglama** | Sertifika doğrulama hatalarını güvenli loglarda maskeli olarak saklayın, kişisel verileri anonimleştirin. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Issuer ACL Eksikliği** | **Neden kaçınılmalı:** Tüm sertifikalar kabul edilebilir hale gelir.<br>**Alternatif:** Issuer ACL'e minimum güvenilir CA setini ekleyin. |
+| **Sertifika Doğrulamasını Kapatma** | **Neden kaçınılmalı:** Geçersiz sertifikalar kabul edilir, güvenlik açığı oluşur.<br>**Alternatif:** `validateCertificate` ve `validateCertificatesIssuer` her zaman aktif tutun. |
+| **IP Kontrolünü Devre Dışı Bırakma** | **Neden kaçınılmalı:** Sertifika paylaşımı riski artar.<br>**Alternatif:** `checkClientIpAddress` özellikle production ortamlarında aktif tutun. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|----------|-----------|
+| **Genel** | mTLS kimlik doğrulama nedir? | Mutual TLS (mTLS), hem istemci hem de sunucunun birbirlerinin sertifikalarını doğruladığı çift yönlü kimlik doğrulama mekanizmasıdır. |
+| **Genel** | Issuer ACL nedir? | Issuer ACL, hangi Certificate Authority (CA) sertifikalarının kabul edileceğini tanımlayan erişim kontrol listesidir. |
+| **Teknik** | Sertifika doğrulaması nasıl çalışır? | Gateway, TLS handshake sırasında istemci sertifikasını alır, geçerlilik tarihlerini, imzasını ve issuer bilgisini kontrol eder. |
+| **Teknik** | IP kontrolü zorunlu mu? | Hayır, ancak sertifika paylaşımı riskine karşı özellikle production ortamlarında önerilir. |
+| **Kullanım** | Farklı endpoint'ler için farklı sertifika politikaları nasıl tanımlanır? | Query Builder'da endpoint bazlı koşullar oluşturup her koşul için ayrı politika atayın. |
+| **Kullanım** | Varsayılan hata mesajını nasıl değiştirebilirim? | Error Message Customization sekmesinden durum kodu, hata kodu ve mesaj alanlarını düzenleyebilirsiniz. |
