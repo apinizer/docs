@@ -1,6 +1,230 @@
 ---
-title: "Elasticsearch için Basit Kimlik Doğrulama Konfigürasyonu"
-description: 'Description of your new file.'
+title: "Basit Kimlik Doğrulama"
+description: 'Bu doküman, Apinizer üzerinde Elasticsearch uygulamasına Basit Kimlik Doğrulama yöntemi ile erişmek için gerekli konfigürasyonları içermektedir.'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+Bu doküman, Apinizer üzerinde Elasticsearch uygulamasına Basit Kimlik Doğrulama yöntemi ile erişmek için gerekli konfigürasyonları içermektedir. Genel olarak, bu işlem Elasticsearch güvenlik seçeneği aktifleştirilerek ve kimlik bilgileri Apinizer API Manager üzerinden tanımlanarak gerçekleştirilir. Elasticsearch uygulaması ilk defa oluşturuluyorsa ilk adımdan itibaren işlemler uygulanır. Eğer Elasticsearch uygulaması varsa kullanıcı oluşturup, kimlik bilgilerini Apinizer API Manager üzerinden tanımlanma işlemine geçilebilir.
+
+## 1.Lisans Kontrolü
+
+Elasticsearch lisansı mutlaka **Elastic Basic License** olmalıdır. Apinizer, bu lisans içerisindeki X-Pack'e ait security eklentisinin desteklediği basit kimlik doğrulama yöntemini kullanmaktadır. Elasticsearch lisans bilgisini kontrol öğrenmek için aşağıdaki istek yapılır.
+
+```bash
+curl -X GET "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_xpack/license?pretty"
+```
+
+## 2. Güvenliği Etkinleştirme
+
+Varsayılan olarak, Elasticsearch güvenlik ayarı etkin değildir. Güvenlik seçeneğini aktifleştirmek için Elasticsearch kurulum dosyasındaki **config/elasticsearch.yml** dizininde yer alan bu dosyaya aşağıdaki özellik eklenir. Birden fazla node varsa hepsinde bu özellik aktifleştirilmelidir.
+
+```yaml
+xpack.security.enabled: true
+```
+
+<Info>
+  Bu işlemden sonra Elasticsearch uygulaması yeniden başlatılmalıdır.
+</Info>
+
+### 2.1 Cluster daki nodeların iletişimlerinin şifreleme (TLS ayarı)
+
+Elasticsearch yeniden başladıktan sonra aşağıdaki hata alınıyor ya da birden fazla node varsa bu bölümdeki ayarlar yapılmalıdır. Hem de güvenlik ayarı etkinleştirildğinde ve production ortamında çalışıyorsa Elasticsearch nodelarının birbirleriyle ilgili iletişiminin şifrelenmesini ister. Ayrıca bu iletişim transport katmanında gerçekleşmektedir.
+
+```
+Transport SSL must be enabled for setups with production licenses. Please set [xpack.security.transport.ssl.enabled] to [true] or disable security by setting [xpack.security.enabled] to [false]
+```
+
+<Info>
+  Birden fazla node varsa hepsinde bu ayar konfigure edilmelidir.
+</Info>
+
+Birden fazla node olan clusterlar için **config/elasticsearch.yml** dosyası üzerinde dikkat edilmesi gereken ve isteğe bağlı diğer ayarlar;
+
+```yaml
+# Nodeları cluster'ı bulması için benzersiz adı olmalıdır.
+cluster.name: ApinizerEsCluster
+
+# Aynı makinede birden fazla node olduğunda aynı ip/host bilgisine sahip olabilecekleri için bu node adı üzerinde sertifikanın konumu belirlenebilir.
+node.name: <ELASTICSEARCH_IP_ADDRESS>
+
+# Eğer tek bir node varsa bu ayar TLS hatasını erteleyebilir. Ama birden fazla node olduğunda silinmelidir.
+# cluster.initial_master_nodes yaml dosyasında ekliyse discovery.type eklemeyiniz.
+discovery.type: single-node
+
+# Birden fazla master-eligible node varsa
+cluster.initial_master_nodes: ["<ELASTICSEARCH_IP_ADDRESS>"]
+```
+
+### 2.2 Sertifika oluşturma
+
+```bash
+# Sertifika oluşturmak için aşağıdaki komut kullanılır. Bu dosyanın ayrıca parola ile korunması zorunlu değildir (Önerilmemektedir).
+./bin/elasticsearch-certutil ca
+./bin/elasticsearch-certutil cert --ca elastic-stack-ca.p12
+
+# Sertifikalar config/certs dizini oluşturulup altına taşınır
+mkdir config/certs/
+mv elastic-certificates.p12 config/certs/
+mv elastic-stack-ca.p12 config/certs/
+
+# Devam etmeden önce bu sertifika dosyalarının Elasticsearch dosyalarıyla aynı ayrıcalıklara sahip olduğundan emin olun.
+```
+
+<Warning>
+  **"could not find java in JAVA_HOME at /tools/java/home/bin/java" hatası alırsanız** aşağıdaki iki komut, ile Java uygulamalarının doğru bir şekilde çalışması için gerekli olan ortam değişkenlerini ayarlamak için kullanılır.
+
+  ```bash
+  export JAVA_HOME=/opt/elasticsearch/elasticsearch-7.9.2/jdk
+  export PATH=$JAVA_HOME/bin:$PATH
+  ```
+</Warning>
+
+Daha sonra **/config/elasticsearch.yml** dosyasına aşağıdaki alanlar eklenmelidir.
+
+```yaml
+xpack.security.transport.ssl.enabled: true
+xpack.security.transport.ssl.verification_mode: certificate
+xpack.security.transport.ssl.keystore.path: certs/elastic-certificates.p12
+xpack.security.transport.ssl.truststore.path: certs/elastic-certificates.p12
+```
+
+<Info>
+  Bu işlemden sonra Elasticsearch uygulaması yeniden başlatılmalıdır.
+</Info>
+
+Aşağıdaki istek ile güvenliği etkinleştirme durumu kontrol edilebilir.
+
+```bash
+curl -X GET -u <USERNAME>:<PASSWORD> "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_xpack?pretty"
+```
+
+Örnek çıktı:
+
+```json
+...
+"security" : {
+  "available" : true,
+  "enabled" : true
+},
+...
+```
+
+Bu alan aktifleştirildiğinde kimlik bilgileri olmayan her istek aşağıdaki gibi reddedilecektir.
+
+```bash
+curl -X GET "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>"
+```
+
+Örnek hata çıktısı:
+
+```json
+{
+  "error": {
+    "root_cause": [
+      {
+        "type": "security_exception",
+        "reason": "missing authentication credentials for REST request [/]",
+        "header": {
+          "WWW-Authenticate": "Basic realm=\"security\" charset=\"UTF-8\""
+        }
+      }
+    ],
+    "type": "security_exception",
+    "reason": "missing authentication credentials for REST request [/]",
+    "header": {
+      "WWW-Authenticate": "Basic realm=\"security\" charset=\"UTF-8\""
+    }
+  },
+  "status": 401
+}
+```
+
+## 3.Built-in kullanıcı şifrelerini oluşturma
+
+Elasticsearch'in varsayılan built-in kullanıcı adı **elastic**'dir. Fakat bu kullanıcı adına oluşturulmuş şifre yoktur.
+
+Şifre ataması yapılırken built-in tüm kullanıcıların şifreleri değiştirilecektir.
+
+```bash
+# Otomatik olarak şifreleri güncellemek için Elasticsearch kurulum dosyasında aşağıdaki komut çalıştırılır.
+./bin/elasticsearch-setup-passwords auto
+
+# Örnek çıktı:
+# Changed password for user elastic
+# PASSWORD elastic = dd6mjMiemZlAKfOXkUAm
+
+# Manuel olarak şifreleri güncellemek için Elasticsearch kurulum dosyasında aşağıdaki komut çalıştırılır.
+./bin/elasticsearch-setup-passwords interactive
+```
+
+<Info>
+  Bu adım, Elasticsearch güvenliği aktifleştirdikten sonra yeni bir kullanıcı oluşturmak için gereklidir. Buradaki kimlik bilgileri de Apinizer API Manager da tanımlanabilir.
+</Info>
+
+## 4.Kullanıcı ekleme
+
+Yeni kullanıcı eklemek ya da güncellemek için aşağıdaki istek yapılır. İstekte kullanıcı adı **apinizer_es_cluster**, şifresi **apinizer** ve rolü **superuser** olan yeni bir kullanıcı eklenmiştir. Eğer kullanıcı bilgileri güncellenirse, **"created" : false** olarak dönecektir.
+
+```bash
+# Windows için;
+curl -X POST -u <USERNAME>:<PASSWORD> "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_security/user/apinizer_es_cluster?pretty" -H "Content-Type:application/json" -d "{\"password\":\"apinizer\", \"roles\":[\"superuser\"], \"full_name\":\"Apinizer Elasticsearch Cluster\",\"email\" : \"apinizer@mail.com\"}"
+
+# Linux için;
+curl -X POST -u <USERNAME>:<PASSWORD> "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_security/user/apinizer_es_cluster?pretty" -H "Content-Type:application/json" -d '{"password":"apinizer", "roles":["superuser"], "full_name":"Apinizer Elasticsearch Cluster","email" : "apinizer@mail.com"}'
+```
+
+Örnek çıktı:
+
+```json
+{
+  "created" : true
+}
+```
+
+### 4.1 Şifre yenileme
+
+Şifre değiştirmek için:
+
+```bash
+bin/elasticsearch-users passwd <USERNAME>
+```
+
+Eğer üstteki komut işe yaramazsa ve eğer Elasticsearch'deki kullanıcıların şifresi kaybedilmiş ise aşağıdaki komut satırından yeni kullanıcı oluşturalarak, cluster kurtarılabilir. Oluşturduğu kullanıcının kimlik bilgilerini kullanarak varolan kullanıcı adı ile parola bilgisini güncelleyebilir.
+
+```bash
+bin/elasticsearch-users useradd <NEW_USERNAME> -p <NEW_PASSWORD> -r superuser
+
+curl -X POST "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_security/user/<OLD_USERNAME>/_password?pretty" -H 'Content-Type: application/json' -d' {
+  "password" : "<OLD_USERNAMES_NEW_PASSWORD>"
+} '
+```
+
+Ek olarak;
+
+* Postman gibi API test aracı üzerinde istek gönderileceği zaman isteğin header alanına **Authorization: Basic <base64 ile encode edilmiş username:password>** bilgisi eklenmelidir.
+
+  ```bash
+  # Örneğin;
+  Authorization: Basic YXBpbml6ZXJfZXNfY2x1c3RlcjphcGluaXplcg==
+  ```
+
+* Kibana üzerinden kullanıcı yönetimini gerçekleştirmek için sırasıyla menüden **Stack Management > Security > User** ekranına gidilmelidir. Kibana kurulum dosyasına **/config/kibana.yml** aşağıdaki alanlar eklenmelidir.
+
+  ```yaml
+  elasticsearch.username: "apinizer_es_cluster"
+  elasticsearch.password: "apinizer"
+  ```
+
+Ek komutlar;
+
+```bash
+# Kimliği doğrulanmış kullanıcının bilgilerini öğrenme
+curl -X GET -u apinizer_es_cluster:apinizer "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_security/_authenticate?pretty"
+
+# Kullanıcı aktifleştirilebilinir ya da devre dışı bırakılabilir.
+curl -X PUT -u apinizer_es_cluster:apinizer "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_xpack/security/user/apinizer_es_cluster/_enable"
+curl -X PUT -u apinizer_es_cluster:apinizer "http://<ELASTICSEARCH_IP_ADDRESS>:<PORT>/_xpack/security/user/apinizer_es_cluster/_disable"
+```
+
+## 5.Apinizer konfigürasyonu
+
+Tanımlanmış kullanıcının, kullanıcı adı ve şifresi Apinizer Manager Console daki Elasticseach Kümeleri sayfasından yapılmaktadır. Kimlik doğrulama switch butonunu aktifleştirip, kimlik bilgileri girilmelidir.

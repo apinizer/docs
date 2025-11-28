@@ -1,6 +1,252 @@
 ---
-title: "Red Hat İşletim Sisteminde Elasticsearch Kurulumu"
-description: 'Description of your new file.'
+title: "RedHat üzerinde Elasticsearch Kurulumu"
+description: 'Bu doküman, Red Hat işletim sistemine sahip bir sunucuya Elasticsearch 7.9.2 kurulumunu anlatmaktadır. Red Hat 8.6 İşletim sisteminin olması tavsiye edilir.'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+Bu doküman, Red Hat işletim sistemine sahip bir sunucuya Elasticsearch **7.9.2** kurulumunu anlatmaktadır. Red Hat 8.6 İşletim sisteminin olması tavsiye edilir.
+
+## Kuruluma Başlamadan Önce Yapılması Gereken Kontroller
+
+<Info>
+  **Kurulum için Önemli**
+
+  Kurulumun sağlıklı olması için sunucularının aşağıdaki adreslere erişmesi gerekmektedir.
+
+  **Elasticsearch kurulumunun yapılabilmesi için:**
+  - [https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.9.2-linux-x86_64.tar.gz](https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.9.2-linux-x86_64.tar.gz)
+</Info>
+
+## #1) İşletim Sistemi Konfigürasyonları (Tüm Sunucularda Yapılacaktır)
+
+```bash
+# Elasticsearch kullanıcısı oluşturulur ve yetkilendirilir.
+sudo adduser elasticsearch
+sudo passwd elasticsearch
+sudo usermod -aG wheel elasticsearch
+
+# Kullanıcıya geçilerek işlemlere devam edilir
+su - elasticsearch
+
+# Aşağıdaki araçların tüm sunucular üzerinde kurulu olması tavsiye edilmektedir.
+sudo yum update
+sudo yum install -y curl wget telnet zip lsof lvm2 net-tools yum-utils bind-utils device-mapper-persistent-data
+
+# Güvenlik duvarı kapatılır
+sudo systemctl stop firewalld
+sudo systemctl disable firewalld
+
+# Sunuculardaki iletişim sorunlarını önlemek için SELinux'u devre dışı bırakılır.
+sudo setenforce 0
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=disabled/' /etc/selinux/config
+
+# Swap kapatılır ve yeniden başlamasının önlenmesi için /etc/fstab dosyası içindeki swap satırı silinir.
+sudo swapoff -a
+sudo vi /etc/fstab
+# Daha sonra vi dosyasını kapatılır (:wq).
+```
+
+## #2) Elasticsearch Kurulumu
+
+### #2.1) İşletim Sistemi Konfigürasyonları ve Elasticsearch Uygulamasının Kurulması (Tüm Elasticsearch sunucularında)
+
+```bash
+sudo ulimit -n 65535
+sudo vi /etc/security/limits.conf
+```
+
+```
+elasticsearch - nofile 65535
+elasticsearch soft memlock unlimited
+elasticsearch hard memlock unlimited
+```
+
+```bash
+sudo sysctl -w vm.swappiness=1
+sudo sysctl -w vm.max_map_count=262144
+sudo vi /etc/sysctl.conf
+```
+
+```
+vm.max_map_count=262144
+```
+
+```bash
+sudo sysctl -p
+sudo sysctl vm.max_map_count
+```
+
+### #2.2) Elasticsearch Kurulumu (Tüm Elasticsearch Sunucularında)
+
+```bash
+sudo mkdir /opt/elasticsearch
+cd /opt/elasticsearch
+sudo wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-7.9.2-linux-x86_64.tar.gz
+sudo tar -xzf elasticsearch-7.9.2-linux-x86_64.tar.gz
+sudo chown -Rf elasticsearch:elasticsearch /opt/elasticsearch
+sudo chmod -Rf 775 /opt/elasticsearch
+
+##Bu noktada uygun diskin nerede mount edilmiş olduğuna dikkat edin veya sistem yöneticilerine diski aşağıdaki path'e eklemelerini söyleyin
+#Bu kontrol için aşağıdaki komutlar kullanılabilir
+df -h
+lsblk
+
+sudo mkdir /mnt/elastic-data/
+sudo mkdir /mnt/elastic-snapdata/
+sudo chown -Rf elasticsearch:elasticsearch /mnt/elastic-*
+sudo chmod -Rf 775 /mnt/elastic-*
+```
+
+### #2.3) Elasticsearch Parametrelerinin Ortama Göre Ayarlanması (Tüm Elasticsearch Sunucularında)
+
+Aşağıdaki parametrelerin kendi ortamınıza uygun olarak ayarlanarak eklenmesi gerekmektedir.
+
+* cluster.initial_master_nodes
+* network.host
+* node.name
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-7.9.2/config/elasticsearch.yml
+```
+
+<Warning>
+  **Önemli**
+
+  Burada path.data ve path.repo adresinin bir önceki maddeye uygun olarak sistemdeki log dosyanızın tutulacağı diskin adresi olarak verilmesi gerekmektedir.
+</Warning>
+
+```yaml
+cluster.name: ApinizerEsCluster
+node.name: "<ELASTICSEARCH_IP_ADDRESS>"
+node.master: true
+node.data: true
+network.host: <ELASTICSEARCH_IP_ADDRESS>
+http.port: 9200
+cluster.initial_master_nodes: ["<ELASTICSEARCH_IP_ADDRESS>"]
+discovery.seed_hosts: []
+path.data: /mnt/elastic-data/
+path.repo: ["/mnt/elastic-snapdata"]
+bootstrap.memory_lock: true
+http.cors.enabled : true
+http.cors.allow-origin : "*"
+http.cors.allow-methods : OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers : X-Requested-With,X-Auth-Token,Content-Type, Content-Length
+```
+
+Elasticsearch'ün kullanacağı JVM (Java Sanal Makinesi) değerleri ve diğer JVM parametrelerini aşağıdaki gibi ayarlayabilirsiniz.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-7.9.2/config/jvm.options
+```
+
+<Warning>
+  **Önemli**
+
+  Burada işletim sisteminin sahip olduğu RAM miktarının yarısına kadar çıkılabilir ve bu değer 32GB'ı aşmamalıdır
+</Warning>
+
+```
+-Xms8g
+-Xmx8g
+```
+
+### #2.4) Elasticsearch'i Linux Service Olarak Ayarlama (Tüm Elasticsearch Sunucularında)
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-7.9.2/bin/elasticsearch-service.sh
+```
+
+```bash
+#!/bin/sh
+SERVICE_NAME=elasticsearch
+PATH_TO_APP="/opt/elasticsearch/elasticsearch-7.9.2/bin/$SERVICE_NAME"
+PID_PATH_NAME="/opt/elasticsearch/elasticsearch-7.9.2/bin/$SERVICE_NAME.pid"
+SCRIPTNAME=elasticsearch-service.sh
+ES_USER=$SERVICE_NAME
+ES_GROUP=$SERVICE_NAME
+
+case $1 in
+    start)
+        echo "Starting $SERVICE_NAME ..."
+        if [ ! -f $PID_PATH_NAME ]; then
+            mkdir $(dirname $PID_PATH_NAME) > /dev/null 2>&1 || true
+            chown $ES_USER $(dirname $PID_PATH_NAME)
+            $SUDO $PATH_TO_APP -d -p $PID_PATH_NAME
+            echo "Return code: $?"
+            echo "$SERVICE_NAME started ..."
+        else
+            echo "$SERVICE_NAME is already running ..."
+        fi
+    ;;
+    stop)
+        if [ -f $PID_PATH_NAME ]; then
+            PID=$(cat $PID_PATH_NAME);
+            echo "$SERVICE_NAME stopping ..."
+            kill -15 $PID;
+            echo "$SERVICE_NAME stopped ..."
+            rm $PID_PATH_NAME
+        else
+            echo "$SERVICE_NAME is not running ..."
+        fi
+    ;;
+    restart)
+        if [ -f $PID_PATH_NAME ]; then
+            PID=$(cat $PID_PATH_NAME);
+            echo "$SERVICE_NAME stopping ...";
+            kill -15 $PID;
+            sleep 1;
+            echo "$SERVICE_NAME stopped ...";
+            rm -rf $PID_PATH_NAME
+            echo "$SERVICE_NAME starting ..."
+            mkdir $(dirname $PID_PATH_NAME) > /dev/null 2>&1 || true
+            chown $ES_USER $(dirname $PID_PATH_NAME)
+            $SUDO $PATH_TO_APP -d -p $PID_PATH_NAME
+            echo "$SERVICE_NAME started ..."
+        else
+            echo "$SERVICE_NAME is not running ..."
+        fi
+    ;;
+    *)
+        echo "Usage: $SCRIPTNAME {start|stop|restart}" >&2
+        exit 3
+    ;;
+esac
+```
+
+Servis ayarları için dosya oluşturulur, düzenlenir ve çalıştırılır.
+
+```bash
+sudo chmod -Rf 775 /opt/elasticsearch/elasticsearch-7.9.2/*
+sudo vi /etc/systemd/system/elasticsearch.service
+```
+
+```ini
+[Unit]
+Description=ElasticSearch Server
+After=network.target
+After=syslog.target
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=forking
+ExecStart=/opt/elasticsearch/elasticsearch-7.9.2/bin/elasticsearch-service.sh start
+ExecStop=/opt/elasticsearch/elasticsearch-7.9.2/bin/elasticsearch-service.sh stop
+ExecReload=/opt/elasticsearch/elasticsearch-7.9.2/bin/elasticsearch-service.sh restart
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+User=elasticsearch
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start elasticsearch
+sudo systemctl status elasticsearch
+sudo systemctl enable elasticsearch
+```
+
+Uyumlu Kibana versiyonu için aşağıdaki linki kullanabilirsiniz.
+
+```
+https://www.elastic.co/downloads/past-releases/kibana-oss-7-9-2
+```
