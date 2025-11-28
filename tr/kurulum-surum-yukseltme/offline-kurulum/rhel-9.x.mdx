@@ -1,9 +1,230 @@
 ---
-title: "RHEL 9.x İşletim Sistemi Üzerine Offline Apinizer Kurulumu"
-description: 'Common Apinizer issues, Gateway startup problems, Memory issues, Connection failures, Policy errors, Deployment failures'
-description: "Bu doküman Kubernetes, Docker or Containerd, Mongodb uygulamalarının RHEL (Red Hat Enterprise Linux) 9.x işletim sistemlerine kurulumlarını anlatır. Ayrıca Rocky Linux 9.x dağıtımlarına da uygulanabilir.
-
-"
+title: "RHEL 9.x üzerinde Kurulum"
+description: 'Bu doküman Kubernetes, Docker or Containerd, Mongodb uygulamalarının RHEL (Red Hat Enterprise Linux) 9.x işletim sistemlerine kurulumlarını anlatır.'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+Bu doküman Kubernetes, Docker or Containerd, Mongodb uygulamalarının RHEL (Red Hat Enterprise Linux) 9.x işletim sistemlerine kurulumlarını anlatır. Ayrıca Rocky Linux 9.x dağıtımlarına da uygulanabilir.
+
+<Warning>
+  Eğer mümkünse, her zaman seçtiğiniz işletim sisteminin son versiyonunu kullanın ve internet erişimiyle sunucuların ve kurulacak paketlerin son versiyonlarını kurun.
+</Warning>
+
+## İndirilecek Dosya
+
+```bash
+Apinizer imajlarının son sürümüne ait indirme linki için lütfen support@apinizer.com mail adresi üzerinden bizimle iletişime geçin.
+
+Rhel 9.x işletim sistemi için Kubernetes, Mongodb and Elasticsearch kurulum dosyaları:
+https://fss.apinizer.com/index.php/s/HZztMxazPsJY09P
+```
+
+```bash
+sudo tar xvf K8S-1.31-Rhel9.x-Offline.tar
+```
+
+```bash
+# Güvenlik duvarı kapatılır
+sudo systemctl stop firewalld
+sudo systemctl disable firewalld
+
+# Sunuculardaki iletişim sorunlarını önlemek için SELinux'u devre dışı bırakılır.
+sudo setenforce 0
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+
+# Swap kapatılır ve yeniden başlamasının önlenmesi için /etc/fstab dosyası içindeki swap satırı silinir.
+sudo swapoff -a
+sudo vi /etc/fstab
+```
+
+## 1) Containerd Ve Gerekli Paketlerin Kurulması
+
+```bash
+sudo yum install -y --cacheonly --disablerepo=* required_rpms/*.rpm --skip-broken
+```
+
+```bash
+#containerd modülünün ayarları
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+#containerd modülünün başlatılması
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+systemctl status containerd
+```
+
+<Warning>
+  **runc conflicts**
+
+  Eğer kurulumlar tamamlandıktan sonra containerd servisi bulunamazsa aşağıdaki komut yardımıyla paketlerde çakışma var mı bakılabilir.
+
+  ```bash
+  [apinizer@redhat ~]$ sudo rpm -ivh required_rpms/containerd.io-1.6.32-3.1.el8.x86_64.rpm
+  warning: required_rpms/containerd.io-1.6.32-3.1.el8.x86_64.rpm: Header V4 RSA/SHA512 Signature, key ID 621e9f35: NOKEY
+  error: Failed dependencies:
+          runc conflicts with containerd.io-1.6.32-3.1.el8.x86_64
+          runc is obsoleted by containerd.io-1.6.32-3.1.el8.x86_64
+  ```
+
+  Eğer paket çakışması varsa:
+
+  ```bash
+  sudo yum remove -y runc
+  # Tekrar kurulum yapılır.
+  sudo yum install -y --cacheonly --disablerepo=* required_rpms/*.rpm --skip-broken
+  ```
+</Warning>
+
+## 2)Kubernetes Paketlerinin Kurulması
+
+```bash
+sudo modprobe overlay
+sudo modprobe br_netfilter
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+Aşağıdaki içeriği ekleyin:
+
+```
+net.bridge.bridge-nf-call-ip6tables=1
+net.bridge.bridge-nf-call-iptables=1
+net.ipv4.ip_forward=1
+net.ipv4.tcp_max_syn_backlog=40000
+net.core.somaxconn=40000
+net.core.wmem_default=8388608
+net.core.rmem_default=8388608
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_mem=134217728 134217728 134217728
+net.ipv4.tcp_rmem=4096 277750 134217728
+net.ipv4.tcp_wmem=4096 277750 134217728
+net.core.netdev_max_backlog=300000
+```
+
+```bash
+sudo sysctl --system
+```
+
+```bash
+sudo yum install -y --cacheonly --disablerepo=* kube_rpms/*.rpm --skip-broken
+```
+
+```bash
+systemctl enable --now kubelet.service
+#Kubernetes kurulum kontrolü
+kubectl version --client && kubeadm version
+```
+
+## 3)Kubernetes Imagelarının Kurulması
+
+```bash
+sudo ctr --namespace k8s.io images import kube_images/kube-apiserver-v1.31.4.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-controller-manager-v1.31.4.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-scheduler-v1.31.4.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-proxy-v1.31.4.tar
+sudo ctr --namespace k8s.io images import kube_images/pause-3.10.tar
+sudo ctr --namespace k8s.io images import kube_images/etcd-3.5.15-0.tar
+sudo ctr --namespace k8s.io images import kube_images/coredns-v1.11.3.tar
+```
+
+Overlay Network kurulumunu hangi paket ile yapacağınıza karar verip sadece onu kurabilirsiniz, varsayılan olarak flannel kurulması tavsiye edilir.
+
+```bash
+#Flannel paketleri
+sudo ctr --namespace k8s.io images import kube_images/flannel-cni-plugin-v1.6.0.tar
+sudo ctr --namespace k8s.io images import kube_images/flannel-v0.26.1.tar
+
+#Calico paketleri
+sudo ctr --namespace k8s.io images import kube_images/calico-kube-controllers-v3.30.2.tar
+sudo ctr --namespace k8s.io images import kube_images/calico-cni-v3.30.2.tar
+sudo ctr --namespace k8s.io images import kube_images/calico-node-v3.30.2.tar
+```
+
+<Info>
+  Kubernetes, pause 3.10 kullanmasına rağmen containerd 3.8'de kalıyor ve bu durum, kubeadm init işlemi sırasında kümenin başlamamasına neden olabilir. Bunu düzeltmek için `/etc/containerd` içindeki yapılandırma dosyasında pause sürümünü 3.10 olarak değiştirebilirsiniz.
+</Info>
+
+## 4) Kubeadm Init
+
+Bu Node, kümedeki ilk Node olduğu için Kubernetes Control Plane olarak seçilecektir.
+
+```bash
+sudo kubeadm init --pod-network-cidr="10.244.0.0/16" --control-plane-endpoint="<MASTER_SERVER_IP_ADDRESS>" --upload-certs --kubernetes-version=v1.31.4
+```
+
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+**Worker node kümeye dahil etmek için:**
+
+Aşağıdaki komut **master node** üzerinde çalıştırılarak kümeye dahil etme komutunu çıktı olarak alabilirsiniz.
+
+```bash
+kubeadm token create --print-join-command
+```
+
+## 5) Flannel Oluşturma
+
+```bash
+ls
+```
+
+Komutu kullanarak dökümanın başında indirdiğiniz .tar dosyasından gelen kube-flannel.yml bulunduğunu teyit ediniz.
+
+```bash
+kubectl apply -f flannel_yaml/kube-flannel.yml
+```
+
+## 6) Apinizer Image'lerinin Kurulması
+
+```bash
+sudo tar xvf 2025.01.4.tar
+```
+
+```bash
+sudo ctr --namespace k8s.io images import manager-2025.01.4.tar apinizercloud/manager:2025.01.4
+sudo ctr --namespace k8s.io images import worker-2025.01.4.tar apinizercloud/worker:2025.01.4
+sudo ctr --namespace k8s.io images import cache-2025.01.4.tar apinizercloud/cache:2025.01.4
+sudo ctr --namespace k8s.io images import integration-2025.01.4.tar apinizercloud/integration:2025.01.4
+sudo ctr --namespace k8s.io images import portal-2025.01.4.tar apinizercloud/portal:2025.01.4
+```
+
+## 7) MongoDB Kurulması
+
+**mongo_rpms** dizininde bulunan kurulumları gerçekleştirir.
+
+```bash
+sudo yum install -y --cacheonly --disablerepo=* mongo_rpms/*.rpm --skip-broken
+```
+
+Kurulum sonrası MongoDB konfigürasyonları [Red Hat İşletim Sisteminde MongoDB Kurulumu](https://docs.apinizer.com/apinizer-dokumantasyonu/red-hat-isletim-sisteminde-mongodb-kurulumu-120520790.html) dökümanından devam edebilirsiniz. ( 2.1 kurulum adımını geçebilirsiniz.)
+
+## 8) Elasticsearch Kurulumu
+
+```bash
+sudo mkdir /opt/elasticsearch
+# Offline kurulum klasörleri içindeki dosyayı taşıyın.
+sudo mv elasticsearch/elasticsearch-7.9.2-linux-x86_64.tar.gz /opt/elasticsearch/
+cd /opt/elasticsearch
+sudo tar -xzf elasticsearch-7.9.2-linux-x86_64.tar.gz
+```
+
+Kurulum dosyasını bulunduğu dizinden /opt/elasticsearch/ klasörüne taşıdıktan sonra [Red Hat İşletim Sisteminde Elasticsearch Kurulumu](https://docs.apinizer.com/apinizer-dokumantasyonu/red-hat-isletim-sisteminde-elasticsearch-kurulumu-70849522.html) sayfasından konfigürasyonları gerçekleştirebilirsiniz.
+
+## 9) Apinizer Kurulumu
+
+Apinizer kurulumu için [Apinizer Kurulumu ve Ayarları](https://docs.apinizer.com/apinizer-dokumantasyonu/apinizer-kurulumu-ve-ayarlari-119504975.html) sayfasından gerçekleştirebilirsiniz.

@@ -1,6 +1,332 @@
 ---
 title: "Apinizer Sürüm Yükseltme"
-description: 'Description of your new file.'
+description: 'Bu kılavuz, Kubernetes üzerinde çalışan Apinizer imajlarının nasıl sürüm yükseltileceğini adım adım açıklamaktadır.'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+Bu kılavuz, Kubernetes üzerinde çalışan Apinizer imajlarının nasıl sürüm yükseltileceğini adım adım açıklamaktadır. Örnek senaryo Ubuntu 22.04 işletim sistemine sahip sunucular üzerinde gerçekleştirilmiştir.
+
+Güncelleme, Apinizer'ın üzerinde bulunduğu Kubernetes worker sunucularının internete erişip erişememesine göre farklı yollarla yapılır.
+
+Güncelleme ile direkt bir ilgisi olmasa da her zaman MongoDB veritabanındaki Apinizer'ın kullandığı veritabanının yedeklenmesi, olası bir rollback durumu için önerilmektedir.
+
+<Warning>
+  Güncelleme işleminden önce, mevcut sistem yapılandırmasıyla uyumsuzluk oluşturabilecek değişiklikleri tespit etmek ve gerekli önlemleri almak adına **Sürüm Notlarının incelenmesi tavsiye edilir**.
+</Warning>
+
+## 1) MongoDB Yedeğinin Alınması
+
+İlk olarak, MongoDB üzerinde bir yedekleme işlemi gerçekleştirilir. Yedek alımı, veri kaybını önlemek için her zaman güncelleme sürecinin ilk adımı olarak yapılır. Bu komut Mongodb sunucusu üzerinde çalıştırılır.
+
+```bash
+# Yedek alma
+sudo mongodump --host <PRIMARY_MONGODB_IP_ADDRESS> --port=25080 --username=apinizer --password=<PASSWORD> --authenticationDatabase=admin --gzip --archive=<BACKUP_DIRECTORY>/apinizer-backup--<CURRENT_VERSION>--<BACKUP_DATE>--01.archive
+```
+
+## 2) Apinizer Uygulamalarının Güncellenmesi
+
+İlgili sunucularda internet erişimi varsa 2.1, yoksa 2.2 maddesinden devam ediniz.
+
+Sistem, temel olarak apimanager (2025.11.0 ve öncesi sürümlerde manager), worker ve cache uygulamalarından oluşur. Lisans kapsamına bağlı olarak integration ve apiportal (2025.04.5 ve öncesi sürümlerde portal) uygulamaları da bulunabilir.
+
+Güncel sürüm bilgilerine [https://hub.docker.com/u/apinizercloud](https://hub.docker.com/u/apinizercloud) adresinden veya [sürüm notları sayfasından](https://docs.apinizer.com/apinizer-dokumantasyonu/sueruem-notlari-release-notes-137331125.html) erişilebilir.
+
+### Güncellemelerdeki anahtar noktalar ve trafik akışında kesinti riski
+
+Güncelleme sırasında trafik kesintisi riski; pod sayısı, güncelleme stratejisi ve sunucu kaynaklarının uygunluğu gibi faktörlere bağlı olarak değişkenlik gösterebilir.
+
+**Replica/pod sayısı:** Güncellenecek uygulama yalnızca 1 pod üzerinde çalışıyorsa kısa süreli kesinti yaşanabilir. Ancak Api Manager bileşeninin 1 pod ile çalışması önerilir.
+
+**Güncelleme stratejisi:** Kurulum sırasında özel bir strateji belirtilmediği sürece, güncellemeler RollingUpdate yöntemiyle ve en az bir pod aktif kalacak şekilde gerçekleştirilir. Bu strateji, çoklu pod kullanımıyla birlikte kesintisiz güncelleme için uygundur. İsteğe bağlı olarak Api Manager ve Cache bileşenlerinde Recreate stratejisi de tercih edilebilir.
+
+**Sunucu kaynaklarının uygunluğu:** Kubernetes worker sunucu sayısının az olduğu ve mevcut kaynakların sınırda kullanıldığı ortamlarda, güncelleme sırasında manuel müdahale gerekebilir ve trafik akışında kesinti yaşanması muhtemeldir.
+
+## 2.1) Apinizer Uygulamalarının Çevrimiçi Güncellenmesi
+
+### 2.1.1) Apinizer Api Manager Uygulamasının Güncellenmesi
+
+<Warning>
+  Apinizer'ın diğer bileşenlerini güncellemeden önce Apinizer Api Manager'ın güncellenmesi gerekmektedir.
+
+  Api Manager'ın veritabanına yapacağı güncellemelerden sonra diğer Apinizer uygulamalarının güncel ayarlarla veritabanından beslenmesi gerekmektedir.
+
+  Bu nedenle, Api Manager güncellendikten sonra Kubernetes üzerindeki Api **Manager podlarının "ready" durumuna geldiğinden emin olunmalı ve ardından diğer bileşenler güncellenmelidir.**
+</Warning>
+
+Bu ve sonraki adımlardaki komutlar, Kubernetes Control Plane görevine sahip sunucular üzerinde çalıştırılır.
+
+```bash
+# Deployment'a ait bilgiler kontrol edilir
+kubectl get deployments -Ao wide
+
+# Api Manager'ın deployment imajı güncellenir
+kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=apinizercloud/apimanager:<NEW_VERSION>
+
+# Pod'un READY olması beklenir, pod durumu ve logları takip edilir
+kubectl get pods -n <MANAGER_NAMESPACE>
+kubectl get logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+```
+
+### 2.1.2) Apinizer Worker ve Cache Uygulamalarının Güncellenmesi
+
+Apinizer Api Manager uygulamasının imajının güncellendiğinden emin olduktan sonra Apinizer Worker ve Cache uygulamaları güncellenir.
+
+```bash
+kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=apinizercloud/worker:<NEW_VERSION>
+kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=apinizercloud/cache:<NEW_VERSION>
+
+# Pod'ların READY olması beklenir, pod durumu takip edilir
+kubectl get pods -n <WORKER_CACHE_NAMESPACE>
+kubectl get logs -f -n <WORKER_CACHE_NAMESPACE> <POD_NAME>
+```
+
+### 2.1.3) Apinizer Portal ve Integration Uygulamalarının Güncellenmesi
+
+Apinizer Portal ve Integration'da benzer şekilde güncellenebilmektedir.
+
+```bash
+kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=apinizercloud/apiportal:<NEW_VERSION>
+kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=apinizercloud/integration:<NEW_VERSION>
+
+# Pod'ların READY olması beklenir, pod durumu takip edilir
+kubectl get pods -n <PORTAL_NAMESPACE>
+kubectl get logs -f -n <PORTAL_NAMESPACE> <POD_NAME>
+kubectl get pods -n <INTEGRATION_NAMESPACE>
+kubectl get logs -f -n <INTEGRATION_NAMESPACE> <POD_NAME>
+```
+
+---
+
+## 2.2) Apinizer Uygulamalarının Çevrimdışı Güncellenmesi
+
+İşlem adımları, Kubernetes ortamlarında güncelleme yapmayı gerektiren offline sistemler için özelleştirilmiştir.
+
+Bu işlem gerçekleştirilirken 2 ana yöntem vardır:
+
+1. İnterneti ve docker/containerd uygulaması olan bir sunucuya imaj dosyalarını çekmek ve bu imaj dosyalarını hedef Kubernetes cluster'ına bu aktarmak
+2. Kubernetes cluster'ın kullanacağı bir repository uygulaması kullanmak (Nexus, Harbor vs.)
+
+Size uygun olan adımdan devam ediniz.
+
+### 2.2.1) Online Sunucudan İmajların Çekilmesi ve Offline Sunuculara Aktarılması
+
+İnternete ve offline makinelere erişimi olan bir makine varsa aşağıdaki adımlar gerçekleştirilebilir.
+
+#### 2.2.1.1) docker kullanılacaksa:
+
+```bash
+# Online sunucudan yükseltme için gerekli olan tüm imajlar çekilir
+docker pull apinizercloud/apimanager:<NEW_VERSION>
+docker pull apinizercloud/worker:<NEW_VERSION>
+docker pull apinizercloud/cache:<NEW_VERSION>
+docker pull apinizercloud/apiportal:<NEW_VERSION>
+docker pull apinizercloud/integration:<NEW_VERSION>
+
+# İlgili imajları offline sunuculara aktarmak için, online sunucuda imajlar `.tar` formatında kaydedilir
+docker save apinizercloud/apimanager:<NEW_VERSION> -o apinizercloud-apimanager.<NEW_VERSION>.tar
+docker save apinizercloud/worker:<NEW_VERSION> -o apinizercloud-worker.<NEW_VERSION>.tar
+docker save apinizercloud/cache:<NEW_VERSION> -o apinizercloud-cache.<NEW_VERSION>.tar
+docker save apinizercloud/apiportal:<NEW_VERSION> -o apinizercloud-apiportal.<NEW_VERSION>.tar
+docker save apinizercloud/integration:<NEW_VERSION> -o apinizercloud-integration.<NEW_VERSION>.tar
+
+# İmajların her biri offline sunucuya aktarılır
+scp apinizercloud-*.tar <OFFLINE_MACHINE_USER>@<OFFLINE_MACHINE_IP>:<TARGET_DIRECTORY>
+
+# Her bir offline sunucuda imajlar yüklenilir
+docker load -i apinizercloud-apimanager.<NEW_VERSION>.tar
+docker load -i apinizercloud-worker.<NEW_VERSION>.tar
+docker load -i apinizercloud-cache.<NEW_VERSION>.tar
+docker load -i apinizercloud-portal.<NEW_VERSION>.tar
+docker load -i apinizercloud-integration.<NEW_VERSION>.tar
+```
+
+#### 2.2.1.2) containerd kullanılacaksa:
+
+```bash
+# Online sunucudan yükseltme için gerekli olan tüm imajlar çekilir
+ctr image pull docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# İlgili imajları offline sunuculara aktarmak için, online sunucuda imajlar `.tar` formatında kaydedilir
+ctr images export apinizercloud-apimanager.tar docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr images export apinizercloud-worker.tar docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr images export apinizercloud-cache.tar docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr images export apinizercloud-apiportal.tar docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr images export apinizercloud-integration.tar docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# İmajların her biri offline kubernetes worker sunuculara aktarılır
+scp docker.io-apinizercloud-*.tar <OFFLINE_MACHINE_USER>@<OFFLINE_MACHINE_IP>:<TARGET_DIRECTORY>
+
+# Her bir offline sunucuda imajlar yüklenilir
+ctr images import apinizercloud-apimanager.tar
+ctr images import apinizercloud-worker.tar
+ctr images import apinizercloud-cache.tar
+ctr images import apinizercloud-apiportal.tar
+ctr images import apinizercloud-integration.tar
+```
+
+### 2.2.2) Yerel İmaj Registry ya da Repository Bulunuyorsa
+
+Farklı imaj registry ve repository'leri farklı yöntemlerle çalışsa da çoğunda çekilen imajlar tag'lenerek uygulamaya gönderilmelidir.
+
+<Info>
+  Eğer uygulama reverse proxy şeklinde kullanılıyorsa hub.docker.com adresindeki apinizercloud reposuna yönelik gerekli tanımın verilmesi yeterli olmaktadır.
+</Info>
+
+#### 2.2.2.1) docker kullanılacaksa:
+
+```bash
+# Gerekli tüm imajlar çekilir
+docker pull apinizercloud/apimanager:<NEW_VERSION>
+docker pull apinizercloud/worker:<NEW_VERSION>
+docker pull apinizercloud/cache:<NEW_VERSION>
+docker pull apinizercloud/apiportal:<NEW_VERSION>
+docker pull apinizercloud/integration:<NEW_VERSION>
+
+# Çekilen imajlar, gerekli tag bilgileri ile yeniden etiketlenir
+docker tag apinizercloud/apimanager:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+docker tag apinizercloud/worker:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+docker tag apinizercloud/cache:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+docker tag apinizercloud/apiportal:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+docker tag apinizercloud/integration:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+
+# Kurumun yerel imaj registry'sine imajlar aktarılır:
+docker push <YEREL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+docker push <YEREL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+docker push <YEREL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+docker push <YEREL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+docker push <YEREL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+```
+
+#### 2.2.2.2) containerd kullanılacaksa:
+
+```bash
+# Gerekli tüm imajlar çekilir
+ctr image pull docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# Çekilen imajlar, gerekli tag bilgileri ile yeniden etiketlenir
+ctr image tag docker.io/apinizercloud/apimanager:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/worker:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/cache:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/apiportal:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/integration:<NEW_VERSION> <YEREL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+
+# Kurumun yerel imaj registry'sine imajlar aktarılır:
+ctr images push <YEREL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+ctr images push <YEREL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+ctr images push <YEREL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+ctr images push <YEREL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+ctr images push <YEREL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+```
+
+### 2.2.3) Apinizer Api Manager Uygulamasının Güncellenmesi
+
+<Warning>
+  Apinizer'ın diğer bileşenlerini güncellemeden önce Apinizer Api Manager'ın güncellenmesi gerekmektedir.
+
+  Api Manager'ın veritabanına yapacağı güncellemelerden sonra diğer Apinizer uygulamalarının güncel ayarlarla veritabanından beslenmesi gerekmektedir.
+
+  Bu nedenle, Api Manager güncellendikten sonra Kubernetes üzerindeki Api **Manager podlarının "ready" durumuna geldiğinden emin olunmalı ve ardından diğer bileşenler güncellenmelidir.**
+</Warning>
+
+Bu ve sonraki adımlardaki komutlar, Kubernetes Control Plane görevine sahip sunucular üzerinde çalıştırılır.
+
+```bash
+# Deployment'a ait bilgiler kontrol edilir
+kubectl get deployments -Ao wide
+
+# ApiManager'ın deployment imajları güncellenir.
+kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=<YEREL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+
+# Pod'un READY olması beklenir, pod durumu takip edilir
+kubectl get pods -n <MANAGER_NAMESPACE>
+kubectl logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+```
+
+### 2.2.4) Apinizer Worker ve Cache Uygulamalarının Güncellenmesi
+
+Apinizer Api Manager uygulamasının imajının güncellendiğinden emin olduktan sonra Apinizer Worker ve Cache uygulamaları güncellenir.
+
+```bash
+kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=<YEREL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=<YEREL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+
+# Pod'ların READY olması beklenir, pod durumu takip edilir
+kubectl get pods -n <WORKER_CACHE_NAMESPACE>
+kubectl logs -f -n <WORKER_CACHE_NAMESPACE> <POD_NAME>
+```
+
+### 2.2.5) Apinizer Portal ve Integration Uygulamalarının Güncellenmesi
+
+Apinizer Portal ve Integration'da benzer şekilde güncellenebilmektedir.
+
+```bash
+kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=<YEREL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=<YEREL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+
+# Pod'ların READY olması beklenir, pod durumu takip edilir
+kubectl get pods -n <PORTAL_NAMESPACE>
+kubectl get logs -f -n <PORTAL_NAMESPACE> <POD_NAME>
+kubectl get pods -n <INTEGRATION_NAMESPACE>
+kubectl get logs -f -n <INTEGRATION_NAMESPACE> <POD_NAME>
+```
+
+## 3) Apinizer Uygulama Güncellemelerinin Geri Alınması
+
+Apinizer uygulamalarında sürüm düşürülmesi desteklenmemektedir. Ancak güncellenen bir sürüm veritabanı yedekleri varsa geri alınabilmektedir.
+
+Herhangi bir sebep ile güncellemelerin geri alınması gerektiğinde yapılması gereken ilk iş **güncelleme öncesi MongoDB yedeğinin alınmış olduğunu** kontrol etmektir. Güncelleme öncesi alınmış bir veritabanı yedeği yoksa Api Manager uygulamasının veritabanında yapacağı değişiklikleri geri almanın bir yolu olmadığı için veritabanı sunucularının sistemsel bir yedeği varsa mevcut son yedeğe dönülerek o tarihteki sürüme geri dönülebilir.
+
+Ancak bu da o tarihten itibaren yapılan değişikliklerin kaybına yol açacağı için dikkatle yapılması gerekirse güncellenmiş veritabanının yedeğinin alınarak, sistemsel yedeğe dönülüp sürüm güncellemesi geri alınıp Apinizer uygulamaları çalıştırıldıktan sonra, koleksiyonlar halinde veritabanına değişikliklerin aktarılması düşünülebilir.
+
+Güncelleme ile yapısal farklılıklar oluşabileceğinden bu işlem sadece referans olarak kullanılmak için düşünülebilir.
+
+### 3.1) MongoDB Veritabanı Geri Yükleme
+
+Bu işlemin öncesinde Api Manager uygulamasının kubernetes üzerinde CrashLoopBackOff **hatası ile yeniden başlatılma döngüsünde olmadığı** teyit edilmelidir. En güvenli yöntem için Api Manager uygulaması replica sayısı 0'a indirilerek durdurulmalıdır.
+
+```bash
+# ApiManager replica sayısı 0'a çekilir ve tüm pod'lar kapatılır
+kubectl scale deploy <MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> --replicas=0
+```
+
+Sonrasında MongoDB mevcut son yedeğe dönülmelidir. Dönüş sırasında olası çakışmaları engellemek için --drop parametresi kullanılabilir. Bu sadece yedek dosyasında karşılığı olan koleksiyonları drop edecek ve yüklemeyi sonrasında gerçekleştirmeyi sağlayacaktır.
+
+Detaylı bilgi için [MongoDB Veritabanı Yedekleme ve Geri Yükleme](/tr/kurulum-surum-yukseltme/mongoDB-yedekleme) sayfası incelenebilir.
+
+### 3.2) Api Manager Uygulamasının Sürümünün Geri Alınması
+
+Dönüş sırasında eğer yerel kayıt defteri kullanılacaksa komutlar buna göre güncellenmelidir.
+
+```bash
+# ApiManager'ın deployment imajı eski sürüm olarak komut çalıştırılır, replica sayısının 1'e çekilir
+kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=apinizercloud/apimanager:<OLD_VERSION>
+kubectl scale deploy <MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> --replicas=1
+
+# Pod'un READY olması beklenir, pod durumu ve logları takip edilir
+kubectl get pods -n <MANAGER_NAMESPACE>
+kubectl logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+```
+
+### 3.3) Diğer Uygulamaların Sürümünün Geri Alınması
+
+Api Manager uygulaması çalışır hale geldiğinde diğer uygulamalar birlikte eski sürüme döndürülebilir.
+
+Dönüş sırasında eğer yerel kayıt defteri kullanılacaksa komutlar buna göre güncellenmelidir.
+
+```bash
+# Deployment imajları eski sürüm olarak komut çalıştırılır
+kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=apinizercloud/worker:<OLD_VERSION>
+kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=apinizercloud/cache:<OLD_VERSION>
+kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=apinizercloud/apiportal:<OLD_VERSION>
+kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=apinizercloud/integration:<OLD_VERSION>
+
+# Pod'ların READY olması beklenir, pod durumları ve gerekirse logları takip edilir
+kubectl get pods -A
+```

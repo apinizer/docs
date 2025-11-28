@@ -1,0 +1,282 @@
+---
+title: "CentOS 7 üzerine Private Docker Registry kurulumu"
+description: 'Docker kayıt defterinin CentOS 7 işletim sistemine sahip olan sunucunuza yüklenmesi ve yapılandırılması için gerekli adımlar.'
+---
+
+Docker kayıt defterinin CentOS 7 işletim sistemine sahip olan sunucunuza yüklenmesi ve yapılandırılması için bu adımları izleyin.
+
+<Info>
+  CentOS 7.4'teki docker dağıtım paketi, ekstra havuzda mevcuttur. CentOS 7 sisteminizde devre dışı bırakılmışsa etkinleştirmeniz gerekebilir.
+</Info>
+
+## Kurulum Adımları
+
+### Kurulum
+
+```bash
+sudo yum -y install docker-distribution
+```
+
+### Docker Kayıt Defterini Yapılandırın
+
+Docker kayıt defteri yapılandırma dosyası **/etc/docker-distribution/registry/config.yml** adresinde bulunur. YAML biçimindedir. Herhangi bir değişiklik yapmanız gerekirse, burada yapın. Örnek yapılandırma dosyası aşağıda gösterilmektedir:
+
+```yaml
+version: 0.1
+log:
+  fields:
+    service: registry
+storage:
+  cache:
+    layerinfo: inmemory
+  filesystem:
+    rootdirectory: /var/lib/registry
+http:
+  addr: :5000
+```
+
+Varsayılan yapılandırma dosyasından:
+
+* **/var/lib/**: kayıt defteri, docker image'larının depolanacağı dizindir.
+* **Service:** tüm ağ arayüzlerinde 5000 numaralı bağlantı noktasına bağlanacak
+
+SELinux'u etkinleştirdiyseniz, 5000 numaralı bağlantı noktasını kullanırken bir sorunla karşılaşabilirsiniz, SELinux'u devre dışı bırakmayı veya sorunlarla karşılaşırsanız izin verici moda getirmeyi düşünün.
+
+Güvenlik duvarı etkinse ve çalışıyorsa, güvenlik duvarında bağlantı noktasına izin verin.
+
+```bash
+firewall-cmd --add-port=5000/tcp
+firewall-cmd --reload
+```
+
+### Docker Kayıt Defterini Başlatın
+
+Şimdi hizmeti başlatabilir ve önyüklemede başlayacak şekilde ayarlayabilirsiniz.
+
+```bash
+systemctl start docker-distribution
+systemctl enable docker-distribution
+```
+
+Docker dağıtım hizmetinin (docker-distribution) çalıştığını doğrulayın:
+
+```bash
+systemctl status docker-distribution
+```
+
+Örnek çıktı:
+
+```
+● docker-distribution.service - v2 Registry server for Docker
+   Loaded: loaded (/usr/lib/systemd/system/docker-distribution.service; disabled; vendor preset: disabled)
+   Active: active (running) since Sat 2018-03-31 14:31:16 EDT; 2min 20s ago
+ Main PID: 16262 (registry)
+   CGroup: /system.slice/docker-distribution.service
+           └─16262 /usr/bin/registry serve /etc/docker-distribution/registry/...
+```
+
+### Kayıt Defteri'ni Docker Engine'e Ekleyin
+
+<Info>
+  Aşağıdaki bilgi Apinizer kurulumunda Kubernetes 1.18.x ve Docker uygulamaları birlikte kurulduğu zaman kullanılacaktır.
+</Info>
+
+Varsayılan olarak docker, docker kayıt defterine bağlanmak için https kullanır. Ancak, özellikle güvenilir bir ağ üzerindeyseniz, güvenli olmayan bir kayıt defterini kullanmak için kullanım örnekleri olabilir. Bu, dahili kullanım için CA imzalı sertifika ihtiyacını veya **tüm docker** düğümlerinde kendinden imzalı sertifikaya güvenmeyi ortadan kaldırır. Güvensiz Kayıt Defteri'ni Docker Engine'e eklemenin adımları aşağıda verilmiştir.
+
+**/etc/docker/daemon.json** dosya içindeki tüm satırlar silinip aşağıdaki satır eklenir.
+
+```bash
+vi /etc/docker/daemon.json
+```
+
+```json
+{
+  "insecure-registries" : ["dockerregistry.local:5000"]
+}
+```
+
+<Warning>
+  Yukarıdaki satırı **/etc/docker/daemon.json** docker registry'e bağlanacak tüm sunucular üzerinde yapılması gerekmektedir.
+</Warning>
+
+Artık kayıt defteri hazır olduğuna göre, docker image'larını ona aktarmaya başlayabilirsiniz. Bir DNS sunucunuz yoksa, ana bilgisayar adını IP Adresiyle eşlemek için /etc/hosts dosyasını kullanın.
+
+```bash
+cat /etc/hosts
+192.168.X.X dockerregistry.local
+```
+
+<Info>
+  `"insecure-registries" : ["192.168.X.X:5000"]` bu şekilde de eklenebilir.
+</Info>
+
+<Note>
+  hostname yazılıyorsa, kubernetes cluster içindeki diğer makinelerinde host dosyalarında belirtilmesi gerekmektedir.
+</Note>
+
+Yukarıdaki değişiklikleri yaptıktan sonra Docker'ı yeniden başlatın.
+
+```bash
+systemctl restart docker
+```
+
+## Docker Kayıt Defteri Kullanımı
+
+Öncelikle docker registry kurulmuş olan ortama image'ları indirilir.
+
+```bash
+sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
+```
+
+Image'ı **dockerregistry.local:5000/manager:<APINIZER_VERSION>** olarak etiketleyin. Bu, mevcut image için ek bir etiket oluşturur. Etiketin ilk kısmı bir ana bilgisayar adı ve bağlantı noktası olduğunda, Docker bunu push sırasında bir kayıt defterinin konumu olarak yorumlar.
+
+```bash
+docker tag apinizercloud/manager:<APINIZER_VERSION> dockerregistry.local:5000/manager:<APINIZER_VERSION>
+```
+
+Image'ı dockerregistry.local:5000/manager:<APINIZER_VERSION> adresinde çalışan yerel kayıt defterine gönderin.
+
+```bash
+docker push dockerregistry.local:5000/manager:<APINIZER_VERSION>
+```
+
+Image yükleme başarılı olduysa, sonunda sha256 hash almalısınız. Aktarılan image'lar **/var/lib/registry/docker/registry/v2/repositories** dizini altında saklanır.
+
+```bash
+ls /var/lib/registry/docker/registry/v2/repositories
+```
+
+### Örnek Kullanımlar
+
+**Örnek:** local registry'e pull edilen image'ı push etmek için. Manager, Worker ve Cache'lerin yüklemek için;
+
+```bash
+# Apinizer Image'ı yükleme
+--- Manager ---
+sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
+sudo docker tag apinizercloud/manager:<APINIZER_VERSION> <YOUR_IP>:5000/manager:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/manager:<APINIZER_VERSION>
+
+--- Worker ---
+sudo docker pull apinizercloud/worker:<APINIZER_VERSION>
+sudo docker tag apinizercloud/worker:<APINIZER_VERSION> <YOUR_IP>:5000/worker:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/worker:<APINIZER_VERSION>
+
+--- Cache ---
+sudo docker pull apinizercloud/cache:<APINIZER_VERSION>
+sudo docker tag apinizercloud/cache:<APINIZER_VERSION> <YOUR_IP>:5000/cache:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/cache:<APINIZER_VERSION>
+```
+
+**Örnek:** .tar olarak alınmış bir apinizer image'nın registry'e yüklenmesi
+
+```bash
+# Apinizer Image'ı yükleme
+docker image load < apinizer-manager.tar
+docker tag apinizer-manager:latest <YOUR_IP>:5000/apinizer-manager:latest
+docker push <YOUR_IP>:5000/apinizer-manager:latest
+```
+
+## Linux shell Kodu ile Image'leri Local Docker Registry'e Ekleme
+
+**v2 API ile image'lerin versiyonlarını listeleme**
+
+```bash
+vi pullApinizerImages.sh
+```
+
+```bash
+#!/bin/bash
+
+localRepositoryUrl=<YOUR_IP>:5000
+
+if [ "$localRepositoryUrl" == "<YOUR_IP>:5000" ]; then
+  echo "Please enter your local Docker Repository URL"
+else
+  echo "Your Local Repository Url : "$localRepositoryUrl
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Please enter the version information as a parameter."
+  exit
+fi
+
+echo 'Version = ' $1
+version=$1
+
+docker pull apinizercloud/manager:"$version"
+docker tag apinizercloud/manager:$version $localRepositoryUrl/manager:$version
+docker push $localRepositoryUrl/manager:$version
+
+docker pull apinizercloud/worker:$version
+docker tag apinizercloud/worker:$version $localRepositoryUrl/worker:$version
+docker push $localRepositoryUrl/worker:$version
+
+docker pull apinizercloud/cache:$version
+docker tag apinizercloud/cache:$version $localRepositoryUrl/cache:$version
+docker push $localRepositoryUrl/cache:$version
+
+echo "Image pull operation completed."
+```
+
+**Kullanımı**
+
+```bash
+# v2 API ile image'n versiyonlarını listeleme
+sh pullApinizerImages.sh <APINIZER_VERSION>
+```
+
+```bash
+# Catalog bilgisi sorgulama
+curl http://<YOUR_IP>:5000/v2/_catalog
+```
+
+Örnek çıktı:
+
+```json
+{
+  "repositories": [
+    "cache",
+    "manager",
+    "worker"
+  ]
+}
+```
+
+```bash
+# v2 API ile registry listeleme
+curl http://<YOUR_IP>:5000/v2/manager/tags/list
+```
+
+Örnek çıktı:
+
+```json
+{
+  "name": "manager",
+  "tags": [
+    "<APINIZER_VERSION>"
+  ]
+}
+```
+
+```yaml
+# Kubernetes'te Apinizer deploy dosyalarına yazmak için
+image: myregistry.local:5000/apinizercloud/manager:<APINIZER_VERSION>
+```
+
+```bash
+# Repository'deki image'ları silmek için
+cd /var/lib/registry/docker/registry/v2/repositories
+sudo rm -rf *
+```
+
+<Note>
+  Local docker Registry kurarken dikkat edilmesi gereken bir diğer konu SSL.
+
+  Daha fazla bilgi için: [https://github.com/Juniper/contrail-docker/wiki/Configure-docker-service-to-use-insecure-registry](https://github.com/Juniper/contrail-docker/wiki/Configure-docker-service-to-use-insecure-registry)
+</Note>
+
+```bash
+docker image prune -a
+```
+

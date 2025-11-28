@@ -1,6 +1,236 @@
 ---
 title: "Openshift Origin 3.11 üzerine Kubernetes Kurulumu"
-description: 'Description of your new file.'
+description: 'Openshift Origin 3.11 platformu üzerine Kubernetes kurulumu için gerekli adımlar ve yapılandırmalar.'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+Bu doküman, Openshift Origin 3.11 platformu üzerine Kubernetes kurulumunu anlatmaktadır.
+
+## 1) İşletim Sistemi Konfigürasyonları (Tüm Sunucularda Yapılacaktır)
+
+```bash
+sudo apt update
+
+# Aşağıdaki araçların tüm sunucular üzerinde kurulu olması tavsiye edilmektedir
+sudo apt install -y curl wget net-tools gnupg2 software-properties-common apt-transport-https ca-certificates
+
+# Apinizer kullanıcısı oluşturulur ve yetkilendirilir.
+sudo adduser apinizer
+sudo usermod -aG sudo apinizer
+
+# Kullanıcıya geçilerek işlemlere devam edilir.
+su - apinizer
+
+#Güvenlik duvarı kapatılır.
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+
+# Kubernetes, MongoDB ve Elasticsearch ortak olarak işletim sisteminde swap kullanımını istememektedirler. Bunun için swap'i devre dışı bırakalım.
+# Çalışan sistemde swap devre dışı bırakmak için
+sudo swapoff -a
+
+# Sistem baştan başladığın swap'ın açılmaması için /etc/fstab dosyası içindeki swap satırı silinir ya da yoruma alınır.
+# Daha sonra vi dosyasını kapatılır (:wq)
+sudo vi /etc/fstab
+```
+
+## 2) Docker Kurulumu
+
+### 2.1) Konteyner Kurulumu (Tüm Openshift Sunucularında Yapılacaktır)
+
+Apinizer kurulumuna geçmeden önce sistemi hazırlamak ve Docker'ı yüklemek için aşağıdaki adımlar izlenir.
+
+```bash
+#Modüllerin kalıcı yüklenmesi için
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+#Modüllerin çalışmakta olan sistemde yüklenmeleri için
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+sysctl ayarları:
+
+```bash
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+Buradaki ilk üç satır zorunlu olup, diğerleri ihtiyaca göre değiştirilebilinir.
+
+```yaml
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward=1
+net.ipv4.tcp_max_syn_backlog=40000
+net.core.somaxconn=40000
+net.core.wmem_default=8388608
+net.core.rmem_default=8388608
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_mem=134217728 134217728 134217728
+net.ipv4.tcp_rmem=4096 277750 134217728
+net.ipv4.tcp_wmem=4096 277750 134217728
+net.core.netdev_max_backlog=300000
+```
+
+Docker kurulumu yapılır.
+
+```bash
+sudo apt update
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo apt update
+sudo apt install -y containerd.io docker-ce docker-ce-cli
+
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "insecure-registries" : [ "172.30.0.0/16" ],
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+```
+
+Docker servisi son ayarlarla birlikte başlatılır.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+sudo systemctl enable docker
+sudo groupadd docker
+sudo gpasswd -a $USER docker
+```
+
+### 2.2) Openshift Origin Kurulumu (Master sunucularda)
+
+```bash
+wget https://github.com/openshift/origin/releases/download/v3.11.0/openshift-origin-client-tools-v3.11.0-0cbc58b-linux-64bit.tar.gz
+
+#Uncompress downloaded file.
+tar xvf openshift-origin-client-tools*.tar.gz
+cd openshift-origin-client*/
+sudo mv oc kubectl /usr/local/bin/
+
+#Verify installation of OpenShift client utility.
+oc version
+sudo systemctl restart docker
+
+oc cluster up --public-hostname=YOURHOSTIP
+oc login -u system:admin
+oc adm policy add-cluster-role-to-user cluster-admin developer
+oc login
+```
+
+#### 2.2.1) Bash Auto-Completion (İsteğe Bağlı, Herhangi Bir Openshift Master Sunucusunda)
+
+Bu işlem ile kubernetes komutlarının yazımında hız kazanılabilir.
+
+```bash
+apt install bash-completion
+source /usr/share/bash-completion/bash_completion
+kubectl completion bash | sudo tee /etc/bash_completion.d/kubectl > /dev/null
+```
+
+#### 2.2.2) Openshift Master Sunucusunda kubectl Komutunun Kullanıcı Konfigürasyonunu Ayarlama (Openshift Master Sunucularında)
+
+kubectl komutlarını çalıştıracak kullanıcı için tanımlar yapılır:
+
+```bash
+mkdir -p $HOME/.kube
+sudo chown -R $(id -u):$(id -g) $HOME/.kube
+```
+
+#### 2.2.3) Kubernetes Ağ Eklentisini Kurun (Openshift Master Sunucularında)
+
+Bu kılavuzda Flannel ağ eklentisini kullanacağız. Desteklenen diğer ağ eklentilerini seçebilirsiniz. Flannel, Kubernet'ler için tasarlanmış bir katman 3 ağ yapısını yapılandırmanın basit ve kolay bir yoludur.
+
+```bash
+oc apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+```
+
+<Warning>
+  **Önemli**
+
+  Eğer Master'ı initialize ederken podCIDR olarak 10.244.0.0/16 değerini kullanmadıysanız yukarıdaki yaml dosyasını indirip network ayarlarını burada da düzenlemelisiniz.
+</Warning>
+
+#### 2.2.4) Kurulum Kontrol (Herhangi Bir Openshift Master Sunucusunda)
+
+Master'dan aşağıdaki kod çalıştırıldığında Master'a ek olarak oluşturulan Node da görünüyorsa kurulum başarıyla tamamlanmış demektir.
+
+İki dakika sonunda NotReady durumundan Ready durumuna geçmezse "oc describe node NODENAME" komutu ile sorun incelenmelidir.
+
+```bash
+oc get node
+```
+
+Örnek çıktı:
+
+```
+NAME       STATUS   ROLES    AGE   VERSION
+localhost  Ready    <none>   5d    v1.11.0+d4cacc0
+```
+
+#### 2.2.5) Openshift Yetkilerinin Tanımlanması (Openshift Master Sunucularında)
+
+Openshift küme verilerinizi korumak için, varsayılan olarak en az bir RBAC yapılandırması ile konuşlandırır. Şu anda, Dashboard yalnızca Bearer Token ile giriş yapmayı destekler. Aşağıdaki adımları sırası ile uygulayınız.
+
+**vi service.yaml**
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kube-system
+```
+
+**vi adminuser.yaml**
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
+```
+
+```bash
+oc apply -f service.yaml
+oc apply -f adminuser.yaml
+oc create clusterrolebinding permissive-binding --clusterrole=cluster-admin --user=admin --user=kubelet --group=system:serviceaccounts
+oc create clusterrolebinding apinizer -n kube-system --clusterrole=cluster-admin --serviceaccount=kube-system:apinizer
+```
+
+### 2.3) DNS Test (İsteğe Bağlı, Herhangi Bir Openshift Master Sunucusunda)
+
+```bash
+oc apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+```
+
+DNS testi tamamlandıktan sonra Openshift Origin 3.11 üzerinde Kubernetes kurulumu tamamlanmış olur. Apinizer kurulumu için [Apinizer Kurulumu](/tr/kurulum-surum-yukseltme/apinizer-kurulumu/giris) dokümantasyonuna bakınız.
