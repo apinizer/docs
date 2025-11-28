@@ -1,6 +1,151 @@
 ---
 title: 'JOSE Doğrulama'
-description: 'XSD 1.1 desteği, Schema caching, Custom error handling, Import/Include resolution'
+description: 'JOSE/JWT içeriklerini imza, şifreleme ve claim kurallarına göre doğrular'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- API Proxy (API Vekil Sunucusu) akışına giren JOSE/JWT tokenlarını doğrulayarak kimlik bilgilerinin güvenilirliğini garanti altına almak üzere tasarlanmıştır.
+- Belirlenen issuer, audience ve claim kurallarını zorunlu tutarak yetkisiz erişimlerin önüne geçer ve hassas endpoint'lerin korunmasını sağlar.
+- Şifrelenmiş JWE içeriklerini güvenli şekilde çözerek aşağı akış servislerine temizlenmiş veri aktarımı sunar.
+- Kimlik ve rol bilgisini header seviyesinde yayarak downstream servislerde merkezi yetkilendirme politikaları ile entegre çalışır.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: JOSE Doğrulama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **JOSE İçeriği Çözümleme**: Token belirlenen kaynaktan (body, Authorization header veya değişken) okunur; gerekiyorsa seçilen JWK ile şifre çözümü yapılır ve claim seti doğrulamaya hazırlanır.
+4. **Karar Verme**:
+   - **Eşleşme Var**: İmza/şifreleme geçerli ise, claim ve audience kuralları sağlanırsa ve issuer ACL onaylanırsa istek akışa devam eder, gerekirse kullanıcı bilgisi header'a eklenir.
+   - **Eşleşme Yok**: Token çözülemezse, imza doğrulanamazsa, claim kuralları ihlal edilirse veya ACL reddi oluşursa istek politika tarafından sonlandırılır.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Esnek JOSE Hedefi**: Token; body, Authorization header veya seçilen değişkenden okunabilir, değişken senaryolarında Query Builder ile dinamik seçim yapılabilir.
+- **Granüler Claim Doğrulaması**: Accepted audience, zorunlu ve yasak claim listeleri ile exact match kuralları tanımlanarak çok katmanlı doğrulama kurgulanır.
+- **Kimlik ve Rol Yayılımı**: İstekten çıkarılan kullanıcı kimliği ve rol bilgisi header üzerinden sonraki servislere taşınabilir, merkezi yetki kontrolü desteklenir.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **JWK Yaşam Döngüsü Yönetimi**: İmza ve şifreleme anahtarları Secret Manager veya manuel JWK seçimleriyle yönetilir; gerekli roller yeni anahtar tanımlayabilir.
+- **Issuer ACL ve IP Kontrolü**: Issuer bazlı izin listesi ve isteği yapan istemci IP doğrulaması ek güvenlik katmanı oluşturur.
+- **Claim Decode ve Yeniden Yazma**: Şifrelenmiş veya base64 claim'ler çözümlenip body, header veya değişkene yönlendirilebilir; kısmi decode desteklenir.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Geliştirme, Test, Canlı Ortam) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Mobil JWT Doğrulama | Mobil uygulama Authorization header'da JWT taşır | `joseTarget=AUTHORIZATION_HEADER`, `validateSign=true`, issuer JWKS kullan | Geçerli token kabul edilir, hatalı imzalar 401 döndürür |
+| IoT JWE Çözümü | IoT cihazları şifreli payload gönderir | `decrypt=true`, `decryptByIssuer=false`, encryption JWK seç | Payload çözülür, içerik downstream servislere aktarılır |
+| Issuer Beyaz Listeleme | Belirli issuer değerleri dışında erişim istenmez | `clientSourcePart=CLAIMS`, `clientFieldname=iss`, exact match map ile liste | Uyumsuz issuer istekleri 403 ile engellenir |
+| Audience Segmentasyonu | Mikroservisler farklı audience bekler | `acceptedAudienceList` ortam bazlı doldur | Yanlış audience içeren istekler özelleştirilmiş hata alır |
+| Kullanıcı Header Enjeksiyonu | Downstream servisler kimlik header'ı ister | `addUserToHeader=true`, `userHeaderName=X-Authenticated-UserId` | Kimlik bilgisi güvenli şekilde başlıkta iletilir |
+| Yetkilendirme Entegrasyonu | Rol bazlı erişim denetimi gerekir | `enableAuthorization=true`, method access yapılandır | İstek, rol eşleşmesi sağlanmazsa politika tarafından durdurulur |
+| Policy Group Senkronizasyonu (opsiyonel) | Aynı kurallar çoklu API Proxy'de kullanılacak | Global politika oluştur, Policy Group'a ekle | Tek değişiklikle tüm API Proxy'lerde politika güncellenir |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni JOSE Doğrulama Politikası Oluşturma
+
+### Yapılandırma Adımları
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → JOSE Doğrulama Politikası** bölümüne gidin.<br/>- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br/><br/>**Name (İsim) Zorunlu:** Örnek: `Production_JOSEValidation`<br/>- Benzersiz isim girin, boşlukla başlamaz.<br/>- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br/><br/>**Description (Açıklama):** Örnek: "JWT imza ve şifreleme doğrulaması yapar."<br/>- Maks. 1000 karakter.<br/>- Politikanın amacını açıklayın. |
+| **Adım 3: JOSE Kaynağı ve Kullanıcı Bilgisi Yapılandırması** | - **JOSE Target** alanından token kaynağını seçin (body, Authorization header veya değişken).<br/>- Değişken kullanıyorsanız ilgili variable'ı seçin veya oluşturun.<br/>- **Client Source Part** ile issuer bilgisinin okunacağı alanı belirleyin, gerekiyorsa `clientFieldname` veya variable atayın. |
+| **Adım 4: Claim ve Audience Kurallarını Tanımlama** | - **Accepted Audience**, **Required Claim**, **Prohibited Claim** listelerini doldurun.<br/>- **Exact Match Claim** için anahtar-tür-değer eşleşmeleri girin.<br/>- `Validate Expiration Time`, `Validate ACL for Issuer` ve `checkClientIpAddress` ayarlarını ihtiyaca göre aktive edin. |
+| **Adım 5: Kriptografik Anahtar ve Decode Ayarları** | - İmza doğrulaması gerekiyorsa **Validate Sign** seçeneğini açın ve gerekli JWK'yi seçin veya oluşturun.<br/>- Şifrelenmiş içerikler için **Decrypt** ayarını ve ilgili JWK'yi yapılandırın.<br/>- **Strip and Decode** ile decode edilecek claim'leri ve hedef alanı tanımlayın. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br/>- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br/><br/>**Örnekler:**<br/>- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br/>- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br/>- Endpoint bazlı: `Path = /api/admin/*`<br/><br/>Koşul tanımlamazsa politika her zaman aktif<br/>Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/gelistirici/politikalar/politika-nedir#conditions) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br/>- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br/><br/>**Varsayılan:**<br/>```json\n{ \n  "statusCode": 403, \n  "message": "[Default hata mesajı]" \n}\n```<br/><br/>**Özel:**<br/>```json\n{ \n  "statusCode": 403, \n  "errorCode": "[CUSTOM_ERROR_CODE]", \n  "message": "[Özel mesaj]" \n}\n``` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br/><br/>**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir kriptografik kontrol (imza veya şifreleme) etkin.<br/><br/>**Sonuç:**<br/>- Politika listeye eklenir.<br/>- API'lere bağlanabilir.<br/>- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı Silme** bölümünde detaylı olarak açıklanmıştır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Silme](/tr/gelistirici/politikalar/politika-nedir#politika-silme)
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Dışa Aktarma İşlemi** bölümünde açıklanmaktadır. Ayrıntılı bilgi için ilgili bölüme bakabilirsiniz: [Politikayı Dışa/İçe Aktarma](/tr/gelistirici/politikalar/politika-nedir#politika-export)
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç, [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasındaki **Politikayı API'ye Bağlama** bölümünde detaylandırılmıştır. Ayrıntılı bilgi için ilgili bölüme göz atabilirsiniz: [Politikayı API'ye Bağlama](/tr/gelistirici/politikalar/politika-nedir#politika-api-baglama)
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Dinamik JWK Entegrasyonu** | - İmza veya şifreleme JWK'sini Secret Manager'dan veya listeden seçin.<br/>- Rolü uygun kullanıcılar aynı ekrandan yeni JWK üretebilir.<br/>- Kaydedilen JWK değişiklikleri politika ile otomatik eşleştirilir. |
+| **Issuer ACL ve IP Doğrulaması** | - `validateACLforIssuer` seçeneğini etkinleştirin.<br/>- Issuer bazlı ACL kurallarını güvenlik servisi üzerinden güncelleyin.<br/>- Gerekirse `checkClientIpAddress` ayarını açarak gelen isteğin IP'sini doğrulayın. |
+| **Claim Decode & Rewrite** | - `stripAndDecode` değerini **ALL** veya **PARTIAL** olarak belirleyin.<br/>- Decode edilecek claim listesini (`jwtClaimsToDecode`) girin.<br/>- Çıktıyı body, header veya değişkene yönlendirip diğer politikalarda kullanın. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Audience Yönetimi** | **Kötü:** Accepted audience boş bırakmak.<br/>**İyi:** Her mikroservis için ayrı audience değeri tanımlamak.<br/>**En İyi:** Ortam bazlı audience listelerini (Geliştirme/Test/Canlı Ortam) ayrı politikalarla yönetmek. |
+| **İmza Doğrulama** | **Kötü:** `validateSign` kapalı çalıştırmak.<br/>**İyi:** Issuer JWKS endpoint'ini `validateByIssuer` ile kullanmak.<br/>**En İyi:** Issuer olmayan senaryolarda merkezi JWK kasasını zorunlu kılmak. |
+| **Şifreleme Yönetimi** | **Kötü:** Şifreli tokenlarda `decrypt` kapalı bırakmak.<br/>**İyi:** Issuer tabanlı çözümlemeyi etkinleştirmek.<br/>**En İyi:** Her issuer için ayrı encryption anahtarı tanımlayıp periyodik anahtar döndürmek. |
+| **Claim Politikaları** | **Kötü:** Claim listelerini tanımsız bırakmak.<br/>**İyi:** Zorunlu ve yasak claim listelerini belirlemek.<br/>**En İyi:** Exact match haritası ile değer-tip doğrulaması yapmak. |
+| **Header Entegrasyonu** | **Kötü:** Kullanıcı kimliğini downstream servislere iletmemek.<br/>**İyi:** `addUserToHeader` ile kimlik header'ı eklemek.<br/>**En İyi:** Rol header'larını güvenlik log'larıyla eşleyip denetlemek. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Anahtar Yönetimi** | JWK dosyalarını Secret Manager'da saklayın; erişimleri rol tabanlı yönetin. |
+| **Issuer Güveni** | Issuer whitelist'ini düzenli güncelleyin; şüpheli issuer'ları derhal kaldırın. |
+| **Token Ömrü** | `validateExpirationTime` daima açık olmalı; uzun süreli tokenları kısıtlayın. |
+| **Header Sertliği** | Eklenen kimlik/rol header'larını yalnızca HTTPS üzerinden iletin; loglarda maskelenmesini sağlayın. |
+| **Hata Mesajları** | Hata mesajlarında içsel detay paylaşmayın; generik mesaj + hata kodu kombinasyonu kullanın. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Statik Gömülü JWK** | **Neden kaçınılmalı:** Kod içine gömülen anahtarlar sızıntıya açıktır.<br/>**Alternatif:** Secret Manager üzerinden JWK seçin. |
+| **Belirsiz Claim Kuralları** | **Neden kaçınılmalı:** Tüm claim'leri kabul etmek güvenlik açığı yaratır.<br/>**Alternatif:** Required ve prohibited listelerini tanımlayın. |
+| **Decode Edilmeyen Şifreli Veri** | **Neden kaçınılmalı:** Şifreli veri doğrulanmadan geçer.<br/>**Alternatif:** `decrypt` ayarını zorunlu tutup uygun JWK'yi bağlayın. |
+| **İzlenmeyen Header Ekleri** | **Neden kaçınılmalı:** Denetlenmeyen header'lar kötüye kullanılabilir.<br/>**Alternatif:** Header kullanımını loglayın ve erişim kontrolü uygulayın. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+|--------|--------------|
+| **JWK Önbelleği** | **Öneri:** Sık kullanılan JWK'leri Secret Manager cache'iyle paylaşın.<br/>**Etki:** İmza doğrulama süresi düşer. |
+| **Claim Kuralı Sayısı** | **Öneri:** Gereksiz claim kontrollerini temizleyin.<br/>**Etki:** Politika yürütme süresi kısalır. |
+| **Decode Seçenekleri** | **Öneri:** Yalnızca ihtiyaç duyulan claim'leri decode edin.<br/>**Etki:** Bellek ve CPU tüketimi azalır. |
+| **Global vs Local Kullanım** | **Öneri:** Aynı kuralları paylaşan API'lerde global politika tercih edin.<br/>**Etki:** Yönetim ve deploy süreleri kısalır. |
+| **Koşul Sadeleştirme** | **Öneri:** Query Builder'da gereksiz koşulları kaldırın.<br/>**Etki:** İstek başına koşul değerlendirme süresi azalır. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru (S) | Cevap (C) |
+|----------|-----------|-----------|
+| **Genel** | Politika hangi token türlerini doğrular? | JOSE standartlarını (JWS/JWE) destekler; JSON Web Signature/Encryption kurallarına göre doğrulama yapar. |
+| **Genel** | Politika birden fazla API Proxy (API Vekil Sunucusu) için paylaşılabilir mi? | Evet, global tanımlandıysa Policy Group aracılığıyla birden fazla API Proxy (API Vekil Sunucusu) ile paylaşılır. |
+| **Teknik** | Issuer kendi JWKS endpoint'ini sunuyorsa nasıl yapılandırılır? | `validateByIssuer` seçeneğini etkinleştirerek gateway'in issuer JWKS'inden anahtar almasını sağlayın. |
+| **Teknik** | Şifrelenmiş JWE içeriği nasıl çözümlenir? | `decrypt` seçeneğini açın, güvenilir değilse uygun encryption JWK'sini seçin; çözülen payload belirlenen hedefe yazılır. |
+| **Kullanım** | Kullanıcı kimliğini header'a eklemek güvenli midir? | HTTPS üzerinde iletin, header adını maskeyin ve sadece yetkili servislerin okumasına izin verin. |
+| **Kullanım** | Claim kurallarını ortam bazında nasıl ayırabilirim? | Her ortam için ayrı politika kopyası oluşturun veya **Condition** sekmesinde ortam header'ına göre koşul tanımlayın. |

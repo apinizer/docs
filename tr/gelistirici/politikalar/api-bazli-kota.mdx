@@ -1,6 +1,110 @@
 ---
 title: 'API Bazlı Kota'
-description: 'Description of your new file.'
+description: 'API Bazlı Kota politikası, belirli zaman periyotlarında API lere gelen toplam istek sayısını sınırlandırarak kullanım kotası yönetimi sağlar'
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+**💡 Politikalar hakkında bilginiz var mı?**\
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını okumanızı öneririz.
+
+API Tabanlı Kota politikası, API kullanımını belirli zaman periyotları (saat, gün, hafta, ay) boyunca sınırlandıran bir kaynak yönetim mekanizmasıdır.
+
+## Amacı Nedir?
+
+- **Kullanım Kotası Yönetimi**: API kullanımını saatlik, günlük, haftalık veya aylık periyotlarda sınırlandırarak kaynak tüketimini kontrol eder ve adil kullanım sağlar.
+- **İş Modeli ve Fiyatlandırma Desteği**: Farklı müşteri segmentleri için özelleştirilmiş kota planları sunar (Free: 1000 istek/ay, Basic: 10K/ay, Premium: 100K/ay, Enterprise: Unlimited), abonelik modellerini destekler.
+- **Maliyet Kontrolü ve Bütçe Yönetimi**: Cloud servis maliyetlerini tahmin edilebilir kılar, müşteri başına kaynak tüketimini izler, beklenmedik maliyet artışlarını önler.
+- **SLA ve Servis Kalitesi Garantisi**: Servis seviyesi sözleşmelerini yerine getirir, tüm kullanıcıların API kaynaklarına erişimini garanti eder, kaynak tükenmesini önler.
+- **Abuse ve Kötüye Kullanım Önleme**: Aşırı kullanımı tespit eder ve engeller, API kaynaklarının adil dağılımını sağlar, hizmet kesintilerini önler.
+
+## Çalışma Prensibi
+
+- **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak bilgileri (IP, kullanıcı, API key vb.) ve zaman damgası tespit edilir.
+- **Politika Kontrolü**: API Tabanlı Kota politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+  - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+  - Politika aktif mi (active=true)?
+  - Variable kullanılıyor mu yoksa Apinizer default mı?
+- **Quota Key Oluşturma ve Sayaç Kontrolü**: Her istek için benzersiz bir kota anahtarı oluşturulur (format: `quota:{policy_id}:{apply_by_value}:{period}`). Apply By parametresi varsa (IP adresi, kullanıcı ID, API key), bu değer anahtara dahil edilir. Hazelcast cache'den mevcut kota kullanım sayacı sorgulanır. Detail List tanımlıysa, hedef değer ile karşılaştırılır ve eşleşen kuralın kotası kullanılır, yoksa varsayılan kota uygulanır.
+- **Karar Verme**:
+  - **Kota Aşılmadıysa**:
+    - Sayaç 1 artırılır ve cache'e senkron olarak yazılır
+    - İstek backend'e iletilir
+    - Kota bilgisi veritabanına asenkron olarak güncellenir (API yanıt süresini etkilemez)
+    - Rate limit statistics aktifse response header'larına kalan kota bilgisi eklenir (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset)
+  - **Kota Aşıldıysa**:
+    - HTTP 429 (Too Many Requests) hatası dönülür, istek işlenmez
+    - Kota yenileme zamanı response header'ında belirtilir
+    - Cache hatası durumunda Cache Error Handling politikası devreye girer (REJECT: istek reddedilir, ALLOW: istek devam eder)
+- **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Veri Depolama Mimarisi
+
+API Tabanlı Kota politikası, veri tutarlılığı ve kalıcılığı sağlamak için iki katmanlı bir depolama stratejisi kullanır:
+
+**Cache (Hazelcast) - Birincil Katman:**
+- Gerçek zamanlı kota kontrolleri için kullanılır
+- Her API isteğinde senkron olarak güncellenir
+- Yüksek performans ve düşük gecikme sağlar
+- Dağıtık sistemlerde tüm Gateway instance'ları aynı sayaçları paylaşır
+
+**Veritabanı - İkincil Katman:**
+- Uzun vadeli kota verilerinin kalıcı saklanması için kullanılır
+- API yanıt süresini etkilememek için asenkron olarak güncellenir
+- Sistem yeniden başlatıldığında veya cache hatası durumunda veri kaybını önler
+- Raporlama, analitik ve faturalama için güvenilir veri kaynağı sağlar
+- Kota geçmişi ve kullanım istatistikleri için arşiv tutar
+
+**Senkronizasyon Stratejisi:**
+Başarılı her istek sonrasında kota bilgileri iki aşamada güncellenir:
+- Öncelikle Hazelcast cache hızlıca güncellenir (senkron) - API yanıt süresine dahil
+- Ardından veritabanı güncellemesi asenkron olarak gerçekleştirilir - API yanıt süresini etkilemez
+
+Bu yaklaşım, yüksek performans ve veri dayanıklılığı arasında optimal bir denge kurar.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Kota Sayısı Limiti**: Belirli bir zaman periyodunda izin verilen maksimum toplam istek sayısını belirler (minimum 1, tam sayı).
+- **Uzun Dönem Zaman Aralığı Desteği**: Saat, Gün, Hafta ve Ay bazında kota periyotları tanımlama. Periyot uzunluğu çarpanı ile özelleştirilebilir zaman aralıkları (örn: 7 gün, 3 ay).
+- **Apply By Değişkeni**: Kota'nın hangi kritere göre uygulanacağını belirler (kullanıcı ID bazlı, API Key bazlı, müşteri ID bazlı, abonelik tipi bazlı). Her değişken değeri için ayrı kota sayacı tutulur.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya kullanıcı tiplerine göre).
+
+### İleri Düzey Özellikler
+
+- **Hedef Bazlı Farklı Kotalar (Detail List)**: Belirli hedef değerler (kullanıcı seviyeleri, abonelik planları, müşteri segmentleri) için özel kota kuralları tanımlama. Regex desteği ile esnek hedef eşleşmeleri. Her hedef için ayrı kota sayısı ve zaman periyodu.
+- **Interval Window Type Desteği**: SLIDING (Kayan Pencere) - Her istek zamanından geriye doğru pencere uygulanır, son N gün/saat içindeki kullanım. FIXED (Sabit Pencere) - Belirli zaman dilimlerinde sayaç sıfırlanır (her ayın 1'i, her haftanın başı), daha yaygın kullanım.
+- **Cache Bağlantı ve Hata Yönetimi**: Cache sunucusu bağlantı timeout süresi ayarlama (saniye). Cache erişilemezse davranış belirleme: REJECT (güvenlik ve fatura doğruluğu öncelikli) veya ALLOW (kullanılabilirlik öncelikli).
+- **Rate Limit İstatistikleri**: Response header'larında kalan kota bilgisi gösterme (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset). Client'ların ve dashboard'ların kota durumunu takip edebilmesi.
+- **Dağıtık Mimari Desteği**: Merkezi Hazelcast cache kullanımı sayesinde birden fazla Gateway instance'ı aynı kota sayaçlarını paylaşır. Kullanıcı hangi gateway'e bağlanırsa bağlansın tutarlı kota takibi garantisi.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Politika Konfigürasyonu
+
+Politika konfigürasyonu için kullanılan alanlar aşağıdaki tabloda görülmektedir.
+
+| Alan | Açıklama |
+| :--- | :------- |
+| **İsim (Name)** | Politikanın kullanımını ve yönetimini kolaylaştırmak için isim yazılabilir. Politikaların yönetimi ve seçimi sırasında bu isme ihtiyacınız olacaktır. |
+| **Açıklama (Description)** | Politikanın kullanımını ve yönetimini kolaylaştırmak için açıklama yazılabilir. |
+| **Yanıt Başlığında Rate Limit İstatistiklerini Göster (Show Rate Limit Statistics in Response Header)** | Aktifleştirilir ise yanıt başlığında Rate Limit istatistiklerini gösterir. |
+| **Uygula (Apply by)** | Belirli bir değişken üzerinden bu politikanın çalışması için değişken seçilebilir. Opsiyoneldir. |
+| **Kota Sayısı (Quota Count)** | Belirli bir zaman periyodunda izin verilen maksimum toplam istek sayısıdır. |
+| **Periyot Uzunluğu (Interval Time Amount)** | Seçilen zaman birimi cinsinden, kota periyodunun süresini belirten sayısal değer. |
+| **Zaman Birimi (Interval Time Unit)** | ONE_HOUR (Saat), ONE_DAY (Gün), ONE_WEEK (Hafta), ONE_MONTH (Ay) |
+| **Hedef Bazlı Özel Kota Kuralları (Detail List)** | Her hedef için özel kota sınırları tanımlanır. |
+| **Periyot Tipi (Interval Window Type)** | SLIDING (Kayan Pencere) veya FIXED (Sabit Pencere) |
+| **Cache Bağlantısı Zaman Aşım Süresi (Cache Connection Timeout (Second))** | Cache bağlantısı için zaman aşımı süresi belirtilir. |
+| **Cache Bağlantı Hatası Eylemi (Action for Cache Connection Error)** | Eğer politika cache sunucusuna bağlantı sorunu yaşarsa uygulanacak eylem belirtilir (REJECT veya ALLOW). |
+
+**Koşullar (Conditions)** ve **Hata Mesajı Özelleştirme (Error Message Customization)** panellerinin detayı için [Politika Nedir?](/tr/gelistirici/politikalar/politika-nedir) sayfasını ziyaret edebilirsiniz.
+
+## Hata Kodları
+
+| Hata Kodu | Hata Mesajı | HTTP Durum Kodu |
+| :-------- | :-------------------------------------------------------------------------------- | :-------------- |
+| ERR-078   | API Based QUOTA policy failed! Error message is: {0}                         | 500             |
+| ERR-079   | Because of reaching QUOTA limit for specified API Proxy, message is BLOCKED! | 403             |
+| ERR-080   | API Based QUOTA policy failed! Error message is: {0}                         | 500             |
