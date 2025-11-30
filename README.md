@@ -1,43 +1,102 @@
-# Mintlify Starter Kit
+# Apinizer Dokümantasyonu
 
-Use the starter kit to get your docs deployed and ready to customize.
+Apinizer, kurumsal şirketlerin iç ve dış sistemlerindeki API'leri güvenli, performanslı ve yönetilebilir hale getiren Full Lifecycle API Management platformudur.
 
-Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
+## 📚 Dokümantasyon Hakkında
 
-- Guide pages
-- Navigation
-- Customizations
-- API reference pages
-- Use of popular components
+Bu repository, Apinizer platformunun kapsamlı dokümantasyonunu içerir. Dokümantasyon [Mintlify](https://mintlify.com) kullanılarak oluşturulmuştur ve farklı roller için özelleştirilmiş içerikler sunar.
 
-**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
+## 🚀 Hızlı Başlangıç
 
-## Development
+### Demo Ortamı
 
-Install the [Mintlify CLI](https://www.npmjs.com/package/mint) to preview your documentation changes locally. To install, use the following command:
+Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresindeki demo ortamını kullanabilirsiniz. Demo ortamında hesap oluşturmak için [kayıt olun](https://demo.apinizer.com/register).
 
+### İlk API Proxy'nizi Oluşturun
+
+1. [Hızlı Başlangıç Rehberi](/quickstart) - 5 dakikada ilk API Proxy'nizi oluşturun
+2. [Rolünüze Göre Başlangıç](/tr/baslamadan-once/rolunuzu-secin) - Size en uygun başlangıç noktasını bulun
+
+## 📖 Dokümantasyon Yapısı
+
+### Genel Bakış
+- **[Apinizer Nedir?](/tr/apinizer-anlama/apinizer-nedir)** - Platform genel bakış ve ürün ailesi
+- **[Temel Kavramlar](/tr/apinizer-anlama/temel-kavramlar)** - API Proxy, Policy, Message Flow ve diğer temel kavramlar
+- **[Mimari ve Deployment](/tr/apinizer-anlama/mimari)** - Sistem mimarisi ve deployment topolojileri
+
+### Geliştirici Dokümantasyonu
+- **[API Proxy Oluşturma](/tr/gelistirici/api-proxy-olusturma)** - REST, SOAP, gRPC, WebSocket API Proxy oluşturma
+- **[Politika Yönetimi](/tr/gelistirici/politikalar)** - Güvenlik, doğrulama, trafik yönetimi politikaları
+- **[Monitoring ve Analytics](/tr/gelistirici/monitoring-analytics)** - API performans izleme ve analiz
+
+### Yönetici Dokümantasyonu
+- **[Kullanıcı ve Erişim Yönetimi](/tr/admin/kullanici-erisim-yonetimi)** - Kullanıcı, rol ve izin yönetimi
+- **[Sistem Ayarları](/tr/admin/sistem-ayarlari)** - Platform konfigürasyonu ve ayarlar
+- **[Monitoring ve Alerting](/tr/admin/monitoring-alerting)** - Sistem izleme ve uyarı yönetimi
+
+### Kurulum ve Operasyon
+- **[Kurulum Kılavuzu](/tr/kurulum-surum-yukseltme/kurulum)** - Kubernetes, MongoDB, Elasticsearch kurulumları
+- **[Bakım ve Operasyon](/tr/bakim-operasyon)** - Veritabanı yönetimi ve yönetici kılavuzları
+- **[Sorun Giderme](/tr/sorun-giderme)** - Yaygın sorunlar ve çözümleri
+
+## 🛠️ Yerel Geliştirme
+
+Dokümantasyonu yerel olarak görüntülemek ve düzenlemek için:
+
+### Gereksinimler
+- Node.js (v18 veya üzeri)
+- npm veya yarn
+
+### Kurulum
+
+1. Repository'yi klonlayın:
+```bash
+git clone https://github.com/apinizer/docs.git
+cd docs
 ```
+
+2. Mintlify CLI'yi global olarak yükleyin:
+```bash
 npm i -g mint
 ```
 
-Run the following command at the root of your documentation, where your `docs.json` is located:
-
-```
+3. Yerel geliştirme sunucusunu başlatın:
+```bash
 mint dev
 ```
 
-View your local preview at `http://localhost:3000`.
+4. Tarayıcınızda `http://localhost:3000` adresini açın
 
-## Publishing changes
+### Dokümantasyon Düzenleme
 
-Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app) to propagate changes from your repo to your deployment. Changes are deployed to production automatically after pushing to the default branch.
+- Dokümantasyon dosyaları `.mdx` formatındadır
+- Ana konfigürasyon dosyası `docs.json` içindedir
+- Değişiklikler otomatik olarak tarayıcıda yenilenir
 
-## Need help?
+## 📝 İçerik Katkısı
 
-### Troubleshooting
+Dokümantasyona katkıda bulunmak için:
 
-- If your dev environment isn't running: Run `mint update` to ensure you have the most recent version of the CLI.
-- If a page loads as a 404: Make sure you are running in a folder with a valid `docs.json`.
+1. Yeni bir branch oluşturun
+2. Değişikliklerinizi yapın
+3. Pull request oluşturun
 
-### Resources
-- [Mintlify documentation](https://mintlify.com/docs)
+## 🔗 Faydalı Bağlantılar
+
+- **Demo Ortamı**: [demo.apinizer.com](https://demo.apinizer.com/)
+- **Ana Web Sitesi**: [apinizer.com](https://apinizer.com)
+- **Destek**: Dokümantasyon içindeki [SSS](/tr/sorun-giderme/sss) bölümüne bakın
+
+## 📄 Lisans
+
+Bu dokümantasyon Apinizer'a aittir. Detaylar için [LICENSE](LICENSE) dosyasına bakın.
+
+## 🤝 Yardım
+
+Sorularınız için:
+- Dokümantasyon içindeki [Sorun Giderme](/tr/sorun-giderme) bölümüne bakın
+- [SSS](/tr/sorun-giderme/sss) sayfasını inceleyin
+
+---
+
+**Not**: Bu dokümantasyon sürekli güncellenmektedir. En güncel bilgiler için dokümantasyon sitesini ziyaret edin.
