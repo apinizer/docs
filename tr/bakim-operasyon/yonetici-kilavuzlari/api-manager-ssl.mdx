@@ -1,6 +1,197 @@
----
-title: 'Api Manager Ssl'
-description: 'Manager SSL configuration, Certificate installation, HTTPS redirect'
----
+# API Manager'ı SSL ile Başlatma
 
-Bu sayfa için içerik hazırlanıyor.
+Öncelikle, .p12 uzantılı sertifika dosyanızı Kubernetes'e bir secret olarak yükleyiniz.
+
+```bash
+kubectl create secret generic manager-tls --from-file=manager.p12 -n apinizer
+```
+
+Bir sertifikanın Alias'ını bulma
+
+```bash
+keytool -list -v -keystore manager.p12 -storetype PKCS12
+```
+
+JKS'den PKCS12 oluşturma
+
+```bash
+keytool -genkeypair -alias <ALIAS> -keyalg RSA -keysize 4096 -storetype PKCS12 -keystore manager.p12 -validity 3650 -storepass <PASSWORD>
+```
+
+Uzantısı .p12 olan dosyanızı /etc/ssl/certs dizinine ekleyiniz.
+
+Deployment yaml tanımında olması gereken değişkenler:
+
+| Değişken | Açıklama |
+| --- | --- |
+| SSL_KEY_STORE | SSL sertifikasını içeren anahtar deposunun yolu. Örneğimizde, Spring Boot'un bunu classpath'te aramasını istiyoruz. |
+| SSL_KEY_STORE_PASSWORD | Anahtar deposuna erişmek için kullanılan şifre. |
+| SSL_KEY_STORE_TYPE | Anahtar deposunun türü (Kullanım: PKCS12). |
+| SSL_KEY_ALIAS | Anahtar deposundaki anahtarı tanımlayan takma ad. |
+| SSL_ENABLED | Spring Boot uygulamasının HTTPS protokolünü kullanmasını sağlar. |
+| SERVER_PORT | Sunucunun dinlediği port. 8443 kullanılmalıdır. |
+
+Örnek bir Api Manager deployment dosyası:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager
+  namespace: apinizer
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: manager
+      version: v1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 75%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: manager
+        version: v1
+    spec:
+      automountServiceAccountToken: true
+      volumes:
+      - name: manager-tls
+        secret:
+          secretName: manager-tls
+      containers:
+      - env:
+        - name: JAVA_OPTS
+          value: ' -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+        - name: LOGGING_LEVEL_ROOT
+          value: INFO
+        - name: LOGGING_LEVEL_com_apinizer_manager
+          value: INFO
+        - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE
+          value: 20MB
+        - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE
+          value: 50MB
+        - name: SPRING_PROFILES_ACTIVE
+          value: prod
+        - name: SSL_KEY_STORE
+          value: /etc/ssl/manager.p12
+        - name: SSL_KEY_STORE_PASSWORD
+          value: <PASSWORD>
+        - name: SSL_KEY_STORE_TYPE
+          value: PKCS12
+        - name: SSL_KEY_ALIAS
+          value: <ALIAS>
+        - name: SSL_ENABLED
+          value: "true"
+        - name: SERVER_PORT
+          value: "8443"
+        - name: SPRING_DATA_MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              key: dbUrl
+              name: mongo-db-credentials
+        - name: SPRING_DATA_MONGODB_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: dbName
+              name: mongo-db-credentials
+        volumeMounts:
+        - name: manager-tls
+          mountPath: /etc/ssl
+        image: apinizercloud/manager:<APINIZER_VERSION>
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - sleep 10
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        name: manager
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        resources:
+          limits:
+            cpu: 1
+            memory: 3Gi
+        securityContext:
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: false
+          runAsGroup: 0
+          runAsNonRoot: false
+          runAsUser: 0
+        startupProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: manager
+  namespace: apinizer
+  labels:
+    app: manager
+spec:
+  selector:
+    app: manager
+  type: NodePort
+  ports:
+  - name: http
+    port: 8443
+    nodePort: 32843
+```
+
+## Sertifika Oluşturma
+
+Kendi sertifikanızı oluşturmak için uygulanacak adımlar:
+
+```bash
+# Private Key Oluşturma
+openssl genrsa -out server.key 2048
+
+# CSR (Certificate Signing Request) Oluşturma
+openssl req -new -key server.key -out server.csr
+
+# İmzalı Sertifika
+openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+
+# PKCS#12 formatı
+openssl pkcs12 -export -out manager.p12 -inkey server.key -in server.crt
+```

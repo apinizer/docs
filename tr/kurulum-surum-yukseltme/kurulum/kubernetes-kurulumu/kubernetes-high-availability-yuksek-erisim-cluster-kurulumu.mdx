@@ -1,0 +1,135 @@
+---
+title: 'Kubernetes High Availability Cluster Installation'
+description: 'Kubernetes High Availability (Yüksek Erişim) Cluster kurulumu'
+---
+
+# Kubernetes High Availability (Yüksek Erişim) Cluster Kurulumu
+
+## 1) HAProxy Kurulumu
+
+HAProxy yük dengeleme ve yüksek erişilebilirlik sağlamak için kullanılan bir açık kaynaklı proxy ve yük dengeleme çözümüdür. Aşağıda Ubuntu işletim sistemleri üzerine kurulumu anlatılmaktadır.
+
+```bash
+sudo apt update
+```
+
+HAProxy kurulumu gerçekleştirilir.
+
+```bash
+sudo apt install haproxy
+```
+
+Konfigürasyon dosyası düzenlenir.
+
+```bash
+sudo vi /etc/haproxy/haproxy.cfg
+```
+
+Aşağıdaki komutlar dosyanın en altına ekleyebilirsiniz. Hostname ve IP alanlarını kendinize göre düzenleyiniz.
+
+```bash
+frontend kubernetes-frontend
+  bind *:6443
+  mode tcp
+  option tcplog
+  default_backend kubernetes-backend
+
+backend kubernetes-backend
+  option httpchk GET /healthz
+  http-check expect status 200
+  mode tcp
+  option ssl-hello-chk
+  balance roundrobin
+  server <master1hostname> <MASTER_1_IP>:6443 check fall 3 rise 2
+  server <master2hostname> <MASTER_2_IP>:6443 check fall 3 rise 2
+  server <master3hostname> <MASTER_3_IP>:6443 check fall 3 rise 2
+```
+
+```bash
+systemctl enable haproxy && systemctl restart haproxy
+systemctl status haproxy
+```
+
+## 2) Keepalived Kurulumu
+
+Keepalived, genellikle birkaç kontrol düğümü (master ve yedek masterlar) arasında Virtual (sanal) bir IP adresi sağlar ve diğer hizmetlerin sürekli olarak çalışmasını sağlamak için kullanılır.
+
+```bash
+sudo apt install keepalived
+```
+
+```bash
+sudo vim /etc/keepalived/check_apiserver.sh
+```
+
+Aşağıdaki script, Kubernetes API sunucusuna ulaşılabilirlik kontrolü yapar. <VIRTUAL_IP> kısmını bir sonraki adımda ekleyeceğiniz virtual ip ile değiştiriniz.
+
+```bash
+#!/bin/sh
+
+errorExit() {
+    echo "*** $@" 1>&2
+    exit 1
+}
+
+curl --silent --max-time 2 --insecure https://localhost:6443/ -o /dev/null || errorExit "Error GET https://localhost:6443/"
+
+if ip addr | grep -q <VIRTUAL_IP>; then
+    curl --silent --max-time 2 --insecure https://<VIRTUAL_IP>:6443/ -o /dev/null || errorExit "Error GET https://<VIRTUAL_IP>:6443/"
+fi
+```
+
+```bash
+chmod +x /etc/keepalived/check_apiserver.sh
+```
+
+```bash
+sudo vim /etc/keepalived/keepalived.conf
+```
+
+Eğer keepalived.conf dosyası boş değilse içeriğini temizleyebiliriniz ve aşağıdaki komut satırlarını ekleyiniz.
+
+**Önemli:** Interface karşısına uygun ağ birimini ekleyiniz. <VIRTUAL_IP> kısmını eklemek istediğiniz IP adresi ile değiştiriniz.
+
+```bash
+vrrp_script check_apiserver {
+    script "/etc/keepalived/check_apiserver.sh"
+    interval 3
+    timeout 10
+    fall 5
+    rise 2
+    weight -2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth1
+    virtual_router_id 1
+    priority 100
+    advert_int 5
+    authentication {
+        auth_type PASS
+        auth_pass mysecret
+    }
+    virtual_ipaddress {
+        <VIRTUAL_IP>
+    }
+    track_script {
+        check_apiserver
+    }
+}
+```
+
+```bash
+systemctl enable --now keepalived
+```
+
+## Kubernetes Kümesini Başlatma
+
+Kubernetes kurulumunu [Ubuntu İşletim Sisteminde Kubernetes Kurulumu - 1.29](#) dökümanından yapabilirsiniz.
+
+**Önemli:** init işlemi yapılırken aşağıdaki gibi endpointe kendi virtual ip adresinizi girmelisiniz.
+
+```bash
+kubeadm init --control-plane-endpoint="<VIRTUAL_IP>:6443" --upload-certs --pod-network-cidr=10.244.0.0/16
+```

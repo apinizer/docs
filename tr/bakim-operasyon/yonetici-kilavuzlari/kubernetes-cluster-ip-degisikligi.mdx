@@ -1,6 +1,120 @@
 ---
-title: 'Kubernetes Cluster Ip Degisikligi'
-description: 'Bu sayfa henüz oluşturulmadı. İçerik yakında eklenecektir.'
+title: Kubernetes Kümesinde IP Değişikliği - Virtual IP Kullanımı
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+# Kubernetes Kümesinde IP Değişikliği - Virtual IP Kullanımı
+
+Bu dökümanda, mevcut Kubernetes kümemizi bozmadan virtual IP'ye yönlendirerek, kesintisiz bir hizmet ile birlikte yüksek erişilebilirlik ile çalışmasını sağlayacağız.
+
+**Mevcut Makineler:**
+
+- Kubernetes Master1
+- Kubernetes Master2
+- Kubernetes Master3
+- Kubernetes Worker1
+- Kubernetes Worker2
+
+## 1) Mevcut Sistem ve Virtual IP Erişimi
+
+Mevcut sistemde, **Master1** üzerinde **kubeadm init** komutuyla başlatılan bir Kubernetes kümesi oluşturuldu ve daha sonra diğer makineler (Master2, Master3, Worker1 ve Worker2) bu kümeye **worker** rolüyle dahil edildi.
+
+Load Balancer üzerinde bir **Virtual IP** tanımlayarak, mevcut makineleri bu **Virtual IP'**ye **6443** portundan eriştirmemiz gerekiyor.
+
+**Çok Önemli**
+
+Eğer load balancer kullanmıyorsanız ve ağ üzerinde sanal ip oluşturamıyorsanız bunun için kullanabileceğiniz **Keepalived** ve **HAProxy** araçları ile bu işlemi gerçekleştirmek için [tıklayınız.](https://docs.apinizer.com/apinizer-dokumantasyonu/kubernetes-high-availability-yueksek-erisim-cluster-kurulumu-93356176.html)
+
+**Keepalived** sanal ip oluşturmak için, **HAProxy** ise yük dengeleme işlemi için kullanılmaktadır.
+
+## 2) IP Değiştirme
+
+Kümede birden fazla master node olduğunda, bu master'ları tek bir master olarak bırakmak için kümeyi yeniden yapılandırmamız gerekmektedir.
+
+Bu işlem genellikle diğer masterları kümeden tamamen çıkartarak başlar.
+
+Aşağıdaki komut **master1 hariç** diğer masterlar (**master2 ve master3**) için çalıştırılır.
+
+```bash
+sudo kubeadm reset
+```
+
+Master1 sunucusundan diğer masterlar (master2 ve master3) kümeden silinir.
+
+```bash
+kubectl delete nodes master2
+kubectl delete nodes master3
+```
+
+Mevcut sistemde master1 ve worker sunucularının kalması gerekmekte.
+
+### 2.1) Master1 sunucusunda yapılacaklar:
+
+Kubelet ve containerd (docker kullanılıyorsa ayrıca docker uygulaması) durdurulur.
+
+```bash
+sudo systemctl stop kubelet
+sudo systemctl stop containerd
+```
+
+Bazı dosyaların yedekleri alınır ve silinir.
+
+```bash
+sudo mv -f /etc/kubernetes /etc/kubernetes.backup
+sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
+sudo mkdir -p /etc/kubernetes/pki
+sudo cp -r /etc/kubernetes_backup/pki /etc/kubernetes
+sudo rm -rf /etc/kubernetes/pki/{apiserver.*,etcd/peer.*}
+sudo rm -f ~/.kube/config
+```
+
+Containerd (docker kullanılıyorsa ayrıca docker uygulaması) başlatılır.
+
+```bash
+sudo systemctl start containerd
+```
+
+Kubeadm init komutu endpoint adresi düzenlenerek tekrardan çalıştırılır ve **Virtual IP** olarak kullanılır.
+
+```bash
+sudo kubeadm init --pod-network-cidr "10.244.0.0/16" --control-plane-endpoint <VIRTUAL_IP> --upload-certs --ignore-preflight-errors=DirAvailable--var-lib-etcd
+```
+
+**Not :** Kubeadm **join** komutları not edilir.
+
+### 2.2) Worker1 ve Worker2 İçin Yapılacaklar:
+
+Kubelet ve containerd (docker kullanılıyorsa ayrıca docker uygulaması) durdurulur.
+
+```bash
+sudo systemctl stop kubelet
+sudo systemctl stop containerd
+```
+
+Bazı dosyaların yedekleri alınır.
+
+```bash
+sudo mv -f /etc/kubernetes /etc/kubernetes.backup
+sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
+```
+
+Containerd (docker kullanılıyorsa ayrıca docker uygulaması) ve kubelet başlatılır.
+
+```bash
+sudo systemctl start kubelet
+sudo systemctl start containerd
+```
+
+Kubeadm **worker join** komutu **worker1** ve **worker2** makinelerinde çalıştırılır.
+
+### 2.3) Master2 ve Master3 İçin Yapılacaklar:
+
+Bu adımda sadece **master join** komutunu master2 ve master3'de çalıştırmanız yeterli olacaktır.
+
+### 2.4) Küme Durumu Kontrolü:
+
+Aşağıdaki komutlar ile yeni küme bilgilerinizi görebilirsiniz.
+
+```bash
+kubectl cluster-info
+kubectl get node -o wide
+```

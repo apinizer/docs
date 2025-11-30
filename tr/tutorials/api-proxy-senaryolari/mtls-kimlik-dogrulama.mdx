@@ -1,0 +1,409 @@
+---
+title: mTLS Kimlik Doğrulama Politikasının Uygulanması
+---
+
+# mTLS Kimlik Doğrulama Politikasının Uygulanması
+
+Bu senaryoda **mTLS Kimlik Doğrulama (Mutual Transport Layer Security Authentication)** politikasının uygulanması anlatılacaktır.
+
+**Çift yönlü TLS kimlik doğrulaması (two-way TLS authentication)** yapılacağı için, **istemci** (client) ve **sunucu** (server) için **sertifikalar** oluşturulması gerekmektedir.
+
+Bir üretim ortamında, sertifikaların bir Sertifika Otoritesinden satın alınması önerilir. Ancak, test etmek veya demo amaçlı olarak, kendi imzaladığımız sertifikaları kullanmak yeterli olacaktır. Bu makalede, kendi imzaladığımız sertifikaları oluşturmak için Java'nın keytool'unu kullanacağız.
+
+:::info
+**keytool** komutlarını çalıştırmak için Java'nın yüklü olduğu path içinde olmanız veya Java'nın **bin** dizininin ortam değişkenlerinizde tanımlı olması gerekir gerekir.
+
+Gizli anahtarların doğru oluşturulabilmesi için Java'nın 1.8.400 sürümünden sonrasını kullanmanız tavsiye edilmektedir.
+:::
+
+:::warning
+Apinizer eğer NGINX veya farklı bir Load Balancer arkasında ise veya SSL offloading firewall tarafından yapılıyorsa sertifikalar Apinizer'a ulaşamayacağından bu araçlarda sertifikaların Apinizer'a geçmesi için ayar yapılmalıdır.
+:::
+
+## MTLS (Mutual TLS) İçin Sertifika, Keystore ve Truststore Oluşturma
+
+### Adım 1: CA Sertifikası ve Anahtarı Oluşturma
+
+CA sertifikası, hem istemci hem de sunucu sertifikalarını imzalamak için kullanılır. Bu, her iki tarafın da birbirini doğrulamasını sağlar.
+
+:::tip
+Eğer elinizde CA Sertifikası varsa 2.Adımdan devam edebilirsiniz.
+:::
+
+**CA private key oluştur**
+
+```bash
+openssl genpkey -algorithm RSA -out ca-key.pem
+```
+
+Bu komut, **RSA** algoritmasını kullanarak bir CA private key (**ca-key.pem**) oluşturur. Bu anahtar, CA sertifikasını imzalamak için kullanılacaktır.
+
+**CA sertifikası oluştur**
+
+```bash
+openssl req -x509 -new -nodes -key ca-key.pem -sha256 -days 365 -out ca-cert.pem -subj "/C=US/ST=California/L=San Francisco/O=MyOrg/OU=MyDept/CN=MyRootCA"
+```
+
+Bu komut, **ca-key.pem** anahtarını kullanarak bir yıl geçerli olacak (**"-days 365"**) bir CA sertifikası (**ca-cert.pem**) oluşturur. Bu sertifika, istemci ve sunucu sertifikalarını imzalamak için kullanılacaktır.
+
+**1. Adım sonrasında oluşan dosyalar:**
+
+- `ca-key.pem`: CA private key
+- `ca-cert.pem`: CA sertifikası
+
+### Adım 2: Sunucu İçin Keystore ve Sertifika Oluşturma
+
+Sunucu, istemci tarafından doğrulanabilmesi için kendi sertifikasına ihtiyaç duyar. Bu sertifika, CA tarafından imzalanmalıdır.
+
+:::tip
+Eğer sunucu Keystore ve Truststore değerlerini adaha önce oluşturmuş iseniz yeni gelen istemciler için bu adımı tekrar etmenize gerek yoktur. Bu durumda 3.adımdan devam edebilirsiniz.
+:::
+
+**Sunucu private key ve CSR oluştur**
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes -keyout server-key.pem -out server.csr -subj "/C=US/ST=California/L=San Francisco/O=MyOrg/OU=MyDept/CN=server"
+```
+
+Bu komut, sunucu için bir private key (**server-key.pem**) ve bir CSR (**server.csr**) oluşturur. CSR, CA tarafından imzalanmak üzere bir sertifika isteğidir.
+
+**CSR'yi CA sertifikası ile imzala**
+
+```bash
+openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out server-cert.pem -days 365 -sha256
+```
+
+Bu komut, CA sertifikasını (**ca-cert.pem**) ve CA anahtarını (**ca-key.pem**) kullanarak sunucu CSR'sini (**server.csr**) imzalar ve bir yıl geçerli olacak bir sunucu sertifikası (**server-cert.pem**) oluşturur.
+
+**Sunucu private key ve sertifikasını pfx formatında birleştir**
+
+```bash
+openssl pkcs12 -export -out server-keystore.pfx -inkey server-key.pem -in server-cert.pem -certfile ca-cert.pem -passout pass:changeit
+```
+
+Bu komut, sunucu private key (**server-key.pem**), sunucu sertifikası (**server-cert.pem**) ve CA sertifikasını (**ca-cert.pem**) birleştirerek bir PFX dosyası (**server-keystore.pfx**) oluşturur. PFX dosyası, Java uygulamaları tarafından kullanılmak üzere keystore olarak kullanılacaktır.
+
+"2.Adım sonrasında oluşan dosyalar:"
+
+- `server-key.pem`: Sunucu private key
+- `server.csr`: Sunucu CSR
+- `server-cert.pem`: Sunucu sertifikası
+- `server-keystore.pfx`: Sunucu keystore dosyası (PFX formatında)
+
+### Adım 3: İstemci İçin Keystore ve Sertifika Oluşturma
+
+İstemci, sunucu tarafından doğrulanabilmesi için kendi sertifikasına ihtiyaç duyar. Bu sertifika, CA tarafından imzalanmalıdır.
+
+:::info
+Eğer sunucu tarafında bu işlemleri yapıyorsanız, bu adımın istemciniz tarafından yapılabilmesi için istemciniz ile CA sertifikanızı paylaşmanız gerekmektedir.
+:::
+
+**İstemci private key ve CSR oluştur**
+
+```bash
+openssl req -new -newkey rsa:2048 -nodes -keyout client-key.pem -out client.csr -subj "/C=US/ST=California/L=San Francisco/O=MyOrg/OU=MyDept/CN=client"
+```
+
+Bu komut, istemci için bir private key (**client-key.pem**) ve bir CSR (**client.csr**) oluşturur. CSR, CA tarafından imzalanmak üzere bir sertifika isteğidir.
+
+**CSR'yi CA sertifikası ile imzala**
+
+```bash
+openssl x509 -req -in client.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out client-cert.pem -days 365 -sha256
+```
+
+Bu komut, CA sertifikasını (**ca-cert.pem**) ve CA anahtarını (**ca-key.pem**) kullanarak istemci CSR'sini (**client.csr**) imzalar ve bir yıl geçerli olacak bir istemci sertifikası (**client-cert.pem**) oluşturur.
+
+**İstemci private key ve sertifikasını pfx formatında birleştir**
+
+```bash
+openssl pkcs12 -export -out client-keystore.pfx -inkey client-key.pem -in client-cert.pem -certfile ca-cert.pem -passout pass:changeit
+```
+
+Bu komut, istemci private key (**client-key.pem**), istemci sertifikası (**client-cert.pem**) ve CA sertifikasını (**ca-cert.pem**) birleştirerek bir PFX dosyası (**client-keystore.pfx**) oluşturur. PFX dosyası, Java uygulamaları tarafından kullanılmak üzere keystore olarak kullanılacaktır.
+
+"3.Adım sonrasında oluşan dosyalar:"
+
+- `client-key.pem`: İstemci private key
+- `client.csr`: İstemci CSR
+- `client-cert.pem`: İstemci sertifikası
+- `client-keystore.pfx`: İstemci keystore dosyası (PFX formatında)
+
+### Adım 4: TrustStore Oluşturma
+
+TrustStore, karşı tarafın sertifikalarını doğrulamak için kullanılır. Hem sunucu hem de istemci tarafında CA sertifikasının bulunması gereklidir.
+
+**CA sertifikasını sunucu truststore'a import et** (Daha önce bu işlemi yaptıysanız bu adımı atlayabilirsiniz. Bu işlem bir kez sunucu tarafında yapılacaktır her bir istemci için tekrarlamayınız! )
+
+```bash
+keytool -importcert -file ca-cert.pem -alias ca-cert -keystore server-truststore.pfx -storetype PKCS12 -storepass changeit -noprompt
+```
+
+Bu komut, CA sertifikasını (**ca-cert.pem**) sunucu truststore'una (**server-truststore.pfx**) import eder. Bu truststore, sunucunun istemci sertifikalarını doğrulamak için kullanacağı CA sertifikasını içerir.
+
+**CA sertifikasını istemci truststore'a import et**
+
+```bash
+keytool -importcert -file ca-cert.pem -alias ca-cert -keystore client-truststore.pfx -storetype PKCS12 -storepass changeit -noprompt
+```
+
+Bu komut, CA sertifikasını (**ca-cert.pem**) istemci truststore'una (**client-truststore.pfx**) import eder. Bu truststore, istemcinin sunucu sertifikalarını doğrulamak için kullanacağı CA sertifikasını içerir.
+
+"4.Adım sonrasında oluşan dosyalar:"
+
+- `server-truststore.pfx`: Sunucu truststore dosyası (PFX formatında)
+- `client-truststore.pfx`: İstemci truststore dosyası (PFX formatında)
+
+### Özet
+
+"Bu adımlar sonucunda elimizde aşağıdaki dosyalar oluştu:"
+
+**CA Tarafında**, "istemci ve sunucu sertifikalarını imzalamak için kullanılacak şu dosyalar oluştu:"
+
+- `ca-key.pem`: CA private key
+- `ca-cert.pem`: CA sertifikası
+
+**Sunucu Tarafında**: sunucu için private key ve CSR'si oluşturuldu. CSR, CA tarafından imzalandı ve sunucu sertifikası elde edildi. Bu sertifika ve private key, sunucu keystore dosyasına (**server-keystore.pfx**) dönüştürüldü:
+
+- `server-key.pem`: Sunucu private key
+- `server.csr`: Sunucu CSR
+- `server-cert.pem`: Sunucu sertifikası
+- `server-keystore.pfx`: Sunucu keystore dosyası (PFX formatında)
+- `server-truststore.pfx`: Sunucu truststore dosyası (PFX formatında)
+
+**İstemci Tarafında**: istemci için kendi private key ve CSR'si oluşturuldu. CSR, CA tarafından imzalandı ve istemci sertifikası elde edildi. Bu sertifika ve private key, istemci keystore dosyasına (**client-keystore.pfx**) dönüştürüldü.
+
+- `client-key.pem`: İstemci private key
+- `client.csr`: İstemci CSR
+- `client-cert.pem`: İstemci sertifikası
+- `client-keystore.pfx`: İstemci keystore dosyası (PFX formatında)
+- `client-truststore.pfx`: İstemci truststore dosyası (PFX formatında)
+
+## İstemci Sertifikasının Apinizer için Ayarlanması
+
+Bu işlemler bittikten sonra İstemcinin sertifikasının Apinizer'da doğrulanması için **user-truststore.pfx** dosyası oluşturulur ve KeyStores ekranından Apinizer'a eklenir.
+
+```code
+keytool -import -trustcacerts -file client-cert.pem -keypass password -storepass changeit -keystore user-truststore.pfx -deststoretype pkcs12
+```
+
+Eklenen user-truststore.pfx dosyası hangi istemci için oluşturulmuş ise o istemci Credential sayfasında bulunur ve Secret bölmesindeki TrustStore alanında seçilir.
+
+:::info
+.p12 ve .pfx uzantıları, aslında aynı dosya formatını belirtir - PKCS#12. PKCS#12, genellikle bir sunucu sertifikası, ilişkili özel anahtar ve isteğe bağlı olarak herhangi bir ara sertifikaları içeren bir dosya formatıdır.
+
+.pfx genellikle Windows platformunda kullanılırken, .p12 genellikle Unix veya Linux tabanlı sistemlerde kullanılır. Ancak, bu iki dosya uzantısı arasında bir fark yoktur ve bir uzantıyı diğerine dönüştürmek için herhangi bir işlem yapmanız gerekmez.
+:::
+
+:::info
+- p12 formatının jks'ye çevrimi için aşağıdaki komut kullanılabilir:
+
+```code
+keytool -importkeystore -srckeystore serverkeystore.pfx -srcstoretype pkcs12 -destkeystore serverkeystore.jks -deststoretype jks
+```
+
+- jks formatının pfx/p12'ye çevrimi için aşağıdaki komut kullanılabilir:
+
+```code
+keytool -importkeystore -srckeystore serverkeystore.jks -srcstoretype jks -destkeystore serverkeystore.pfx -deststoretype pkcs12
+```
+:::
+
+## Oluşturulan User Truststore'un Apinizer'a Yüklenmesi
+
+Key Stores ekranından **Oluştur (Create)** butonuna tıklanır.
+
+![Create Key Store](/images/create-key-store.png)
+
+Açılan ekrandan **Yeni Key Store Tanımı (New Key Store Definition)** butonuna tıklanır.
+
+![New Key Store Definition](/images/new-key-store-definition.png)
+
+Oluşturulan **user-truststore.pfx** dosyası seçilir ve gerekli bilgiler girildikten sonra **Kaydet (Save)** butonuna tıklanır.
+
+![Upload Truststore](/images/upload-truststore.png)
+
+**Kaydet ve Yükle (Save and Deploy)** butonuna tıklanarak istemci keystore kaydedilmiş olur.
+
+![Save and Deploy Truststore](/images/save-deploy-truststore.png)
+
+## Apinizer Environments Üzerinde Gerekli Ayarların Yapılması
+
+mTLS politikasının kullanılabilmesi için Apinizer Environment's üzerinde SSL Offloading yapılmalı ve mTLS seçeneği seçili olmalıdır.
+
+Bunun için Gateway Environment'ın deployment ayarları üzerinde **HTTPS Enabled** seçeneği ve onunla birlikte gelen **mTLS** seçenekleri **aktifleştirilir**.
+
+![HTTPS Enabled mTLS](/images/https-enabled-mtls.png)
+
+Oluşturulan **server-keystore.pfx** ve **server-truststore.pfx** dosyaları eklenir. Parola bilgileri girilir. **Kaydet (Save)** butonuna tıklanır.
+
+![Server Keystore Truststore](/images/server-keystore-truststore.png)
+
+Kaydettikten sonra **Yeniden Yayınlama (Republish)** gerekmektedir.
+
+![Republish](/images/republish.png)
+
+## API Proxy'ye mTLS Kimlik Doğrulama Politikasının Eklenmesi
+
+API Proxy'nin Geliştirme (Develop) sekmesinden **Politika Ekle (Add Policy)** linkine tıklanır.
+
+![Add Policy](/images/add-policy-mtls.png)
+
+Politikalardan **mTLS** seçilir.
+
+![Select mTLS Policy](/images/select-mtls-policy.png)
+
+Politika ayarları aşağıdaki gibi yapılır ve **Kaydet (Save)** butonuna tıklanır.
+
+![mTLS Policy Settings](/images/mtls-policy-settings.png)
+
+:::info
+mTLS Ayarları hakkında detaylı bilgi için [tıklayınız](/tr/gelistirici/politikalar/mtls-authentication).
+:::
+
+## Kimlik Bilgisi'nin mTLS Ayarları
+
+Kimlik bilgisinin kullanıcı adı bilgisi, istemcinin sahip olduğu sertifika içerisinde yer alan **"issuer"** değerindeki **"cn name"** bilgisi ile aynı olmalıdır.
+
+Kimlik bilgisinin API Proxy ACL sekmesine, mTLS politikası eklenmiş olan API Proxy eklenmelidir.
+
+"Kimlik bilgisinin mTLS Ayarları sekmesine aşağıdaki görselde olduğu gibi truststore eklenir:"
+
+![Credential mTLS Settings](/images/credential-mtls-settings.png)
+
+## API Proxy'ye İstek Yapılması
+
+API Proxy'ye aşağıdaki **istemci Java kod örneği** ve ona ait **pom** dosyası ile istek yapılabilir.
+
+### Örnek Java Kodu:
+
+```java
+package mtls;
+
+import org.apache.http.HttpEntity;
+import org.apache.http.client.methods.CloseableHttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.ssl.SSLContexts;
+import org.apache.http.util.EntityUtils;
+
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.FileInputStream;
+import java.security.KeyStore;
+
+public class MTLSClientTest {
+    public static void main(String[] args) throws Exception {
+        KeyStore keystore = KeyStore.getInstance("PKCS12");
+        keystore.load(new FileInputStream("/Users/mhy/Downloads/mtls/client-keystore.pfx"), "changeit".toCharArray());
+
+        KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagerFactory.init(keystore, "changeit".toCharArray());
+
+        SSLContext sslContext = SSLContext.getInstance("TLS");
+        SSLConnectionSocketFactory sslConnectionSocketFactory;
+        boolean verifyServerCertificate=true;
+
+        if(verifyServerCertificate){
+            //if verifying server certificate is needed, use this code:
+            KeyStore truststore = KeyStore.getInstance("PKCS12");
+            truststore.load(new FileInputStream("/Users/mhy/Downloads/mtls/client-truststore.pfx"), "changeit".toCharArray());
+
+            TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            trustManagerFactory.init(truststore);
+
+            sslContext.init(keyManagerFactory.getKeyManagers(), trustManagerFactory.getTrustManagers(), null);
+            sslConnectionSocketFactory = new SSLConnectionSocketFactory(sslContext);
+        }else{
+            //if verifying server certificate is NOT needed, use this code:
+            sslContext = SSLContexts.custom()
+                    .loadKeyMaterial(keystore, "changeit".toCharArray())
+                    .loadTrustMaterial((chain, authType) -> true) // Trust all certificates
+                    .build();
+            sslConnectionSocketFactory = new SSLConnectionSocketFactory(sslContext);
+        }
+
+        CloseableHttpClient httpClient = HttpClients.custom()
+                .setSSLSocketFactory(sslConnectionSocketFactory)
+                .build();
+
+        HttpGet httpGet = new HttpGet("https://api.apinizer.com/apigw/mtls/pet/findByStatus?status=sold");
+
+        try (CloseableHttpResponse response = httpClient.execute(httpGet)) {
+            HttpEntity entity = response.getEntity();
+            if (entity != null) {
+                String responseBody = EntityUtils.toString(entity);
+                System.out.println(responseBody);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        } finally {
+            httpClient.close();
+        }
+    }
+}
+```
+
+### Pom:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>Jose-SenderReceiver</groupId>
+    <artifactId>Jose-SenderReceiver</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>7</source>
+                    <target>7</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+    <dependencies>
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>nimbus-jose-jwt</artifactId>
+            <version>9.25.6</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk15to18</artifactId>
+            <version>1.69</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-text</artifactId>
+            <version>1.8</version>
+        </dependency>
+        <!-- Apache HttpClient -->
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpclient</artifactId>
+            <version>4.5.13</version>
+        </dependency>
+        <!-- SSLContext for mTLS -->
+        <dependency>
+            <groupId>org.apache.httpcomponents</groupId>
+            <artifactId>httpcore-nio</artifactId>
+            <version>4.4.13</version>
+        </dependency>
+        <!-- BouncyCastle for mTLS -->
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcprov-jdk15to18</artifactId>
+            <version>1.69</version>
+        </dependency>
+    </dependencies>
+</project>
+```

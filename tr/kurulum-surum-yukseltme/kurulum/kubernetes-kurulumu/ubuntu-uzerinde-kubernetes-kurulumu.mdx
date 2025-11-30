@@ -1,0 +1,75 @@
+---
+title: 'Kubernetes Sertifika Kontrolü ve Yenileme Scripti'
+description: 'Kubernetes sertifika kontrolü ve otomatik yenileme scripti'
+---
+
+# Kubernetes Sertifika Kontrolü ve Yenileme Scripti
+
+:::warning Önemli Not
+- Kubernetes kümesindeki düğümler arası güvenli iletişim için kullanılan SSL sertifikaları **kendinden imzalıdır (self-signed)** ve varsayılan olarak **1 yıl geçerlilik süresine** sahiptir.
+
+- Bu sertifikaların süresi dolmadan yenilenmesi kritik öneme sahiptir. Ancak, bu yenileme işleminin otomatikleştirilmesi genel olarak önerilmemektedir. Kubernetes, sertifika yenileme işlemini genellikle **yeni sürümlere yükseltmelerle** birlikte yapmayı teşvik eder. Bu yaklaşım, sistemin hem güvenlik hem de uyumluluk açısından güncel kalmasını sağlar.
+
+- Bu nedenle, sertifika yenileme işleminin potansiyel risklerini en aza indirmek ve kontrol altında tutmak için **planlı ve kontrollü bir şekilde yürütülmesini** önemle tavsiye ederiz. Bu, olası kesintilerin önüne geçmek ve güvenliği sağlamak için en iyi yöntemdir.
+:::
+
+```bash
+vi k8s-certs-check.sh
+```
+
+```bash
+#!/bin/bash
+
+# Eşik gün sayısı
+THRESHOLD_DAYS=35
+NEED_RENEWAL=false
+LOG_FILE="$(dirname "$0")/cert_renewal.log"
+current_date=$(date '+%Y-%m-%d %H:%M:%S')
+
+sudo kubeadm certs check-expiration > /tmp/cert_check.txt
+
+# İlk veri satırını ayıklamak için 'CERTIFICATE' başlığını bul
+first_data_line=$(grep -A 100 'CERTIFICATE' /tmp/cert_check.txt | tail -n +2 | head -n 1)
+
+# Gün sayısını ayıkla
+days=$(echo "$first_data_line" | awk '{print $(NF-2)}' | grep -Eo '[0-9]+')
+
+echo "Gün sayısı: $days"
+
+# Gün sayısının eşikten az olup olmadığını kontrol et
+if [[ -n "$days" && "$days" -lt "$THRESHOLD_DAYS" ]]; then
+    echo "Sertifikanın süresi $THRESHOLD_DAYS günden az kalmış: $first_data_line"
+    NEED_RENEWAL=true
+fi
+
+if [[ -n "$days" && "$days" -lt "$THRESHOLD_DAYS" ]]; then
+    echo "[$current_date] Sertifika süresi az kaldı. Yenileme işlemi başlatılıyor..." | tee -a "$LOG_FILE"
+    sudo kubeadm certs renew all
+    sudo systemctl restart kubelet
+    echo -e "\033[0;32m[$current_date] Yenileme işlemi tamamlandı! Sertifikaların süresi tekrar kontrol ediliyor...\033[0m" | tee -a "$LOG_FILE"
+    sudo kubeadm certs check-expiration | tee -a "$LOG_FILE"
+else
+    echo -e "\033[0;32m[$current_date] Sertifikaların süresi yeterli, yenilemeye gerek yok.\033[0m" | tee -a "$LOG_FILE"
+fi
+```
+
+```bash
+sudo chmod +x k8s-certs-check.sh
+./k8s-certs-check.sh
+```
+
+Scripti çalıştırdığınız dizine `cert_renewal.log` dosyasını ekler ve buradan çalıştırma loglarını izleyebilirsiniz.
+
+Dilerseniz scriptin belirli bir zamanda ya da zaman periyodunda çalıştırılmasını sağlayabilirsiniz. Bunun için cron kullanılabilir.
+
+```bash
+sudo crontab -e
+```
+
+Açılan dosyanın içine alttaki satırı ekleyiniz.
+
+```bash
+59 23 1 * * /path/k8s-certs-check.sh
+```
+
+Örnek kulllanımda her ayın 1. günü saat 23:59 da script çalışacaktır.

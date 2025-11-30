@@ -1,6 +1,261 @@
 ---
-title: "Araçlar"
-description: 'Description of your new file.'
+title: "API Portal'in Yapay Zeka Araçları ile Web Tarayıcı Üzerinden MCP Bağlantısıyla Kullanımı"
+description: "MCP (Model Context Protocol), yapay zeka araçlarının harici sistemlerle güvenli ve kontrollü şekilde iletişim kurmasına olanak tanır."
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+# API Portal'in Yapay Zeka Araçları ile Web Tarayıcı Üzerinden MCP Bağlantısıyla Kullanımı
+
+MCP (Model Context Protocol), yapay zeka araçlarının harici sistemlerle güvenli ve kontrollü şekilde iletişim kurmasına olanak tanır. Apinizer API Portal'ı MCP desteği olmayan bir yapay zeka aracı ile kullanmak için aşağıdaki adımları izleyebilirsiniz.
+
+Bunun için Chrome tarayıcısı üzerinden üçüncü taraf bir eklenti kurulabilir ve MCP bağlantısının bu eklenti aracılığıyla yönetilmesi sağlanabilir.
+
+:::warning Önemli
+Bu yöntem; tamamen üçüncü taraf uygulama, eklenti veya betiklerin çalıştırılmasını gerektirmektedir. Söz konusu üçüncü taraf yazılımlar **APINIZER** tarafından geliştirilmemekte, doğrulanmamakta veya desteklenmemektedir. Bu nedenle:
+
+- Üçüncü taraf yazılımların kurulumu ve kullanımı **kullanıcının kendi inisiyatifinde** olup, doğabilecek tüm risk, zarar ve hukuki sorumluluk kullanıcıya aittir.
+- **APINIZER**, bu tür uygulamaların veya betiklerin çalıştırılması sonucu ortaya çıkabilecek **veri kaybı, güvenlik ihlali, uyumsuzluk, erişim engeli** veya herhangi bir doğrudan/dolaylı zarardan sorumlu tutulamaz.
+- Kurulum öncesinde ve kullanım süresince, çalıştırılacak uygulama veya kodların **tamamının kaynağı, güvenilirliği ve içeriği** kullanıcı tarafından dikkatle incelenmeli ve onaylanmalıdır.
+
+**Önemli:** Herhangi bir güvenlik riski veya uyumsuzluk yaşamamak adına, yalnızca kaynağını ve güvenilirliğini tamamen doğruladığınız eklenti ve kodları kullanmanız şiddetle tavsiye edilir.
+:::
+
+## 1. Gerekli Eklentiyi Kurun
+
+Chrome tarayıcısında **Eklentiler** menüsünden "MCP SuperAssistant" eklentisini yükleyin. Bu eklenti, tarayıcı ile MCP sunucusu arasında köprü görevini görecektir.
+
+![MCP SuperAssistant Eklentisi](image-2025-8-12_17-42-15.png)
+
+## 2. MCP Sunucu Tanım Dosyasını Oluşturun
+
+Eklenti veya istemci, Apinizer API Portal'a nasıl bağlanacağını bu dosyadan okuyacaktır.
+
+Bilgisayarınızda uygun bir konuma `http_proxy.js` isimli aşağıdaki formatta bir **javascript** dosyası oluşturun (örnek `C:\mcp\http_proxy.js`) :
+
+```javascript
+const connection = require('https');
+const readline = require('readline');
+
+// Token'ı environment variable'dan al
+const APINIZER_TOKEN = process.env.APINIZER_TOKEN;
+const APINIZER_HOST = process.env.APINIZER_HOST;
+const APINIZER_PORT = process.env.APINIZER_PORT;
+const timeout = 10000; // 10 saniye
+
+async function sendHttpRequest(data) {
+  return new Promise((resolve, reject) => {
+    const postData = JSON.stringify(data);
+    const options = {
+      hostname: APINIZER_HOST,
+      port: APINIZER_PORT,
+      path: '/apiportal/management/mcp/api',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'APINIZER-TOKEN': APINIZER_TOKEN
+      }
+    };
+
+    const req = connection.request(options, (res) => {
+      let responseData = '';
+      res.on('data', (chunk) => {
+        responseData += chunk;
+      });
+      res.on('end', () => {
+        console.error(`Status: ${res.statusCode}`);
+        console.error(`Raw Response: ${responseData}`);
+
+        // 401 Unauthorized kontrolü
+        if (res.statusCode === 401) {
+          reject(new Error('Unauthorized: Invalid MCP token'));
+          return;
+        }
+
+        // 403 Forbidden kontrolü
+        if (res.statusCode === 403) {
+          reject(new Error('Forbidden: Access denied'));
+          return;
+        }
+
+        try {
+          const response = JSON.parse(responseData);
+          // Claude Desktop için ultra güvenli temizlik
+          const cleanResponse = {
+            jsonrpc: response.jsonrpc || "2.0"
+          };
+
+          // ID kontrolü - null, undefined veya notification durumu
+          if (response.id !== null && response.id !== undefined) {
+            cleanResponse.id = response.id;
+          } else if (data.method && data.method.startsWith('notifications/')) {
+            console.error('Notification detected - skipping ID');
+          } else {
+            cleanResponse.id = data.id || "unknown";
+          }
+
+          // Result varsa ekle
+          if (response.result !== null && response.result !== undefined) {
+            cleanResponse.result = response.result;
+          }
+
+          // Error varsa ekle
+          if (response.error !== null && response.error !== undefined) {
+            cleanResponse.error = response.error;
+          }
+
+          // Notification'lar için özel handling
+          if (data.method && data.method.startsWith('notifications/')) {
+            console.error('Notification acknowledged - no response sent');
+            return;
+          }
+
+          console.error(`Cleaned Response: ${JSON.stringify(cleanResponse)}`);
+          resolve(cleanResponse);
+        } catch (error) {
+          console.error(`Parse Error: ${error.message}`);
+          reject(new Error(`Invalid JSON: ${responseData.substring(0, 100)}`));
+        }
+      });
+    });
+
+    req.setTimeout(timeout, () => {
+      console.error(`Request timeout after ${timeout}ms`);
+      req.destroy();
+      reject(new Error(`Request timeout after ${timeout}ms`));
+    });
+
+    req.on('error', (error) => {
+      console.error(`Request Error: ${error.message}`);
+      reject(error);
+    });
+
+    req.write(postData);
+    req.end();
+  });
+}
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  terminal: false
+});
+
+rl.on('line', async (line) => {
+  try {
+    console.error(`Input: ${line}`);
+    const request = JSON.parse(line);
+
+    // Notification'lar için özel handling
+    if (request.method && request.method.startsWith('notifications/')) {
+      console.error('Processing notification...');
+      await sendHttpRequest(request);
+      return;
+    }
+
+    const response = await sendHttpRequest(request);
+    if (response) {
+      console.log(JSON.stringify(response));
+    }
+  } catch (error) {
+    console.error('Error:', error.message);
+    const errorResponse = {
+      jsonrpc: "2.0",
+      id: "error",
+      error: {
+        code: -32603,
+        message: error.message
+      }
+    };
+    console.log(JSON.stringify(errorResponse));
+  }
+});
+
+console.error(`Secure MCP HTTP/HTTPS proxy started with token: ${APINIZER_TOKEN.substring(0, 8)}...`);
+```
+
+Bilgisayarınızda uygun bir konuma aşağıdaki formatta bir **JSON** dosyası oluşturun (örnek `C:\mcp\mcp_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "apinizer-portal-mcp-http": {
+      "command": "node",
+      "args": [
+        "C:\\mcp\\http_proxy.js"
+      ],
+      "env": {
+        "APINIZER_TOKEN": "mcp_xxx",
+        "APINIZER_HOST": "apiportal.apinizer.com",
+        "APINIZER_PORT": "443"
+      }
+    }
+  }
+}
+```
+
+### Açıklamalar:
+
+- **`command`**: MCP sunucusunun çalıştırılacağı komut (burada Node.js kullanılıyor).
+- **`args`**: MCP proxy script'inin dosya yolu.
+- **`env`**: Bağlantı için gerekli ortam değişkenleri:
+  - `APINIZER_TOKEN`: Apinizer MCP erişim token'ınız.
+  - `APINIZER_HOST`: Apinizer API Portal ana host adresi.
+  - `APINIZER_PORT`: HTTPS portu (varsayılan: 443).
+
+## 3. Node.js Kurulumu
+
+MCP sunucuları Node.js üzerinde çalıştığı için hedef sistemde olduğu gibi erişim sağlayacağınız sisteminizde de Node.js kurulu olmalıdır.
+
+**İndirme Linki:** [https://nodejs.org/tr/download](https://nodejs.org/tr/download)
+
+Kurulumdan sonra terminal/komut istemcisinde aşağıdaki komutla versiyonu kontrol edebilirsiniz:
+
+```bash
+node --version
+npm --version
+```
+
+## 4. MCP Bağlantısını Ayarlamak
+
+Kullandığınız yapay zeka aracının web arayüzünü açın ve yeni bir sohbet oluşturun.
+
+Burada yönergeleri girdiğiniz kutucuğun sonuna eklenmiş olan "MCP" ifadesine tıklayın ve "Configure" butonuna basın, açılan alanda MCP alanını ve altındaki alanları aktifleştirin.
+
+![MCP Konfigürasyonu](image-2025-8-12_17-49-39.png)
+
+Windows'ta komut satırını açın (Win+R → cmd → enter) ve aşağıdaki ifadeyi sondaki adresi kendinize göre düzelterek çalıştırın.
+
+```bash
+npx @srbhptl39/mcp-superassistant-proxy@latest --config C:\\mcp\\mcp_config.json
+```
+
+Bu işlem sonunda tarayıcıda yan tarafa açılan yeni ekranda "Server Connected" ifadesini ve "Available Tools" sekmesinde ilgili bağlantı tanımınızı görmeniz gerekiyor.
+
+![Server Connected](image-2025-8-12_17-57-19.png)
+
+Yönergeleri girdiğiniz kutucuğunun sonundaki "MCP" ifadesine basın ve size çıkardığı "Instructions"'ı yönerge olarak girmek için insert'e basın. Yönergeleri gönderin.
+
+![Instructions](image-2025-8-12_17-59-11.png)
+
+Bu noktadan itibaren Apinizer API Portaline MCP ile bağlanabilir, size sunulan araçları kullanabilirsiniz.
+
+## 5. Örnekler
+
+### ChatGPT ekran görüntüleri
+
+![ChatGPT Örnek 1](image-2025-8-13_9-39-23.png)
+
+![ChatGPT Örnek 2](image-2025-8-13_9-40-7.png)
+
+![ChatGPT Örnek 3](image-2025-8-13_9-40-20.png)
+
+### Gemini ekran görüntüleri
+
+![Gemini Örnek 1](image-2025-8-13_9-37-58.png)
+
+![Gemini Örnek 2](image-2025-8-13_9-38-24.png)
+
+![Gemini Örnek 3](image-2025-8-13_9-38-37.png)
+
+![Gemini Örnek 4](image-2025-8-13_9-38-55.png)
+

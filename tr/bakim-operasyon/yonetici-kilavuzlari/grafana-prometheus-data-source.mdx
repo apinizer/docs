@@ -1,6 +1,198 @@
 ---
-title: 'Grafana Prometheus Data Source'
-description: 'Bu sayfa henüz oluşturulmadı. İçerik yakında eklenecektir.'
+title: Grafana Kurulumu ve Veri Kaynağı Olarak Prometheus Entegrasyonu
 ---
 
-Bu sayfa için içerik hazırlanıyor.
+# Grafana Kurulumu ve Veri Kaynağı Olarak Prometheus Entegrasyonu
+
+## 1-) Grafana Kurulumu
+
+### Persistent Storage Yapılandırması
+
+Grafana'nın verileri Kubernetes cluster'ındaki bir node üzerinde depolanacağı için **PersistentVolume (PV)** ve **PersistentVolumeClaim (PVC)** tanımlamalarının yapılması gerekmektedir. Bu yapılandırma, Grafana'nın kapanma veya yeniden başlatılma durumlarında verilerini korumasını sağlar.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: grafana-pv
+  namespace: monitoring
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /mnt/data/grafana
+  persistentVolumeReclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+Yukarıdaki **PersistentVolume (PV) ve PersistentVolumeClaim (PVC)** yapılandırması, Grafana'nın verilerini belirli bir node üzerinde saklamasını sağlar. Ancak burada kullanılan **hostPath**, Grafana'nın çalıştığı belirli bir node'un yerel dosya sistemine bağımlıdır.
+
+**Bu nedenle:**
+
+- Grafana pod'ları **farklı bir node'a taşınırsa**, yeni node üzerinde aynı **hostPath** dizini olmadığı sürece **verilerini kaybedecektir**.
+- Pod'ların her zaman aynı node üzerinde çalışmasını garanti altına almak için **nodeAffinity** veya **nodeSelector** kullanarak pod'ları belirli node'lara sabitlemek gerekir.
+
+Alternatif olarak, verilerin **node bağımsız** bir şekilde saklanması için **NFS, Ceph, Longhorn veya bir bulut tabanlı depolama çözümü** kullanılabilir.
+
+### Grafana Secret Yapılandırması
+
+```bash
+// Grafana arayüzüne girecek admin kullanıcısının şifresi ve parolası belirlenir.
+GF_SECURITY_ADMIN_USER=admin
+GF_SECURITY_ADMIN_PASSWORD=<YOUR_GRAFANA_PASSWORD>
+
+echo -n ${GF_SECURITY_ADMIN_USER} | base64
+//Bunun çıktısını bir sonraki adımda <ENCODED_GF_SECURITY_ADMIN_USER> değişkeni yerine koyacağız
+
+echo -n ${GF_SECURITY_ADMIN_PASSWORD} | base64
+//Bunun çıktısını bir sonraki adımda <ENCODED_GF_SECURITY_ADMIN_PASSWORD> değişkeni yerine koyacağız
+```
+
+Grafana arayüzünde kullanılacak kullanıcı adı ve şifre aşağıda verilen secret ile saklanır.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secrets
+  namespace: monitoring
+type: Opaque
+data:
+  GF_SECURITY_ADMIN_USER: <ENCODED_GF_SECURITY_ADMIN_USER>
+  GF_SECURITY_ADMIN_PASSWORD: <ENCODED_GF_SECURITY_ADMIN_PASSWORD>
+```
+
+### Grafana Deployment Yapılandırması
+
+Aşağıdaki Grafana Deployment YAML dosyasını sistemlerinize uygun olacak şekilde değiştirerek Kubernetes Cluster'ınıza yükleyin.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: grafana
+  name: grafana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - <NODE_HOSTNAME>
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command: ["sh", "-c", "chown -R 472:472 /var/lib/grafana"]
+          volumeMounts:
+            - mountPath: /var/lib/grafana
+              name: grafana-storage
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.6.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http-grafana
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 256m
+              memory: 256Mi
+          envFrom:
+            - secretRef:
+                name: grafana-secrets
+          volumeMounts:
+            - mountPath: /var/lib/grafana
+              name: grafana-storage
+      volumes:
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+```
+
+### Grafana için Kubernetes Servisi oluşturulur.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  ports:
+    - name: http
+      port: 3000
+      nodePort: 32181
+  selector:
+    app: grafana
+  type: NodePort
+```
+
+Grafana Kubernetes üzerinde deploy olurken grafana isminde ve NodePort tipinde bir Kubernetes servisi oluşturur. Bu servis kubernetes dışından Grafana'ya erişim için gereklidir. Ancak siz bu servis yerine Ingress veya kurumunuzda bağlantı yöntemi için hangi yapıyı kullanıyorsanız ona göre uyarlayabilirsiniz.
+
+## 2) Grafana Üzerinde Data Source Olarak Prometheus'un Ayarlanması
+
+### 1. Grafana'da Oturum Açın
+
+### 2. Sol Menüden Data Source sekmesine tıklayın ve Add new data source seçeneğini seçin.
+
+### 3. Data source olarak Prometheus seçilir. 4. Prometheus Connection url'si ve gerekli diğer ayarlar girilip kaydedilir.
+
+![Prometheus Data Source Seçimi](/images/grafana-prometheus-datasource-select.png)
+
+![Prometheus Connection Ayarları](/images/grafana-prometheus-connection.png)
+
+### 5. Sol Menüden Dashboard sekmesine tıklayın ve new dashboard seçeneğini seçin.
+
+![Dashboard Oluşturma](/images/grafana-dashboard-create.png)
+
+### 6. Yeni dashboard oluşturulur ve data source olarak prometheus seçilir.
+
+![Dashboard Data Source](/images/grafana-dashboard-datasource.png)

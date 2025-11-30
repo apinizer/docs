@@ -1,0 +1,214 @@
+---
+title: SOAP Mesajı İmza Doğrulaması (İstemci Sertifikası ile)
+---
+
+# SOAP Mesajı İmza Doğrulaması (İstemci Sertifikası ile)
+
+Bu script, SOAP mesajlarının imza doğrulamasını istemci sertifikası kullanarak gerçekleştirir. Script, gelen SOAP mesajının dijital imzasını doğrular ve sertifika geçerliliğini kontrol eder.
+
+**ÖNEMLİ:** Bu politikanın çalışması için öncesinde istemci kimliği (client identity) belirtilmiş olmalıdır.
+
+**Groovy Script Kodu**
+
+```groovy
+import org.apache.commons.lang3.StringUtils;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+import javax.xml.crypto.*;
+import javax.xml.crypto.dsig.Reference;
+import javax.xml.crypto.dsig.XMLSignatureFactory;
+import javax.xml.crypto.dsig.dom.DOMValidateContext;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.ByteArrayInputStream;
+import java.io.FileInputStream;
+import java.io.StringWriter;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.cert.X509Certificate;
+import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
+
+//This class must only be used for empty reference context
+class SignatureURIDereferencer implements URIDereferencer {
+    private final Document doc;
+    private final Element signatureElement;
+
+    public SignatureURIDereferencer(Document doc, Element signatureElement) {
+        this.doc = doc;
+        this.signatureElement = signatureElement;
+    }
+
+    @Override
+    public Data dereference(URIReference uriReference, XMLCryptoContext context) throws URIReferenceException {
+        String uri = uriReference.getURI();
+        if (uri == null || uri.isEmpty()) {
+            try {
+                // temporarily remove signature element
+                Node parentNode = signatureElement.getParentNode();
+                Node removedNode = parentNode.removeChild(signatureElement);
+                // apply C14N transformation
+                TransformerFactory tf = TransformerFactory.newInstance();
+                Transformer trans = tf.newTransformer();
+                StringWriter sw = new StringWriter();
+                trans.transform(new DOMSource(doc), new StreamResult(sw));
+                // add signature element back
+                parentNode.appendChild(removedNode);
+                return new OctetStreamData(new ByteArrayInputStream(sw.toString().getBytes()));
+            } catch (Exception e) {
+                throw new URIReferenceException("Dereference işlemi sırasında hata: " + e.getMessage(), e);
+            }
+        }
+        throw new URIReferenceException("Unsupported uri: " + uri);
+    }
+}
+
+// Function to set error response
+void setErrorResponse(String code, String desc) {
+    requestErrorMessageToTargetAPI = """<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <soap:Body>
+        <soap:Fault>
+            <faultCode>${code}</faultCode>
+            <faultString>${desc}</faultString>
+        </soap:Fault>
+    </soap:Body>
+</soap:Envelope>""";
+    statusCodeToTargetAPI = 401;
+}
+
+try {
+    //IMPORTANT: Client identity must be specified before this policy execution
+    // Check if client certificate is present
+    if (credential_certificate == null) {
+        setErrorResponse("ERR-01", "No certificate found for the sender member!");
+        return;
+    }
+
+    // Check certificate validity
+    try {
+        credential_certificate.checkValidity();
+    } catch (Exception e) {
+        setErrorResponse("ERR-02", "Client certificate was expired!");
+        return;
+    }
+
+    DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+    dbf.setNamespaceAware(true);
+    dbf.setXIncludeAware(false);
+    dbf.setExpandEntityReferences(false);
+    dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+    dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+    dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+    DocumentBuilder builder = dbf.newDocumentBuilder();
+    Document doc = builder.parse(new ByteArrayInputStream(requestBodyTextFromClient.getBytes("UTF-8")));
+
+    NodeList nl = doc.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", "Signature");
+    if (nl.getLength() == 0) {
+        setErrorResponse("ERR-03", "Request is not signed.");
+        return;
+    }
+
+    Element signatureElement = (Element) nl.item(0);
+
+    // gather ID's from references in signature
+    Set<String> referencedIds = new HashSet<>();
+    NodeList references = signatureElement.getElementsByTagNameNS("http://www.w3.org/2000/09/xmldsig#", "Reference");
+    for (int i = 0; i < references.getLength(); i++) {
+        Element reference = (Element) references.item(i);
+        String uri = reference.getAttribute("URI");
+        if (uri != null && uri.startsWith("#")) {// process only fragment identifiers
+            // remove # sign from uri
+            referencedIds.add(uri.substring(1));
+        }
+        //ignore external references and empty uri
+    }
+
+    // set the id elements that are only referenced in signature
+    NodeList allElements = doc.getElementsByTagName("*");
+    for (int i = 0; i < allElements.getLength(); i++) {
+        Element element = (Element) allElements.item(i);
+        // wsu:Id attribute control
+        if (element.hasAttributeNS("http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd", "Id")) {
+            String idValue = element.getAttributeNS("http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd", "Id");
+            if (referencedIds.contains(idValue)) {
+                element.setIdAttributeNS("http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd", "Id", true);
+            }
+        }
+        // Id attribute control
+        if (element.hasAttribute("Id")) {
+            String idValue = element.getAttribute("Id");
+            if (referencedIds.contains(idValue)) {
+                element.setIdAttribute("Id", true);
+            }
+        }
+        // ID attribute control
+        if (element.hasAttribute("ID")) {
+            String idValue = element.getAttribute("ID");
+            if (referencedIds.contains(idValue)) {
+                element.setIdAttribute("ID", true);
+            }
+        }
+        // id attribute control
+        if (element.hasAttribute("id")) {
+            String idValue = element.getAttribute("id");
+            if (referencedIds.contains(idValue)) {
+                element.setIdAttribute("id", true);
+            }
+        }
+    }
+
+    XMLSignatureFactory fac = XMLSignatureFactory.getInstance("DOM");
+
+    // Create signature context for empty uri references
+    final PublicKey key = credential_certificate.getPublicKey();
+    DOMValidateContext signatureContext = new DOMValidateContext(key, signatureElement);
+    signatureContext.setURIDereferencer(new SignatureURIDereferencer(doc, signatureElement));
+
+    // Create signature context for fragment uri references
+    DOMValidateContext refContext = new DOMValidateContext(key, signatureElement);
+
+    // unmarshal signature
+    javax.xml.crypto.dsig.XMLSignature signature = fac.unmarshalXMLSignature(signatureContext);
+
+    // validate signature
+    boolean signatureValid = signature.getSignatureValue().validate(signatureContext);
+
+    // validate references
+    boolean referencesValid = true;
+    List<?> referenceList = signature.getSignedInfo().getReferences();
+    for (Object ref : referenceList) {
+        Reference reference = (Reference) ref;
+        if (!StringUtils.isBlank(reference.getURI())) {
+            boolean refValid = reference.validate(refContext);
+            if (!refValid) {
+                referencesValid = false;
+            }
+        }
+    }
+
+    // Both validation results must be success
+    if (!(signatureValid && referencesValid)) {
+        setErrorResponse("ERR-04", "Signature verification failed!");
+        return;
+    }
+} catch (Exception e) {
+    setErrorResponse("ERR-05", "Error during signature verification: " + e.getMessage());
+    return;
+}
+```
+
+**Hata Kodları**
+
+- **ERR-01**: Gönderen üye için sertifika bulunamadı
+- **ERR-02**: İstemci sertifikası süresi dolmuş
+- **ERR-03**: İstek imzalanmamış
+- **ERR-04**: İmza doğrulaması başarısız
+- **ERR-05**: İmza doğrulama sırasında hata oluştu

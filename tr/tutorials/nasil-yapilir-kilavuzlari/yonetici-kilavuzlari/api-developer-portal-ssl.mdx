@@ -1,0 +1,230 @@
+---
+title: "API Developer Portal'ı SSL ile Başlatma"
+description: 'API Developer Portal\'ın SSL/TLS sertifikası ile başlatılması'
+---
+
+# API Developer Portal'ı SSL ile Başlatma
+
+Bu sayfa, API Developer Portal'ın SSL/TLS sertifikası ile başlatılması işlemini açıklamaktadır.
+
+## Genel Bakış
+
+API Developer Portal'ı SSL/TLS sertifikaları ile güvenli şekilde başlatabilirsiniz. Bu sayfa Kubernetes ortamında API Developer Portal'ın SSL ile yapılandırılmasını açıklar.
+
+## Sertifika Hazırlığı
+
+### 1. SSL/TLS Sertifikası Oluşturma
+
+Self-signed sertifika oluşturma (test için):
+
+```bash
+openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout portal.key \
+  -out portal.crt \
+  -subj "/CN=api-developer-portal.apinizer.svc.cluster.local"
+```
+
+### 2. JKS Formatına Dönüştürme
+
+Sertifikayı JKS formatına dönüştürme:
+
+```bash
+openssl pkcs12 -export -in portal.crt -inkey portal.key \
+  -out portal.p12 -name portal -password pass:changeit
+
+keytool -importkeystore -srckeystore portal.p12 \
+  -srcstoretype pkcs12 -srcstorepass changeit \
+  -destkeystore portal.jks -deststorepass changeit
+```
+
+## Kubernetes Secret Oluşturma
+
+### 1. Secret Oluşturma
+
+Sertifikaları Kubernetes secret olarak oluşturun:
+
+```bash
+kubectl create secret tls portal-tls \
+  --cert=portal.crt \
+  --key=portal.key \
+  -n apinizer
+```
+
+### 2. JKS Secret Oluşturma
+
+JKS dosyasını secret olarak oluşturun:
+
+```bash
+kubectl create secret generic portal-jks \
+  --from-file=portal.jks \
+  --from-literal=password=changeit \
+  -n apinizer
+```
+
+## API Developer Portal Deployment Yapılandırması
+
+### 1. SSL Environment Variables
+
+API Developer Portal deployment'ında SSL ayarlarını yapılandırın:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-developer-portal
+  namespace: apinizer
+spec:
+  template:
+    spec:
+      containers:
+      - name: api-developer-portal
+        image: apinizer/api-developer-portal:latest
+        env:
+        - name: SSL_ENABLED
+          value: "true"
+        - name: SSL_KEY_STORE
+          value: "/etc/ssl/certs/portal.jks"
+        - name: SSL_KEY_STORE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: portal-jks
+              key: password
+        - name: SSL_KEY_STORE_TYPE
+          value: "JKS"
+        - name: SERVER_PORT
+          value: "8443"
+        - name: SERVER_SSL_ENABLED
+          value: "true"
+        volumeMounts:
+        - name: ssl-certs
+          mountPath: /etc/ssl/certs
+          readOnly: true
+      volumes:
+      - name: ssl-certs
+        secret:
+          secretName: portal-jks
+```
+
+### 2. SSL Port Yapılandırması
+
+Service'te SSL port'unu expose edin:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-developer-portal
+  namespace: apinizer
+spec:
+  selector:
+    app: api-developer-portal
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: https
+    port: 8443
+    targetPort: 8443
+  type: ClusterIP
+```
+
+## Ingress Yapılandırması
+
+### TLS ile Ingress
+
+Ingress yapılandırmasında TLS ayarlarını yapın:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: portal-ingress
+  namespace: apinizer
+spec:
+  tls:
+  - hosts:
+    - portal.example.com
+    secretName: portal-tls
+  rules:
+  - host: portal.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: api-developer-portal
+            port:
+              number: 8443
+```
+
+## SSL Yapılandırma Doğrulama
+
+### 1. Pod Loglarını Kontrol Etme
+
+SSL yapılandırmasının doğru yüklendiğini kontrol edin:
+
+```bash
+kubectl logs api-developer-portal-pod-name -n apinizer | grep SSL
+```
+
+### 2. SSL Bağlantısını Test Etme
+
+Pod içinden SSL bağlantısını test edin:
+
+```bash
+kubectl exec -it api-developer-portal-pod-name -n apinizer -- \
+  curl -k https://localhost:8443/health
+```
+
+### 3. Sertifika Doğrulama
+
+Sertifika bilgilerini kontrol edin:
+
+```bash
+kubectl exec -it api-developer-portal-pod-name -n apinizer -- \
+  keytool -list -v -keystore /etc/ssl/certs/portal.jks \
+  -storepass changeit
+```
+
+## SSL Best Practices
+
+### Sertifika Yönetimi
+
+- Production ortamlarında CA imzalı sertifikalar kullanın
+- Sertifikaları düzenli olarak yenileyin
+- Sertifika expiration'larını izleyin
+
+### Güvenlik Ayarları
+
+- TLS 1.2 veya üzeri kullanın
+- Zayıf cipher suite'leri devre dışı bırakın
+- Perfect Forward Secrecy (PFS) kullanın
+
+### Secret Yönetimi
+
+- Sertifika şifrelerini güvenli şekilde saklayın
+- Secret'ları düzenli olarak rotate edin
+- RBAC ile secret erişimini kısıtlayın
+
+## Sorun Giderme
+
+### SSL Başlatma Hatası
+
+1. Sertifika dosyalarının doğru mount edildiğini kontrol edin
+2. Secret'ların doğru oluşturulduğunu kontrol edin
+3. JKS şifresinin doğru olduğunu kontrol edin
+4. Pod log'larını inceleyin
+
+### Bağlantı Hatası
+
+1. Port yapılandırmasını kontrol edin
+2. Firewall kurallarını kontrol edin
+3. Service yapılandırmasını kontrol edin
+4. Ingress yapılandırmasını kontrol edin
+
+## İlgili Kaynaklar
+
+- [API Manager SSL](/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/api-manager-ssl)
+- [API Developer Portal SSL](/tr/bakim-operasyon/yonetici-kilavuzlari/api-developer-portal-ssl)
+- [SSL/TLS Apinizer Modülleri Başlatma](/tr/bakim-operasyon/yonetici-kilavuzlari/ssl-tls-apinizer-modulleri-baslatma)

@@ -1,0 +1,256 @@
+---
+title: SOAP Mesajı İmzalama (Private Key ve Sertifika ile)
+---
+
+# SOAP Mesajı İmzalama (Private Key ve Sertifika ile)
+
+## Bouncycastle kütüphanesi ile imzalama
+
+```groovy
+import org.apache.ws.security.WSConstants;
+import org.apache.ws.security.WSEncryptionPart;
+import org.apache.ws.security.WSSConfig;
+import org.apache.ws.security.components.crypto.CryptoFactory;
+import org.apache.ws.security.components.crypto.Merlin;
+import org.apache.ws.security.message.WSSecHeader;
+import org.apache.ws.security.message.WSSecSignature;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.cert.X509CertificateHolder;
+import org.bouncycastle.openssl.PEMException;
+import org.bouncycastle.openssl.PEMKeyPair;
+import org.bouncycastle.openssl.PEMParser;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
+import javax.xml.crypto.dsig.Reference;
+import javax.xml.soap.*;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.*;
+import java.nio.file.Files;
+import java.security.*;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.interfaces.RSAPrivateCrtKey;
+import java.security.spec.InvalidKeySpecException;
+import java.security.spec.RSAPublicKeySpec;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Properties;
+import java.util.Vector;
+
+// Function to set error response
+void setErrorResponse(String code, String desc) {
+    requestErrorMessageToTargetAPI = """<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+        <soap:Body>
+            <soap:Fault>
+                <faultCode>${code}</faultCode>
+                <faultString>${desc}</faultString>
+            </soap:Fault>
+        </soap:Body>
+    </soap:Envelope>""";
+    statusCodeToTargetAPI = 401;
+}
+
+try {
+    PrivateKey privateKey = environment_privateKeyMap.get("Server Private Key");
+    if ( privateKey == null) {
+        setErrorResponse("ERR-01", "Server private key was not found.");
+        return;
+    }
+
+    X509Certificate certificate = environment_certificateMap.get("Server Certificate");
+    if ( certificate == null) {
+        setErrorResponse("ERR-02", "Server certificate was not found.");
+        return;
+    }
+
+    String username = "alias";
+    String password = "123456";
+
+    Properties cryptoProps = new Properties();
+    cryptoProps.put("org.apache.ws.security.crypto.provider", "org.apache.ws.security.components.crypto.Merlin");
+
+    KeyStore keyStore = KeyStore.getInstance("JKS");
+    keyStore.load(null, null); // Initialize the keystore
+    keyStore.setKeyEntry(username, privateKey, password.toCharArray(), new X509Certificate[]{certificate});
+
+    Merlin crypto = (Merlin) CryptoFactory.getInstance(cryptoProps);
+    crypto.setKeyStore(keyStore);
+
+    SOAPMessage soapMessage = MessageFactory.newInstance(SOAPConstants.SOAP_1_1_PROTOCOL)
+            .createMessage(null, new ByteArrayInputStream(responseBodyTextToClient.getBytes()));
+
+    SOAPPart soapPart = soapMessage.getSOAPPart();
+    SOAPEnvelope envelope = soapPart.getEnvelope();
+    envelope.addNamespaceDeclaration("ws24", "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd");
+
+    SOAPHeader header = envelope.getHeader();
+    if (header == null) {
+        header = envelope.addHeader();
+    }
+
+    WSSecHeader secHeader = new WSSecHeader();
+    secHeader.setMustUnderstand(true);
+    secHeader.insertSecurityHeader(soapPart);
+
+    org.apache.xml.security.Init.init();
+
+    /* optional
+    WSSecTimestamp timestamp = new WSSecTimestamp();
+    timestamp.setTimeToLive(600);
+    timestamp.build(soapPart, secHeader);
+    */
+
+    WSSConfig wssConfig = new WSSConfig();
+    wssConfig.setWsiBSPCompliant(false);
+
+    WSSecSignature sign = new WSSecSignature(wssConfig);
+    sign.setUserInfo(username, password);
+    sign.setSignatureAlgorithm("http://www.w3.org/2001/04/xmldsig-more#rsa-sha256");
+    sign.setSigCanonicalization("http://www.w3.org/2001/10/xml-exc-c14n#");
+    sign.setDigestAlgo("http://www.w3.org/2001/04/xmlenc#sha256");
+    sign.setKeyIdentifierType(WSConstants.ISSUER_SERIAL);
+    sign.setUseSingleCertificate(true);
+
+    sign.prepare(soapPart, crypto, secHeader);
+
+    Vector<WSEncryptionPart> signParts = new Vector<>();
+    signParts.add(new WSEncryptionPart("Body", SOAPConstants.URI_NS_SOAP_ENVELOPE, "Content"));
+
+    List<Reference> referenceList = sign.addReferencesToSign(signParts, secHeader);
+    sign.computeSignature(referenceList, true, null);
+
+    StringWriter sw = new StringWriter();
+    TransformerFactory.newInstance().newTransformer().transform(new DOMSource(soapPart), new StreamResult(sw));
+    requestBodyTextToTargetAPI = sw.toString();
+} catch (Exception e) {
+    setErrorResponse("ERR-03", "Error during sign operation: " + e.getMessage());
+    return;
+}
+```
+
+## Apache kütüphanesi ile imzalama
+
+```groovy
+import org.apache.xml.security.algorithms.MessageDigestAlgorithm;
+import org.apache.xml.security.signature.XMLSignature;
+import org.apache.xml.security.transforms.Transforms;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+import javax.xml.XMLConstants;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerConfigurationException;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.dom.DOMSource;
+import javax.xml.transform.stream.StreamResult;
+import java.io.ByteArrayInputStream;
+import java.io.FileInputStream;
+import java.io.StringWriter;
+import java.security.KeyStore;
+import java.security.PrivateKey;
+import java.security.cert.X509Certificate;
+import java.util.Base64;
+import java.util.UUID;
+
+final String SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/";
+final String WSSE_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd";
+final String WSU_NS = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd";
+final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
+final String EC_NS = "http://www.w3.org/2001/10/xml-exc-c14n#";
+
+// Function to set error response
+void setErrorResponse(String code, String desc) {
+    requestErrorMessageToTargetAPI = """<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+        <soap:Body>
+            <soap:Fault>
+                <faultCode>${code}</faultCode>
+                <faultString>${desc}</faultString>
+            </soap:Fault>
+        </soap:Body>
+    </soap:Envelope>""";
+    statusCodeToTargetAPI = 401;
+}
+
+try {
+    PrivateKey privateKey = environment_privateKeyMap.get("Server Private Key");
+    if ( privateKey == null) {
+        setErrorResponse("ERR-01", "Server private key was not found.");
+        return;
+    }
+
+    X509Certificate certificate = environment_certificateMap.get("Server Certificate");
+    if ( certificate == null) {
+        setErrorResponse("ERR-02", "Server certificate was not found.");
+        return;
+    }
+
+    org.apache.xml.security.Init.init();
+
+    DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+    dbf.setNamespaceAware(true);
+    dbf.setXIncludeAware(false);
+    dbf.setExpandEntityReferences(false);
+    dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+    dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+    dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+
+    DocumentBuilder builder = dbf.newDocumentBuilder();
+    Document doc = builder.parse(new ByteArrayInputStream( requestBodyTextFromClient .getBytes("UTF-8")));
+
+    // Add ID attribute to body element
+    NodeList bodyList = doc.getElementsByTagNameNS(SOAP_NS, "Body");
+    Element bodyElement = (Element) bodyList.item(0);
+    String bodyId = "id-" + UUID.randomUUID().toString();
+    bodyElement.setAttributeNS(WSU_NS, "wsu:Id", bodyId);
+    bodyElement.setIdAttributeNS(WSU_NS, "Id", true);
+    bodyElement.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:wsu", WSU_NS);
+
+    XMLSignature signature = new XMLSignature(doc, "", XMLSignature.ALGO_ID_SIGNATURE_RSA_SHA256, Transforms.TRANSFORM_C14N_EXCL_OMIT_COMMENTS);
+
+    Element soapHeader = getOrCreateSoapHeader(doc);
+
+    Element wsseHeader = doc.createElementNS(WSSE_NS, "wsse:Security");
+    wsseHeader.setAttributeNS(SOAP_NS, "soapenv:mustUnderstand", "1");
+    wsseHeader.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:wsse", WSSE_NS);
+    wsseHeader.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:wsu", WSU_NS);
+    wsseHeader.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:ds", DS_NS);
+    wsseHeader.setAttributeNS("http://www.w3.org/2000/xmlns/", "xmlns:ec", EC_NS);
+
+    soapHeader.appendChild(wsseHeader);
+    wsseHeader.appendChild(signature.getElement());
+
+    Transforms transforms = new Transforms(doc);
+    transforms.addTransform(Transforms.TRANSFORM_C14N_EXCL_OMIT_COMMENTS);
+
+    //Add Body as reference
+    signature.addDocument("#" + bodyId, transforms, MessageDigestAlgorithm.ALGO_ID_DIGEST_SHA256);
+
+    Element bst = doc.createElementNS(WSSE_NS, "wsse:BinarySecurityToken");
+    bst.setAttributeNS(WSU_NS, "wsu:Id", "X509-" + UUID.randomUUID().toString());
+    bst.setAttributeNS(null, "EncodingType", "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary");
+    bst.setAttributeNS(null, "ValueType", "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3");
+    bst.setTextContent(Base64.getEncoder().encodeToString(cert.getEncoded()));
+
+    wsseHeader.insertBefore(bst, signature.getElement());
+
+    signature.addKeyInfo(cert);
+    signature.sign(privateKey);
+
+    final StringWriter sw = new StringWriter();
+    TransformerFactory factory = TransformerFactory.newInstance();
+    factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+    Transformer transformer = factory.newTransformer();
+    transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
+    transformer.transform(new DOMSource(doc), new StreamResult(sw));
+
+    requestBodyTextToTargetAPI = sw.toString();
+} catch (Exception e) {
+    setErrorResponse("ERR-03", "Error during sign operation: " + e.getMessage());
+    return;
+}
+```
