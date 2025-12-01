@@ -3,6 +3,7 @@
 MDX dosyalarındaki frontmatter description alanlarındaki tek tırnak sorunlarını düzeltir.
 Description alanı tek tırnakla başlayıp tek tırnakla bitiyorsa ve içinde tek tırnak varsa,
 çift tırnakla değiştirir. İçindeki tek tırnaklar korunur.
+Çift tek tırnakları (''') tek tek tırnağa (') çevirir.
 """
 
 import re
@@ -16,6 +17,7 @@ def fix_description_quotes(content):
     Örnek:
     description: 'API Proxy'de mesajlar' -> description: "API Proxy'de mesajlar"
     description: "API Proxy'de mesajlar" -> değişmez (zaten doğru)
+    description: "GitOps''un" -> description: "GitOps'un"
     """
     lines = content.split('\n')
     fixed_lines = []
@@ -55,6 +57,15 @@ def fix_description_quotes(content):
                     if current_line.rstrip().endswith("'"):
                         break
                     i += 1
+        elif re.match(r'^\s*description:\s*"', line):
+            # Çift tırnakla başlayan description satırı
+            # Çift tek tırnakları (''') tek tek tırnağa çevir
+            if "''" in line:
+                # Çift tek tırnakları tek tek tırnağa çevir
+                fixed_line = line.replace("''", "'")
+                fixed_lines.append(fixed_line)
+            else:
+                fixed_lines.append(line)
         else:
             fixed_lines.append(line)
         
