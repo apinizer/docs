@@ -32,7 +32,7 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 ### Yönetici Dokümantasyonu
 - **[Kullanıcı ve Erişim Yönetimi](/tr/admin/kullanici-erisim-yonetimi)** - Kullanıcı, rol ve izin yönetimi
 - **[Sistem Ayarları](/tr/admin/sistem-ayarlari)** - Platform konfigürasyonu ve ayarlar
-- **[Monitoring ve Alerting](/tr/admin/monitoring-alerting)** - Sistem izleme ve uyarı yönetimi
+- **[Monitoring ve Alerting](/tr/analytic/monitoring-alerting)** - Sistem izleme ve uyarı yönetimi
 
 ### Kurulum ve Operasyon
 - **[Kurulum Kılavuzu](/tr/kurulum-surum-yukseltme/kurulum)** - Kubernetes, MongoDB, Elasticsearch kurulumları
