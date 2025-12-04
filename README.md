@@ -1,10 +1,10 @@
 # Apinizer Dokümantasyonu
 
-Apinizer, kurumsal şirketlerin iç ve dış sistemlerindeki API'leri güvenli, performanslı ve yönetilebilir hale getiren Full Lifecycle API Management platformudur.
+**Apinizer**, kurumsal şirketlerin iç ve dış sistemlerindeki API'leri güvenli, performanslı ve yönetilebilir hale getiren **Full Lifecycle API Management** platformudur.
 
-## 📚 Dokümantasyon Hakkında
+Bu dokümantasyon, Apinizer platformunu kullanmak isteyen geliştiriciler, sistem yöneticileri ve iş analistleri için kapsamlı bir rehber sunar. Platformun tüm özelliklerini keşfetmek, API Proxy'lerinizi oluşturmak ve yönetmek, güvenlik politikalarınızı yapılandırmak ve sisteminizi optimize etmek için ihtiyacınız olan tüm bilgileri burada bulabilirsiniz.
 
-Bu repository, Apinizer platformunun kapsamlı dokümantasyonunu içerir. Dokümantasyon [Mintlify](https://mintlify.com) kullanılarak oluşturulmuştur ve farklı roller için özelleştirilmiş içerikler sunar.
+Dokümantasyon, farklı roller ve kullanım senaryolarına göre özelleştirilmiş içerikler içerir ve [Mintlify](https://mintlify.com) kullanılarak oluşturulmuştur. Hızlı başlangıç rehberlerinden derinlemesine teknik dokümantasyona kadar, Apinizer ile çalışırken ihtiyacınız olan her şeyi kapsar.
 
 ## 🚀 Hızlı Başlangıç
 
