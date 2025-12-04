@@ -36,8 +36,8 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 
 ### Kurulum ve Operasyon
 - **[Kurulum Kılavuzu](/tr/kurulum-surum-yukseltme/kurulum)** - Kubernetes, MongoDB, Elasticsearch kurulumları
-- **[Bakım ve Operasyon](/tr/bakim-operasyon)** - Veritabanı yönetimi ve yönetici kılavuzları
-- **[Sorun Giderme](/tr/sorun-giderme)** - Yaygın sorunlar ve çözümleri
+- **[Bakım ve Operasyon](/tr/operasyon)** - Veritabanı yönetimi ve yönetici kılavuzları
+- **[Sorun Giderme](/tr/operasyon/sorun-giderme)** - Yaygın sorunlar ve çözümleri
 
 ## 🛠️ Yerel Geliştirme
 
@@ -85,7 +85,7 @@ Dokümantasyona katkıda bulunmak için:
 
 - **Demo Ortamı**: [demo.apinizer.com](https://demo.apinizer.com/)
 - **Ana Web Sitesi**: [apinizer.com](https://apinizer.com)
-- **Destek**: Dokümantasyon içindeki [SSS](/tr/sorun-giderme/sss) bölümüne bakın
+- **Destek**: Dokümantasyon içindeki [SSS](/tr/operasyon/sorun-giderme/sss) bölümüne bakın
 
 ## 📄 Lisans
 
@@ -94,8 +94,8 @@ Bu dokümantasyon Apinizer'a aittir. Detaylar için [LICENSE](LICENSE) dosyasın
 ## 🤝 Yardım
 
 Sorularınız için:
-- Dokümantasyon içindeki [Sorun Giderme](/tr/sorun-giderme) bölümüne bakın
-- [SSS](/tr/sorun-giderme/sss) sayfasını inceleyin
+- Dokümantasyon içindeki [Sorun Giderme](/tr/operasyon/sorun-giderme) bölümüne bakın
+- [SSS](/tr/operasyon/sorun-giderme/sss) sayfasını inceleyin
 
 ---
 
