@@ -1,0 +1,402 @@
+---
+title: "Topoloji 3: Yüksek Erişilebilirlik"
+description: 'Yüksek erişilebilirlik gereksinimleri olan production ortamları için kurulum gereksinimleri: sistem gereksinimleri, ağ topolojisi, kapasite planlama ve donanım gereksinimleri'
+---
+
+Bu sayfa, Apinizer'ı **yüksek erişilebilirlik gereksinimleri olan kritik production ortamlarında** kurmak isteyenler için hazırlanmıştır. Bu topoloji, %99.9+ uptime, otomatik failover ve veri replikasyonu sağlar.
+
+## Genel Bakış
+
+Topoloji 3, yüksek erişilebilirlik için tasarlanmış, tüm kritik bileşenlerin cluster yapısında çalıştığı bir topolojidir. Tüm bileşenler 12 sunucu üzerinde dağıtılmıştır.
+
+### Mimari Yapı
+
+```
+                    Internet
+                       │
+                       ▼
+            ┌────────────────────┐
+            │  Load Balancer    │
+            │  (HA VIP)         │
+            └──────────┬─────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      DMZ ZONE               │
+        │  ┌────────────────────────┐ │
+        │  │   Worker Node 1        │ │
+        │  │   Worker Node 2        │ │
+        │  │   Worker Node 3        │ │
+        │  └────────────────────────┘ │
+        └──────────────┬──────────────┘
+                       │
+            ┌───────────┴───────────┐
+            │  Internal Firewall   │
+            └───────────┬───────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      LAN ZONE                │
+        │  ┌────────────────────────┐ │
+        │  │ Control-Plane Node 1   │ │
+        │  │ Control-Plane Node 2   │ │
+        │  │ Control-Plane Node 3   │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ MongoDB Replica Set   │ │
+        │  │ Node 1 (Primary)       │ │
+        │  │ Node 2 (Secondary)     │ │
+        │  │ Node 3 (Secondary)     │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ Elasticsearch Cluster │ │
+        │  │ Node 1 (Master+Data)   │ │
+        │  │ Node 2 (Master+Data)   │ │
+        │  │ Node 3 (Master+Data)   │ │
+        │  └────────────────────────┘ │
+        └──────────────────────────────┘
+```
+
+## 1. Sistem Gereksinimleri
+
+### İşletim Sistemi
+
+* **Ubuntu Server 24.04 LTS** veya **RHEL 9.x**
+* Minimum kernel versiyonu: 5.4+
+* SELinux: Disabled (RHEL için) veya Permissive mode
+
+### Yazılım Bileşenleri
+
+| Bileşen | Versiyon/Gereksinim |
+|---------|---------------------|
+| **Kubernetes** | 1.31.0+ (HA Cluster) |
+| **Docker/Containerd** | Kubernetes ile uyumlu versiyon |
+| **MongoDB** | Herhangi bir versiyon (Replica Set - 3 node minimum) |
+| **Elasticsearch** | 7.9.2 (Cluster - 3 node minimum) |
+| **Network Plugin** | Flannel 0.27.4 (veya uyumlu) |
+| **Load Balancer** | HAProxy 2.0+ veya Nginx 1.18+ (HA yapılandırma) |
+
+### Ağ Gereksinimleri
+
+* **Internet Erişimi**: Kurulum sırasında gerekli
+* **DNS**: Çalışan DNS çözümleme
+* **Firewall**: Gerekli portların açık olması
+* **Load Balancer**: HA yapılandırma (VIP)
+* **Network Latency**: Node'lar arası < 1ms (aynı datacenter)
+
+## 2. Ağ Topolojisi
+
+### DMZ ve LAN Ayrımı (Zorunlu)
+
+Yüksek erişilebilirlik için DMZ/LAN ayrımı zorunludur:
+
+```
+                    Internet
+                       │
+                       ▼
+            ┌────────────────────┐
+            │  External Firewall │
+            │   (Port 443/80)    │
+            └──────────┬─────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      DMZ ZONE               │
+        │  ┌────────────────────────┐ │
+        │  │   Load Balancer (HA)   │ │
+        │  │   VIP: api.example.com  │ │
+        │  └───────────┬────────────┘ │
+        │              │              │
+        │  ┌───────────▼────────────┐ │
+        │  │   Worker Node 1       │ │
+        │  │   Worker Node 2       │ │
+        │  │   Worker Node 3       │ │
+        │  │   - Proxy Handler     │ │
+        │  │   - Token Provider    │ │
+        │  │   - Local Cache       │ │
+        │  └───────────────────────┘ │
+        └──────────────┬──────────────┘
+                       │
+            ┌───────────┴───────────┐
+            │  Internal Firewall   │
+            │  (Restricted Access)  │
+            └───────────┬───────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      LAN ZONE                │
+        │  ┌────────────────────────┐ │
+        │  │ Control-Plane Cluster │ │
+        │  │ (3 nodes - HA)        │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ Manager Module         │ │
+        │  │ (Pod'lar worker'larda) │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ MongoDB Replica Set   │ │
+        │  │ (3 nodes)              │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ Elasticsearch Cluster │ │
+        │  │ (3 nodes)              │ │
+        │  └────────────────────────┘ │
+        │                              │
+        │  ┌────────────────────────┐ │
+        │  │ Cache Cluster          │ │
+        │  │ (Hazelcast - 3 nodes)  │ │
+        │  └────────────────────────┘ │
+        └──────────────────────────────┘
+```
+
+### Port Gereksinimleri
+
+#### Kubernetes Control-Plane Nodes (3 adet)
+
+Her bir control-plane node için:
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 6443 | HTTPS | Kubernetes API Server | ✅ |
+| 10250 | HTTPS | Kubelet API | ✅ |
+| 10259 | HTTPS | Kube-scheduler | ✅ |
+| 10257 | HTTPS | Kube-controller-manager | ✅ |
+| 2379-2380 | TCP | etcd client/server | ✅ |
+| 8472 | UDP | Flannel VXLAN | ✅ |
+
+#### Kubernetes Worker Nodes (3 adet)
+
+Her bir worker node için:
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 10250 | HTTPS | Kubelet API | ✅ |
+| 30000-32767 | TCP/UDP | NodePort Services | ✅ |
+| 8472 | UDP | Flannel VXLAN | ✅ |
+| 30080/30090 | HTTP | Worker Erişimi | ✅ |
+
+#### MongoDB Replica Set Nodes (3 adet)
+
+Her bir MongoDB node için:
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 27017 | TCP | MongoDB | ✅ |
+
+#### Elasticsearch Cluster Nodes (3 adet)
+
+Her bir Elasticsearch node için:
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 9200 | HTTP | Elasticsearch HTTP | ✅ |
+| 9300 | TCP | Elasticsearch Transport | ✅ |
+
+#### Load Balancer (HA)
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 443 | HTTPS | Dış erişim (API) | ✅ |
+| 80 | HTTP | HTTP → HTTPS redirect | ✅ |
+| 8080 | HTTP | Backend (Worker'lara) | ✅ |
+| 6443 | HTTPS | Kubernetes API (VIP) | ✅ |
+
+### Firewall Kuralları
+
+**DMZ → LAN:**
+* Port 8080: Manager'a (konfigürasyon alımı)
+* Port 27017: MongoDB'ye (replica set)
+* Port 9200: Elasticsearch'e (cluster)
+* Port 5701: Cache'e (Hazelcast cluster)
+* Port 6443: Kubernetes API'ye (VIP)
+
+**LAN → DMZ:**
+* Port 8080: Worker'lara (deployment işlemleri)
+* Port 30080/30090: Worker'lara (health check)
+
+**Internet → DMZ:**
+* Port 443/80: Load Balancer'a
+
+**Node'lar Arası İletişim:**
+* Control-Plane node'lar arası: 6443, 2379-2380, 10250, 10259, 10257, 8472
+* Worker node'lar arası: 10250, 8472
+* MongoDB node'lar arası: 27017
+* Elasticsearch node'lar arası: 9200, 9300
+
+## 3. Kapasite Planlama
+
+### Trafik Tahmini
+
+Bu topoloji aşağıdaki trafik seviyeleri için uygundur:
+
+* **Günlük İstek**: > 1,000,000 istek/gün
+* **Saniyede İstek**: > 100 istek/saniye (ortalama)
+* **Peak Trafik**: > 1,000 istek/saniye
+* **Eşzamanlı Kullanıcı**: > 1,000 kullanıcı
+
+### Veri Büyüklüğü Tahmini
+
+**MongoDB:**
+* Konfigürasyon verileri: ~500 MB - 2 GB
+* Audit log'lar: ~50-500 GB/ay
+* Toplam tahmini: ~500 GB - 2 TB (1 yıl için)
+* Replikasyon faktörü: 3x (toplam disk: 1.5 TB - 6 TB)
+
+**Elasticsearch:**
+* Günlük log hacmi: 50-500 GB/gün
+* Aylık log hacmi: ~1.5 TB - 15 TB/ay
+* Toplam tahmini: ~5 TB - 50 TB (1 yıl için, retention'a göre değişir)
+* Replikasyon faktörü: 1x (shard replication)
+
+### Performans Beklentileri
+
+* **API Yanıt Süresi**: < 200ms (ortalama)
+* **Yüksek Yük Altında**: < 500ms
+* **Eşzamanlı Bağlantı**: 1,000 - 10,000 bağlantı
+* **Throughput**: 1,000-10,000 istek/saniye
+* **Uptime**: %99.9+ (yıllık < 8.76 saat kesinti)
+
+## 4. Donanım Gereksinimleri
+
+Aşağıdaki gereksinimler tavsiye edilen **minimum** konfigürasyon için belirtilmiştir. Servis yüklerinize göre artırılmalıdır.
+
+### Kubernetes Control-Plane Nodes
+
+| No | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+|----|-----------------|-----|-----|------|------------|
+| Sunucu 1 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 4GB | 80GB | Kubernetes Control-Plane |
+| Sunucu 2 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 4GB | 80GB | Kubernetes Control-Plane |
+| Sunucu 3 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 4GB | 80GB | Kubernetes Control-Plane |
+
+### Kubernetes Worker Nodes
+
+| No | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+|----|-----------------|-----|-----|------|------------|
+| Sunucu 4 | Ubuntu Server 24.04 LTS / RHEL 9.x | 12 | 16GB | 80GB | Kubernetes Worker |
+| Sunucu 5 | Ubuntu Server 24.04 LTS / RHEL 9.x | 12 | 16GB | 80GB | Kubernetes Worker |
+| Sunucu 6 | Ubuntu Server 24.04 LTS / RHEL 9.x | 12 | 16GB | 80GB | Kubernetes Worker |
+
+### MongoDB Replica Set Nodes
+
+| No | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+|----|-----------------|-----|-----|------|------------|
+| Sunucu 7 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 12GB | 200GB | MongoDB Replica Set Node 1 |
+| Sunucu 8 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 12GB | 200GB | MongoDB Replica Set Node 2 |
+| Sunucu 9 | Ubuntu Server 24.04 LTS / RHEL 9.x | 4 | 12GB | 200GB | MongoDB Replica Set Node 3 |
+
+### Elasticsearch Cluster Nodes
+
+| No | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+|----|-----------------|-----|-----|------|------------|
+| Sunucu 10 | Ubuntu Server 24.04 LTS / RHEL 9.x | 8 | 64GB | 2TB | Elasticsearch Cluster Node 1 (Master+Data) |
+| Sunucu 11 | Ubuntu Server 24.04 LTS / RHEL 9.x | 8 | 64GB | 2TB | Elasticsearch Cluster Node 2 (Master+Data) |
+| Sunucu 12 | Ubuntu Server 24.04 LTS / RHEL 9.x | 8 | 64GB | 2TB | Elasticsearch Cluster Node 3 (Master+Data) |
+
+## Yüksek Erişilebilirlik Özellikleri
+
+### Otomatik Failover
+
+* **Kubernetes Control-Plane**: etcd cluster ile otomatik failover
+* **Worker Nodes**: Pod'lar otomatik olarak diğer node'lara taşınır
+* **MongoDB**: Replica set ile otomatik primary seçimi
+* **Elasticsearch**: Cluster health monitoring ve otomatik recovery
+* **Load Balancer**: Health check ile otomatik trafik yönlendirme
+
+### Veri Replikasyonu
+
+* **MongoDB**: 3 node replica set (1 Primary + 2 Secondary)
+* **Elasticsearch**: Shard replication (her shard için replica)
+* **Kubernetes**: etcd cluster replication
+
+### Load Balancing
+
+* **Worker Nodes**: Trafik 3 worker arasında dağıtılır
+* **MongoDB**: Read operations secondary'lere dağıtılabilir
+* **Elasticsearch**: Query'ler cluster içinde dağıtılır
+
+## Kurulum Öncesi Checklist
+
+Kuruluma başlamadan önce aşağıdaki hazırlıkları yapmalısınız:
+
+### Altyapı Hazırlığı
+
+- [ ] 12 sunucu hazırlandı (3 Control-Plane + 3 Worker + 3 MongoDB + 3 Elasticsearch)
+- [ ] Load Balancer hazırlandı (HA yapılandırma)
+- [ ] İşletim sistemi kuruldu (Ubuntu 24.04 LTS veya RHEL 9.x)
+- [ ] Sunucular arası ağ bağlantısı test edildi (< 1ms latency)
+- [ ] DNS çözümleme çalışıyor
+- [ ] Internet erişimi mevcut
+- [ ] VIP (Virtual IP) yapılandırıldı
+
+### Ağ Hazırlığı
+
+- [ ] DMZ ve LAN zone'ları yapılandırıldı
+- [ ] Firewall kuralları yapılandırıldı
+- [ ] Load balancer HA yapılandırıldı
+- [ ] SSL/TLS sertifikaları hazırlandı
+- [ ] Gerekli portlar açıldı
+- [ ] Network segmentation uygulandı
+
+### Yazılım Hazırlığı
+
+- [ ] Kubernetes HA cluster kurulum paketleri hazır
+- [ ] MongoDB replica set kurulum paketleri hazır
+- [ ] Elasticsearch cluster kurulum paketleri hazır
+- [ ] Apinizer image'leri erişilebilir
+- [ ] Load balancer yazılımı kuruldu (HA)
+
+### Güvenlik Hazırlığı
+
+- [ ] SSH anahtarları yapılandırıldı
+- [ ] Sudo erişimi yapılandırıldı
+- [ ] Güvenlik güncellemeleri yapıldı
+- [ ] Firewall kuralları test edildi
+- [ ] SSL/TLS sertifikaları hazırlandı
+- [ ] Network segmentation test edildi
+
+## Kullanım Senaryoları
+
+Bu topoloji aşağıdaki durumlar için idealdir:
+
+* ✅ **Kritik Production Ortamları**: Kesintisiz hizmet gereksinimleri
+* ✅ **Yüksek Trafikli Sistemler**: > 1M istek/gün
+* ✅ **Yüksek Erişilebilirlik**: %99.9+ uptime gereksinimleri
+* ✅ **Kritik İş Süreçleri**: Kesintisiz çalışma zorunluluğu
+* ✅ **Veri Güvenliği**: Replikasyon ve yedekleme gereksinimleri
+* ✅ **Zero-Downtime Updates**: Kesintisiz güncelleme gereksinimleri
+
+## Sonraki Adımlar
+
+Kuruluma başlamak için:
+
+<CardGroup cols={2}>
+  <Card title="Kurulum Genel Bakış" icon="book" href="/tr/kurulum/genel-bakis">
+    Kurulum öncesi bilgileri inceleyin
+  </Card>
+  <Card title="Kubernetes HA Cluster" icon="layer-group" href="/tr/kurulum/kubernetes/kubernetes-high-availability-yuksek-erisim-cluster">
+    Kubernetes HA cluster kurulumunu öğrenin
+  </Card>
+  <Card title="MongoDB Replica Set" icon="database" href="/tr/kurulum/mongodb/ubuntu-mongodb">
+    MongoDB replica set kurulumunu öğrenin
+  </Card>
+  <Card title="Elasticsearch Cluster" icon="magnifying-glass" href="/tr/kurulum/elasticsearch/ubuntu-elasticsearch">
+    Elasticsearch cluster kurulumunu öğrenin
+  </Card>
+  <Card title="Ağ Topolojisi" icon="network-wired" href="/tr/apinizer-anlama/deployment/ag-topolojisi">
+    DMZ/LAN topolojisini öğrenin
+  </Card>
+  <Card title="Apinizer Kurulumu" icon="rocket" href="/tr/kurulum/apinizer/apinizer">
+    Apinizer kurulum adımlarını takip edin
+  </Card>
+  <Card title="Kapasite Planlama" icon="calculator" href="/tr/apinizer-anlama/sistem/kapasite-planlama">
+    Detaylı kapasite planlama yapın
+  </Card>
+  <Card title="Diğer Topolojiler" icon="sitemap" href="/tr/apinizer-anlama/deployment/deployment-modelleri">
+    Diğer topolojileri inceleyin
+  </Card>
+</CardGroup>

@@ -1,0 +1,311 @@
+---
+title: "Topoloji 2: Profesyonel Kurulum"
+description: 'Profesyonel production ortamları için kurulum gereksinimleri: sistem gereksinimleri, ağ topolojisi, kapasite planlama ve donanım gereksinimleri'
+---
+
+Bu sayfa, Apinizer'ı **profesyonel production ortamlarında** kurmak isteyenler için hazırlanmıştır. Bu topoloji, orta ölçekli kurumsal uygulamalar için tasarlanmıştır ve worker node'ları arasında yük dengeleme sağlar.
+
+## Genel Bakış
+
+Topoloji 2, production ortamları için uygun, worker node'ları arasında yük dengeleme sağlayan bir topolojidir. Tüm bileşenler 3 sunucu üzerinde çalışır.
+
+### Mimari Yapı
+
+```
+                    Internet
+                       │
+                       ▼
+            ┌────────────────────┐
+            │  Load Balancer     │
+            │  (HAProxy/Nginx)   │
+            └──────────┬─────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      Sunucu 1                │
+        │  ┌────────────────────────┐ │
+        │  │ Kubernetes Control-Plane│ │
+        │  └────────────────────────┘ │
+        │  ┌────────────────────────┐ │
+        │  │ Elasticsearch (Single)  │ │
+        │  └────────────────────────┘ │
+        │  ┌────────────────────────┐ │
+        │  │ MongoDB (Single)        │ │
+        │  └────────────────────────┘ │
+        └──────────────┬───────────────┘
+                       │
+                       │ Kubernetes Cluster
+                       ▼
+        ┌──────────────────────────────┐
+        │      Sunucu 2                │
+        │  ┌────────────────────────┐ │
+        │  │ Kubernetes Worker      │ │
+        │  │  - Manager Module      │ │
+        │  │  - Worker Module       │ │
+        │  │  - Cache Module        │ │
+        │  └────────────────────────┘ │
+        └──────────────┬───────────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      Sunucu 3                │
+        │  ┌────────────────────────┐ │
+        │  │ Kubernetes Worker      │ │
+        │  │  - Worker Module       │ │
+        │  │  - Cache Module        │ │
+        │  └────────────────────────┘ │
+        └──────────────────────────────┘
+```
+
+## 1. Sistem Gereksinimleri
+
+### İşletim Sistemi
+
+* **Ubuntu Server 24.04 LTS** veya **RHEL 9.x**
+* Minimum kernel versiyonu: 5.4+
+* SELinux: Disabled (RHEL için) veya Permissive mode
+
+### Yazılım Bileşenleri
+
+| Bileşen | Versiyon/Gereksinim |
+|---------|---------------------|
+| **Kubernetes** | 1.31.0+ (veya desteklenen herhangi bir versiyon) |
+| **Docker/Containerd** | Kubernetes ile uyumlu versiyon |
+| **MongoDB** | Herhangi bir versiyon (Replica Set olarak yapılandırılmalı) |
+| **Elasticsearch** | 7.9.2 (resmi desteklenen versiyon) |
+| **Network Plugin** | Flannel 0.27.4 (veya uyumlu) |
+| **Load Balancer** | HAProxy 2.0+ veya Nginx 1.18+ |
+
+### Ağ Gereksinimleri
+
+* **Internet Erişimi**: Kurulum sırasında gerekli
+* **DNS**: Çalışan DNS çözümleme
+* **Firewall**: Gerekli portların açık olması
+* **Load Balancer**: Trafik dağıtımı için
+
+## 2. Ağ Topolojisi
+
+### DMZ ve LAN Ayrımı (Önerilen)
+
+Production ortamları için DMZ/LAN ayrımı önerilir:
+
+```
+                    Internet
+                       │
+                       ▼
+            ┌────────────────────┐
+            │  External Firewall │
+            │   (Port 443/80)    │
+            └──────────┬─────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      DMZ ZONE               │
+        │  ┌────────────────────────┐ │
+        │  │   Load Balancer        │ │
+        │  │   (HAProxy/Nginx)      │ │
+        │  └───────────┬────────────┘ │
+        │              │              │
+        │  ┌───────────▼────────────┐ │
+        │  │   Worker Nodes         │ │
+        │  │   (Sunucu 2 & 3)       │ │
+        │  │   - Proxy Handler      │ │
+        │  │   - Token Provider     │ │
+        │  └───────────────────────┘ │
+        └──────────────┬──────────────┘
+                       │
+            ┌───────────┴───────────┐
+            │  Internal Firewall   │
+            │  (Restricted Access)  │
+            └───────────┬───────────┘
+                       │
+                       ▼
+        ┌──────────────────────────────┐
+        │      LAN ZONE                │
+        │  ┌────────────────────────┐ │
+        │  │   Sunucu 1             │ │
+        │  │   - Control-Plane      │ │
+        │  │   - Manager Module     │ │
+        │  │   - MongoDB            │ │
+        │  │   - Elasticsearch      │ │
+        │  └────────────────────────┘ │
+        └──────────────────────────────┘
+```
+
+### Port Gereksinimleri
+
+#### Sunucu 1 (Control-Plane + Manager + Database)
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 6443 | HTTPS | Kubernetes API Server | ✅ |
+| 10250 | HTTPS | Kubelet API | ✅ |
+| 10259 | HTTPS | Kube-scheduler | ✅ |
+| 10257 | HTTPS | Kube-controller-manager | ✅ |
+| 2379-2380 | TCP | etcd client/server | ✅ |
+| 8472 | UDP | Flannel VXLAN | ✅ |
+| 27017 | TCP | MongoDB | ✅ |
+| 9200 | HTTP | Elasticsearch HTTP | ✅ |
+| 9300 | TCP | Elasticsearch Transport | ✅ |
+| 32080 | HTTP | Manager Erişimi | ✅ |
+
+#### Sunucu 2 ve 3 (Worker Nodes)
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 10250 | HTTPS | Kubelet API | ✅ |
+| 30000-32767 | TCP/UDP | NodePort Services | ✅ |
+| 8472 | UDP | Flannel VXLAN | ✅ |
+| 30080/30090 | HTTP | Worker Erişimi | ✅ |
+
+#### Load Balancer
+
+| Port | Protokol | Açıklama | Gerekli |
+|------|----------|----------|---------|
+| 443 | HTTPS | Dış erişim (API) | ✅ |
+| 80 | HTTP | HTTP → HTTPS redirect | ✅ |
+| 8080 | HTTP | Backend (Worker'lara) | ✅ |
+
+### Firewall Kuralları
+
+**DMZ → LAN:**
+* Port 8080: Manager'a (konfigürasyon alımı)
+* Port 27017: MongoDB'ye
+* Port 9200: Elasticsearch'e
+* Port 5701: Cache'e
+
+**LAN → DMZ:**
+* Port 8080: Worker'lara (deployment işlemleri)
+* Port 30080/30090: Worker'lara (health check)
+
+**Internet → DMZ:**
+* Port 443/80: Load Balancer'a
+
+## 3. Kapasite Planlama
+
+### Trafik Tahmini
+
+Bu topoloji aşağıdaki trafik seviyeleri için uygundur:
+
+* **Günlük İstek**: 10,000 - 1,000,000 istek/gün
+* **Saniyede İstek**: 1 - 100 istek/saniye (ortalama)
+* **Peak Trafik**: 100 - 1,000 istek/saniye
+* **Eşzamanlı Kullanıcı**: 50 - 1,000 kullanıcı
+
+### Veri Büyüklüğü Tahmini
+
+**MongoDB:**
+* Konfigürasyon verileri: ~100-500 MB
+* Audit log'lar: ~5-50 GB/ay
+* Toplam tahmini: ~100-500 GB (1 yıl için)
+
+**Elasticsearch:**
+* Günlük log hacmi: 1-50 GB/gün
+* Aylık log hacmi: ~30 GB - 1.5 TB/ay
+* Toplam tahmini: ~500 GB - 5 TB (1 yıl için, retention'a göre değişir)
+
+### Performans Beklentileri
+
+* **API Yanıt Süresi**: < 300ms (ortalama)
+* **Yüksek Yük Altında**: < 1 saniye
+* **Eşzamanlı Bağlantı**: 100 - 1,000 bağlantı
+* **Throughput**: 100-1,000 istek/saniye
+
+## 4. Donanım Gereksinimleri
+
+Aşağıdaki gereksinimler tavsiye edilen **minimum** konfigürasyon için belirtilmiştir. Servis yüklerinize göre artırılmalıdır.
+
+| No | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+|----|-----------------|-----|-----|------|------------|
+| Sunucu 1 | Ubuntu Server 24.04 LTS / RHEL 9.x | 8 | 32GB | 1TB | Kubernetes Control-Plane, Elasticsearch (Master+Data), Replica set MongoDB Single Instance |
+| Sunucu 2 | Ubuntu Server 24.04 LTS / RHEL 9.x | 10 | 12GB | 80GB | Kubernetes Worker |
+| Sunucu 3 | Ubuntu Server 24.04 LTS / RHEL 9.x | 10 | 12GB | 80GB | Kubernetes Worker |
+
+## Kurulum Öncesi Checklist
+
+Kuruluma başlamadan önce aşağıdaki hazırlıkları yapmalısınız:
+
+### Altyapı Hazırlığı
+
+- [ ] 3 sunucu hazırlandı (Sunucu 1, 2, 3)
+- [ ] Load Balancer hazırlandı (HAProxy/Nginx)
+- [ ] İşletim sistemi kuruldu (Ubuntu 24.04 LTS veya RHEL 9.x)
+- [ ] Sunucular arası ağ bağlantısı test edildi
+- [ ] DNS çözümleme çalışıyor
+- [ ] Internet erişimi mevcut
+
+### Ağ Hazırlığı
+
+- [ ] DMZ ve LAN zone'ları yapılandırıldı
+- [ ] Firewall kuralları yapılandırıldı
+- [ ] Load balancer yapılandırıldı
+- [ ] SSL/TLS sertifikaları hazırlandı
+- [ ] Gerekli portlar açıldı
+
+### Yazılım Hazırlığı
+
+- [ ] Kubernetes kurulum paketleri hazır
+- [ ] MongoDB kurulum paketleri hazır
+- [ ] Elasticsearch kurulum paketleri hazır
+- [ ] Apinizer image'leri erişilebilir
+- [ ] Load balancer yazılımı kuruldu
+
+### Güvenlik Hazırlığı
+
+- [ ] SSH anahtarları yapılandırıldı
+- [ ] Sudo erişimi yapılandırıldı
+- [ ] Güvenlik güncellemeleri yapıldı
+- [ ] Firewall kuralları test edildi
+- [ ] SSL/TLS sertifikaları hazırlandı
+
+## Kullanım Senaryoları
+
+Bu topoloji aşağıdaki durumlar için idealdir:
+
+* ✅ **Orta Ölçekli Production**: Kurumsal uygulamalar
+* ✅ **Orta Trafikli Sistemler**: 10K - 1M istek/gün
+* ✅ **Worker Yük Dengeleme**: İki worker arasında trafik dağıtımı
+* ✅ **Bütçe Optimizasyonu**: Yüksek erişilebilirlik olmadan production
+* ✅ **Kurumsal Uygulamalar**: Orta seviye gereksinimler
+
+## Sınırlamalar ve Dikkat Edilmesi Gerekenler
+
+<Warning>
+  **Bu topolojinin sınırlamaları:**
+  
+  * ⚠️ Veritabanı tek nokta arıza riski taşır (MongoDB single instance)
+  * ⚠️ Elasticsearch tek node (yüksek erişilebilirlik yok)
+  * ⚠️ Control-Plane tek node (Kubernetes HA yok)
+  * ⚠️ Yüksek erişilebilirlik gereksinimleri için Topoloji 3 önerilir
+</Warning>
+
+## Sonraki Adımlar
+
+Kuruluma başlamak için:
+
+<CardGroup cols={2}>
+  <Card title="Kurulum Genel Bakış" icon="book" href="/tr/kurulum/genel-bakis">
+    Kurulum öncesi bilgileri inceleyin
+  </Card>
+  <Card title="Ağ Topolojisi" icon="network-wired" href="/tr/apinizer-anlama/deployment/ag-topolojisi">
+    DMZ/LAN topolojisini öğrenin
+  </Card>
+  <Card title="Kubernetes Kurulumu" icon="layer-group" href="/tr/kurulum/kubernetes/ubuntu-kubernetes">
+    Kubernetes kurulum adımlarını takip edin
+  </Card>
+  <Card title="MongoDB Kurulumu" icon="database" href="/tr/kurulum/mongodb/ubuntu-mongodb">
+    MongoDB kurulum adımlarını takip edin
+  </Card>
+  <Card title="Elasticsearch Kurulumu" icon="magnifying-glass" href="/tr/kurulum/elasticsearch/ubuntu-elasticsearch">
+    Elasticsearch kurulum adımlarını takip edin
+  </Card>
+  <Card title="Apinizer Kurulumu" icon="rocket" href="/tr/kurulum/apinizer/apinizer">
+    Apinizer kurulum adımlarını takip edin
+  </Card>
+  <Card title="Yüksek Erişilebilirlik" icon="shield-halved" href="/tr/apinizer-anlama/deployment/topoloji-3-yuksek-erisilebilirlik">
+    HA gereksinimleri için Topoloji 3'ü inceleyin
+  </Card>
+  <Card title="Diğer Topolojiler" icon="sitemap" href="/tr/apinizer-anlama/deployment/deployment-modelleri">
+    Diğer topolojileri inceleyin
+  </Card>
+</CardGroup>
