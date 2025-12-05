@@ -35,7 +35,7 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 - **[Monitoring ve Alerting](/tr/analytic/monitoring-alerting)** - Sistem izleme ve uyarı yönetimi
 
 ### Kurulum ve Operasyon
-- **[Kurulum Kılavuzu](/tr/kurulum-surum-yukseltme/kurulum)** - Kubernetes, MongoDB, Elasticsearch kurulumları
+- **[Kurulum Kılavuzu](/tr/kurulum/kurulum)** - Kubernetes, MongoDB, Elasticsearch kurulumları
 - **[Bakım ve Operasyon](/tr/operasyon)** - Veritabanı yönetimi ve yönetici kılavuzları
 - **[Sorun Giderme](/tr/operasyon/sorun-giderme)** - Yaygın sorunlar ve çözümleri
 
