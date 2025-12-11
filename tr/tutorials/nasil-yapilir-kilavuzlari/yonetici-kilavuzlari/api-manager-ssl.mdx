@@ -5,226 +5,200 @@ description: "API Manager'ın SSL/TLS sertifikası ile başlatılması"
 
 # API Manager'ı SSL ile Başlatma
 
-Bu sayfa, API Manager'ın SSL/TLS sertifikası ile başlatılması işlemini açıklamaktadır.
+Öncelikle, .p12 uzantılı sertifika dosyanızı Kubernetes'e bir secret olarak yükleyiniz.
 
-## Genel Bakış
-
-API Manager'ı SSL/TLS sertifikaları ile güvenli şekilde başlatabilirsiniz. Bu sayfa Kubernetes ortamında API Manager'ın SSL ile yapılandırılmasını açıklar.
-
-## Sertifika Hazırlığı
-
-### 1. SSL/TLS Sertifikası Oluşturma
-
-Self-signed sertifika oluşturma (test için):
-
-```bash
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-  -keyout api-manager.key \
-  -out api-manager.crt \
-  -subj "/CN=api-manager.apinizer.svc.cluster.local"
+```powershell
+kubectl create secret generic manager-tls --from-file=manager.p12 -n apinizer
 ```
 
-### 2. JKS Formatına Dönüştürme
+Bir sertifikanın Alias'ını bulma:
 
-Sertifikayı JKS formatına dönüştürme:
-
-```bash
-openssl pkcs12 -export -in api-manager.crt -inkey api-manager.key \
-  -out api-manager.p12 -name api-manager -password pass:changeit
-
-keytool -importkeystore -srckeystore api-manager.p12 \
-  -srcstoretype pkcs12 -srcstorepass changeit \
-  -destkeystore api-manager.jks -deststorepass changeit
+```powershell
+keytool -list -v -keystore  manager.p12 -storetype PKCS12
 ```
 
-## Kubernetes Secret Oluşturma
+JKS'den PKCS12 oluşturma:
 
-### 1. Secret Oluşturma
-
-Sertifikaları Kubernetes secret olarak oluşturun:
-
-```bash
-kubectl create secret tls api-manager-tls \
-  --cert=api-manager.crt \
-  --key=api-manager.key \
-  -n apinizer
+```powershell
+keytool -genkeypair -alias <ALIAS> -keyalg RSA -keysize 4096 -storetype PKCS12 -keystore manager.p12 -validity 3650 -storepass <PASSWORD>
 ```
 
-### 2. JKS Secret Oluşturma
+<Info>
+Uzantısı .p12 olan dosyanızı /etc/ssl/certs dizinine ekleyiniz.
+</Info>
 
-JKS dosyasını secret olarak oluşturun:
+Deployment yaml tanımında olması gereken değişkenler:
 
-```bash
-kubectl create secret generic api-manager-jks \
-  --from-file=api-manager.jks \
-  --from-literal=password=changeit \
-  -n apinizer
-```
+| Değişken | Açıklama |
+|----------|----------|
+| SSL_KEY_STORE | SSL sertifikasını içeren anahtar deposunun yolu. Örneğimizde, Spring Boot'un bunu classpath'te aramasını istiyoruz. |
+| SSL_KEY_STORE_PASSWORD | Anahtar deposuna erişmek için kullanılan şifre. |
+| SSL_KEY_STORE_TYPE | Anahtar deposunun türü (Kullanım: PKCS12). |
+| SSL_KEY_ALIAS | Anahtar deposundaki anahtarı tanımlayan takma ad. |
+| SSL_ENABLED | Spring Boot uygulamasının HTTPS protokolünü kullanmasını sağlar. |
+| SERVER_PORT | Sunucunun dinlediği port. 8443 kullanılmalıdır. |
 
-## API Manager Deployment Yapılandırması
-
-### 1. SSL Environment Variables
-
-API Manager deployment'ında SSL ayarlarını yapılandırın:
+Örnek bir Api Manager deployment dosyası:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: api-manager
+  name: manager
   namespace: apinizer
 spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: manager
+      version: v1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 75%
+    type: RollingUpdate
   template:
+    metadata:
+      labels:
+        app: manager
+        version: v1
     spec:
+      automountServiceAccountToken: true
+      volumes:
+      - name: manager-tls
+        secret:
+          secretName: manager-tls
       containers:
-      - name: api-manager
-        image: apinizer/api-manager:latest
-        env:
+      - env:
+        - name: JAVA_OPTS
+          value: ' -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+        - name: LOGGING_LEVEL_ROOT
+          value: INFO
+        - name: LOGGING_LEVEL_com_apinizer_manager
+          value: INFO
+        - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE
+          value: 20MB
+        - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE
+          value: 50MB
+        - name: SPRING_PROFILES_ACTIVE
+          value: prod
+        - name: SSL_KEY_STORE
+          value: /etc/ssl/manager.p12
+        - name: SSL_KEY_STORE_PASSWORD
+          value: <PASSWORD>
+        - name: SSL_KEY_STORE_TYPE
+          value: PKCS12
+        - name: SSL_KEY_ALIAS
+          value: <ALIAS>
         - name: SSL_ENABLED
           value: "true"
-        - name: SSL_KEY_STORE
-          value: "/etc/ssl/certs/api-manager.jks"
-        - name: SSL_KEY_STORE_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: api-manager-jks
-              key: password
-        - name: SSL_KEY_STORE_TYPE
-          value: "JKS"
         - name: SERVER_PORT
           value: "8443"
-        - name: SERVER_SSL_ENABLED
-          value: "true"
+        - name: SPRING_DATA_MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              key: dbUrl
+              name: mongo-db-credentials
+        - name: SPRING_DATA_MONGODB_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: dbName
+              name: mongo-db-credentials
         volumeMounts:
-        - name: ssl-certs
-          mountPath: /etc/ssl/certs
-          readOnly: true
-      volumes:
-      - name: ssl-certs
-        secret:
-          secretName: api-manager-jks
-```
-
-### 2. SSL Port Yapılandırması
-
-Service'te SSL port'unu expose edin:
-
-```yaml
+        - name: manager-tls
+          mountPath: /etc/ssl/
+        image: apinizercloud/manager:<APINIZER_VERSION>
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - sleep 10
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        name: manager
+        ports:
+        - containerPort: 8443
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 120
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        resources:
+          limits:
+            cpu: 1
+            memory: 3Gi
+        securityContext:
+          allowPrivilegeEscalation: true
+          readOnlyRootFilesystem: false
+          runAsGroup: 0
+          runAsNonRoot: false
+          runAsUser: 0
+        startupProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8443
+            scheme: HTTPS
+          initialDelaySeconds: 90
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: api-manager
+  name: manager
   namespace: apinizer
+  labels:
+    app: manager
 spec:
   selector:
-    app: api-manager
+    app: manager
+  type: NodePort
   ports:
-  - name: http
-    port: 8080
-    targetPort: 8080
-  - name: https
-    port: 8443
-    targetPort: 8443
-  type: ClusterIP
+    - name: http
+      port: 8443
+      nodePort: 32843
 ```
 
-## Ingress Yapılandırması
+## Sertifika Oluşturma
 
-### TLS ile Ingress
+Kendi sertifikanızı oluşturmak için uygulanacak adımlar:
 
-Ingress yapılandırmasında TLS ayarlarını yapın:
+```powershell
+# Private Key Oluşturma
+openssl genrsa -out server.key 2048
 
-```yaml
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: api-manager-ingress
-  namespace: apinizer
-spec:
-  tls:
-  - hosts:
-    - api-manager.example.com
-    secretName: api-manager-tls
-  rules:
-  - host: api-manager.example.com
-    http:
-      paths:
-      - path: /
-        pathType: Prefix
-        backend:
-          service:
-            name: api-manager
-            port:
-              number: 8443
+# CSR (Certificate Signing Request) Oluşturma
+openssl req -new -key server.key -out server.csr
+
+# İmzalı Sertifika
+openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+
+# PKCS#12 formatı
+openssl pkcs12 -export -out manager.p12 -inkey server.key -in server.crt
 ```
-
-## SSL Yapılandırma Doğrulama
-
-### 1. Pod Loglarını Kontrol Etme
-
-SSL yapılandırmasının doğru yüklendiğini kontrol edin:
-
-```bash
-kubectl logs api-manager-pod-name -n apinizer | grep SSL
-```
-
-### 2. SSL Bağlantısını Test Etme
-
-Pod içinden SSL bağlantısını test edin:
-
-```bash
-kubectl exec -it api-manager-pod-name -n apinizer -- \
-  curl -k https://localhost:8443/health
-```
-
-### 3. Sertifika Doğrulama
-
-Sertifika bilgilerini kontrol edin:
-
-```bash
-kubectl exec -it api-manager-pod-name -n apinizer -- \
-  keytool -list -v -keystore /etc/ssl/certs/api-manager.jks \
-  -storepass changeit
-```
-
-## SSL Best Practices
-
-### Sertifika Yönetimi
-
-- Production ortamlarında CA imzalı sertifikalar kullanın
-- Sertifikaları düzenli olarak yenileyin
-- Sertifika expiration'larını izleyin
-
-### Güvenlik Ayarları
-
-- TLS 1.2 veya üzeri kullanın
-- Zayıf cipher suite'leri devre dışı bırakın
-- Perfect Forward Secrecy (PFS) kullanın
-
-### Secret Yönetimi
-
-- Sertifika şifrelerini güvenli şekilde saklayın
-- Secret'ları düzenli olarak rotate edin
-- RBAC ile secret erişimini kısıtlayın
-
-## Sorun Giderme
-
-### SSL Başlatma Hatası
-
-1. Sertifika dosyalarının doğru mount edildiğini kontrol edin
-2. Secret'ların doğru oluşturulduğunu kontrol edin
-3. JKS şifresinin doğru olduğunu kontrol edin
-4. Pod log'larını inceleyin
-
-### Bağlantı Hatası
-
-1. Port yapılandırmasını kontrol edin
-2. Firewall kurallarını kontrol edin
-3. Service yapılandırmasını kontrol edin
-4. Ingress yapılandırmasını kontrol edin
-
-## İlgili Kaynaklar
-
-- [API Developer Portal SSL](/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/api-developer-portal-ssl)
-- [SSL/TLS Apinizer Modülleri Başlatma](/tr/bakim-operasyon/yonetici-kilavuzlari/ssl-tls-apinizer-modulleri-baslatma)
-- [PFX JKS Dönüştürme](/tr/bakim-operasyon/yonetici-kilavuzlari/pfx-jks-donusturme)
