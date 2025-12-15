@@ -3,107 +3,82 @@ title: "MongoDB Veritabanını Otomatik Yedekleme ve Eski Yedekleri Temizleme"
 description: "MongoDB veritabanını otomatik olarak yedekleyerek veri kaybını önleyebilir, eski yedekleri temizleyerek depolama alanını optimize edebilir, cron job ile zamanlanmış yedekleme yapılandırabilir ve mongodump ile yedekten geri yükleme işlemlerini gerçekleştirebilir."
 ---
 
-## Genel Bakış
+<Warning>
+    Bu script, MongoDB veritabanının yedeğini alır ve `/opt/mongoyedek` klasöründe saklar. Birden fazla yedek varsa, en yeni 2 tanesini tutar ve diğerlerini siler.
 
-MongoDB veritabanını otomatik olarak yedekleyerek veri kaybını önleyebilir ve eski yedekleri temizleyerek depolama alanını optimize edebilirsiniz.
+</Warning>
+<Warning>
+    Eski yedeklerin çok fazla sayıda olması ya da silinmemesi durumunda sunucunun diskini doldurmamak için ya yedekleri alacağınız adrese ayrı bir disk alanı tanımlatın ya da yedekleri sunucu haricinde bir yere taşımayı da gözden geçirin.
 
-## Yedekleme Stratejisi
+</Warning>
 
-### Yedekleme Türleri
 
-| Yedekleme Türü | Açıklama |
-|----------------|----------|
-| **Full Backup** | Tüm veritabanının yedeği |
-| **Incremental Backup** | Sadece değişen verilerin yedeği |
-| **Point-in-Time Recovery** | Belirli bir zaman noktasına geri dönüş |
 
-### Yedekleme Sıklığı
 
-Yedekleme sıklığını belirleyin:
+Script için belirtilen 'Ip,Username,Password' alanlarını kendi Db bilgilerinize göre düzenleyiniz.
 
-- Günlük yedekleme
-- Haftalık yedekleme
-- Aylık yedekleme
-
-## Otomatik Yedekleme Scripti
-
-### MongoDB Dump Scripti
+```bash
+sudo vi mongodump.sh
+```
 
 ```bash
 #!/bin/bash
 
-# Yedekleme ayarları
-BACKUP_DIR="/backup/mongodb"
-DATE=$(date +%Y%m%d_%H%M%S)
-RETENTION_DAYS=30
+IP_ADDRESS="{Ip}"
+USERNAME="{Username}"
+PASSWORD="{Password}"
+PORT="25080"
+BACKUP_DIR="/opt/mongoyedek"
 
-# MongoDB bağlantı bilgileri
-MONGO_HOST="mongodb-service"
-MONGO_PORT="27017"
-MONGO_DB="apinizer"
-MONGO_USER="admin"
-MONGO_PASS="password"
+# Yedekleme Klasörünü Kontrol Et ve Oluştur
+if [ ! -d "$BACKUP_DIR" ]; then
+    sudo mkdir -p "$BACKUP_DIR"
+    sudo chown $USER:$USER "$BACKUP_DIR"
+fi
 
-# Yedekleme dizini oluşturma
-mkdir -p $BACKUP_DIR
+# Dosya ismini belirle ve numara ekle
+DATE=$(date +%F)  
+BASE_NAME="apinizer-backup-${DATE}"
+index=0
 
-# MongoDB dump
-mongodump \
-  --host=$MONGO_HOST:$MONGO_PORT \
-  --db=$MONGO_DB \
-  --username=$MONGO_USER \
-  --password=$MONGO_PASS \
-  --out=$BACKUP_DIR/backup_$DATE
+# Aynı gün içinde mevcut dosyaları kontrol et ve uygun bir numara belirle
+while [ -e "${BACKUP_DIR}/${BASE_NAME}-${index}.archive" ]; do
+    index=$((index + 1))
+done
 
-# Eski yedekleri temizleme
-find $BACKUP_DIR -type d -mtime +$RETENTION_DAYS -exec rm -rf {} \;
+BACKUP_PATH="${BACKUP_DIR}/${BASE_NAME}-${index}.archive"
+
+# Son 2 dosyayı tutmak için dosya isimlerini al ve sil
+files_to_keep=$(ls -lt "$BACKUP_DIR"/*.archive | head -n 2 | awk '{print $9}')
+all_files=$(ls -lt "$BACKUP_DIR"/*.archive | awk '{print $9}')
+files_to_delete=$(comm -23 <(echo "$all_files" | sort) <(echo "$files_to_keep" | sort))
+
+for file in $files_to_delete; do
+    echo "Siliniyor: $file"
+    sudo rm -f "$file"
+done
+
+
+sudo mongodump --host "$IP_ADDRESS" --port="$PORT" --username="$USERNAME" --password="$PASSWORD" --authenticationDatabase=admin --gzip --archive="$BACKUP_PATH"
+
+echo "Yedekleme tamamlandı: $BACKUP_PATH"
 ```
-
-<Tip>
-Script dosyasını çalıştırılabilir hale getirmek için `chmod +x backup-script.sh` komutunu kullanın.
-</Tip>
-
-### Cron Job Kurulumu
-
-Cron job ile otomatik yedekleme:
-
-<Steps>
-  <Step>
-    **Crontab Düzenleme**
-
-    ```bash
-    crontab -e
-    ```
-  </Step>
-  <Step>
-    **Yedekleme Zamanlaması Ekleme**
-
-    Günlük yedekleme (her gece 02:00'de) için:
-
-    ```bash
-    0 2 * * * /path/to/backup-script.sh
-    ```
-  </Step>
-</Steps>
-
-## Yedekten Geri Yükleme
-
-Yedekten geri yükleme işlemi:
 
 ```bash
-mongorestore \
-  --host=$MONGO_HOST:$MONGO_PORT \
-  --db=$MONGO_DB \
-  --username=$MONGO_USER \
-  --password=$MONGO_PASS \
-  $BACKUP_DIR/backup_20240101_020000
+sudo chmod +x mongodump.sh
+./mongodump.sh
 ```
 
-<Warning>
-Geri yükleme işlemi mevcut verileri üzerine yazabilir. Geri yükleme yapmadan önce mevcut verilerinizin yedeğini alın.
-</Warning>
+Dilerseniz scriptin belirli bir zamanda ya da zaman periyodunda çalıştırılmasını sağlayabilirsiniz. Bunun için cron kullanılabilir.
 
-## İlgili Kaynaklar
+```bash
+sudo crontab -e
+```
 
-- [MongoDB Sorunları](/tr/operasyon/sorun-giderme/mongodb-sorunlari)
-- [MongoDB Loglarını Elasticsearch'e Yazma](/tr/operasyon/sorun-giderme/mongodb-loglarini-elasticsearch-yazma)
+Açılan dosyanın içine alttaki satırı ekleyiniz.
+
+```bash
+59 23 1 * * /path/mongodump.sh
+```
+
+Örnek kulllanımda her ayın 1. günü saat 23:59 da script çalışacaktır.
