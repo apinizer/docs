@@ -1,0 +1,165 @@
+---
+title: API Trafik Loglarını Kibana-8.17.10 İle Görselleştirme
+description: "Apinizer API trafik loglarını Kibana 8.17.10 ile görselleştirebilir ve analiz edebilir. Kibana kurulumu, SSL sertifikaları, kimlik doğrulama token'ları ve servis yapılandırması işlemlerini gerçekleştirebilir."
+---
+
+## Kibana Kurulumu
+
+Kibana v8.17.10 aşağıdaki şekilde indirilir:
+
+```bash
+# Apinizer kullanıcısı oluşturulur ve yetkilendirilir.
+sudo adduser apinizer
+sudo usermod -aG sudo apinizer
+
+# Kullanıcıya geçilerek işlemlere devam edilir
+sudo su - apinizer
+
+# Aşağıdaki araçların tüm sunucular üzerinde kurulu olması tavsiye edilmektedir
+sudo apt update
+sudo apt install -y curl wget net-tools gnupg2 software-properties-common apt-transport-https ca-certificates
+```
+
+```bash
+sudo mkdir /opt/kibana
+cd /opt/kibana
+sudo wget https://artifacts.elastic.co/downloads/kibana/kibana-8.17.10-linux-x86_64.tar.gz
+sudo tar -xzf kibana-8.17.10-linux-x86_64.tar.gz
+```
+
+Kibana'nın çıkartıldığı dizine (`kibana-8.17.10-linux-x86_64/`) geçiş yapılır.
+
+```bash
+cd kibana-8.17.10-linux-x86_64/
+```
+
+**Kimlik Doğrulama Token'ının Oluşturulması**
+
+elasticsearch dizininde token oluşturulur:
+
+```bash
+/opt/elasticsearch/elasticsearch-8.17.10/bin/elasticsearch-service-tokens create elastic/kibana kibana-token
+```
+
+<Note>
+Komut çıktısında verilen token bilgisini not edin. Bu bilgi `kibana.yml` dosyasında `elasticsearch.serviceAccountToken` alanında kullanılır. (Alternatif olarak `kibana_system` kullanıcısının şifresi de kullanılabilir ancak token yöntemi öncelikli tercihtir.)
+</Note>
+
+**SSL Sertifikalarının Hazırlanması**
+
+```bash
+cd /opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+
+# 1. Kök Sertifikayı (CA) dışarı aktar
+openssl pkcs12 -in elastic-stack-ca.p12 -nokeys -out elastic-stack-ca.crt -passin pass:""
+
+# 2. Özel Anahtarı (Private Key) şifresiz olarak dışarı aktar
+openssl pkcs12 -in elastic-certificates.p12 -nocerts -nodes -out elastic-certificates.key -passin pass:""
+```
+
+**Sertifika Transferi ve Yetkilendirme**
+
+```bash
+# 1. CA Sertifikası Transferi
+sudo cp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-stack-ca.crt /opt/kibana/kibana-8.17.10/config/
+
+# 2. Sunucu Sertifikası Transferi
+sudo cp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.crt /opt/kibana/kibana-8.17.10/config/
+
+# 3. Özel Anahtar Transferi
+sudo cp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.key /opt/kibana/kibana-8.17.10/config/
+```
+
+**Dosya İzinlerinin Ayarlanması (Kibana Sunucusu)**
+
+```bash
+# Anahtar dosyasını sadece dosya sahibinin okuyabilmesi için:
+sudo chmod 600 /opt/kibana/kibana-8.17.10/config/elastic-certificates.key
+
+# (Opsiyonel) Dosya sahipliğinin servis kullanıcısına verilmesi: 
+sudo chown -R apinizer:apinizer /opt/kibana/
+```
+
+Konfigürasyon için Config klasörü içindeki "kibana.yml" dosyasında Apinizer'ın Elasticsearch Entegrasyonu için Sunucu bilgileri düzenlenir.
+
+**Dosya Yolu:** `/opt/kibana/kibana-8.17.10/config/kibana.yml`
+
+```bash
+sudo vi config/kibana.yml
+```
+
+```yaml
+server.port: 5601
+
+# Kibana'nın dinleyeceği IP adresi. 
+# "0.0.0.0" değeri, sunucunun tüm ağ arayüzlerinden gelen istekleri kabul etmesini sağlar.
+server.host: "0.0.0.0"
+
+# Kibana'ya dışarıdan erişimde kullanılan temel URL (Proxy veya Load Balancer arkasında önem taşır)
+server.publicBaseUrl: "https://<KIBANA_SUNUCU_IP>:<KIBANA_PORT>"
+
+server.ssl.enabled: true
+
+server.ssl.certificate: "/opt/kibana/kibana-8.17.10/config/elastic-certificates.crt"
+server.ssl.key: "/opt/kibana/kibana-8.17.10/config/elastic-certificates.key"
+
+
+elasticsearch.hosts: ["https://<ELASTICSEARCH_IP>:<ELASTICSEARCH_PORT>"]
+
+# Kimlik doğrulama için Service Account Token kullanılır.
+# (Kullanıcı adı/şifre yerine bu yöntem performans ve güvenlik için önerilir)
+elasticsearch.serviceAccountToken: "<SERVICE_ACCOUNT_TOKEN>"
+
+# ----------------------------------------------------------------
+# ELASTICSEARCH SSL GÜVENLİK AYARLARI
+# ----------------------------------------------------------------
+# Elasticsearch sunucusunun kimliğini doğrulamak için kullanılan Kök Sertifika (CA)
+elasticsearch.ssl.certificateAuthorities: [ "/opt/kibana/kibana-8.17.10/config/elastic-stack-ca.crt" ]
+
+elasticsearch.ssl.verificationMode: certificate
+```
+
+## Kibanayı Linux Servis Olarak Ayarlama
+
+```bash
+sudo vi /etc/systemd/system/kibana.service
+```
+
+```ini
+[Unit]
+Description=Kibana 8.17.10
+After=network.target
+
+[Service]
+Type=simple
+# Kibana dosyaları hangi kullanıcıdaysa o yazılmalı (Sizde 'apinizer')
+User=apinizer
+Group=apinizer
+
+# Kibana'nın bulunduğu dizin ve çalıştırma komutu
+ExecStart=/opt/kibana/kibana-8.17.10/bin/kibana
+WorkingDirectory=/opt/kibana/kibana-8.17.10
+
+# Performans ve Log ayarları
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=inherit
+
+# Node.js bellek limiti (Opsiyonel ama önerilir, RAM'e göre artırılabilir)
+Environment=NODE_OPTIONS="--max-old-space-size=2048"
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable kibana.service
+sudo systemctl start kibana.service
+sudo systemctl status kibana.service
+```
+
+```bash
+sudo netstat -tulpn | grep 5601
+```
