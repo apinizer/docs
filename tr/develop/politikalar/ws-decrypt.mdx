@@ -1,0 +1,158 @@
+---
+title: "WS-Security Decrypt"
+description: "Gelen SOAP mesajlarındaki WS-Security şifreli içerikleri seçilen anahtar deposu ile çözebilirsiniz"
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- WS-Security ile şifrelenmiş SOAP mesajlarını API Proxy (API Vekil Sunucusu) katmanında çözerek uygulamaya düz metin içerik iletilmesini sağlar.
+- Mesaj şifre çözme anahtarlarını merkezi bir anahtar deposunda yönetip yetkisiz erişimleri engeller.
+- Koşul bazlı etkinleştirme ile yalnızca belirli Endpoint akışlarında şifre çözme işlemi çalıştırılır.
+- Özelleştirilebilir hata mesajlarıyla tüketici uygulamalara anlamlı geri bildirim sunar.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: WS Güvenlik Şifre Çözme politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Şifre Çözme Kontrolü**: SOAP zarfındaki WS-Security `EncryptedData` blokları incelenir, seçilen anahtar deposundan özel anahtar alınır ve mesaj içeriği çözümlenir.
+4. **Karar Verme**:
+   - **Eşleşme Var**: Anahtar deposundaki anahtar ile şifre çözülür ve mesaj içeriği arka uç servise düz metin olarak iletilir.
+   - **Eşleşme Yok**: Anahtar ID uyuşmazlığı veya eksik WS-Security header durumda politika başarısız olur, isteğin devamı durdurulur.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **SOAP Şifre Çözme Motoru**: WS-Security standardındaki `EncryptedKey` ve `EncryptedData` bloklarını analiz eder, keystore'dan anahtar çekerek içeriği çözümleyip mesajı günceller.
+- **Anahtar Deposu Entegrasyonu**: Kuruma özel KeyStore servisinden keystore listeler, seçilen deposu politika ile ilişkilendirir ve projeye göre filtreler.
+- **Esnek Hata Yönetimi**: Varsayılan ve özelleştirilmiş hata mesajlarıyla şifre çözme hatalarında ayrıntılı geri bildirim sunar.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Case-Insensitive Anahtar Eşleştirme**: `allowCaseInsensitiveId` seçeneğiyle şifreli bloklardaki `KeyIdentifier` değerlerini büyük/küçük harf duyarlılığından bağımsız eşler.
+- **Global/Local Politika Akışı**: Aynı yapılandırmayı global olarak paylaşıp local kopyalarla özelleştirme, localizasyon sırasında otomatik isim eşsizliği kontrolü.
+- **Eşzamanlı Kullanım Takibi**: Politikayı kullanan API ve Proxy Group listesini göstererek değişiklik veya silme öncesi etki analizi sağlar.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| SOAP Güvenli Trafik | Dış sisteme ait SOAP mesajları WS-Security ile şifreli geliyor | Global politikada projeye ait `ProductionDecryptKS` keystore seçilir. | Mesaj içeriği çözülür, arka uç servis şifreli veri görmez. |
+| Bölümlü Şifre Kaldırma | Yalnızca yönetim servisi için şifre çözme gerekli | Koşulda `Path = /api/admin/*` tanımlanır. | Yönetim çağrıları çözülür, diğerleri atlanır. |
+| Anahtar Rotasyonu | Yeni sertifika devreye alınacak | Yeni keystore oluşturulup politikada güncellenir. | Kesinti olmadan yeni anahtar kullanılır. |
+| Case ID Uyumsuzluğu | Tedarikçi sistem `KeyIdentifier` değerlerini farklı case ile gönderiyor | `allowCaseInsensitiveId` etkinleştirilir. | Anahtar ID farkları tolere edilir, hata düşmez. |
+| Test Ortamı İzolasyonu | Test ortamında farklı keystore kullanılmalı | Local politika oluşturulup ilgili API'ye atanır. | Test anahtarı yalnızca o API'de kullanılır. |
+| Hata Analizi | Şifre çözme başarısız olduğunda anlamlı bildirim gerekli | Özel hata mesajı yapılandırılır, 403 statü kodu seçilir. | İstemciye açıklayıcı JSON hata döner. |
+| Performans İzleme *(opsiyonel)* | Büyük mesajlarda şifre çözme maliyetli | Koşulda içerik tipine göre politika devre dışı bırakılır. | Gereksiz decryption engellenir, gecikme azalır. |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni WS Güvenlik Şifre Çözme Politikası Oluşturma
+
+<img src="/images/develop/politikalar/ws-decrypt-1.png" alt="WS Güvenlik Şifre Çözme Politikası" width="1000" />
+
+### Yapılandırma Adımları
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → WS Güvenlik Şifre Çözme** bölümüne gidin.<br />- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br /><br />**Name (İsim) Zorunlu:** Örnek: `Production_WsDecrypt`<br />- Benzersiz isim girin, boşlukla başlamaz.<br />- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br /><br />**Description (Açıklama):** Örnek: "Bankacılık entegrasyonları için SOAP şifre çözme"<br />- Maks. 1000 karakter.<br />- Politikanın amacını açıklayın. |
+| **Adım 3: WS-Security Decryption Parametreleri** | **Decryption KeyStore (Zorunlu):** Listeden ilgili keystore'u seçin. Keystore, şifre çözme anahtarını içerir.<br />**KeyStore Tooltipleri:** Seçilen kaynağın proje kapsamına uygun olduğunu doğrular. |
+| **Adım 4: Case-Insensitive ID Kontrolü (Varsa)** | **Allow Case-Insensitive Identifier:** İşaretleyerek `KeyIdentifier` alanlarının büyük/küçük harf farkını göz ardı edin. SOAP sağlayıcısı farklı case kullanıyorsa aktive edin. |
+| **Adım 5: Şifre Çözme Doğrulama Notları (Varsa)** | Test ortamında manuel olarak SOAP mesajını gönderip hata loglarını kontrol edin; yanlış keystore seçimi durumunda hata kodu 401 döner. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br />- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br /><br />**Örnekler:**<br />- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br />- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br />- Endpoint bazlı: `Path = /api/admin/*`<br />Koşul tanımlamazsa politika her zaman aktif<br /><br />Detaylar için bakabilirsiniz: [Koşullar (Conditions)](/tr/concepts/temel-kavramlar/politika-nedir#koşullar) |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br />- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br /><br />**Varsayılan:**<br />`{ "statusCode": 403, "message": "[Default hata mesajı]" }`<br /><br />**Özel:**<br />`{ "statusCode": 403, "errorCode": "[CUSTOM_ERROR_CODE]", "message": "[Özel mesaj]" }` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br /><br />**Kontrol Listesi:** Benzersiz isim. Zorunlu alanlar dolu. En az bir WS-Security anahtar yapılandırması mevcut<br /><br />**Sonuç:**<br />- Politika listeye eklenir.<br />- API'lere bağlanabilir.<br />- Global politikaysa otomatik uygulanır. |
+
+**Koşullar** ve **Hata Mesajı Özelleştirme** panellerinin açıklaması için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Koşullar](/tr/concepts/temel-kavramlar/politika-nedir#koşullar) ve [Hata Mesajı Özelleştirme (Error Message Customization)](/tr/concepts/temel-kavramlar/politika-nedir#hata-mesajı-özelleştirme-error-message-customization) bölümlerini inceleyebilirsiniz.
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Akıştan Politika Kaldırma](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akıştan-politika-kaldırma) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) ve içe aktarma (Import) adımları için [Export/Import](/tr/admin/secrets-management/export-import) sayfasına bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akışa-politika-ekleme) bölümüne bakabilirsiniz.
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **KeyStore Yedekleme Entegrasyonu** | - Keystore servisinde versiyon etiketi tanımlayın.<br />- Politika kaydederken doğru etiketi seçin.<br />- Rotasyon sonrası eski anahtarı export ile arşivleyin. |
+| **Çok Katmanlı Koşul Yönetimi** | - Query Builder'da `AND/OR` bloklarını kullanın.<br />- Header ve Path kombinasyonlarıyla SOAP dışı istekleri hariç tutun.<br />- Koşul metnini `preview` ile doğrulayın. |
+| **Hata Senaryosu Test Otomasyonu** | - Error Message sekmesinde özel kod tanımlayın.<br />- Test otomasyonunda bu kodu doğrulayın.<br />- Başarısız denemeleri Apinizer loglarında takip edin. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **Anahtar Yönetimi** | **Kötü:** Tek keystore'ı tüm ortamlarla paylaşmak.<br />**İyi:** Ortam bazlı ayrı keystore'lar kullanmak.<br />**En İyi:** Ortam + kullanım amacı (işlem tipi) bazlı segmentasyon sağlamak. |
+| **Koşul Tasarımı** | **Kötü:** Koşul tanımlamadan tüm trafiğe uygulamak.<br />**İyi:** Path bazlı filtre eklemek.<br />**En İyi:** Path + Header + Method kombinasyonu ile minimum kapsam belirlemek. |
+| **Hata Görünürlüğü** | **Kötü:** Varsayılan hata mesajını değiştirmemek.<br />**İyi:** Genel hata mesajı eklemek.<br />**En İyi:** Hata kodunu ve destek iletişim bilgisini içeren JSON mesajı tanımlamak. |
+| **Sürüm Yönetimi** | **Kötü:** Değişiklikleri takip etmeden düzenlemek.<br />**İyi:** Değişiklikleri manuel dokümante etmek.<br />**En İyi:** Export dosyalarını sürüm kontrolüne alıp değişiklik tarihçesi çıkarmak. |
+| **Test Süreçleri** | **Kötü:** Canlı Ortam üzerinde test yapmak.<br />**İyi:** Test ortamında manuel doğrulama yapmak.<br />**En İyi:** Otomasyon scriptleriyle şifre çözme ve hata senaryolarını düzenli test etmek. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **Anahtar Saklama** | Keystore erişim yetkilerini kısıtlayın, anahtar dosyalarını şifreli depolama alanında tutun. |
+| **Sertifika Rotasyonu** | Sertifika yenileme takvimi oluşturun, rotasyon öncesi yeni keystore'u import edin ve politikayı hazırlayın. |
+| **Koşul Güvenliği** | Koşulları yalnızca güvenilir trafiğe göre yapılandırın, açık wildcard kullanmamaya çalışın. |
+| **Audit Logları** | Şifre çözme hatalarını ve başarı olaylarını loglayıp SIEM'e yönlendirin. |
+| **Yetki Denetimi** | Politika düzenleme ve deploy işlemlerini ROLE_MANAGE_GLOBAL_POLICIES ile sınırlayın. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Yanlış Keystore Seçimi** | **Neden kaçınılmalı:** Hatalı anahtar ile şifre çözme başarısız olur, 401 döner.<br />**Alternatif:** Keystore adını ortam adına göre standartlaştırıp seçimde doğrulayın. |
+| **Koşulsuz Uygulama** | **Neden kaçınılmalı:** Şifreli olmayan mesajlarda gereksiz işlem yükü oluşur.<br />**Alternatif:** WS-Security header kontrolü yapan koşul ekleyin. |
+| **Pasif Politika Takibi** | **Neden kaçınılmalı:** Gerekli olduğunda politika devre dışı kalmış olabilir.<br />**Alternatif:** Passive politikaları düzenli gözden geçirin, gerekirse silin. |
+| **Hata Mesajı Gizliliği** | **Neden kaçınılmalı:** Fazla teknik detay sızabilir.<br />**Alternatif:** Genel mesaj verip ayrıntıyı loglarda tutun. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+|--------|--------------|
+| **Mesaj Boyutu** | **Öneri:** Büyük SOAP gövdeleri için sıkıştırmayı etkinleştirin.<br />**Etki:** Şifre çözme sonrası aktarım süresi kısalır. |
+| **Koşul Değerlendirmesi** | **Öneri:** Koşullarda gereksiz regex kullanmayın.<br />**Etki:** Politika değerlendirme süresi azalır. |
+| **Keystore Erişimi** | **Öneri:** Keystore servisinin Cache süresini ayarlayın.<br />**Etki:** Anahtar erişiminde gecikme azalır, throttle riski düşer. |
+| **Eşzamanlı İstekler** | **Öneri:** Throttling ve Rate Limiting politikalarıyla birlikte kullanın.<br />**Etki:** Ani yüklenmelerde şifre çözme kuyruğu yönetilir. |
+| **Log Seviyesi** | **Öneri:** Debug loglarını yalnızca Geliştirme ortamında açın.<br />**Etki:** Canlı Ortam performansı korunur. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru | Cevap |
+|----------|----------|-----------|
+| **Genel** | WS Güvenlik Şifre Çözme politikası hangi mesaj türlerini destekler? | Politikayı SOAP tabanlı WS-Security `EncryptedData` ve `EncryptedKey` yapıları için kullanabilirsiniz; REST JSON mesajları desteklenmez. |
+| **Genel** | Politika pasif hale getirildiğinde ne olur? | Politika koşulları çalışmaz, şifre çözme yapılmaz; yapılandırma saklanır ve yeniden aktive edilebilir. |
+| **Teknik** | `allowCaseInsensitiveId` ne zaman aktif edilmeli? | Dış sistem `KeyIdentifier` değerlerini farklı büyük/küçük harf varyasyonlarıyla gönderiyorsa uyumsuzluğu gidermek için aktif edin. |
+| **Teknik** | Keystore değişikliği sonrası deploy gerekiyor mu? | Global politika için evet; değişiklik kaydedildikten sonra deploy edip bağlı API Proxy'lerde güncellenmesini sağlayın. |
+| **Kullanım** | Aynı API üzerinde birden fazla WS Güvenlik Şifre Çözme politikası kullanılabilir mi? | Aynı akışta yalnızca bir politika etkin olmalıdır; farklı Endpoint'ler için local kopyalar oluşturabilirsiniz. |
+| **Kullanım** | Hata mesajını nerede özelleştirebilirim? | Politika formundaki **Error Message Customization** sekmesinde statü kodu ve JSON gövdesini düzenleyebilirsiniz. |
+
+

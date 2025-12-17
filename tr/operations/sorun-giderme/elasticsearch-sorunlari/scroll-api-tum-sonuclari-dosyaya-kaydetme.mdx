@@ -1,0 +1,189 @@
+---
+title: "Scroll API ile Tüm Sorgu Sonucunu Bash Script ile Dosyaya Kaydetmek"
+description: "Elasticsearch'te 1000'den fazla kayıt içeren sorgu sonuçlarını Scroll API kullanarak alabilir ve bash script ile dosyaya kaydedebilir. Apinizer'da tutulan logları başka ortamlara aktarabilir, farklı ürünlerle inceleyebilir ve büyük veri setlerini veri kaybı olmadan dışa aktarabilir."
+---
+
+## Ön Gereksinim: JQ (JSON Processor) Kurulumu
+
+Bash script'in düzgün çalışabilmesi için JQ paketinin sunucuya kurulması gerekir.
+
+### 1. EPEL Deposunu Kurma
+
+```bash
+yum install epel-release -y
+```
+
+### 2. Sunucuyu Güncelleme
+
+```bash
+yum update -y
+```
+
+### 3. JQ (JSON Processor) Aracını Kurma
+
+```bash
+yum install jq -y
+```
+
+## Scroll Yapan Script
+
+<Note>
+Aşağıdaki script'in `script.sh` adıyla bir dizine kaydedilip, `chmod +x script.sh` komutu ile executable yapılması gerekir.
+</Note>
+
+```bash
+#!/bin/bash
+
+es_url='http://<ELASTICSEARCH_IP>:9200'
+index=apinizer-log-apiproxy-<XXXX>
+
+response=$(curl -X GET -s $es_url/$index/_search?scroll=1m -H 'Content-Type: application/json' -d @query.json)
+scroll_id=$(echo $response | jq -r ._scroll_id)
+hits_count=$(echo $response | jq -r '.hits.hits | length')
+hits_so_far=${hits_count}
+echo Got initial response with $hits_count hits and scroll ID $scroll_id
+
+# process first page of results here (ex. put the response into result.json)
+echo $response | jq . >> result.json
+
+while [ "$hits_count" != "0" ]; do
+
+  response=$(curl -X GET -s $es_url/_search/scroll -H 'Content-Type: application/json' -d "{ \"scroll\": \"1m\", \"scroll_id\": \"$scroll_id\" }")
+  scroll_id=$(echo $response | jq -r ._scroll_id)
+  hits_count=$(echo $response | jq -r '.hits.hits | length')
+  hits_so_far=$((hits_so_far + hits_count))
+  echo "Got response with $hits_count hits (hits so far: $hits_so_far), new scroll ID $scroll_id"
+
+  # process page of results (ex. put the response into result.json)
+  echo $response | jq . >> result.json
+done
+
+echo Done!
+
+#script reference: https://gist.github.com/toripiyo/8b14e8a387069bae372d49296b0077d7
+```
+
+## Örnek Sorgu
+
+<Note>
+Aşağıdaki sorgunun `query.json` adıyla `script.sh` dosyasıyla aynı dizine kaydedilmesi gerekir.
+
+Bu sorgunun Apinizer Elasticsearch adresine gönderilmesi gerektiğinden istek yapılan adres ve index adının kendi ortamınıza göre düzeltilmesi gerekir.
+</Note>
+
+```json
+{
+  "from": 0,
+  "size": 3000000,
+  "query": {
+    "bool": {
+      "filter": [
+        {
+          "bool": {
+            "filter": [
+              {
+                "bool": {
+                  "filter": [
+                    {
+                      "match": {
+                        "uok": {
+                          "query": "username",
+                          "operator": "OR",
+                          "prefix_length": 0,
+                          "max_expansions": 50,
+                          "fuzzy_transpositions": true,
+                          "lenient": false,
+                          "zero_terms_query": "NONE",
+                          "auto_generate_synonyms_phrase_query": true,
+                          "boost": 1.0
+                        }
+                      }
+                    }
+                  ],
+                  "adjust_pure_negative": true,
+                  "boost": 1.0
+                }
+              }
+            ],
+            "adjust_pure_negative": true,
+            "boost": 1.0
+          }
+        },
+        {
+          "bool": {
+            "filter": [
+              {
+                "bool": {
+                  "should": [
+                    {
+                      "term": {
+                        "pi": {
+                          "value": "6130d19b59f2007bff548d29",
+                          "boost": 1.0
+                        }
+                      }
+                    }
+                  ],
+                  "adjust_pure_negative": true,
+                  "boost": 1.0
+                }
+              },
+              {
+                "range": {
+                  "@timestamp": {
+                    "from": "now-4320m/m",
+                    "to": "now/m",
+                    "include_lower": true,
+                    "include_upper": true,
+                    "boost": 1.0
+                  }
+                }
+              }
+            ],
+            "adjust_pure_negative": true,
+            "boost": 1.0
+          }
+        }
+      ],
+      "adjust_pure_negative": true,
+      "boost": 1.0
+    }
+  },
+  "_source": {
+    "includes": [
+      "@timestamp",
+      "uok",
+      "fcrb",
+      "sc",
+      "pet",
+      "rt",
+      "tch",
+      "tcb",
+      "hr1ra",
+      "et",
+      "fcrh"
+    ],
+    "excludes": []
+  }
+}
+```
+
+<Info>
+Bu sorgu içerisinde yer alan alanların ne anlama geldiğine bakmak için [bu sayfayı](/tr/setup/elasticsearch/manuel-ilm-politikasi-ve-template-olusturma) ziyaret edebilirsiniz.
+</Info>
+
+## Script'in Çalıştırılması
+
+Script'i çalıştırmak için terminal'den `./script.sh` komutu çalıştırılır.
+
+Sonrasında aşağıdaki şekilde bilgi notları gelmeye başlar ve sonuçlar `result.json` dosyasında birikir.
+
+<Frame caption="Script Çalıştırma Örneği">
+  <img
+    src="/images/elasticsearch/scroll-api-output.png"
+    alt="Scroll API Script Çıktısı"
+    width="900"
+    height="400"
+    style={{ borderRadius: '0.5rem' }}
+  />
+</Frame>

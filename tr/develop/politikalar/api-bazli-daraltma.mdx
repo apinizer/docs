@@ -1,0 +1,235 @@
+---
+title: "API Bazlı Daraltma"
+description: "API'lere gelen istekleri kısa zaman aralıklarında (saniye/dakika) sınırlandırabilir, DDoS koruması sağlayabilir, burst protection uygulayabilir ve sistem kaynaklarını koruyabilirsiniz"
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+# Genel Bakış
+
+API Bazlı Throttling politikası, API'lere gelen isteklerin kısa zaman aralıklarında (saniye, dakika) sınırlandırılmasını sağlar. Bu politika ile:
+
+* Belirli bir zaman diliminde izin verilen maksimum istek sayısını kontrol edebilirsiniz.
+* Farklı hedefler için özel hız sınırları tanımlayabilirsiniz.
+* API'lerinizi aşırı yüklenmeye karşı koruyabilirsiniz.
+* Kullanıcı bazında veya değişken bazında hız sınırlaması uygulayabilirsiniz.
+
+<Info>
+**Throttling:** Kısa süreli (saniye/dakika) hız kontrolü sağlar, sadece cache kullanır, sistem yeniden başlatıldığında sayaçlar sıfırlanır, burst protection ve DDoS koruması için idealdir.
+
+**Kota:** Uzun dönemli (saat/gün/hafta/ay) toplam kullanım limitlerini yönetir, cache + veritabanı kombinasyonu kullanır, kalıcı veri depolama sağlar, faturalama ve abonelik yönetimi için kullanılır.
+</Info>
+
+## Amacı Nedir?
+
+* **Sistem Koruması ve Kaynak Yönetimi**: Backend sistemlerini aşırı yüklenmeye karşı korur, kaynak tükenmesini önler ve sunucu kapasitesinin adil kullanımını sağlar.
+* **DDoS ve Bot Saldırısı Önleme**: DDoS saldırıları, bot trafiği ve kötü niyetli istek bombardımanına karşı sistem güvenliğini sağlar.
+* **İş Modeli ve SLA Desteği**: Farklı kullanıcı segmentleri için özelleştirilmiş hizmet seviyeleri sunar (Free, Premium, Enterprise), servis seviyesi sözleşmelerini yerine getirir.
+* **Maliyet Kontrolü ve Performans Optimizasyonu**: Cloud servis maliyetlerini optimize eder, gereksiz API çağrılarını sınırlar, sonsuz döngü ve yanlış implementasyonları erken tespit eder.
+
+## Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak bilgileri (IP, kullanıcı, API key vb.) tespit edilir.
+2. **Politika Kontrolü**: API bazlı Hız Sınırlama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   * Politika aktif mi (active=true)?
+   * Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   * Variable kullanılıyor mu yoksa default ayarlarda mı?
+3. **Throttling Key Oluşturma ve Sayaç Kontrolü**: Her istek için benzersiz bir throttling anahtarı oluşturulur (format: `throttling:{policy_id}:{apply_by_value}:{window}`). Apply By parametresi varsa (IP adresi, kullanıcı adı, API key vs.), bu değer anahtara dahil edilir. Cache'den mevcut istek sayacı sorgulanır. Detail List tanımlıysa, hedef değer ile karşılaştırılır ve eşleşen kuralın limiti kullanılır, yoksa varsayılan limit uygulanır.
+4. **Karar Verme**:
+   **Limit Aşılmadıysa:**
+   * Sayaç 1 artırılır ve cache'e senkron olarak yazılır.
+   * İstek backend'e iletilir.
+   * Rate limit statistics aktifse response header'larına kota bilgisi eklenir (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset).
+   
+   **Limit Aşıldıysa:**
+   * HTTP 403 hatası dönülür, akış kesilir, hata hattına geçer.
+   
+   **Cache'e erişim hatası olursa:**
+   * Cache Error Handling politikası devreye girer (ALLOW: akış devam eder, REJECT: akış kesilir).
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+# Veri Depolama Stratejisi
+
+API Bazlı Throttling politikası, yüksek performans için sadece cache bazlı depolama kullanır:
+
+**Cache - Tek Katman:**
+
+* Tüm throttling sayaçları sadece cache'de tutulur.
+* Her API isteğinde senkron olarak güncellenir.
+* Minimum gecikme ve maksimum performans sağlar.
+* Dağıtık sistemlerde tüm Gateway instance'ları aynı sayaçları paylaşır.
+
+**⚠️ Önemli: Veritabanı Kullanımı Yoktur**
+
+* Throttling politikası veritabanına yazma yapmaz.
+* Veriler geçicidir ve cache'in TTL (Time-To-Live) süresi dolduğunda otomatik silinir.
+* Sistem yeniden başlatıldığında throttling sayaçları sıfırlanır.
+* Bu tasarım kısa süreli hız kontrolü için yeterlidir ve maksimum performans sağlar.
+
+# Özellikler ve Yetenekler
+
+## Temel Özellikler
+
+* **Mesaj Sayısı Limiti**: Belirli bir zaman diliminde izin verilen maksimum istek sayısını belirler (minimum 1, tam sayı).
+* **Esnek Zaman Aralığı Desteği**: Saniye ve dakika bazında zaman periyotları tanımlama. Periyot uzunluğu çarpanı ile özelleştirilebilir zaman aralıkları (örn: 3 saniye, 5 dakika).
+* **Apply By Değişkeni**: Throttling'in hangi kritere göre uygulanacağını belirler (IP adresi, kullanıcı adı, API Key veya seçeceğiniz herhangi bir header/parametre/body değeri bazlı). Her değişken değeri için ayrı sayaç tutulur.
+* **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması kullanıma hazır şekilde bekler.
+* **Koşul Bazlı Uygulama**: Condition ile politikanın hangi durumlarda uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+## İleri Düzey Özellikler
+
+* **Hedef Bazlı Farklı Limitler (Detail List)**: Belirli kurallara göre belirli limitler belirtmek (kullanıcı seviyeleri, IP aralıkları, API key'ler). Regex desteği ile esnek hedef eşleşmeleri. Her hedef için ayrı mesaj sayısı ve zaman aralığı.
+* **Interval Window Type Desteği**: SLIDING (Kayan Pencere) - Her istek zamanından ileriye doğru pencere uygulanır, daha hassas kontrol sağlanır. FIXED (Sabit Pencere) - Belirli zaman dilimlerinde sayaç sıfırlanır, daha performanslı.
+* **Cache Bağlantı ve Hata Yönetimi**: Cache sunucusu bağlantı timeout süresi ayarlama (saniye). Cache erişilemezse davranış belirleme: ALLOW (kullanılabilirlik öncelikli) veya REJECT (güvenlik öncelikli).
+* **Rate Limit İstatistikleri**: Response header'larında kalan kota bilgisi gösterme (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset). Client'ların kendi kotalarını takip edebilmesi.
+* **Dağıtık Mimari Desteği**: Merkezi cache kullanımı sayesinde birden fazla Gateway instance'ı aynı sayaçları paylaşır. Kullanıcı hangi gateway'e bağlanırsa bağlansın tutarlı hız sınırlama sağlanır.
+* **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) veya API Proxy'lere import etme.
+* **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme ve Proxy Group içerisinde politika kullanımıyla merkezi güncelleme ve deploy işlemleri.
+* **Deploy ve Versiyonlama**: API Proxy'lerdeki Deployment History özelliği ile versiyonlama yapılması. Global politika veya Policy Group kullanımı ile hangi API Proxy'lerde kullanıldığını görme.
+
+# Kullanım Senaryoları
+
+API Bazlı Throttling politikası, API trafiğini yönetmek ve sistem kaynaklarını korumak amacıyla istek oranlarını kontrol eder. Aşağıdaki örnek senaryolar, farklı kullanım durumlarında bu politikanın nasıl uygulanabileceğini göstermektedir. Her senaryo, belirli bir ihtiyaca karşılık gelen konfigürasyon örneğiyle birlikte açıklanmıştır.
+
+| **Senaryo** | **Durum** | **Çözüm (Politika Uygulaması)** | **Beklenen Davranış / Sonuç** |
+|-------------|-----------|----------------------------------|-------------------------------|
+| **Basit API Rate Limiting** | Tüm kullanıcılar için genel bir hız sınırı koymak istiyorsunuz | Mesaj Sayısı: 100, Periyot: 1 Dakika, Apply By: Boş, Interval Window Type: SLIDING | Her kullanıcı dakikada maksimum 100 istek atabilir. Tüm istekler aynı limiti paylaşır |
+| **IP Bazlı Hız Sınırlama** | Her IP adresi için ayrı limit belirlemek istiyorsunuz | Apply By: `{client.ip}`, Mesaj Sayısı: 50, Periyot: 1 Dakika | Her IP adresi dakikada maksimum 50 istek atabilir. IP'ler birbirinden bağımsız sayılır |
+| **Kullanıcı Seviyesi Bazlı Farklı Limitler** | Premium kullanıcılara daha yüksek limit vermek istiyorsunuz | Apply By: `{user.tier}`, Mesaj Sayısı: 100, Detail List: premium=1000/dk, enterprise=5000/dk, free=100/dk | Free: 100 istek/dk, Premium: 1000 istek/dk, Enterprise: 5000 istek/dk |
+| **Belirli Endpoint'ler İçin Farklı Limitler** | Resource-intensive endpoint'lere daha düşük limit uygulamak istiyorsunuz | Politika 1: Mesaj: 10/dk, Koşul: `{request.path} CONTAINS '/api/heavy'`. Politika 2: Mesaj: 100/dk, Koşul: diğerleri | `/api/heavy/*` endpoint'leri 10 istek/dk, diğer endpoint'ler 100 istek/dk sınırına sahip olur |
+| **API Key Bazlı Throttling** | Her API key için ayrı kota tanımlamak ve müşterilerin kotalarını takip etmelerini sağlamak istiyorsunuz | Apply By: `{request.header.X-API-Key}`, Mesaj Sayısı: 500, Periyot: 1 Saat, Show Rate Limit Statistics: Aktif | Her API key saatte 500 istek atabilir. Response header'larında kalan kota gösterilir (X-RateLimit-Remaining) |
+| **İç ve Dış Kullanıcılar İçin Farklı Limitler** | İç ağdan gelen isteklere daha yüksek limit vermek istiyorsunuz | Apply By: `{client.ip}`, Mesaj: 100/dk (varsayılan), Detail List: 192.168.*=10000/dk (regex), 10.*=10000/dk (regex) | İç ağ (192.168.*, 10.*) 10000 istek/dk, dış kullanıcılar 100 istek/dk sınırına sahip olur |
+| **Burst Protection ile Günlük Kota** | Hem anlık burst koruması hem de günlük toplam kota uygulamak istiyorsunuz | Throttling Politikası: 10 istek/saniye (SLIDING)<br />Kota Politikası: 10000 istek/gün (FIXED) | Throttling anlık hız kontrolü sağlar (10 istek/sn), Kota günlük toplam kullanımı kontrol eder (10K istek/gün). İki politika birlikte kullanılarak hem kısa vadeli hem uzun vadeli koruma sağlanır |
+
+# Politika Parametrelerini Yapılandırma
+
+Bu bölümde, yeni bir **API Based Throttling** politikasının oluşturulması için kullanılan alanlar ve yapılandırma adımları yer almaktadır. Politika parametreleri, isteklerin hangi ölçüte göre sınırlandırılacağını, zaman penceresinin nasıl hesaplanacağını ve limit aşımlarında sistemin nasıl davranacağını belirler.
+
+## Yeni API bazlı Hız Sınırlama Politikası Oluşturma
+
+<img src="/images/develop/politikalar/api-bazli-daraltma-1.png" alt="API Bazlı Hız Sınırlama Politikası" width="1000" />
+
+## Yapılandırma Adımları
+
+| **Adım** | **Açıklama / İşlem** |
+|----------|----------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → API Based Throttling** bölümüne gidin.<br />- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br /><br />**Name (İsim) Zorunlu:**<br />Örnek: `Production_API_Throttling`<br />- Benzersiz isim girin, boşlukla başlamaz.<br />- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br /><br />**Description (Açıklama):**<br />Örnek: "Canlı ortam için dakikada 100 istek limiti"<br />- Maks. 1000 karakter.<br />- Politikanın amacını açıklayın. |
+| **Adım 3: Throttling Ayarlarını Yapılandırma** | **Rate Limit İstatistiklerini Response Header'da Göster:** Varsayılan değeri kapalı.<br />- Toggle switch ile aktif/pasif yapın.<br />- Aktif olduğunda response header'larında `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` bilgileri gösterilir.<br /><br />**Uygulama Değişkeni (Apply By):** Varsayılan değeri kapalı.<br />- "Değişken Seç" butonuna tıklayın.<br />- Throttling'in hangi kritere göre uygulanacağını belirler.<br />- Değişken seçilmezse tüm istekler aynı limiti paylaşır.<br /><br />**Mesaj Sayısı:** Zorunlu, Minimum: 1.<br />- İzin verilen maksimum istek sayısı.<br />- Örnek: 100<br /><br />**Periyot Uzunluğu:** Zorunlu, Minimum: 1.<br />- Zaman aralığının çarpanı.<br />- Örnek: 1<br /><br />**Zaman Birimi:** Zorunlu<br />- Saniye, Dakika<br />- Örnek: Dakika<br /><br />⚠️ Not: Throttling politikası kısa süreli hız kontrolü içindir. Saat veya gün bazlı uzun dönem kontrolü için API Based Quota politikasını kullanın. |
+| **Adım 4: Hedef Bazlı Kurallar Tanımlama (İsteğe Bağlı)** | **Hedef Bazlı Throttling Kuralları (Target-Specific Throttling Rules):**<br />- Farklı hedef değerler için özel limitler tanımlayın. **[+]** butonuna tıklayarak yeni satır ekleyin.<br /><br />**Tablo Kolonları:**<br />- **Hedef Değer:** Zorunlu. Değişken değeri (örn: "premium", "192.168.1.*", "test_user")<br />- **Regex İfade:** Hedef değerin regex olup olmadığı<br />- Toggle (Boolean)<br />- **Mesaj Sayısı:** Bu hedef için istek limiti<br />- Number (Min: 1)<br />- **Periyot Uzunluğu:** Zaman aralığı çarpanı<br />- Number (Min: 1)<br />- **Zaman Birimi:** Saniye/Dakika/Saat/Gün<br />- Dropdown<br /><br />**Kullanım Senaryoları:**<br />- Premium kullanıcılara daha yüksek limit: `premium` → 1000 istek/dakika<br />- Belirli IP aralıkları: `192.168.*` (regex aktif) → 500 istek/dakika<br />- Test kullanıcıları: `test_user` → 10000 istek/dakika<br /><br />**Silme:** Satır sonundaki çöp kutusu ikonu ile satırı kaldırın. |
+| **Adım 5: Gelişmiş Ayarları Yapılandırma** | **Interval Window Type:** Zorunlu<br />- **SLIDING (Kayan Pencere):** Her istek zamanından geriye doğru pencere uygulanır, daha hassas kontrol. Örnek: Son 60 saniyedeki istek sayısı.<br />- **FIXED (Sabit Pencere):** Belirli zaman dilimlerinde sıfırlanır, daha performanslı. Örnek: Her dakika başında sayaç sıfırlanır.<br /><br />**Cache Bağlantı Timeout:** Zorunlu, Minimum: 1 saniye<br />- Cache sunucusuna bağlantı timeout süresi.<br />- Timeout durumunda hata yönetimi politikası devreye girer.<br />- Önerilen: 1-3 saniye<br /><br />**Cache Hata Yönetimi Tipi:** Zorunlu<br />- **REJECT:** İsteği reddet, hata dön. Güvenlik öncelikli yaklaşım. SLA garantisi önemli sistemler için.<br />- **ALLOW:** İsteğe izin ver, devam et. Kullanılabilirlik öncelikli yaklaşım. Cache geçici arızalarda servis devam eder.<br /><br />**Interval Window Hesaplama (FIXED):**<br /><br />**Bir dakikadan kısa aralıklar için (örn: 10 saniye):**<br />- Formül: `Pencere Başlangıcı = Dakika Başlangıcı + (Geçen Periyotlar × Periyot Süresi)`<br />- Örnek: Saat 14:37:25'teki bir istek, 10 saniyelik periyotta → 14:37:20-14:37:29 penceresine aittir<br /><br />**Bir dakika veya daha uzun aralıklar için (örn: 5 dakika):**<br />- Formül: `Pencere Başlangıcı = Saat Başlangıcı + (Geçen Periyotlar × Periyot Süresi)`<br />- Örnek: Saat 14:37'deki bir istek, 5 dakikalık periyotta → 14:35:00-14:39:59 penceresine aittir<br /><br />**Performans Önerisi:** Yüksek trafikli API'lerde FIXED window tercih edilmelidir. SLIDING window her istek için cache okuması yaparken, FIXED sadece sayaç artırımı yapar ve daha performanslıdır. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br />- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br /><br />**Örnekler:**<br />- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br />- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br />- Endpoint bazlı: `Path = /api/admin/*`<br /><br />Koşul tanımlamazsa politika her zaman aktif<br /><br /> |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br />- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br /><br />**Varsayılan:**<br />`{ "statusCode": 429, "message": "Too Many Requests" }`<br /><br />**Özel:**<br />`{ "statusCode": 429, "errorCode": "THROTTLE_LIMIT_EXCEEDED", "message": "Dakikalık istek limitiniz aşıldı. Lütfen 60 saniye sonra tekrar deneyin." }` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br /><br />**Kontrol Listesi:**<br />Benzersiz isim. Zorunlu alanlar dolu. En az bir mesaj sayısı ve zaman aralığı tanımlı<br /><br />**Sonuç:**<br />- Politika listeye eklenir.<br />- API'lere bağlanabilir.<br />- Global politikaysa otomatik uygulanır. |
+
+**Koşullar** ve **Hata Mesajı Özelleştirme** panellerinin açıklaması için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Koşullar](/tr/concepts/temel-kavramlar/politika-nedir#koşullar) ve [Hata Mesajı Özelleştirme (Error Message Customization)](/tr/concepts/temel-kavramlar/politika-nedir#hata-mesajı-özelleştirme-error-message-customization) bölümlerini inceleyebilirsiniz.
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Akıştan Politika Kaldırma](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akıştan-politika-kaldırma) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) ve içe aktarma (Import) adımları için [Export/Import](/tr/admin/secrets-management/export-import) sayfasına bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akışa-politika-ekleme) bölümüne bakabilirsiniz.
+
+## İleri Düzey Özellikler
+
+Bu bölümde kullanıcı, **API Based Throttling** politikasının gelişmiş yönetim kabiliyetlerini kullanarak daha esnek, dinamik ve kurumsal seviyede kontrol elde eder.
+Değişken yönetimi, hedefe özel kural tanımları, koşullu aktivasyon ve özelleştirilebilir hata mesajları gibi ileri düzey özellikler sayesinde politikalar dinamik şekilde uyarlanabilir, farklı senaryolara göre optimize edilebilir.
+
+| **Özellik** | **Açıklama ve Adımlar** |
+|-------------|-------------------------|
+| **Regex ile Hedef Eşleştirme** | - Detail List tablosunda yeni bir satır ekleyin.<br />- Hedef Değer alanına regex pattern girin (örn: `premium_user_.*`).<br />- Regex İfade toggle'ını aktif edin ve özel limit tanımlayın.<br />- Bu sayede birden fazla hedef tek bir kuralla eşleştirilir. |
+| **Çoklu Politika Kombinasyonu** | - Bir API'ye birden fazla throttling politikası atayın (örn: burst protection + günlük kota).<br />- İlk politika: 10 istek/saniye (SLIDING) - burst koruması.<br />- İkinci politika: 10000 istek/gün (FIXED) - günlük kota.<br />- Tüm politikalar sırayla çalışır ve birbirini tamamlar. |
+| **Dinamik Variable Kullanımı** | - Custom header, JWT claim veya context değişkeni oluşturun.<br />- Apply By alanında bu değişkeni seçin (örn: `{jwt.user_tier}`).<br />- Her değişken değeri için ayrı sayaç tutulur, dinamik segmentasyon sağlanır. |
+
+# İpuçları ve En İyi Uygulamalar
+
+## Yapılması Gerekenler ve En İyi Uygulamalar
+
+| **Kategori** | **Açıklama / Öneriler** |
+|--------------|-------------------------|
+| **Anlamlı İsimler Kullanın** | **Kötü:** `policy1`, `rate-limit`, `throttle-test`<br />**İyi:** `Standard_User_Throttle`, `Premium_Service_Limit`, `Emergency_Burst_Control` |
+| **Limit Değerleri Belirleme** | **Kötü:** Çok düşük limitler (5 istek/dakika) - normal kullanıcıları engeller<br />**İyi:** Gerçek kullanım istatistiklerine göre limitler (100 istek/dakika)<br />**En İyi:** A/B testi ile optimal limitleri belirleyin, kullanıcı geri bildirimlerini değerlendirin ve metriklerle sürekli optimize edin |
+| **Window Type Seçimi** | **Kötü:** Her senaryo için FIXED kullanmak - hassas kontrol eksikliği<br />**İyi:** Performans kritikse FIXED, hassas kontrol gerekiyorsa SLIDING<br />**En İyi:** Kritik endpoint'ler için SLIDING, yüksek trafikli endpoint'ler için FIXED kullanarak dengeli yaklaşım benimseyin |
+| **Apply By Değişkeni** | **Kötü:** Değişken kullanmamak - tüm kullanıcılar aynı limiti paylaşır<br />**İyi:** IP bazlı throttling - her IP için ayrı sayaç<br />**En İyi:** Kullanıcı ID veya API Key ile kişiselleştirilmiş limitler, adil kaynak dağılımı ve abuse önleme |
+| **Detail List Kullanımı** | **Kötü:** Tüm kullanıcılar için tek limit - esneklik yok<br />**İyi:** Premium/Free ayrımı - iki seviye<br />**En İyi:** Çok katmanlı tier sistemi (Free/Basic/Premium/Enterprise), regex ile dinamik gruplar, özel müşteriler için custom limitler |
+| **Rate Limit Header'ları** | **Kötü:** Header'ları göstermemek - kullanıcılar limit aşımını beklenmedik şekilde yaşar<br />**İyi:** Sadece external API'lerde header göstermek<br />**En İyi:** Tüm throttling'lerde header aktif, dokümantasyonda client'lara nasıl kullanacakları anlatılmış, retry-after bilgisi sağlanmış |
+
+# Throttling ve Kota Politikalarını Birlikte Kullanma
+
+Throttling ve Kota politikaları birbirini tamamlar ve birlikte kullanıldığında en etkili koruma sağlar:
+
+**Throttling (Kısa Vadeli Koruma):**
+
+* Saniye/dakika bazlı hız kontrolü
+* Burst saldırılarını anında engeller
+* Sadece cache kullanır, maksimum performans
+* Sistem yeniden başlatmalarından etkilenir
+
+**Kota (Uzun Vadeli Koruma):**
+
+* Saat/gün/ay bazlı toplam kullanım kontrolü
+* Faturalama ve abonelik yönetimi
+* Cache + veritabanı, kalıcı veri
+* Raporlama ve analitik desteği
+
+**Örnek Kombinasyon:**
+
+```
+API'ye Throttling: 100 istek/dakika (burst protection)
+
+API'ye Kota: 100.000 istek/ay (subscription limit)
+```
+
+Bu sayede hem anlık saldırılara hem de uzun vadeli kötüye kullanıma karşı korunmuş olursunuz.
+
+# Güvenlik En İyi Uygulamaları
+
+| **Güvenlik Alanı** | **Açıklama / Uyarılar** |
+|--------------------|-------------------------|
+| **DDoS Koruması** | Burst protection için saniye bazında düşük limitler tanımlayın (örn: 10 istek/saniye).<br />Uzun süreli saldırıları engellemek için Throttling ile birlikte Kota politikası kullanın (örn: Throttling: 10/sn + Kota: 10000/gün).<br />Şüpheli IP'ler için daha sıkı limitler uygulayın.<br />Sadece Throttling kullanıyorsanız sistem yeniden başlatıldığında sayaçlar sıfırlanacağını unutmayın. |
+| **API Key Sızıntısı Koruması** | API Key bazlı throttling ile sızan key'lerin zararını sınırlayın.<br />Anormal kullanım paternlerini tespit etmek için monitoring kurun.<br />Key rotation stratejisi uygulayın. |
+| **Cache Güvenliği** | Cache sunucusunu güvenli ağda tutun.<br />Cache hatalarında varsayılan olarak REJECT tercih edin (güvenlik öncelikli). |
+| **Koşullu Sınırlama** | Production ortamında daha sıkı limitler uygulayın.<br />Test/Dev ortamları için ayrı politikalar oluşturun.<br />Internal IP'ler için gevşek, external IP'ler için sıkı limitler. |
+| **Monitoring ve Alerting** | 429 hata oranlarını sürekli izleyin.<br />Limit aşımlarında alert oluşturun.<br />Anormal trafik artışlarını tespit edecek metrikler kurun. |
+
+# Kaçınılması Gerekenler
+
+| **Kategori** | **Açıklama / Uyarılar** |
+|--------------|-------------------------|
+| **Çok Yüksek Cache Timeout** | **Neden kaçınılmalı:** Cache sunucusu yanıt vermediğinde uzun süre beklenir, request latency artar, kullanıcı deneyimi bozulur<br />**Alternatif:** 1-3 saniye arası timeout kullanın, cache sağlığını monitoring ile takip edin, failover mekanizması kurun |
+| **ALLOW Modu Her Yerde Kullanımı** | **Neden kaçınılmalı:** Cache hatalarında throttling devre dışı kalır, güvenlik açığı oluşur, abuse saldırıları başarılı olabilir<br />**Alternatif:** Kritik sistemlerde REJECT kullanın, cache high availability sağlayın, sadece read-only API'lerde ALLOW tercih edin |
+| **Değişken Kullanmadan Hedef Kuralları** | **Neden kaçınılmalı:** Apply By olmadan Detail List çalışmaz, hedef eşleştirmesi yapılamaz, kurallar etkisiz kalır<br />**Alternatif:** Mutlaka Apply By değişkeni tanımlayın, değişken değerleri ile hedef değerleri eşleştirin |
+| **Çok Karmaşık Regex Kullanımı** | **Neden kaçınılmalı:** Her istek için regex işlenir, performans düşer, CPU kullanımı artar, latency eklenir<br />**Alternatif:** Basit string eşleştirme kullanın, gerekmedikçe regex aktif etmeyin, prefix/suffix kontrolü tercih edin |
+
+# Performans İpuçları
+
+| **Kriter** | **Öneri / Etki** |
+|------------|------------------|
+| **FIXED Window Tercihi** | **Öneri:** Yüksek trafikli API'lerde FIXED window kullanın, saniye bazında SLIDING yerine dakika bazında FIXED tercih edin<br />**Etki:** Cache okuması azalır, işlem maliyeti düşer, throughput %20-40 artar |
+| **Cache Key Expiration** | **Öneri:** Throttling için cache key'lerde uygun TTL değerleri kullanın, periyot süresi + 10 saniye buffer ekleyin (örn: 60 saniye periyot için 70 saniye TTL)<br />**Etki:** Gereksiz veri birikmesi önlenir, cache memory kullanımı optimize edilir, eski pencere verilerinin manuel silinmesine gerek kalmaz |
+| **Detail List Optimizasyonu** | **Öneri:** Detail List'i 10-15 kuralla sınırlayın, sık kullanılan kuralları üstte tutun, gereksiz regex kullanmayın<br />**Etki:** Kural eşleştirme hızlanır, CPU kullanımı azalır, ortalama latency 5ms'den az kalır |
+| **Cache Key Stratejisi** | **Öneri:** Kısa ve unique key formatları kullanın, gereksiz bilgi key'e eklemeyin, key expiration süreleri optimize edin<br />**Etki:** Cache memory kullanımı azalır, key lookup hızlanır, performansı artar |
+| **Monitoring ve Tuning** | **Öneri:** Throttling metriklerini toplayın (hit rate, rejection rate), latency dağılımını analiz edin, cache performansını izleyin<br />**Etki:** Bottleneck'ler erken tespit edilir, optimal konfigürasyon belirlenir, proaktif optimizasyon yapılır |
+
+# Sık Sorulan Sorular (SSS)
+
+| **Kategori** | **Soru** | **Cevap** |
+|--------------|--------------|---------------|
+| **Genel** | Bir API'ye birden fazla throttling politikası eklenebilir mi? | Evet, birden fazla throttling politikası eklenebilir.<br />Örneğin bir politika saniye bazında burst protection sağlarken (10 istek/saniye), diğeri günlük toplam kotayı kontrol edebilir (10000 istek/gün).<br />Tüm politikalar sırayla çalışır ve herhangi biri limit aşımı tespit ederse istek reddedilir. |
+| **Genel** | Detail List olmadan Apply By kullanılabilir mi? | Evet, Apply By değişkeni tek başına kullanılabilir.<br />Bu durumda her değişken değeri için politikada tanımlanan varsayılan limit uygulanır.<br />Detail List, belirli değişken değerleri için farklı limitler tanımlamak istediğinizde kullanılır. |
+| **Teknik** | Cache sunucusu neden gereklidir? | Throttling sayaçlarını tutmak için merkezi bir cache sunucusu kullanılır.<br />Dağıtık sistemlerde (birden fazla Gateway instance) tutarlı sayım için gereklidir.<br />Cache olmadan her Gateway kendi sayacını tutar ve limitler doğru uygulanamaz. |
+| **Teknik** | Throttling verileri neden veritabanına yazılmıyor? | Throttling kısa süreli (saniye/dakika) hız kontrolü sağlar ve yüksek performans gerektirir.<br />Veritabanı yazma işlemi her istek için 5-20ms gecikme ekler, bu da throttling'in amacını bozar.<br />Cache-only yaklaşım 1ms'den az gecikme ile çalışır.<br />Veriler geçicidir ve sistem yeniden başlatıldığında sıfırlanır, bu kısa vadeli limitler için kabul edilebilir bir durumdur.<br />Uzun vadeli kullanım takibi gerekiyorsa API Based Quota politikası kullanılmalıdır. |
+| **Teknik** | Sistem yeniden başlatıldığında throttling sayaçları ne olur? | Throttling sadece cache kullandığı için sistem yeniden başlatıldığında veya cache temizlendiğinde tüm sayaçlar sıfırlanır.<br />Bu tasarım gereğidir ve kısa süreli hız kontrolü için sorun oluşturmaz.<br />Pencere süreleri zaten kısa (saniye/dakika) olduğu için kullanıcı deneyimini etkilemez.<br />Kalıcı sayaç tutulması gerekiyorsa Kota politikası kullanılmalıdır. |
+| **Kullanım** | Saat veya gün bazlı throttling yapabilir miyim? | Teknik olarak mümkün olsa da önerilmez.<br />Throttling kısa süreli hız kontrolü (saniye/dakika) için tasarlanmıştır.<br />Saat veya gün bazlı kontrole ihtiyacınız varsa API Based Quota politikasını kullanın.<br />Quota politikası veritabanı desteği ile uzun vadeli limitleri daha güvenilir şekilde yönetir ve faturalama için gerekli kalıcılığı sağlar. |
+| **Teknik** | SLIDING ve FIXED window arasındaki fark nedir? | SLIDING: Her istek anında geriye doğru pencere açar (son 60 saniye). Daha hassas kontrol ama daha fazla cache okuması.<br />FIXED: Belirli zaman dilimlerinde sıfırlanır (her dakika başı). Daha performanslı ama burst'lere daha az duyarlı. |
+| **Kullanım** | Rate limit header'larını göstermezsem ne olur? | Politika normal çalışır ancak client'lar kalan kotalarını göremez.<br />Bu durumda kullanıcılar limit aşımını sadece 429 hatası aldıklarında anlar.<br />Header'lar aktifse client'lar proaktif olarak request rate'lerini ayarlayabilir ve daha iyi kullanıcı deneyimi sağlanır. |
+| **Kullanım** | Kullanıcı limitini aştığında ne olur? | HTTP 429 (Too Many Requests) hatası dönülür ve istek işlenmez.<br />Rate limit header'ları aktifse response'da X-RateLimit-Reset bilgisi ile ne zaman tekrar deneyebileceği belirtilir.<br />Özel hata mesajı tanımlanmışsa o mesaj gösterilir. |
+

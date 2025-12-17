@@ -19,24 +19,24 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 ## 📖 Dokümantasyon Yapısı
 
 ### Genel Bakış
-- **[Apinizer Nedir?](/tr/apinizer-anlama/apinizer-nedir)** - Platform genel bakış ve ürün ailesi
-- **[Temel Kavramlar](/tr/apinizer-anlama/temel-kavramlar/api-proxy-group.mdx)** - API Proxy, Policy, Message Flow ve diğer temel kavramlar
-- **[Mimari ve Deployment](/tr/apinizer-anlama/mimari)** - Sistem mimarisi ve deployment topolojileri
+- **[Apinizer Nedir?](/tr/concepts/apinizer-nedir)** - Platform genel bakış ve ürün ailesi
+- **[Temel Kavramlar](/tr/concepts/temel-kavramlar/api-proxy-group.mdx)** - API Proxy, Policy, Message Flow ve diğer temel kavramlar
+- **[Mimari ve Deployment](/tr/concepts/mimari)** - Sistem mimarisi ve deployment topolojileri
 
 ### Geliştirici Dokümantasyonu
-- **[API Proxy Oluşturma](/tr/gelistirici/api-proxy-olusturma/api-creator-db-api-olusturma.mdx)** - REST, SOAP, gRPC, WebSocket API Proxy oluşturma
-- **[Politika Yönetimi](/tr/gelistirici/politikalar/api-bazli-daraltma.mdx)** - Güvenlik, doğrulama, trafik yönetimi politikaları
+- **[API Proxy Oluşturma](/tr/develop/api-proxy-olusturma/api-creator-db-api-olusturma.mdx)** - REST, SOAP, gRPC, WebSocket API Proxy oluşturma
+- **[Politika Yönetimi](/tr/develop/politikalar/api-bazli-daraltma.mdx)** - Güvenlik, doğrulama, trafik yönetimi politikaları
 - **[Monitoring ve Analytics](/tr/analytic/analytics)** - API performans izleme ve analiz
 
 ### Yönetici Dokümantasyonu
-- **[Kullanıcı ve Erişim Yönetimi](/tr/admin/kullanici-erisim-yonetimi/genel-bakis.mdx)** - Kullanıcı, rol ve izin yönetimi
-- **[Sistem Ayarları](/tr/admin/sistem-ayarlari/genel-bakis.mdx)** - Platform konfigürasyonu ve ayarlar
-- **[Monitoring ve Alerting](/tr/izleme/izleme-genel-bakis)** - Sistem izleme ve uyarı yönetimi
+- **[Kullanıcı ve Erişim Yönetimi](/tr/admin/user-access-management/genel-bakis.mdx)** - Kullanıcı, rol ve izin yönetimi
+- **[Sistem Ayarları](/tr/admin/system-settings/genel-bakis.mdx)** - Platform konfigürasyonu ve ayarlar
+- **[Monitoring ve Alerting](/tr/monitor/izleme-genel-bakis)** - Sistem izleme ve uyarı yönetimi
 
 ### Kurulum ve Operasyon
-- **[Kurulum Kılavuzu](/tr/kurulum/genel-bakis)** - Kubernetes, MongoDB, Elasticsearch kurulumları
-- **[Bakım ve Operasyon](/tr/operasyon/genel-bakis.mdx)** - Veritabanı yönetimi ve yönetici kılavuzları
-- **[Sorun Giderme](/tr/operasyon/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx)** - Yaygın sorunlar ve çözümleri
+- **[Kurulum Kılavuzu](/tr/setup/genel-bakis)** - Kubernetes, MongoDB, Elasticsearch kurulumları
+- **[Bakım ve Operasyon](/tr/operations/genel-bakis.mdx)** - Veritabanı yönetimi ve yönetici kılavuzları
+- **[Sorun Giderme](/tr/operations/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx)** - Yaygın sorunlar ve çözümleri
 
 ## 🛠️ Yerel Geliştirme
 
@@ -84,7 +84,7 @@ Dokümantasyona katkıda bulunmak için:
 
 - **Demo Ortamı**: [demo.apinizer.com](https://demo.apinizer.com/)
 - **Ana Web Sitesi**: [apinizer.com](https://apinizer.com)
-- **Destek**: Dokümantasyon içindeki [Sorun Giderme](/tr/operasyon/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) bölümüne bakın
+- **Destek**: Dokümantasyon içindeki [Sorun Giderme](/tr/operations/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) bölümüne bakın
 
 ## 📄 Lisans
 
@@ -93,8 +93,8 @@ Bu dokümantasyon Apinizer'a aittir. Detaylar için [LICENSE](LICENSE) dosyasın
 ## 🤝 Yardım
 
 Sorularınız için:
-- Dokümantasyon içindeki [Sorun Giderme](/tr/operasyon/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) bölümüne bakın
-- [Sorun Giderme](/tr/operasyon/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) sayfasını inceleyin
+- Dokümantasyon içindeki [Sorun Giderme](/tr/operations/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) bölümüne bakın
+- [Sorun Giderme](/tr/operations/sorun-giderme/kubernetes-docker-containerd-sorunlari.mdx) sayfasını inceleyin
 
 ---
 

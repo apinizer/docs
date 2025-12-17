@@ -1,0 +1,368 @@
+---
+title: Apinizer Gateway için Prometheus Kurulumu ve Scraping Yapılandırması
+description: "Apinizer Gateway'in metriklerini Prometheus'a entegre etmek için gerekli kurulum ve yapılandırma adımlarını sağlar. Prometheus'un Gateway metriklerini toplaması için sabit (constant) ve dinamik (dynamic) scraping yöntemlerini destekler. Gateway metrikleri 9091 portu üzerinden sunulur ve Prometheus'un Kubernetes ortamında pod'ları otomatik olarak keşfetmesi veya sabit servis adresleri üzerinden metrik toplaması için gerekli yapılandırmaları içerir."
+---
+
+<Info>
+Prometheus, belirli hedeflerden metrikleri çekerek zaman serisi verisi olarak saklayan bir izleme sistemidir. Scraping, Prometheus'un hedef servislerden metrikleri periyodik olarak topladığı süreçtir. Apinizer Gateway'in metrikleri 9091 portu üzerinden sağlanır ve Prometheus, bu metrikleri iki farklı yöntemle çekebilir.
+</Info>
+
+<CardGroup cols={2}>
+  <Card title="Constant Scraping" icon="link">
+    Sabit IP adresleri veya DNS isimleriyle static_configs altında tanımlanan servislerden metrik toplama
+  </Card>
+  <Card title="Dynamic Scraping" icon="network-wired">
+    Kubernetes servis keşif mekanizması aracılığıyla pod'ları otomatik olarak keşfetme ve metrik toplama
+  </Card>
+</CardGroup>
+
+## Prometheus Kurulumu ve Scraping Yapılandırması
+
+### Sabit (Constant) Scraping Yapılandırması
+
+<Info>
+Sabit scraping yönteminde, izlenecek servisler önceden belirlenmiş sabit IP adresleri veya DNS isimleriyle static_configs altında tanımlanır. Prometheus, bu servisleri düzenli aralıklarla sorgular. Bu yöntem, servis adreslerinin değişmediği veya manuel olarak tanımlanabildiği durumlarda kullanışlıdır.
+</Info>
+
+Apinizer Gateway'in metrikleri 9091 portu üzerinden yayınlayabilmesi için ilgili container'a environment variable olarak `METRICS_ENABLED=TRUE` parametresi tanımlanmalıdır.
+
+```yaml
+...
+containers:
+  - env:
+    - name: METRICS_ENABLED
+      value: "true"
+...
+```
+
+Constant Scraping yapılandırmasında, Prometheus'un metrikleri kazıyacağı servis adının belirtilmesi gerekmektedir. Bu nedenle, Apinizer Worker bileşeninin 9091 portuna yönlendirme yapacak bir servis oluşturulmalıdır.
+
+**apinizer-prometheus-svc.yaml**
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-prometheus-service
+  namespace: <WORKER_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: worker
+  type: ClusterIP
+```
+
+Apinizer Gateway'in 9091 portundan Prometheus'a metrik sağlaması için, Prometheus'un scraping yapılandırmasının ConfigMap üzerinden yapılması gerekir. Prometheus'un worker-prometheus-service adlı servisi belirlenen adreste static_configs içine tanımlanarak constant scraping yapılandırması gerçekleştirilir.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: 'my-app-static'
+        static_configs:
+          - targets: ['worker-prometheus-service.<WORKER_NAMESPACE>.svc.cluster.local:9091']
+```
+
+### Dinamik (Dynamic) Scraping Yapılandırması
+
+<Info>
+Dinamik scraping yöntemi, Prometheus'un Kubernetes içindeki podları otomatik olarak keşfetmesini sağlar. Bu yöntem sayesinde, her yeni pod için manuel scraping yapılandırması yapmak gerekmez. Prometheus, pod'lara eklenen belirli anotasyonları kullanarak metrikleri otomatik olarak çeker. Bu yöntem, mikro hizmet mimarilerinde ve sürekli değişen altyapılarda büyük avantaj sağlar.
+</Info>
+
+Gateway metriklerinin Prometheus tarafından toplanabilmesi için **Ağ Geçidi Ortamları (Gateway Environments)** sayfasında **Deployments & Services** bölümünde Worker edit deployment seçeneği seçilerek `METRICS_ENABLED=TRUE` değişkeni eklenmelidir.
+
+<img
+  src="/images/operations/scraping-yapilandirmasi.png"
+  alt="Worker Deployment Edit"
+  width="800"
+  height="600"
+/>
+
+#### Kubernetes Yönetimi Apinizer ile Yapılmıyor ise
+
+<Warning>
+Kubernetes yönetimi Apinizer ile yapılmıyorsa, aşağıdaki adımları manuel olarak gerçekleştirmeniz gerekir.
+</Warning>
+
+Prometheus'un Worker pod'larından metrik toplamasını sağlamak için ilgili **Deployment** manifestine **spec.template.metadata.annotations** bölümüne ilgili anotasyonlar eklenmelidir. Buna ek olarak, Apinizer Gateway'in metrikleri 9091 portu üzerinden yayınlayabilmesi için ilgili container'a environment variable olarak `METRICS_ENABLED=TRUE` parametresi tanımlanmalıdır. Bu sayede metrik servisi 9091 portu üzerinden dışa aktarılacaktır ve Prometheus, 9091 portunda çalışan Apinizer Gateway pod'unu otomatik olarak keşfedecek ve metrikleri kazıyacaktır.
+
+```yaml
+...
+template:
+  metadata:
+    annotations:
+      prometheus.io/port: "9091"
+      prometheus.io/scrape: "true"
+...
+```
+
+```yaml
+...
+containers:
+  - env:
+    - name: METRICS_ENABLED
+      value: "true"
+...
+```
+
+#### Prometheus Scraping Konfigürasyonu
+
+Pod'lardaki anotasyonları keşfedebilmesi için Prometheus'un ConfigMap yapılandırmasında **kubernetes_sd_configs** kullanılarak dynamic scraping etkinleştirilmelidir.
+
+<Info>
+Aşağıdaki ConfigMap örneği, Prometheus'un Kubernetes podlarını dinamik olarak keşfetmesini sağlar. Bu yapılandırma, Prometheus'un Kubernetes podlarını otomatik olarak keşfetmesini ve sadece `prometheus.io/scrape: "true"` anotasyonu olan podlardan metrik toplamasını sağlar. Böylece, Apinizer Gateway'e dinamik scraping uygulanarak manuel hedef tanımlamaya gerek kalmadan metrikler Prometheus tarafından toplanabilir.
+</Info>
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: 'kubernetes-pods'
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape_slow]
+            action: drop
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+            replacement: '[$2]:$1'
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\\d+);((([0-9]+?)(\\.|$)){4})
+            replacement: $2:$1
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_annotation_prometheus_io_param_(.+)
+            replacement: __param_$1
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Pending|Succeeded|Failed|Completed
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+```
+
+### Prometheus'un Kurulumu
+
+#### Persistent Storage Yapılandırması
+
+<Info>
+Prometheus'un metrikleri Kubernetes cluster'ındaki bir node üzerinde depolanacağı için **PersistentVolume (PV)** ve **PersistentVolumeClaim (PVC)** tanımlamalarının yapılması gerekmektedir. Bu yapılandırma, Prometheus'un kapanma veya yeniden başlatılma durumlarında verilerini korumasını sağlar.
+</Info>
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-pv
+  labels:
+    type: local
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data/prometheus"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+<Warning>
+Yukarıdaki PersistentVolume (PV) ve PersistentVolumeClaim (PVC) yapılandırması, Prometheus'un verilerini belirli bir node üzerinde saklamasını sağlar. Ancak burada kullanılan **hostPath**, Prometheus'un çalıştığı belirli bir node'un yerel dosya sistemine bağımlıdır.
+
+**Bu nedenle:**
+
+- Prometheus pod'ları farklı bir node'a taşınırsa, yeni node üzerinde aynı hostPath dizini olmadığı sürece verilerini kaybedecektir.
+- Pod'ların her zaman aynı node üzerinde çalışmasını garanti altına almak için nodeAffinity veya nodeSelector kullanarak pod'ları belirli node'lara sabitlemek gerekir.
+
+Alternatif olarak, verilerin node bağımsız bir şekilde saklanması için **NFS, Ceph, Longhorn veya bir bulut tabanlı depolama çözümü** kullanılabilir.
+</Warning>
+
+#### ServiceAccount ve RBAC Yapılandırması
+
+<Info>
+Prometheus'un pod'ları keşfetmesi ve metriklerini toplayabilmesi için gerekli izinlere sahip olması gerekir. Bunun için aşağıdaki ServiceAccount, ClusterRole ve ClusterRoleBinding tanımlamalarını yapılmalıdır.
+</Info>
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+```
+
+Aşağıdaki Prometheus Deployment YAML dosyasını sistemlerinize uygun olacak şekilde değiştirerek Kubernetes Cluster'ınıza yükleyin.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - <NODE_HOSTNAME>
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command: ["sh", "-c", "chown -R 65534:65534 /prometheus"]
+          volumeMounts:
+            - mountPath: /prometheus
+              name: prometheus-storage
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.3.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              memory: 256Mi
+              cpu: 256m
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=7d"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/prometheus
+            - name: prometheus-storage
+              mountPath: /prometheus
+      volumes:
+        - name: config-volume
+          configMap:
+            name: prometheus-config
+        - name: prometheus-storage
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+```
+
+Prometheus için Kubernetes Servisi oluşturulur.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: monitoring
+spec:
+  type: NodePort
+  ports:
+    - port: 9090
+      targetPort: 9090
+      nodePort: 30190
+  selector:
+    app: prometheus
+```
+
+<Info>
+Prometheus Kubernetes üzerinde deploy olurken prometheus-service isminde ve NodePort tipinde bir Kubernetes servisi oluşturur. Bu servis kubernetes dışından Prometheus'a erişim için gereklidir. Ancak siz bu servis yerine Ingress veya kurumunuzda bağlantı yöntemi için hangi yapıyı kullanıyorsanız ona göre uyarlayabilirsiniz.
+</Info>

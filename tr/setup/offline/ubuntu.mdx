@@ -1,0 +1,184 @@
+---
+title: "Ubuntu üzerinde Kurulum"
+description: "Bu doküman, Ubuntu işletim sistemine sahip bir sunucuya Kubernetes 1.31.7 (Ubuntu 24.0x işletim sistemi için) sürümünün ve Apinizer kurulumunu anlatmaktadır."
+---
+
+Bu doküman, Ubuntu işletim sistemine sahip bir sunucuya Kubernetes 1.31.7 (Ubuntu 24.0x işletim sistemi için) sürümünün ve Apinizer kurulumunu anlatmaktadır.
+
+## İndirilecek Dosya
+
+```bash
+Apinizer'ın son sürümüne ait indirme linki için lütfen support@apinizer.com mail adresi üzerinden bizimle iletişime geçin.
+
+Ubuntu 24.x işletim sistemi için Kubernetes, Mongodb and Elasticsearch kurulum dosyaları:
+https://fss.apinizer.com/index.php/s/8HbiSgKZsDO0akg
+
+Ubuntu 22.x işletim sistemi için Kubernetes, Mongodb and Elasticsearch kurulum dosyaları:
+https://fss.apinizer.com/index.php/s/C75rOwbN2bTOqgs
+```
+
+<Info>
+  Online makine üzerinde .tar halinde oluşturulan paketler offline makineye taşınır.
+</Info>
+
+```bash
+tar -xzf offlineApinizerInstallation-Ubuntu24.x.tar
+```
+
+```bash
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+sudo swapoff -a
+sudo vi /etc/fstab
+```
+
+## 1) Containerd Paketlerinin Kurulması
+
+```bash
+sudo dpkg -i containerd_deb/*.deb
+```
+
+```bash
+#containerd modülünün ayarları
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+#containerd modülünün başlatılması
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+sudo systemctl status containerd
+```
+
+## 2) Kubernetes Paketlerinin Kurulması
+
+```bash
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+#Modüllerin çalışmakta olan sistemde yüklenmeleri için
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+```bash
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+Aşağıdaki içeriği ekleyin:
+
+```
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward=1
+net.ipv4.tcp_max_syn_backlog=40000
+net.core.somaxconn=40000
+net.core.wmem_default=8388608
+net.core.rmem_default=8388608
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_mem=134217728 134217728 134217728
+net.ipv4.tcp_rmem=4096 277750 134217728
+net.ipv4.tcp_wmem=4096 277750 134217728
+net.core.netdev_max_backlog=300000
+```
+
+```bash
+sudo sysctl --system
+```
+
+```bash
+sudo dpkg -i kube_deb/*.deb
+```
+
+```bash
+systemctl enable --now kubelet.service
+#Kubernetes kurulum kontrolü ve başlatılması
+kubectl version --client && kubeadm version
+```
+
+## 3) Kubernetes İmajlarının Yüklenmesi
+
+```bash
+sudo ctr --namespace k8s.io images import kube_images/kube-apiserver:v1.31.7.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-controller-manager:v1.31.7.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-scheduler:v1.31.7.tar
+sudo ctr --namespace k8s.io images import kube_images/kube-proxy:v1.31.7.tar
+sudo ctr --namespace k8s.io images import kube_images/pause:3.10.tar
+sudo ctr --namespace k8s.io images import kube_images/etcd:3.5.15-0.tar
+sudo ctr --namespace k8s.io images import kube_images/coredns:v1.8.6.tar
+sudo ctr --namespace k8s.io images import kube_images/flannel-cni-plugin-v1.6.2.tar
+sudo ctr --namespace k8s.io images import kube_images/flannel-v0.26.4.tar
+```
+
+## 4) Kubeadm Init
+
+```bash
+sudo kubeadm init --pod-network-cidr="10.244.0.0/16" --control-plane-endpoint="<MASTER_SERVER_IP_ADDRESS>" --upload-certs --kubernetes-version=v1.31.7
+```
+
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+**Worker node kümeye dahil etmek için:**
+
+Aşağıdaki komut **master node** üzerinde çalıştırılarak kümeye dahil etme komutunu çıktı olarak alabilir ve worker olarak ekleyeceğiniz node'larda çalıştırabilirsiniz.
+
+```bash
+kubeadm token create --print-join-command
+```
+
+## 5) Flannel Oluşturma
+
+```bash
+kubectl apply -f flannel_yaml/kube-flannel.yml
+```
+
+## 6)Apinizer Image'lerinin Yüklenmesi
+
+```bash
+sudo tar xvf apinizerImages.tar
+cd apinizerImages
+```
+
+```bash
+sudo ctr --namespace k8s.io images import manager_<APINIZER_VERSION>.tar apinizercloud/manager:<APINIZER_VERSION>
+sudo ctr --namespace k8s.io images import worker_<APINIZER_VERSION>.tar apinizercloud/worker:<APINIZER_VERSION>
+sudo ctr --namespace k8s.io images import cache_<APINIZER_VERSION>.tar apinizercloud/cache:<APINIZER_VERSION>
+sudo ctr --namespace k8s.io images import integration_<APINIZER_VERSION>.tar apinizercloud/integration:<APINIZER_VERSION>
+sudo ctr --namespace k8s.io images import portal_<APINIZER_VERSION>.tar apinizercloud/portal:<APINIZER_VERSION>
+```
+
+## 7) MongoDB Kurulması
+
+```bash
+sudo dpkg -i mongo_deb/*.deb
+```
+
+Kurulum sonrası MongoDB konfigürasyonları [Ubuntu İşletim Sisteminde MongoDB Kurulumu](/tr/setup/mongodb/ubuntu-mongodb.mdx) dökümandaki kısımlar ile aynıdır.
+
+## 8) Elasticsearch Kurulumu
+
+```bash
+sudo mkdir /opt/elasticsearch
+# Offline kurulum klasörleri içindeki dosyayı taşıyın.
+sudo mv elasticsearch/elasticsearch-7.9.2-linux-x86_64.tar.gz /opt/elasticsearch/
+cd /opt/elasticsearch
+sudo tar -xzf elasticsearch-7.9.2-linux-x86_64.tar.gz
+```
+
+Kurulum dosyasını bulunduğu dizinden /opt/elasticsearch/ klasörüne taşıdıktan sonra [Ubuntu İşletim Sisteminde Elasticsearch Kurulumu](/tr/setup/elasticsearch/ubuntu-elasticsearch.mdx) sayfasında ki adımları uygulayın.
+
+## 9) Apinizer Kurulumu
+
+Apinizer kurulumu için [Apinizer Kurulumu ve Ayarları](/tr/setup/apinizer/apinizer.mdx) sayfasından gerçekleştirebilirsiniz.

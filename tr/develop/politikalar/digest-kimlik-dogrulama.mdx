@@ -1,0 +1,160 @@
+---
+title: "Digest Kimlik Doğrulama"
+description: "HTTP Digest kimlik bilgilerini doğrulayabilir, isteğe özel başlık ve yetkilendirme seçenekleri kullanabilirsiniz. Şifrelerin düz metin olarak gönderilmesini önleyerek daha güvenli kimlik doğrulama sağlayabilirsiniz"
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+## Genel Bakış
+
+HTTP Digest kimlik bilgilerini doğrular, isteğe özel başlık ve yetkilendirme seçenekleri sağlar.
+
+## Amacı Nedir?
+
+- Dizinde saklanan Secret Manager değişkenleriyle eşleştirerek gelen HTTP Digest kimlik doğrulamasını zorunlu kılmak ve anonim erişimi engellemek.
+- İsteğin Authorization başlığını kontrol edip, upstream servisler için güvenli kullanıcı kimliği ve rol aktarımı sağlamak.
+- Opsiyonel istemci IP doğrulaması ve Clear Auth gibi ek kontrollerle saldırı yüzeyini azaltmak.
+- Dahili yetkilendirme motoru veya harici servislerle entegre olarak rol bazlı erişim kararlarını merkezileştirmek.
+- Hata mesajı ve koşul bazlı çalıştırma seçenekleriyle politikanın farklı ortam gereksinimlerine uyarlanmasını sağlamak.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: Digest Kimlik Doğrulama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **Digest Kimlik Doğrulama Kontrolü**: Authorization header içindeki digest parametreleri çözümlenir, username/password/nonce/created değişkenleri Secret Manager üzerinden alınır ve RFC uyumlu özet karşılaştırması yapılır; **değişkenlerden biri eksikse istek hemen reddedilir.**
+4. **Karar Verme**:
+   - **Eşleşme Var**: Kullanıcı tanımlıysa isteğe devam edilir, Clear Auth kapalıysa orijinal başlık saklanır, Add User to Header aktifse kullanıcı bilgisi istenen header'a eklenir, yetkilendirme açıksa rol listesi hesaplanır.
+   - **Eşleşme Yok**: Varsayılan veya özelleştirilmiş hata yanıtı hazırlanır, isteğin iletimi durdurulur, yetkilendirme çağrıları tetiklenmez.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Secret Manager Değişken Yönetimi**: Kullanıcı adı, parola, nonce ve created değerleri Apinizer Secret Manager değişkenleriyle ilişkilendirilir; değişken güncellemeleri tek noktadan yönetilir.
+- **Authorization Header İşleme**: Clear Auth seçeneği ile doğrulama sonrası hassas kimlik bilgileri upstream servislere geçmeden silinebilir.
+- **İstemci IP Doğrulaması**: checkClientIpAddress parametresiyle talep eden IP'nin kayıtlı kimlik bilgisiyle eşleşmesi sağlanarak paylaşım saldırıları engellenir.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Yetkilendirme Katmanı Entegrasyonu**: AuthorizationConfiguration bileşeniyle LDAP, veritabanı veya REST API tabanlı rol doğrulaması eklenebilir, roller header'a taşınabilir.
+- **Metot Bazlı Erişim Kısıtlama**: enableMethodAccess sayesinde HTTP metoduna göre rol zorunluluğu tanımlanır, hassas işlemler ayrı korunur.
+- **Secret Manager Senkronizasyonu**: Otomatik variable seçimi, digest politikalarına özgü username/password/nonce/created varsayılanlarını hızla yükler.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+| :------ | :---- | :--------------------------- | :------------------------ |
+| **Kurumsal Portal** | Yalnızca kayıtlı kullanıcılar portal arayüzüne erişebilmeli | Username/password/nonce/created değişkenleri Secret Manager'dan seçilir, Add User to Header aktif edilir | Başarılı kullanıcı bilgisi `X-Authenticated-UserId` başlığına taşınır, diğer istekler 401 döner |
+| **Operasyon API'si** | Operasyon ekip IP listesi dışında erişim olmamalı | checkClientIpAddress aktif edilir, IP değişkenleri Secret Manager'da güncellenir | Liste dışı IP'den gelen digest istekleri 401 döner, loglanır |
+| **Üçüncü Parti Entegrasyon** | Partner servis rol bazlı yetkiye ihtiyaç duyuyor | enableAuthorization açılır, Authorization API seçilir, roller header'a eklenir | Doğrulanan kullanıcı rolleri `X-Authenticated-UserRoles` içinde upstream servise iletilir |
+| **Canlı Bakım Zamanı** | Bakımda geçici olarak digest devre dışı bırakılmalı | Politika pasif yapılır, açıklamaya bakım notu eklenir | İstekler digest kontrolü olmadan geçer, bakım sonrası tekrar aktive edilir |
+| **Mikroservis Güvenliği** | Bazı endpoint'lerde ek güvenlik gerekiyor | Query Builder ile `/admin/*` path'ine koşul eklenir, Clear Auth kapatılır | Sadece yönetim endpoint'lerinde digest çalışır, diğerlerinde politika devreye girmez |
+| **Test Ortamı Simülasyonu** | QA ortamında farklı kullanıcı seti kullanılacak | Export alınır, test ortamında import edilip Secret Manager değişkenleri QA kullanıcılarıyla güncellenir | QA ortamı kendi digest kimlik bilgileriyle izole çalışır |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir.
+
+### Yeni Digest Kimlik Doğrulama Politikası Oluşturma
+
+<img src="/images/develop/politikalar/digest-kimlik-dogrulama-1.png" alt="Digest Kimlik Doğrulama Politikası Yapılandırma" width="1000" />
+
+#### Yapılandırma Adımları
+
+| Adım | Açıklama / İşlem |
+| :--- | :--------------- |
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → Digest Kimlik Doğrulama Politikası** bölümüne gidin.<br />- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br /><br />**Name (İsim) Zorunlu:**<br />Örnek: `Production_DigestAuth`<br />- Benzersiz isim girin, boşlukla başlamaz.<br />- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br /><br />**Description (Açıklama):**<br />Örnek: "Canlı ortam için digest kimlik doğrulaması"<br />- Maks. 1000 karakter.<br />- Politikanın amacını açıklayın. |
+| **Adım 3: Secret Manager Değişkenlerini Seçme** | Username, Password, Nonce ve Created değişkenlerini sırasıyla belirleyin.<br />- Değişken diyaloglarıyla mevcut kayıtları güncelleyebilir veya yenilerini seçebilirsiniz.<br />- Her dört değişken seçilmeden politika kaydedilmez. |
+| **Adım 4: İstemci Kontrollerini Ayarlama** | **Clear Auth:**<br />- Checkbox aktif edilirse, upstream servise gönderilmeden önce Authorization başlığını temizler.<br />- Mikroservis mimarilerinde backend'in şifre bilgisine erişmesini engellemek için kullanılır.<br /><br />**Check Client IP Address:**<br />- Checkbox aktif edilirse, IP kontrolü yapılır.<br />- Kimlik bilgisi paylaşımını engeller. |
+| **Adım 5: Başlık ve Yetkilendirme Yapılandırması** | **Add User to Header:**<br />- Toggle aktif edilirse, doğrulanan kullanıcı bilgisi özel header ile backend'e iletilir.<br />- **User Header Name** alanı açılır (varsayılan: `X-Authenticated-UserId`).<br /><br />**AuthorizationConfiguration:**<br />- Yetkilendirme Kaynağı, rol başlığı ve metot kısıtlarını tanımlayın. |
+| **Adım 6: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br />- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br /><br />**Örnekler:**<br />- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br />- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br />- Endpoint bazlı: `Path = /api/admin/*`<br /><br />Koşul tanımlamazsa politika her zaman aktif<br /><br /> |
+| **Adım 7: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br />- Erişim reddedildiğinde dönecek mesajı özelleştirin.<br /><br />**Varsayılan:**<br />`{ "statusCode": 403, "message": "[Default hata mesajı]" }`<br /><br />**Özel:**<br />`{ "statusCode": 403, "errorCode": "[CUSTOM_ERROR_CODE]", "message": "[Özel mesaj]" }` |
+| **Adım 8: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br /><br />**Kontrol Listesi:**<br />- Benzersiz isim<br />- Zorunlu alanlar dolu<br />- En az bir digest değişken seti seçili<br /><br />**Sonuç:**<br />- Politika listeye eklenir.<br />- API Proxy (API Vekil Sunucusu)'lere bağlanabilir.<br />- Global politikaysa otomatik uygulanır. |
+
+**Koşullar** ve **Hata Mesajı Özelleştirme** panellerinin açıklaması için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Koşullar](/tr/concepts/temel-kavramlar/politika-nedir#koşullar) ve [Hata Mesajı Özelleştirme (Error Message Customization)](/tr/concepts/temel-kavramlar/politika-nedir#hata-mesajı-özelleştirme-error-message-customization) bölümlerini inceleyebilirsiniz.
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Akıştan Politika Kaldırma](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akıştan-politika-kaldırma) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) ve içe aktarma (Import) adımları için [Export/Import](/tr/admin/secrets-management/export-import) sayfasına bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akışa-politika-ekleme) bölümüne bakabilirsiniz.
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+| :------ | :------------------ |
+| **Yetkilendirme Kaynağı Senaryoları** | - AuthorizationConfiguration bileşeninden LDAP, Database veya API kaynağını seçin.<br />- Rol eşlemesi için credentialRoleIdList listesini doldurun.<br />- Use Secret Manager seçeneği ile hassas bağlantı bilgilerini yönetilebilir değişkenlerde tutun. |
+| **Metot Bazlı Erişim Kontrolü** | - enableMethodAccess seçeneğini aktif edin.<br />- policyAuthorizationMethodDefList altında HTTP metodunu ve gerekli rolü eşleştirin.<br />- Yetkisi olmayan metod çağrıları için özel hata mesajı tanımlayın. |
+| **Rol Başlığı Yerleşimi** | - addRolesToHeader seçeneğini işaretleyin.<br />- rolesHeaderName alanını hedef servisin beklediği başlığa göre güncelleyin.<br />- Başarılı doğrulamada roller otomatik olarak oluşturulmuş başlıkta iletilsin. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+| :------- | :------------------ |
+| **Secret Manager Yönetimi** | **Kötü:** Digest kullanıcılarını düz metinle saklamak<br />**İyi:** Secret Manager'de değişken oluşturmak<br />**En İyi:** Değişkenlere erişimi RBAC ile sınırlandırmak |
+| **Authorization Header Kullanımı** | **Kötü:** Clear Auth kapalıyken hassas başlığı ilerletmek<br />**İyi:** Clear Auth'ı hassas entegrasyonlarda aktif tutmak<br />**En İyi:** Clear Auth artı özel log maskeleme uygulamak |
+| **Koşul Tasarımı** | **Kötü:** Politikanın her isteğe uygulanması<br />**İyi:** Yalnızca yönetim endpoint'lerine koşul koymak<br />**En İyi:** Koşulları ortam, metot ve header kombinasyonlarına göre optimize etmek |
+| **Rol İletimi** | **Kötü:** Roller olmadan downstream yetkilendirmeye güvenmek<br />**İyi:** Roller için default header kullanmak<br />**En İyi:** Add Roles to Header + imzalı header validasyonu uygulamak |
+| **Versiyonlama** | **Kötü:** Değişiklikleri kaydetmeden önce yedek almamak<br />**İyi:** Export alıp saklamak<br />**En İyi:** Export dosyalarını kurumsal versiyon yönetiminde arşivlemek |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+| :-------------- | :------------------ |
+| **Kimlik Bilgisi Koruması** | Secret Manager erişimlerini denetleyin, değişkenleri uygulama kaynak koduna gömmeyin. |
+| **Replay Koruması** | Nonce ve created değerlerini zorunlu kılın, loglarda maskeleyin. |
+| **IP Whitelisting** | checkClientIpAddress seçeneğini, sabit IP'li tüketicilerde etkinleştirin. |
+| **Log Maskeleme** | Authorization başlığını log'larken özetleyin veya maskeleme kuralları uygulayın. |
+| **Yetkilendirme Denetimi** | enableAuthorization açıkken, rol eşlemelerinin güncel olduğundan emin olmak için düzenli audit yapın. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+| :------- | :------------------ |
+| **Eksik Değişken Tanımı** | **Neden kaçınılmalı:** Zorunlu digest alanları olmadan politika istekleri reddeder.<br />**Alternatif:** Tüm değişkenleri Secret Manager'dan seçip test edin. |
+| **Yanlış Header Adı** | **Neden kaçınılmalı:** Upstream servis kullanıcı kimliğini okuyamaz.<br />**Alternatif:** userHeaderName'i hedef servisin beklediği adla eşleştirin. |
+| **Kontrolsüz Clear Auth Kapalı Kullanımı** | **Neden kaçınılmalı:** Authorization başlığı iç ağda gereksizce yayılır.<br />**Alternatif:** Clear Auth'ı açıp gerekli bilgileri özel header'da taşıyın. |
+| **Test Edilmemiş Authorization Kuralları** | **Neden kaçınılmalı:** Yanlış rol atamaları üretim kesintisine yol açabilir.<br />**Alternatif:** Rolleri Geliştirme ortamında senaryo bazlı test edin. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+| :----- | :---------- |
+| **Secret Manager Erişimi** | **Öneri:** Sık kullanılan değişkenleri Secret Manager cache'ine alın.<br />**Etki:** Kimlik doğrulama gecikmesi azalır. |
+| **Authorization Servis Çağrıları** | **Öneri:** Harici yetkilendirme API'sini düşük gecikmeli halde tutun.<br />**Etki:** Toplam politika yanıt süresi düşer. |
+| **Koşul Değerlendirme** | **Öneri:** Query Builder'da gereksiz OR bloklarını temizleyin.<br />**Etki:** İstek başına koşul değerlendirme süresi kısalır. |
+| **Loglama Seviyesi** | **Öneri:** Başarılı isteklerde log seviyesini INFO yerine DEBUG'a çekin.<br />**Etki:** Yüksek trafikte log yazma maliyeti azalır. |
+| **Rol Dağıtımı** | **Öneri:** Role header'larını yalnızca enableAuthorization aktifken üretin.<br />**Etki:** Gereksiz header oluşturma yükü ortadan kalkar. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru | Cevap |
+| :------- | :------- | :-------- |
+| **Genel** | Digest Kimlik Doğrulama Politikası hangi isteklerde devreye girer? | Politika aktif ve koşulları sağlanan tüm HTTP/HTTPS isteklerinde Authorization header'ı kontrol eder. |
+| **Genel** | Clear Auth ne zaman kullanılmalı? | Upstream servislerin digest header'ına ihtiyaç duymadığı, yalnızca kullanıcı kimliğine ihtiyaç duyduğu durumlarda etkinleştirilmelidir. |
+| **Teknik** | Secret Manager değişkeni nasıl seçiliyor? | Variable diyalogu ile mevcut değişkenler listelenir, seçilen kayıt otomatik olarak ilgili alanla eşleştirilir. |
+| **Teknik** | Authorization entegrasyonu başarısız olursa ne olur? | Yetkilendirme hata döndürürse politika 403 Forbidden üretir ve özelleştirilmiş hata mesajı tetiklenir. |
+| **Kullanım** | Aynı kullanıcı için farklı nonce değerleri desteklenir mi? | Evet, nonce değişkeni Secret Manager'da dinamik güncellenebilir; replay koruması için únicos değerler önerilir. |
+| **Kullanım** | Politika yerelleştirilince ne değişir? | Localize işlemi global politikayı kopyalar, yeni politika yalnızca seçilen API Proxy (API Vekil Sunucusu) içinde düzenlenir. |
+
+
