@@ -1,0 +1,136 @@
+---
+title: "High Availability Cluster"
+description: "You can perform Kubernetes high availability cluster installation. You can configure multi-master node configuration using HAProxy and Keepalived and provide continuous accessibility with virtual IP address."
+---
+
+## 1) HAProxy Installation
+
+HAProxy is an open-source proxy and load balancing solution used to provide load balancing and high availability. Installation on Ubuntu operating systems is described below.
+
+```bash
+sudo apt update
+```
+
+HAProxy installation is performed.
+
+```bash
+sudo apt install haproxy
+```
+
+Configuration file is edited.
+
+```bash
+sudo vi /etc/haproxy/haproxy.cfg
+```
+
+You can add the following commands to the bottom of the file. Edit the hostname and IP fields according to yourself.
+
+```bash
+frontend kubernetes-frontend
+  bind *:6443
+  mode tcp
+  option tcplog
+  default_backend kubernetes-backend
+
+backend kubernetes-backend
+  option httpchk GET /healthz
+  http-check expect status 200
+  mode tcp
+  option ssl-hello-chk
+  balance roundrobin
+  server <master1hostname> <MASTER_1_IP>:6443 check fall 3 rise 2
+  server <master2hostname> <MASTER_2_IP>:6443 check fall 3 rise 2
+  server <master3hostname> <MASTER_3_IP>:6443 check fall 3 rise 2
+```
+
+```bash
+systemctl enable haproxy && systemctl restart haproxy
+systemctl status haproxy
+```
+
+## 2) Keepalived Installation
+
+Keepalived provides a virtual IP address between multiple control nodes (master and backup masters) and is used to ensure continuous operation of other services.
+
+```bash
+sudo apt install keepalived
+```
+
+```bash
+sudo vim /etc/keepalived/check_apiserver.sh
+```
+
+The following script performs availability check to the Kubernetes API server. Replace the &#60;VIRTUAL_IP&#62; part with the virtual ip you will add in the next step.
+
+```bash
+#!/bin/sh
+
+errorExit() {
+  echo "*** $@" 1>&2
+  exit 1
+}
+
+curl --silent --max-time 2 --insecure https://localhost:6443/ -o /dev/null || errorExit "Error GET https://localhost:6443/"
+if ip addr | grep -q <VIRTUAL_IP>; then
+  curl --silent --max-time 2 --insecure https://<VIRTUAL_IP>:6443/ -o /dev/null || errorExit "Error GET https://<VIRTUAL_IP>:6443/"
+fi
+
+```
+
+```bash
+chmod +x /etc/keepalived/check_apiserver.sh
+```
+
+```bash
+sudo vim /etc/keepalived/keepalived.conf
+```
+
+If the keepalived.conf file is not empty, you can clear its content and add the following command lines.
+
+**Important:** Add the appropriate network unit opposite the interface. Replace the &#60;VIRTUAL_IP&#62; part with the IP address you want to add.
+
+```bash
+vrrp_script check_apiserver {
+  script "/etc/keepalived/check_apiserver.sh"
+  interval 3
+  timeout 10
+  fall 5
+  rise 2
+  weight -2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth1
+    virtual_router_id 1
+    priority 100
+    advert_int 5
+    authentication {
+        auth_type PASS
+        auth_pass mysecret
+    }
+    virtual_ipaddress {   
+     <VIRTUAL_IP>    
+ }
+    track_script {
+        check_apiserver
+    }
+}
+```
+
+```bash
+systemctl enable --now keepalived
+```
+
+## Starting Kubernetes Cluster
+
+You can perform Kubernetes installation from the [Kubernetes Installation on Ubuntu Operating System](/en/setup/kubernetes/ubuntu-kubernetes) document.
+
+<Warning>
+  **Important:** When performing the init operation, you must enter your own virtual IP address to the endpoint as follows.
+</Warning>
+
+```bash
+kubeadm init --control-plane-endpoint="<VIRTUAL_IP>:6443" --upload-certs --pod-network-cidr=10.244.0.0/16
+```
+

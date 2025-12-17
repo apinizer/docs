@@ -1,0 +1,524 @@
+---
+title: "Ubuntu"
+description: "You can install Kubernetes version 1.34 on Ubuntu operating system. You can configure Containerd container runtime, create cluster network structure with Flannel network plugin, and configure multi-master."
+---
+## Checks Required Before Starting Installation
+
+Before starting installations, make sure to confirm from system administrators that the servers are on the same network and on the same Virtual Machine.
+
+Before starting installations, make sure that the server's hostname is not localhost.localdomain and that each one is unique (with hostname command). If it is, be sure to change it before starting operations.
+
+### (If Necessary) Changing Hostname
+
+```bash
+hostnamectl set-hostname your-new-hostname
+```
+
+There should not be a hostname defined as `127.0.1.1` in the `/etc/hosts` file.
+
+There should not be an entry like `"nameserver 127.0.1.1"` in the `/etc/resolv.conf` file.
+
+If a Proxy is required for internet access, the following codes should be executed.
+
+```bash
+#Run the following on Linux Shell:
+export http_proxy=http://proxyIp:port/
+export https_proxy=http://proxyIp:port/
+export no_proxy=localhost,127.0.0.1,SERVERIP,*.hostname
+```
+
+Add the following codes to the files below:
+
+```bash
+sudo vi /etc/apt/apt.conf
+```
+
+```
+Acquire::http::Proxy "http://username:password@proxyIp:port";
+Acquire::https::Proxy "https://username:password@proxyIp:port";
+```
+
+```bash
+sudo vi /etc/systemd/system/docker.service.d/proxy.conf
+```
+
+```
+[Service]
+Environment="HTTP_PROXY=http://proxyIp:port"
+Environment="HTTPS_PROXY=https://proxyIp:port"
+Environment="NO_PROXY="localhost,127.0.0.1,::1,SERVERIP,*.hostname"
+```
+
+When updating Ubuntu packages, it tries to pull from servers in Turkey location. However, there may be problems with tr.archive.ubuntu.com from time to time. In this case, the following change should be made.
+
+```bash
+sudo vi /etc/apt/sources.list
+```
+
+Replace all addresses containing `tr.` with "Replace All".
+
+Example:
+- Old: `http://tr.archive.ubuntu.com/ubuntu`
+- New: `http://archive.ubuntu.com/ubuntu`
+
+## 1) Operating System Configurations (To be performed on all servers)
+
+```bash
+# Apinizer user is created and authorized.
+sudo adduser apinizer
+sudo usermod -aG sudo apinizer
+
+# Switch to the user to continue operations
+sudo su - apinizer
+
+# It is recommended that the following tools be installed on all servers
+sudo apt update
+sudo apt install -y curl wget net-tools gnupg2 software-properties-common apt-transport-https ca-certificates
+
+#Firewall is disabled
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+
+# Swap is disabled and the swap line in /etc/fstab file is deleted to prevent it from restarting.
+sudo swapoff -a
+sudo vi /etc/fstab
+# Then close the vi file (:wq)
+```
+
+## 2) Kubernetes Installation
+
+### 2.1) Container Installation (To be performed on all Kubernetes servers)
+
+```bash
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+#To load modules in the running system
+sudo modprobe overlay
+sudo modprobe br_netfilter
+sudo lsmod | grep br_netfilter
+#sysctl settings
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+```
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward=1
+net.ipv4.tcp_max_syn_backlog=40000
+net.core.somaxconn=40000
+net.core.wmem_default=8388608
+net.core.rmem_default=8388608
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_mem=134217728 134217728 134217728
+net.ipv4.tcp_rmem=4096 277750 134217728
+net.ipv4.tcp_wmem=4096 277750 134217728
+net.core.netdev_max_backlog=300000
+```
+
+```bash
+# Loading configurations
+sudo sysctl --system
+sudo apt install -y curl gnupg2 software-properties-common apt-transport-https ca-certificates
+sudo apt update
+
+# Add Docker repo
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+
+# Install containerd
+sudo apt update
+sudo apt install -y containerd.io
+
+# Configure containerd and start service
+sudo mkdir -p /etc/containerd
+sudo containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+
+# Restart containerd
+sudo systemctl restart containerd
+sudo systemctl enable containerd
+systemctl status containerd
+```
+
+### 2.2) Kubernetes Installation (On Master and Worker servers)
+
+Loading Kubernetes keys and repository addresses to the system:
+
+```bash
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+sudo apt-get update
+
+# Kubernetes installation
+sudo apt-get install -y kubelet=1.34.3-1.1 kubeadm=1.34.3-1.1 kubectl=1.34.3-1.1
+sudo apt-mark hold kubelet kubeadm kubectl
+
+# Check installation and start
+kubectl version --client && kubeadm version
+sudo systemctl enable kubelet
+```
+
+#### 2.2.1) Bash Auto-Completion (Optional, On any Kubernetes Master Server)
+
+This operation can speed up writing Kubernetes commands:
+
+```bash
+sudo apt install bash-completion
+source /usr/share/bash-completion/bash_completion
+echo 'source <(kubectl completion bash)' >>~/.bashrc
+echo 'alias k=kubectl' >>~/.bashrc
+echo 'complete -o default -F __start_kubectl k' >>~/.bash
+source ~/.bashrc
+```
+
+#### 2.2.2) Creating Kubernetes Master Server (On Kubernetes Master Servers)
+
+To make Multi-Master Kubernetes, run the following command:  
+Use the hostname address of the Master server.
+```bash
+sudo kubeadm init --pod-network-cidr "10.244.0.0/16" --control-plane-endpoint "<MASTER_SERVER_HOSTNAME>" --upload-certs
+```
+If you will not use `10.244.0.0/16` as the IP block (podCIDR value) that Kubernetes pods will receive, you need to edit the above command accordingly.
+
+To use Multi-Master structure, other nodes that will be Master should be connected with the following code
+
+```bash
+sudo kubeadm join <MASTER_SERVER_HOSTNAME>:6443 --token <XXX> --discovery-token-ca-cert-hash sha256:<YYY> --control-plane --certificate-key <ZZZ>
+```
+
+If the connection command is desired to be recreated, the output of the second of the following codes should be added to the first:
+
+```bash
+kubeadm token create --print-join-command
+sudo kubeadm init phase upload-certs --upload-certs
+```
+
+As a result, it should look like the following:
+
+```
+<output of join command in step 1> --control-plane --certificate-key <key value that is the output of step 2>
+```
+
+If the code is desired to be created manually, the following are used:
+
+- For XXX → `kubeadm token list`
+- For YYY → `openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.* //'`
+- For ZZZ → `sudo kubeadm init phase upload-certs --upload-certs`
+
+#### 2.2.3) Setting User Configuration of kubectl Command on Kubernetes Master Server (On Kubernetes Master Servers)
+
+Definitions are made for the user who will run kubectl commands:
+
+```bash
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown -R $(id -u):$(id -g) $HOME/.kube
+```
+
+#### 2.2.4) Install Kubernetes Network Plugin (On Kubernetes Master Servers)
+
+We will use the Flannel network plugin in this guide. You can choose other supported network plugins. Flannel is a simple and easy way to configure a layer 3 network structure designed for Kubernetes.
+
+```bash
+vi kube-flannel.yml
+```
+
+```yaml
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: kube-flannel
+  labels:
+    k8s-app: flannel
+    pod-security.kubernetes.io/enforce: privileged
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - nodes/status
+  verbs:
+  - patch
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flannel
+subjects:
+- kind: ServiceAccount
+  name: flannel
+  namespace: kube-flannel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    k8s-app: flannel
+  name: flannel
+  namespace: kube-flannel
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: kube-flannel-cfg
+  namespace: kube-flannel
+  labels:
+    tier: node
+    k8s-app: flannel
+    app: flannel
+data:
+  cni-conf.json: |
+    {
+      "name": "cbr0",
+      "cniVersion": "0.3.1",
+      "plugins": [
+        {
+          "type": "flannel",
+          "delegate": {
+            "hairpinMode": true,
+            "isDefaultGateway": true
+          }
+        },
+        {
+          "type": "portmap",
+          "capabilities": {
+            "portMappings": true
+          }
+        }
+      ]
+    }
+  net-conf.json: |
+    {
+      "Network": "10.244.0.0/16",
+      "EnableNFTables": false,
+      "Backend": {
+        "Type": "vxlan"
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: kube-flannel-ds
+  namespace: kube-flannel
+  labels:
+    tier: node
+    app: flannel
+    k8s-app: flannel
+spec:
+  selector:
+    matchLabels:
+      app: flannel
+  template:
+    metadata:
+      labels:
+        tier: node
+        app: flannel
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/os
+                operator: In
+                values:
+                - linux
+      hostNetwork: true
+      priorityClassName: system-node-critical
+      tolerations:
+      - operator: Exists
+        effect: NoSchedule
+      serviceAccountName: flannel
+      initContainers:
+      - name: install-cni-plugin
+        image: docker.io/flannel/flannel-cni-plugin:v1.6.0-flannel1
+        command:
+        - cp
+        args:
+        - -f
+        - /flannel
+        - /opt/cni/bin/flannel
+        volumeMounts:
+        - name: cni-plugin
+          mountPath: /opt/cni/bin
+      - name: install-cni
+        image: docker.io/flannel/flannel:v0.26.1
+        command:
+        - cp
+        args:
+        - -f
+        - /etc/kube-flannel/cni-conf.json
+        - /etc/cni/net.d/10-flannel.conflist
+        volumeMounts:
+        - name: cni
+          mountPath: /etc/cni/net.d
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+      containers:
+      - name: kube-flannel
+        image: docker.io/flannel/flannel:v0.26.1
+        command:
+        - /opt/bin/flanneld
+        args:
+        - --ip-masq
+        - --kube-subnet-mgr
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "50Mi"
+        securityContext:
+          privileged: false
+          capabilities:
+            add: ["NET_ADMIN", "NET_RAW"]
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: EVENT_QUEUE_DEPTH
+          value: "5000"
+        volumeMounts:
+        - name: run
+          mountPath: /run/flannel
+        - name: flannel-cfg
+          mountPath: /etc/kube-flannel/
+        - name: xtables-lock
+          mountPath: /run/xtables.lock
+      volumes:
+      - name: run
+        hostPath:
+          path: /run/flannel
+      - name: cni-plugin
+        hostPath:
+          path: /opt/cni/bin
+      - name: cni
+        hostPath:
+          path: /etc/cni/net.d
+      - name: flannel-cfg
+        configMap:
+          name: kube-flannel-cfg
+      - name: xtables-lock
+        hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+```
+
+If you did not use the value `10.244.0.0/16` as podCIDR when initializing the Master, you should edit the network settings in the yaml file above.
+
+```bash
+kubectl apply -f kube-flannel.yml
+```
+
+#### 2.2.5) If Master Server is Also Desired to be Used as Worker (Optional)
+
+This is not a recommended method for production environments.
+
+To add Worker task to Master:
+
+```bash
+# To make all Masters Workers
+kubectl  taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
+
+# For some cases, master needs to be written instead of control-plane
+kubectl  taint nodes --all node-role.kubernetes.io/master:NoSchedule-
+
+# To give Worker task to only one Master
+kubectl taint nodes <NODE_NAME> node-role.kubernetes.io/control-plane:NoSchedule-
+```
+
+To remove Worker task from Master:
+
+```bash
+# To remove Worker task from all Masters
+kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule
+
+# To remove Worker task from only one Master
+kubectl taint nodes <NODE_NAME> node-role.kubernetes.io/control-plane:NoSchedule
+```
+
+#### 2.2.6) Registering Kubernetes Worker Servers to Master (On Kubernetes Worker Servers)
+
+A token information is needed to connect the Worker server to Master. This will be visible in writing on the master node during this installation phase. But if it is skipped or if you want to view it again, the following command can be used.
+
+On Master Node
+
+```bash
+sudo kubeadm token create --print-join-command
+```
+
+On Node(s) that will be Worker
+
+```bash
+sudo kubeadm join <MASTER_SERVER_HOSTNAME>:6443 --token <XXX> --discovery-token-ca-cert-hash sha256:<YYY>
+```
+
+#### 2.2.7) Installation Check (On any Kubernetes Master Server)
+
+If the Node created in addition to Master is also visible when the following code is run from Master, the installation has been completed successfully.
+
+If it does not transition from NotReady status to Ready status after two minutes, the problem should be examined with the `"kubectl describe node <NODE_NAME>"` command.
+
+```bash
+kubectl get node
+```
+
+```
+NAME         STATUS   ROLES    AGE   VERSION
+k8s-master   Ready    master   5d    v1.34.0
+k8s-worker1  Ready    <none>   5d    v1.34.0
+```
+
+### 2.3) DNS Test (Optional, On any Kubernetes Master Server)
+
+```bash
+kubectl apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+kubectl get pods --namespace=kube-system -l k8s-app=kube-dns
+kubectl -n kube-system get configmap coredns -oyaml
+kubectl exec -i -t dnsutils -- nslookup kubernetes.default
+kubectl exec -ti dnsutils -- cat /etc/resolv.conf
+```
+
+For more information, please review the address at this link.
+

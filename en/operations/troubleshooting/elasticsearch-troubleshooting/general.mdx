@@ -1,0 +1,285 @@
+---
+title: "Elasticsearch Possible Issues and Solutions"
+description: "You can detect and resolve common issues that may be encountered with Elasticsearch. Provides solutions for situations such as disk fullness, highlight limits, RAM limits, shard limits, unassigned shards, and NAS mount issues, and explains how to detect and resolve these issues."
+---
+
+## Stopping Log Writing Due to Disk Fullness
+
+<Warning>
+When Elasticsearch is installed with default settings, it warns when the disk it is on reaches 85% fullness and stops log writing when it reaches 90%.
+</Warning>
+
+### Solution
+
+Space needs to be freed on the disk or the disk needs to be enlarged. After this operation, the disk is notified that it is ready for writing again with the following command:
+
+```bash
+curl -X PUT "<ELASTIC_IP>:9200/_all/_settings?pretty" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "index.blocks.read_only_allow_delete": null
+  }'
+```
+
+### Disk Watermark Settings
+
+Since this situation can lead to high amounts of space being unusable on large disks, it is recommended to be set specifically for your servers. These limits can be updated by giving disk size as percentage or numeric.
+
+#### Setting with Numeric Limit
+
+```bash
+curl -X PUT "<ELASTIC_IP>:9200/_cluster/settings" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "transient": {
+      "cluster.routing.allocation.disk.watermark.low": "100gb",
+      "cluster.routing.allocation.disk.watermark.high": "80gb",
+      "cluster.routing.allocation.disk.watermark.flood_stage": "50gb",
+      "cluster.info.update.interval": "1m"
+    }
+  }'
+```
+
+#### Setting with Percentage Limit
+
+```bash
+curl -X PUT "<ELASTIC_IP>:9200/_cluster/settings" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "transient": {
+      "cluster.routing.allocation.disk.watermark.low": "90%",
+      "cluster.routing.allocation.disk.watermark.high": "93%",
+      "cluster.routing.allocation.disk.watermark.flood_stage": "95%",
+      "cluster.info.update.interval": "1m"
+    }
+  }'
+```
+
+<Note>
+You should also enter the same values in the configuration file of Elasticsearch that you continue to run instantly afterwards. This is necessary to prevent your settings from being lost in case of a possible restart of the application.
+</Note>
+
+**Settings to be added to elasticsearch.yml file:**
+
+```yaml
+cluster.routing.allocation.disk.threshold_enabled: true
+cluster.routing.allocation.disk.watermark.low: 93%
+cluster.routing.allocation.disk.watermark.high: 95%
+```
+
+---
+
+## Highlight Error in Kibana
+
+### Error Message
+
+```
+x of y shards failed: The data you are seeing might be incomplete or wrong. 
+The length of [X] field of [Y] doc of [<INDEX_NAME>] index has exceeded [1000000] 
+- maximum allowed to be analyzed for highlighting
+```
+
+### Reason
+
+The data size limit that Elasticsearch can perform highlight operation for each record comes as 1,000,000 characters by default. This is the optimal value Elasticsearch has determined for JVM RAM usage and search speed.
+
+### Solution
+
+This setting can be increased with the following command. If you don't know your data size, you can adjust it to a suitable limit by increasing this value gradually.
+
+```bash
+curl -XPUT "<ELASTIC_IP>:9200/.ds-apinizer-log-apiproxy-AAAA-000*/_settings" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "index": {
+      "highlight.max_analyzed_offset": 2000000
+    }
+  }'
+```
+
+---
+
+## "I/O Reactor Status: STOPPED" Error on API Traffic Screens
+
+### Error Message
+
+```
+Request cannot be executed; I/O reactor status: STOPPED
+```
+
+### Reason
+
+RAM limits used by Elasticsearch need to be increased.
+
+### Solution
+
+This setting can be increased from the `jvm.options` file. It is recommended not to exceed half of total RAM amount.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-7.9.2/config/jvm.options
+```
+
+Add the following lines to the file:
+
+```bash
+-Xms8g
+-Xmx8g
+```
+
+Restart Elasticsearch to apply changes:
+
+```bash
+systemctl restart elasticsearch
+```
+
+---
+
+## Maximum Shards Limit Error
+
+### Error Message
+
+```
+Elasticsearch exception [type=validation_exception, reason=Validation Failed: 
+1: this action would add [2] total shards, but this cluster currently has [1000]/[1000] maximum shards open;]
+```
+
+### Reason
+
+`_cluster.max_shards_per_node` limit has been reached. It is necessary to increase the number of data-holding nodes, reduce the number of shards in the cluster, or increase the shard limit on the system.
+
+### Solution 1: Increasing Data Node Count
+
+<Note>
+The recommended solution for this problem is to increase the number of data-holding nodes.
+</Note>
+
+### Solution 2: Increasing Shard Limit
+
+Since increasing data nodes may not always be possible, manually managing shards is also a usable solution:
+
+```bash
+curl -XPUT http://<ELASTICSEARCH_IP>:9200/_cluster/settings \
+  --header "Content-Type:application/json" \
+  -d '{
+    "persistent": {
+      "cluster.routing.allocation.total_shards_per_node": 2000,
+      "cluster.max_shards_per_node": 2000
+    }
+  }'
+```
+
+Trigger rollover operation:
+
+```bash
+curl http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-<INDEX_KEY>/_rollover
+```
+
+### Solution 3: Deleting Old Indexes (Not Recommended)
+
+<Warning>
+This method is **NOT RECOMMENDED** as it will cause loss in old logs. It should only be used as a last resort.
+</Warning>
+
+```bash
+curl -XDELETE http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-<INDEX_KEY>-<INDEX_NUMBER>
+```
+
+---
+
+## Unassigned Shards - CLUSTER-RECOVERED
+
+### Reason
+
+It may not be able to distribute shards after a possible server restart or file loss.
+
+### Solution Steps
+
+#### 1. Checking Node Status
+
+It is necessary to ensure that all Elasticsearch nodes are running and there is no file loss.
+
+The `config/elasticsearch.yml` file is checked on Elasticsearch master node. IPs of other nodes can be found here and it should be ensured that they are also running. You cannot see these nodes with `GET /_nodes` request while connected nodes are closed.
+
+#### 2. Checking Cluster Status
+
+Status of nodes, cluster, and shards is checked with the following commands:
+
+```bash
+# List nodes
+curl "<ELASTICSEARCH_IP>:9200/_nodes"
+
+# Get shard allocation explanation
+curl "<ELASTICSEARCH_IP>:9200/_cluster/allocation/explain"
+
+# Check shard status
+curl "<ELASTICSEARCH_IP>:9200/_cat/shards?v=true&h=index,shard,prirep,state,node,unassigned.reason&s=state"
+```
+
+#### 3. Reactivating Allocation
+
+Distribution on nodes is reactivated with the following command:
+
+```bash
+curl -XPUT "<ELASTICSEARCH_IP>:9200/_cluster/settings?pretty" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "transient": {
+      "cluster.routing.allocation.enable": true
+    }
+  }'
+```
+
+#### 4. Reroute Operation
+
+When the above command is not sufficient, this operation is forced with the following command:
+
+```bash
+curl -XPOST "<ELASTICSEARCH_IP>:9200/_cluster/reroute?retry_failed=true&pretty"
+```
+
+---
+
+## NAS Disk Mount Access Error
+
+### Reason
+
+When trying to connect to NAS disk, file system access permissions need to be set.
+
+### Solution
+
+#### 1. Getting Elasticsearch User ID Information
+
+```bash
+id elasticsearch
+```
+
+Example output:
+```
+uid=1000(elasticsearch) gid=1000(elasticsearch) groups=1000(elasticsearch),4(adm),24(cdrom),27(sudo),30(dip),46(plugdev),101(lxd)
+```
+
+#### 2. Mounting NAS Disk
+
+Mount operation is performed with the following command by giving appropriate permissions to mount NAS disk:
+
+```bash
+sudo mount -t cifs \
+  -o rw,uid=1000,gid=1000,file_mode=0755,dir_mode=0755,username=elasticsearch,password=1234 \
+  //192.168.111.248/LogApinizer \
+  /home/data/
+```
+
+#### 3. Permanent Mount Settings
+
+Add the following lines to the `fstab` file for the mount operation to be permanent:
+
+```bash
+sudo vi /etc/fstab
+```
+
+Line to add:
+
+```
+//192.168.111.248/LogApinizer /home/data cifs rw,uid=1000,gid=1000,file_mode=0755,dir_mode=0755,username=elasticsearch,password=1234 0 0
+```
+

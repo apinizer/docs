@@ -1,0 +1,1092 @@
+---
+title: "Apinizer Installation and Configuration"
+description: "Provides installation and configuration of Apinizer API Management Platform on Kubernetes. Provides installation steps, prerequisites and configuration details for API Manager, API Gateway and API Cache Server components. Contains necessary information for MongoDB, Elasticsearch and Kubernetes cluster installations."
+---
+
+## Introduction
+
+Apinizer consists of five components, three of which are basic, running on Kubernetes Platform: **API Manager (Management Console)**, **API Gateway** and **API Cache Server**.
+
+### API Manager (Management Console)
+
+API Manager is a web-based management interface where APIs, Policies, Users, Credentials and configurations are defined, and API Traffic and Analytics data are viewed and analyzed.
+
+### API Gateway
+
+It is the most important component of Apinizer. It is the point where requests from clients are received. It also serves as a **Policy Enforcement Point**.
+
+It processes the incoming request according to the defined policies and routes it to the relevant Backend API/Service. It can work as a load balancer when routing. TLS/SSL termination is done here. It also processes the response returned from the Backend API/Service according to the defined policies and sends it to the client. It records all operations performed during this process and sends them asynchronously to the log server.
+
+It handles the recording of sensitive data according to the determined rules (deletion, masking, encryption). Each Gateway belongs to an **Environment**, and its settings change according to the Environment it runs in. There can be multiple Environments in Apinizer and multiple Gateways in each Environment.
+
+### API Cache Server
+
+API Cache Server manages the data shared by its components by storing it in distributed cache, and also provides performance improvement.
+
+<Info>
+  After Apinizer images are deployed to Kubernetes environment, you need to add the License Key provided to you by Apinizer to the database.
+</Info>
+
+Apinizer installation continues with the installation of API Manager first, then the definition of environments where Gateway and Cache Servers will run.
+
+## Pre-Installation Steps
+
+Before starting Apinizer installation, **Kubernetes Cluster**, **Replicaset MongoDB**, and optionally **Elasticsearch** if API Traffic and Analytics data will be managed through Apinizer must be installed on your servers.
+
+<Warning>
+  If Kubernetes, MongoDB and Log Servers are ready in your environments, skip this section.
+</Warning>
+
+<CardGroup cols={2}>
+  <Card title="Kubernetes Installation" icon="layer-group" href="/en/setup/kubernetes/kubernetes">
+    Learn Kubernetes cluster installation
+  </Card>
+  <Card title="MongoDB Installation" icon="database" href="/en/setup/mongodb/ubuntu-mongodb">
+    Learn MongoDB installation
+  </Card>
+  <Card title="Elasticsearch Installation" icon="magnifying-glass-chart" href="/en/setup/elasticsearch/ubuntu-elasticsearch">
+    Learn Elasticsearch installation
+  </Card>
+  <Card title="Cloud Installation" icon="cloud" href="/en/setup/cloud/amazon-eks-elastic-kubernetes-service">
+    Install on cloud environments
+  </Card>
+  <Card title="Offline Installation" icon="download" href="/en/setup/offline/introduction">
+    Perform offline installation
+  </Card>
+</CardGroup>
+
+## Installation and Configuration
+
+### Defining Kubernetes Permissions and Creating Namespaces
+
+Kubernetes API permissions need to be defined for Apinizer to access pods in the created Namespace.
+
+In Kubernetes, **ClusterRole** and **ClusterRoleBinding** provide role and role assignment mechanisms at the Kubernetes cluster level. These two resources enable cluster administrators and application developers to manage access and permissions to Kubernetes resources.
+
+If Environment management will be done through API Manager, permissions need to be defined for Apinizer to access Kubernetes APIs and perform create, delete, update and watch operations on Namespace, Deployment, Pod, Service.
+
+#### If Kubernetes management is done with Apinizer
+
+In the following step, Roles and RoleBindings are created on Kubernetes and permissions are defined. Permission is granted for all environments that will be created in this step.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apinizer
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: apinizer-role-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: apinizer-role
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: system:serviceaccounts
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: apinizer-role
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - nodes
+      - services
+      - namespaces
+      - pods
+      - endpoints
+      - pods/log
+      - secrets
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - create
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - create
+      - patch
+      - delete
+```
+
+```bash
+kubectl apply -f apinizer-role.yaml
+```
+
+#### If Kubernetes management is not done with Apinizer
+
+Here, permissions are set only for the manager application in the Apinizer namespace.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: apinizer
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: manager-serviceaccount
+  namespace: apinizer
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: apinizer-role
+  namespace: apinizer
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - services
+      - namespaces
+      - pods
+      - endpoints
+      - pods/log
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - create
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: manager-serviceaccount-apinizer-role-binding
+  namespace: apinizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: apinizer-role
+subjects:
+  - kind: ServiceAccount
+    name: manager-serviceaccount
+    namespace: apinizer
+```
+
+```bash
+kubectl apply -f apinizer-manager-role.yaml
+```
+
+### API Manager (Management Console) Installation
+
+API Manager is a web-based management interface where APIs, Policies, Users, Credentials and configurations are defined, and API Traffic and Analytics data are viewed and analyzed.
+
+Configure the following variables according to your environment before deploying API Manager to Kubernetes.
+
+* **APINIZER_VERSION** - Parameter indicating which Apinizer version you will install. [Click here to see current versions](https://hub.docker.com/r/apinizercloud/manager/tags). It is recommended to always use the latest version in new installations. [Click here to review release notes](/en/release-notes/overview).
+* **MONGO_DBNAME** - Database URL information to be used for Apinizer configurations. It is recommended to use the name "apinizerdb" by default.
+* **MONGOX_IP and MONGOX_PORT** - IP and port information of MongoDB servers. MongoDB default port is 27017. Apinizer uses port 25080 by default.
+* **MONGO_USERNAME and MONGO_PASSWORD** - Information about the user defined for Apinizer in your MongoDB application, who is authorized on the relevant database or has the authority to create that database.
+* **YOUR_LICENSE_KEY** - License key sent to you by Apinizer.
+* **K8S_ANY_WORKER_IP** - An IP from your Kubernetes Cluster is required for you to access the Apinizer Management Console interface from any web browser after Apinizer installation is completed. This is usually preferred as one of the Kubernetes Worker servers and it is recommended to be placed behind a Load Balancer and DNS later.
+
+#### Creating secret with MongoDB information
+
+It is recommended that your MongoDB database connection information be stored in an Encoded form in kubernetes deployments. For this, apply the following steps in the terminal of a Linux-based operating system.
+
+```bash
+DB_URL='mongodb://<MONGO_USERNAME>:<MONGO_PASSWORD>@<MONGO1_IP>:<MONGO1_PORT>,<MONGO2_IP>:<MONGO2_PORT>,<MONGO3_IP>:<MONGO3_PORT>/?authSource=admin&replicaSet=apinizer-replicaset'
+DB_NAME=<MONGO_DBNAME>  # Our default recommendation for <MONGO_DBNAME> variable is the name "apinizerdb"
+echo -n ${DB_URL} | base64  # We will put the output of this in place of <ENCODED_URL> variable in the next step
+echo -n ${DB_NAME} | base64  # We will put the output of this in place of <ENCODED_DB_NAME> variable in the next step
+vi secret.yaml
+```
+
+Preparing secret yaml with MongoDB information:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongo-db-credentials
+  namespace: apinizer
+type: Opaque
+data:
+  dbUrl: <ENCODED_URL>
+  dbName: <ENCODED_DB_NAME>
+```
+
+```bash
+kubectl apply -f secret.yaml
+```
+
+#### API Manager Kubernetes deployment
+
+Modify the following example yaml file according to your systems and load it to your Kubernetes Cluster.
+
+```bash
+vi apinizer-manager-deployment.yaml
+```
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apimanager
+  namespace: apinizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apimanager
+      version: v1
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: apimanager
+        version: v1
+    spec:
+      containers:
+      - env:
+        - name: JAVA_OPTS
+          value: '-XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+        - name: SPRING_PROFILES_ACTIVE
+          value: prod
+        - name: WORKER_DEPLOYMENT_TIMEOUT
+          value: '120'
+        - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE 
+          value: '70MB' 
+        - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE 
+          value: '70MB'
+        - name: SPRING_DATA_MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              key: dbUrl
+              name: mongo-db-credentials
+        - name: SPRING_DATA_MONGODB_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: dbName
+              name: mongo-db-credentials
+        name: apimanager
+        image: apinizercloud/apimanager:<APINIZER_VERSION>
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        resources:
+          limits:
+            cpu: 1
+            memory: 3Gi
+        startupProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /apinizer/management/health
+            port: 8080
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          successThreshold: 1
+          timeoutSeconds: 30
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      hostAliases:
+      - ip: "<IP_ADDRESS>"
+        hostnames:
+        - "<DNS_ADDRESS_1>"
+        - "<DNS_ADDRESS_2>"
+```
+
+<Info>
+  If Environments Will Not Be Managed Through Apinizer, Manager's Deployment is Changed
+
+  To enable Deployment objects to bind to the required ServiceAccount, the serviceAccountName field is added to the spec field as follows:
+
+  ```yaml
+  spec:
+    serviceAccountName: manager-serviceaccount
+  ```
+</Info>
+
+<Info>
+  **Environment Variables**
+
+  Apinizer API Manager runs on Spring Boot infrastructure. In Spring Boot, Environment variables are usually expressed using underscore (`_`) and uppercase. Therefore, for example, when setting `spring.servlet.multipart.max-file-size` and `spring.servlet.multipart.max-request-size` properties as environment variables, you may need to use underscore.
+
+  Example: You can define `SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE` and `SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE` as environment variables.
+
+  If you are using a proxy server like NGINX and want to increase the file upload limit, you need to add the following setting to the NGINX configuration file:
+
+  ```nginx
+  http {
+    ...
+    client_max_body_size 70M; # 70MB file limit
+    ...
+  }
+  ```
+</Info>
+
+<Info>
+  **Environment Variables**
+
+  Deployment operations are performed synchronously to ensure data integrity. The WORKER_DEPLOYMENT_TIMEOUT parameter indicates how many seconds after the deploy operation performed through API Manager or Management API will timeout.
+
+  ```yaml
+  env:
+    - name: WORKER_DEPLOYMENT_TIMEOUT
+      value: '120'
+  ```
+</Info>
+
+Create Kubernetes Service for API Manager:
+
+```bash
+vi apinizer-manager-service.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: apimanager
+  namespace: apinizer
+  labels:
+    app: apimanager
+spec:
+  selector:
+    app: apimanager
+  type: NodePort
+  ports:
+    - name: http
+      port: 8080
+      nodePort: 32080
+```
+
+```bash
+kubectl apply -f apinizer-manager-deployment.yaml
+kubectl apply -f apinizer-manager-service.yaml
+```
+
+<Info>
+  When API Manager is deployed on Kubernetes, it creates a Kubernetes service named manager and of type NodePort. This service is necessary for accessing API Manager from outside kubernetes. However, you can delete this service and adapt it according to the structure you use for connection method in your organization, such as Ingress.
+</Info>
+
+After this operation, to track the created pod and examine its log, run the first code below to get the pod name and use it in the second code.
+
+```bash
+kubectl get pods -n apinizer
+kubectl logs <POD_NAME> -n apinizer
+```
+
+<Warning>
+  After Apinizer images are deployed to Kubernetes environment, you need to add the License Key provided to you by Apinizer to the database.
+</Warning>
+
+#### Entering API Manager license key
+
+The License Key provided to you by Apinizer can be updated in a `.js` file as follows and the license information in the database can be updated.
+
+```bash
+vi license.js
+```
+
+```javascript
+db.general_settings.updateOne(
+  {"_class":"GeneralSettings"},
+  { $set: { licenseKey: '<YOUR_LICENSE_KEY>'}}
+)
+```
+
+The created license.js is run on the MongoDB server. A result showing Matched = 1 is expected.
+
+```bash
+mongosh mongodb://<MONGODB_IP>:<MONGO_PORT>/<MONGO_DBNAME> --authenticationDatabase "admin" -u "apinizer" -p "<MONGO_PASSWORD>" < license.js
+```
+
+If the installation process was successful, you can access Apinizer API Manager (Management Console) from the following address.
+
+```
+http://<K8S_ANY_WORKER_IP>:32080
+```
+
+**Default Username:** admin
+
+**Default User Password:** Request help from Apinizer support team.
+
+<Warning>
+  It is recommended that you change your password after your first login to Apinizer Management Console.
+</Warning>
+
+<Frame caption="Change Password page - Password change screen after first login">
+  <img
+    src="/images/setup/apinizer/sifre-degistirme.png"
+    alt="Change Password Page"
+    width="1200"
+    height="800"
+    style={{ borderRadius: '0.5rem' }}
+  />
+</Frame>
+
+#### Starting Apinizer Manager with SSL
+
+You can perform this from the guide at [Starting API Manager with SSL](/en/operations/administrator-guides/api-manager-ssl).
+
+### Settings to be Made in Connection Management Pages
+
+Information about where traffic logs flowing through Apinizer will be sent needs to be defined to Apinizer. This definition is made through Connectors on the Connection Configurations page. If you do not have a specific choice, you can use an Elasticsearch connector so that data management is also set from Apinizer to fully benefit from Apinizer's Analytics and Monitoring capabilities.
+
+You can make connection definitions for the applications you will use for these operations from the pages allocated to connectors under System Settings → Connection Management tab.
+
+If you will manage your API Traffic and API Analytics data with your own Log systems, you can define those you find suitable from the integration settings suitable for you.
+
+* [ActiveMQ](/en/integrations/connectors/activemq-connector)
+* [Database](/en/integrations/connectors/database-connector)
+* [Elasticsearch](/en/integrations/connectors/elasticsearch-connector)
+* [Kafka](/en/integrations/connectors/kafka-connector)
+* [RabbitMQ](/en/integrations/connectors/rabbitmq-connector)
+* [Syslog](/en/integrations/connectors/syslog-connector)
+* [Webhook](/en/integrations/connectors/webhook-connector)
+
+### Settings to be Made in General Settings (System Settings) Page
+
+By going to System Settings → General Settings page, here;
+
+* Whether a value will be added to the end of the addresses you define to the relevant Worker environments when serving the services you will serve through the system,
+* Whether you will manage the kubernetes environment where Apinizer is located through Apinizer,
+* Whether logs of error messages will be sent to connected connectors even if log settings are closed,
+* Settings related to login and session duration for Management Console interface,
+* Number of rollback points to be kept in each proxy,
+* Applications where application logs and token logs will be kept/sent
+
+changes can be made. Appropriate definitions for your organization should be made here.
+
+[Click here for detailed information about this page](/en/admin/system-settings/global-configuration).
+
+### Settings to be Made in Gateway Environments Page
+
+At least one environment must be created and published on the System Settings → Gateways page.
+
+By giving an appropriate environment name, settings are entered to containers with resources suitable for your license and server quantity. This environment name will also be the kubernetes namespace where the applications in the relevant environment will run. Then, Connector definitions are made to the environments where you want to write logs, enabling the environments to write logs.
+
+#### If Kubernetes management is done with Apinizer
+
+[Click here for detailed information about Gateway Environments page](/en/admin/server-management/gateway-environments).
+
+Here, on the page opened with the new environment option, general settings such as which namespace you will create the environment in, which address you will open it from, which connectors you will connect, and the resources and JVM parameters of worker and cache applications are set and the environment is published.
+
+#### If Kubernetes management is not done with Apinizer
+
+[Click here for detailed information about Manual Management of Gateway Environments](/en/admin/server-management/manual-management-of-gateway-environments).
+
+In the necessary role assignments, the namespace where worker and cache will run is created and permissions are set within this namespace, two deployment files named worker and cache and kubernetes services must be created for access to pods that will be created after these deployments.
+
+##### Creating roles and rolebindings for Worker and Cache
+
+The names of the environments to be created should be determined in advance and `<WORKER_CACHE_NAMESPACE>` variables should be set in this way, and the following steps should be applied for each environment to be created.
+
+```bash
+vi apinizer-worker-cache-role-ns.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: <WORKER_CACHE_NAMESPACE>
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: worker-cache-role
+  namespace: <WORKER_CACHE_NAMESPACE>
+rules:
+  - apiGroups:
+      - ''
+    resources:
+      - services
+      - namespaces
+      - pods
+      - endpoints
+      - pods/log
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - create
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: manager-serviceaccount-worker-cache-role-binding
+  namespace: <WORKER_CACHE_NAMESPACE>
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: worker-cache-role
+subjects:
+  - kind: ServiceAccount
+    name: manager-serviceaccount
+    namespace: <WORKER_CACHE_NAMESPACE>
+```
+
+```bash
+vi apinizer-worker-cache-rolebinding.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: worker-cache-serviceaccount
+  namespace: <WORKER_CACHE_NAMESPACE>
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: worker-cache-serviceaccount-apinizer-role-binding
+  namespace: apinizer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: apinizer-role
+subjects:
+  - kind: ServiceAccount
+    name: worker-cache-serviceaccount
+    namespace: <WORKER_CACHE_NAMESPACE>
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: worker-cache-serviceaccount-worker-cache-role-binding
+  namespace: <WORKER_CACHE_NAMESPACE>
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: worker-cache-role
+subjects:
+  - kind: ServiceAccount
+    name: worker-cache-serviceaccount
+    namespace: <WORKER_CACHE_NAMESPACE>
+```
+
+```bash
+kubectl apply -f apinizer-worker-cache-role-ns.yaml
+kubectl apply -f apinizer-worker-cache-rolebinding.yaml
+```
+
+##### Creating Worker and Cache deployments
+
+```bash
+vi apinizer-worker-deployment.yaml
+```
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  strategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxUnavailable: 75%
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      serviceAccountName: worker-cache-serviceaccount
+      containers:
+        - name: worker
+          image: apinizercloud/worker:<APINIZER_VERSION>
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JAVA_OPTS
+              value: -server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true
+            - name: tuneWorkerThreads
+              value: "1024"
+            - name: tuneWorkerMaxThreads
+              value: "4096"
+            - name: tuneBufferSize
+              value: "16384"
+            - name: tuneIoThreads
+              value: "4"
+            - name: tuneBacklog
+              value: "10000"
+            - name: tuneRoutingConnectionPoolMaxConnectionPerHost
+              value: "1024"
+            - name: tuneRoutingConnectionPoolMaxConnectionTotal
+              value: "4096"
+            - name: SPRING_DATA_MONGODB_DATABASE
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-db-credentials
+                  key: dbName
+            - name: SPRING_DATA_MONGODB_URI
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-db-credentials
+                  key: dbUrl
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8091
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          ports:
+            - containerPort: 8091
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8091
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          resources:
+            limits:
+              cpu: 4
+              memory: 4Gi
+          startupProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8091
+              scheme: HTTP
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+      restartPolicy: Always
+      hostAliases:
+        - ip: "<IP_ADDRESS>"
+          hostnames:
+            - "<DNS_ADDRESS_1>"
+            - "<DNS_ADDRESS_2>"
+```
+
+<Warning>
+  Eğer Gateway'in türü HTTP+Websocket olarak belirlenecekse **http2Enabled** parametresinin false olarak girilmesi önerilmektedir [bkz](/en/admin/server-management/ag-gecidi-ortamlari).
+
+  ```yaml
+  - name: http2Enabled
+    value: "false"
+  ```
+</Warning>
+
+<Info>
+  Worker uygulaması HTTPS ile sunulmak istenilirse yukarıdaki yaml'da **livenessProbe**, **readinessProbe** ve **startupProbe**'ların altındaki **port** değeri **8443**, **scheme** değeri **HTTPS** olarak verilmelidir.
+</Info>
+
+<Warning>
+  Worker deployment içindeki **spec.selector.matchLabels.app** ve **spec.template.metadata.labels.app** etiketleri, apinizer'ın worker pod'larını doğru şekilde tanıyıp kontrol etmesini sağlar. Bu etiketlerin değiştirilmesi, pod'ların doğru şekilde seçilmesini engelleyebilir ve sistemin işleyişini bozabilir. Bu nedenle, bu etiketlerin değerleri değiştirilmemelidir.
+</Warning>
+
+```bash
+vi apinizer-cache-deployment.yaml
+```
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cache
+  strategy:
+    type: "RollingUpdate"
+    rollingUpdate:
+      maxUnavailable: 75%
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      serviceAccountName: worker-cache-serviceaccount
+      containers:
+        - name: cache
+          image: apinizercloud/cache:<APINIZER_VERSION>
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: JAVA_OPTS
+              value: -server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=1024 -Dlog4j.formatMsgNoLookups=true
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+            - name: SPRING_DATA_MONGODB_DATABASE
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-db-credentials
+                  key: dbName
+            - name: SPRING_DATA_MONGODB_URI
+              value: null
+              valueFrom:
+                secretKeyRef:
+                  name: mongo-db-credentials
+                  key: dbUrl
+            - name: CACHE_SERVICE_NAME
+              value: cache-hz-service
+            - name: CACHE_QUOTA_TIMEZONE
+              value: +03:00
+            - name: SERVER_TOMCAT_MAX_THREADS
+              value: "1024"
+            - name: SERVER_TOMCAT_MIN_SPARE_THREADS
+              value: "512"
+            - name: SERVER_TOMCAT_ACCEPT_COUNT
+              value: "512"
+            - name: SERVER_TOMCAT_MAX_CONNECTIONS
+              value: "1024"
+            - name: SERVER_TOMCAT_CONNECTION_TIMEOUT
+              value: "20000"
+            - name: SERVER_TOMCAT_KEEPALIVE_TIMEOUT
+              value: "60000"
+            - name: SERVER_TOMCAT_MAX_KEEPALIVE_REQUESTS
+              value: "10000"
+            - name: SERVER_TOMCAT_PROCESSOR_CACHE
+              value: "512"
+            - name: HAZELCAST_IO_WRITE_THROUGH
+              value: "false"
+            - name: HAZELCAST_MAP_LOAD_CHUNK_SIZE
+              value: "10000"
+            - name: HAZELCAST_MAP_LOAD_BATCH_SIZE
+              value: "10000"
+            - name: HAZELCAST_CLIENT_SMART
+              value: "true"
+            - name: HAZELCAST_MAPCONFIG_BACKUPCOUNT
+              value: "1"
+            - name: HAZELCAST_MAPCONFIG_READBACKUPDATA
+              value: "false"
+            - name: HAZELCAST_MAPCONFIG_ASYNCBACKUPCOUNT
+              value: "0"
+            - name: HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY
+              value: "block"
+            - name: HAZELCAST_MAP_WRITE_DELAY_SECONDS
+              value: "5"
+            - name: HAZELCAST_MAP_WRITE_BATCH_SIZE
+              value: "100"
+            - name: HAZELCAST_MAP_WRITE_COALESCING
+              value: "true"
+            - name: HAZELCAST_MAP_WRITE_BEHIND_QUEUE_CAPACITY
+              value: "100000"
+          ports:
+            - containerPort: 8090
+            - containerPort: 5701
+          resources:
+            limits:
+              cpu: 1
+              memory: 1024Mi
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          startupProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8090
+              scheme: HTTP
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+      restartPolicy: Always
+      hostAliases:
+        - ip: "<IP_ADDRESS>"
+          hostnames:
+            - "<DNS_ADDRESS_1>"
+            - "<DNS_ADDRESS_2>"
+```
+
+<Info>
+  **Environment Variables**
+
+  These environment variables are added to the YAML file to configure Tomcat's thread and connection management and Hazelcast's data loading, backup and write-behind behaviors.
+
+  **Tomcat Settings:**
+  * `SERVER_TOMCAT_MAX_THREADS`: Maximum number of concurrent threads (threads) that Tomcat can handle
+  * `SERVER_TOMCAT_MIN_SPARE_THREADS`: Minimum number of idle threads that Tomcat keeps ready
+  * `SERVER_TOMCAT_ACCEPT_COUNT`: Maximum number of connections that can be queued when all threads are busy
+  * `SERVER_TOMCAT_MAX_CONNECTIONS`: Maximum number of connections that Tomcat can accept at the same time
+  * `SERVER_TOMCAT_CONNECTION_TIMEOUT`: Connection timeout duration (milliseconds)
+  * `SERVER_TOMCAT_KEEPALIVE_TIMEOUT`: Timeout duration for keep-alive connections (milliseconds)
+  * `SERVER_TOMCAT_MAX_KEEPALIVE_REQUESTS`: Maximum number of requests that can be processed over a keep-alive connection
+  * `SERVER_TOMCAT_PROCESSOR_CACHE`: Maximum number of processors in the processor cache
+
+  **Hazelcast Settings:**
+  * `HAZELCAST_IO_WRITE_THROUGH`: Whether Hazelcast write-through mode is enabled
+  * `HAZELCAST_MAP_LOAD_CHUNK_SIZE`: Chunk size to be used in map loading
+  * `HAZELCAST_MAP_LOAD_BATCH_SIZE`: Batch size to be used in map loading
+  * `HAZELCAST_CLIENT_SMART`: Whether Hazelcast client will use smart routing
+  * `HAZELCAST_MAPCONFIG_BACKUPCOUNT`: How many backup copies of Hazelcast map data will be kept
+  * `HAZELCAST_MAPCONFIG_READBACKUPDATA`: Will reading be done from backup copies?
+  * `HAZELCAST_MAPCONFIG_ASYNCBACKUPCOUNT`: Asynchronous backup copy count
+  * `HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY`: Hazelcast response queue idle strategy (for example: block, busyspin, backoff)
+  * `HAZELCAST_MAP_WRITE_DELAY_SECONDS`: Delay duration for Map write-behind feature (seconds)
+  * `HAZELCAST_MAP_WRITE_BATCH_SIZE`: Batch size for Map write-behind feature
+  * `HAZELCAST_MAP_WRITE_COALESCING`: Will coalescing be done in write-behind operations?
+  * `HAZELCAST_MAP_WRITE_BEHIND_QUEUE_CAPACITY`: Maximum capacity of write-behind queue
+</Info>
+
+<Warning>
+  If you set the `HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY` parameter to `"backoff"`: It will continuously use 90-100% of the Pod's CPU limit. This situation can provide 5-10% performance increase but consumes the CPU resource limit of the Cache pod.
+</Warning>
+
+```bash
+kubectl apply -f apinizer-worker-deployment.yaml
+kubectl apply -f apinizer-cache-deployment.yaml
+```
+
+##### Creating services for Worker and Cache
+
+```bash
+vi apinizer-worker-service.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-management-api-http-service
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  ports:
+    - port: 8091
+      protocol: TCP
+      targetPort: 8091
+  selector:
+    app: worker
+  type: ClusterIP
+---
+# If your Gateway's Communication Protocol Type is HTTP or websocket, the following
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-http-service
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  ports:
+    - nodePort: 30080
+      port: 8091
+      protocol: TCP
+      targetPort: 8091
+  selector:
+    app: worker
+  type: NodePort
+---
+# If your Gateway's Communication Protocol Type is gRPC, the following
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-grpc-service
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  ports:
+    - nodePort: 30152
+      port: 8094
+      protocol: TCP
+      targetPort: 8094
+  selector:
+    app: worker
+  type: NodePort
+```
+
+<Info>
+  If Worker is desired to be served with HTTPS, in the above yaml, **port** and **targetPort** values should be given as **8443**.
+</Info>
+
+```bash
+vi apinizer-cache-service.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-http-service
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  ports:
+    - port: 8090
+      protocol: TCP
+      targetPort: 8090
+  selector:
+    app: cache
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-hz-service
+  namespace: <WORKER_CACHE_NAMESPACE>
+spec:
+  ports:
+    - port: 5701
+      protocol: TCP
+      targetPort: 5701
+  selector:
+    app: cache
+  type: ClusterIP
+```
+
+##### Copying MongoDB secret from Apinizer namespaces to newly created namespaces
+
+Since Gateway and Cache Server applications will also connect to MongoDB, the secret created for the Manager application is copied to other namespaces. The following example copies a secret in the apinizer namespace to the relevant namespace.
+
+```bash
+kubectl get secret mongo-db-credentials -n apinizer -o yaml | sed 's/namespace: apinizer/namespace: <WORKER_CACHE_NAMESPACE>/' | kubectl create -f -
+```
+
+Load the created .yaml files to the kubernetes environment.
+
+```bash
+kubectl apply -f apinizer-worker-service.yaml
+kubectl apply -f apinizer-cache-service.yaml
+```
+
+After installing Worker and Cache applications to your Kubernetes environment, go to Server Management Section from Apinizer API Manager and add the Kubernetes Namespace you will create to Apinizer as an Environment. The Environment name here must be the same as your Namespace in Kubernetes.
+
+#### Adding Log Connector to created environments
+
+At least one Log connector must be connected to the created environments.
+
+[Click here for detailed information about adding Log Connector to environments](/en/admin/server-management/adding-connectors-to-gateway-environments).
+
+After completing the above steps, go to the Server Management section on API Manager again and update the Environment you have defined as **published**.
+
+### Settings to be Made in Backup Management/Configuration Page
+
+Backup of the database where Apinizer configuration data and, if you have set them on the General Settings page, log and token records are kept can be done by extracting a dump file on the relevant (if there are more than one, the one specified in this setting) server.
+
+It is recommended that this file be backed up to a secure server by your organization's system team employees in any case.
+
+[Click here for detailed information about this page](/en/operations/backup-and-restore/mongodb-backup-and-restore).
+
+### Other Settings
+
+Please change the password of the "admin" user account you logged into Apinizer Management Console at the first login from the Change Password page under the quick menu at the top right and note it securely. [Click here for detailed information about the Users page where user management is done](/en/admin/user-access-management/users).
+
+[If you want users to use passwords found in LDAP/Active Directory when logging into the management console, click here for detailed information](/en/admin/system-settings/ldap-login-settings).
+
+Many features you will use in Apinizer write their logs to the database where configuration data is kept. [If these information are logs that are not necessary according to your organization's policies, click here for detailed information about what these data are and how this growth will be kept under control](/en/operations/database-growth-management/overview).
+
+If you are using Elasticsearch managed by Apinizer for Apinizer traffic logs and prefer that its backup be done by taking snapshots at certain intervals, [click here to perform these operations in detail](/en/operations/database-growth-management/overview).
+
+It is strongly recommended that DNS routing be done to the ports where Worker environments are opened in Apinizer installation and the servers they run on. For this, your organization's employees should be informed about which server and ports Apinizer is opened from and which DNSs should be used to access these addresses.
+
+If your organization is part of the kamunet network and Apinizer will directly access the kamunet network, Apinizer servers' exits should be able to exit as if they were your kamunet IP. This operation called NAT'ing needs to be set up by your organization's firewall administrators.
+
+If your organization wants to use the KPS (Identity Sharing System) services offered by the General Directorate of Population and Citizenship Affairs through Apinizer, your organization's kps information should be entered into the management console from the [KPS Setting page](/en/admin/system-settings/global-configuration).
+
+<Note>
+  **Congratulations!** If you have successfully reached this point, it means that Apinizer installation and settings are completed.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Portal Installation" icon="window-maximize" href="/en/setup/apinizer/api-portal">
+    Learn API Developer Portal installation
+  </Card>
+  <Card title="API Integration Installation" icon="plug" href="/en/setup/apinizer/api-integration">
+    Learn API Integration installation
+  </Card>
+  <Card title="Multi-Region Installation" icon="globe" href="/en/setup/apinizer/multi-region">
+    Learn Multi-Region installation
+  </Card>
+  <Card title="Kubernetes Installation" icon="layer-group" href="/en/setup/kubernetes/kubernetes">
+    Learn Kubernetes installation
+  </Card>
+</CardGroup>

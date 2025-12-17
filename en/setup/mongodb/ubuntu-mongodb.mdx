@@ -1,0 +1,315 @@
+---
+title: "MongoDB Installation on Ubuntu"
+description: "You can perform MongoDB Replicaset 8.0 installation on servers with Ubuntu operating system. It is recommended to use Ubuntu 2024.04 LTS operating system. Operating system configurations, MongoDB application installation, replicaset configuration and high availability settings can be made during the installation process."
+---
+
+## Checks to be Made Before Starting Installation
+
+<Warning>
+  **Very Important**
+
+  Before starting installations, make sure that the server's hostname is **not localhost.localdomain and each one is unique** (with hostname command). If it is, be sure to change it before starting operations.
+
+  ```bash
+  #(If necessary) Changing hostname
+  hostnamectl set-hostname your-new-hostname
+  ```
+
+  There should not be a hostname defined as **127.0.1.1** in the `/etc/hosts` file.
+
+  There should not be an entry like **nameserver 127.0.1.1** in the `/etc/resolv.conf` file.
+</Warning>
+
+<Info>
+  **Important**
+
+  For the installation to be healthy, your servers need to access the following addresses.
+
+  **MongoDB:**
+  - [https://www.mongodb.org/static/pgp/server-8.0.asc](https://www.mongodb.org/static/pgp/server-8.0.asc)
+  - [https://repo.mongodb.org/apt/ubuntu](https://repo.mongodb.org/apt/ubuntu)
+  - [http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.20_amd64.deb](http://nz2.archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2.20_amd64.deb)
+</Info>
+
+<Info>
+  **Important**
+
+  When updating Ubuntu packages, it tries to pull from the server in Turkey location. However, there may be problems at [tr.archive.ubuntu.com](http://tr.archive.ubuntu.com) address from time to time. In this case, the following change needs to be made.
+
+  ```bash
+  sudo vi /etc/apt/sources.list
+  ```
+
+  #Replace all addresses containing tr. with "Replace All".
+
+  #Example:
+
+  Old: [http://tr.archive.ubuntu.com/ubuntu](http://tr.archive.ubuntu.com/ubuntu)
+
+  New: [http://archive.ubuntu.com/ubuntu](http://archive.ubuntu.com/ubuntu)
+</Info>
+
+## Operating System Configurations
+
+<Note>
+  These steps should be performed on all MongoDB servers.
+</Note>
+
+```bash
+# Apinizer user is created and authorized
+sudo adduser apinizer
+sudo usermod -aG sudo apinizer
+
+# Switch to user and continue operations
+sudo su - apinizer
+
+# Installing necessary tools
+sudo apt update
+sudo apt install -y curl wget net-tools gnupg2 software-properties-common apt-transport-https ca-certificates lsb-release
+
+# Firewall is turned off
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+
+# Swap is turned off and the swap line in /etc/fstab file is deleted to prevent it from restarting
+sudo swapoff -a
+sudo vi /etc/fstab
+# Then close the vi file (:wq)
+```
+
+## MongoDB Installation
+
+### Installing MongoDB Application
+
+<Note>
+  These steps should be performed on all MongoDB servers.
+</Note>
+
+```bash
+wget http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+sudo dpkg -i ./libssl1.1_1.1.1f-1ubuntu2_amd64.deb
+
+curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/mongodb-8.gpg
+
+echo "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
+
+sudo apt update
+sudo apt install mongodb-org -y
+sudo apt-mark hold mongo*
+```
+
+### MongoDB Configurations
+
+<Note>
+  These steps should be performed on all MongoDB servers.
+</Note>
+
+**Creating key:**
+
+```bash
+sudo mkdir -p /etc/mongodb/keys/
+sudo chown -Rf apinizer:apinizer /etc/mongodb/keys
+sudo chmod -Rf 700 /etc/mongodb/keys
+sudo openssl rand -base64 756 > /etc/mongodb/keys/mongo-key
+sudo chmod -Rf 400 /etc/mongodb/keys/mongo-key
+sudo chown -Rf mongodb:mongodb /etc/mongodb
+```
+
+You need to add the following parameters to the `/etc/mongod.conf` file by setting them according to your environment:
+
+* storage / wiredTiger
+* replication
+* security
+* setParameter
+* processManagement
+
+**The state the relevant configuration file should be in:**
+
+```yaml
+storage:
+  dbPath: /var/lib/mongodb
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: 2
+
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+
+net:
+  port: 25080
+  bindIp: 0.0.0.0
+
+replication:
+  replSetName: apinizer-replicaset
+
+security:
+  authorization: enabled
+  keyFile: /etc/mongodb/keys/mongo-key
+
+setParameter:
+  transactionLifetimeLimitSeconds: 300
+
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+```
+
+Then MongoDB application is started:
+
+```bash
+sudo systemctl enable mongod
+sudo systemctl start mongod
+```
+
+<Info>
+  If MongoDB installation will be done on multiple servers, keys created on Primary node are moved to all nodes and the same permissions are given.
+
+  ```bash
+  #Key file is copied from Primary server to all Secondary servers
+  scp -r /etc/mongodb/keys/ apinizer@mongoDb2:/tmp
+  #the same operation must be done separately for mongoDb3
+
+  #Key is moved to where it should be on Secondary servers
+  sudo mv /tmp/keys/ /etc/mongodb/keys/
+
+  #Permissions are checked and corrected
+  chmod -Rf 400 /etc/mongodb/keys
+  chown -Rf mongodb:mongodb /etc/mongodb
+  ```
+</Info>
+
+### ReplicaSet Configuration and Authorized User Definition
+
+<Note>
+  These steps should be performed only on MongoDB Primary server.
+</Note>
+
+<Warning>
+  Replicaset activation operation should be done only on Primary server.
+</Warning>
+
+**Activating Replicaset:**
+
+```bash
+mongosh mongodb://localhost:25080
+#If connection error is given at this stage, server name with server address should be added under /etc/hosts and it should be checked if one of the values of 127.0.0.1 expression is localhost
+
+rs.initiate()
+rs.status()
+```
+
+**Creating authorized user for Apinizer application:**
+
+```javascript
+use admin
+db.createUser(
+  {
+    user: 'apinizer',
+    pwd: '<YOUR_PASSWORD>',
+    roles: [ { role: 'root', db: 'admin' } ],
+	mechanisms:[  "SCRAM-SHA-1"]   }
+);
+
+exit;
+```
+
+<Info>
+  If MongoDB's local management will be done by you, a user with the following role needs to be created.
+
+  ```javascript
+  roles: [ { role: "readWrite", db: "apinizerdb" } ]
+  ```
+</Info>
+
+<Info>
+  **Changes That May Be Needed**
+
+  Grant permission to a user on previously created MongoDB using the following command lines.
+
+  ```bash
+  mongosh mongodb://localhost:25080
+  use admin;
+  db.grantRolesToUser('admin', [{ role: 'root', db: 'admin' }])
+  ```
+
+  **If hostname or IP address change is desired:**
+
+  ```bash
+  mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+  cfg = rs.conf()
+  cfg.members[0].host = "<MONGO_IP_ADDRESS>:25080"
+  rs.reconfig(cfg)
+  rs.status()
+  ```
+
+  **If a user password change is desired:**
+
+  ```javascript
+  use admin
+  db.changeUserPassword("apinizer", passwordPrompt())
+  ```
+
+  **If arbiter is desired to be added to MongoDB:**
+
+  ```javascript
+  db.adminCommand({ setDefaultRWConcern: 1, defaultWriteConcern: { w: "majority" } })
+  rs.addArb("<MONGO_IP_ADDRESS>:25080")
+  ```
+</Info>
+
+### MongoDB ReplicaSet Installation on Multiple Servers
+
+<Note>
+  These steps should be performed only on MongoDB Primary server.
+</Note>
+
+<Info>
+  Apinizer recommends MongoDB's high availability feature. High availability enables Secondary Nodes to come into play when Primary Node fails.
+
+  At least 3 servers (1 Primary and 2 Secondary) are required for high availability in MongoDB as well. If Primary node encounters a problem, a Secondary node automatically becomes Primary, so the system works without interruption. When Primary node becomes active again, it remains as Secondary node. However, this function cannot be seen when there are fewer than 3 active servers.
+
+  High availability is not limited to only 3 servers; it can also be applied with Arbiter or more servers. Servers can be positioned in different locations to increase system continuity.
+
+  For more information, you can check the link [https://www.mongodb.com/docs/manual/core/replica-set-architectures/](https://www.mongodb.com/docs/manual/core/replica-set-architectures/).
+</Info>
+
+When you restart Mongod services, you can configure Secondary nodes on Primary node with replica set architecture using the following commands.
+
+```bash
+mongosh mongodb://<PRIMARY_NODE>:25080 --authenticationDatabase "admin" -u "apinizer" -p
+rs.add("mongoDb02:25080")
+rs.add("mongoDb03:25080")
+rs.status()
+exit;
+```
+
+With this step, a structure consisting of a total of three servers, one Primary and the other two Secondary, has been established.
+
+In high availability situation, if Primary server's connection is cut or it does not work, a Secondary server should automatically take over the main server role. To set this situation, the following steps should be applied for all nodes on Primary node.
+
+```bash
+mongosh mongodb://<PRIMARY_NODE>:25080 --authenticationDatabase "admin" -u "apinizer" -p
+cfg = rs.conf()
+cfg.members[0].priority = 1
+cfg.members[0].votes = 1
+cfg.members[1].priority = 1
+cfg.members[1].votes = 1
+cfg.members[2].priority = 1
+cfg.members[2].votes = 1
+rs.reconfig(cfg)
+rs.conf()
+rs.status()
+exit;
+```
+
+<Info>
+  Priority specifies the priority of the node being selected as new Primary and this value can be scaled between 0 and 1. While value 0 indicates that it can never be Primary node, Primary priority is found according to how close other values are to 1.
+
+  Votes specifies whether a node can vote in a new Primary election and takes value 0 or 1. This value shows whether the node will vote in the election.
+</Info>
+
+<Note>
+  This installation has been prepared assuming that DNSs in the form of "mongoDb01, mongoDb02, mongoDb03, k8sWorkerIP" can be resolved by the system. In cases where servers cannot resolve these DNSs, either this situation should be fixed or all DNSs should be fixed as IP.
+</Note>
+

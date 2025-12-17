@@ -1,0 +1,235 @@
+---
+title: "Openshift Origin 3.11"
+description: "Provides Kubernetes installation and configuration on Openshift Origin 3.11 platform. Includes Openshift Origin 3.11 installation steps, Docker configurations, network plugins and RBAC settings. Prepares the necessary Kubernetes environment for Apinizer installation."
+---
+
+## 1) Operating System Configurations (To be done on all servers)
+
+```bash
+sudo apt update
+
+# It is recommended that the following tools be installed on all servers
+sudo apt install -y curl wget net-tools gnupg2 software-properties-common apt-transport-https ca-certificates
+
+# Apinizer user is created and authorized.
+sudo adduser apinizer
+sudo usermod -aG sudo apinizer
+
+# Switch to user and continue operations.
+su - apinizer
+
+# Firewall is turned off.
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+
+# Kubernetes, MongoDB and Elasticsearch do not want swap usage in the operating system in common. Let's disable swap for this.
+# To disable swap in running system
+sudo swapoff -a
+
+# The swap line in /etc/fstab file is deleted or commented out so that swap does not open when the system restarts.
+# Then close the vi file (:wq)
+sudo vi /etc/fstab
+```
+
+## 2) Docker Installation
+
+### 2.1) Container Installation (To be done on all Openshift servers)
+
+To prepare the system and install Docker before proceeding to Apinizer installation, follow the steps below.
+
+```bash
+# For permanent loading of modules
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+
+# To load modules in the running system
+sudo modprobe overlay
+sudo modprobe br_netfilter
+```
+
+sysctl settings:
+
+```bash
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+The first three lines here are mandatory, others can be changed as needed.
+
+```yaml
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward=1
+net.ipv4.tcp_max_syn_backlog=40000
+net.core.somaxconn=40000
+net.core.wmem_default=8388608
+net.core.rmem_default=8388608
+net.ipv4.tcp_sack=1
+net.ipv4.tcp_window_scaling=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.tcp_keepalive_intvl=30
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_moderate_rcvbuf=1
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+net.ipv4.tcp_mem=134217728 134217728 134217728
+net.ipv4.tcp_rmem=4096 277750 134217728
+net.ipv4.tcp_wmem=4096 277750 134217728
+net.core.netdev_max_backlog=300000
+```
+
+Docker installation is done.
+
+```bash
+sudo apt update
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+sudo apt update
+sudo apt install -y containerd.io docker-ce docker-ce-cli
+
+sudo mkdir -p /etc/systemd/system/docker.service.d
+sudo tee /etc/docker/daemon.json <<EOF
+{
+  "insecure-registries" : [ "172.30.0.0/16" ],
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+EOF
+```
+
+Docker service is started with final settings.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+sudo systemctl enable docker
+sudo groupadd docker
+sudo gpasswd -a $USER docker
+```
+
+### 2.2) Openshift Origin Installation (On master servers)
+
+```bash
+wget https://github.com/openshift/origin/releases/download/v3.11.0/openshift-origin-client-tools-v3.11.0-0cbc58b-linux-64bit.tar.gz
+
+#Uncompress downloaded file.
+tar xvf openshift-origin-client-tools*.tar.gz
+cd openshift-origin-client*/
+sudo mv oc kubectl /usr/local/bin/
+
+#Verify installation of OpenShift client utility.
+oc version
+sudo systemctl restart docker
+
+oc cluster up --public-hostname=YOURHOSTIP
+oc login -u system:admin
+oc adm policy add-cluster-role-to-user cluster-admin developer
+oc login
+```
+
+#### 2.2.1) Bash Auto-Completion (Optional, On any Openshift Master server)
+
+Speed can be gained in writing kubernetes commands with this operation.
+
+```bash
+apt install bash-completion
+source /usr/share/bash-completion/bash_completion
+kubectl completion bash | sudo tee /etc/bash_completion.d/kubectl > /dev/null
+```
+
+#### 2.2.2) Setting User Configuration of kubectl Command on Openshift Master Server (On Openshift Master servers)
+
+Definitions are made for the user who will run kubectl commands:
+
+```bash
+mkdir -p $HOME/.kube
+sudo chown -R $(id -u):$(id -g) $HOME/.kube
+```
+
+#### 2.2.3) Install Kubernetes Network Plugin (On Openshift Master servers)
+
+We will use the Flannel network plugin in this guide. You can select other supported network plugins. Flannel is a simple and easy way to configure a layer 3 network structure designed for Kubernetes.
+
+```bash
+oc apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+```
+
+<Warning>
+  **Important**
+
+  If you did not use the value 10.244.0.0/16 as podCIDR when initializing the Master, you should download the yaml file above and edit the network settings here as well.
+</Warning>
+
+#### 2.2.4) Installation Check (On any Openshift Master server)
+
+When the code below is run from Master, if the Node created in addition to Master is also visible, it means the installation has been completed successfully.
+
+If it does not pass from NotReady status to Ready status within two minutes, the problem should be examined with the "oc describe node NODENAME" command.
+
+```bash
+oc get node
+```
+
+Example output:
+
+```
+NAME       STATUS   ROLES    AGE   VERSION
+localhost  Ready    <none>   5d    v1.11.0+d4cacc0
+```
+
+#### 2.2.5) Defining Openshift Permissions (On Openshift Master servers)
+
+To protect your Openshift cluster data, it is deployed with at least one RBAC configuration by default. Currently, Dashboard only supports login with Bearer Token. Apply the following steps in order.
+
+**vi service.yaml**
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-user
+  namespace: kube-system
+```
+
+**vi adminuser.yaml**
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-user
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: admin-user
+  namespace: kube-system
+```
+
+```bash
+oc apply -f service.yaml
+oc apply -f adminuser.yaml
+oc create clusterrolebinding permissive-binding --clusterrole=cluster-admin --user=admin --user=kubelet --group=system:serviceaccounts
+oc create clusterrolebinding apinizer -n kube-system --clusterrole=cluster-admin --serviceaccount=kube-system:apinizer
+```
+
+### 2.3) DNS Test (Optional, On any Openshift Master server)
+
+```bash
+oc apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+```
+
+After the DNS test is completed, Kubernetes installation on Openshift Origin 3.11 is completed. For Apinizer installation, see [Apinizer Installation](/en/setup/apinizer/apinizer) documentation.
+

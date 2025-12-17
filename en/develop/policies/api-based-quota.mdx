@@ -1,0 +1,200 @@
+---
+title: "API Based Quota"
+description: "You can manage usage quota by limiting the total number of requests coming to APIs in certain time periods. You can control long-term (hour/day/week/month) limits and provide billing and subscription management"
+---
+
+<Tip>
+This document describes the detailed usage of a specific policy. If you are using Apinizer policy structure for the first time or want to learn the general working principles of policies, we recommend that you first read the [What is Policy?](/en/concepts/core-concepts/what-is-policy) page.
+</Tip>
+
+## Overview
+
+API Based Quota policy is a resource management mechanism that limits API usage over certain time periods (hour, day, week, month).
+
+### What is its Purpose?
+
+- **Usage Quota Management**: Controls resource consumption and provides fair usage by limiting API usage in hourly, daily, weekly, or monthly periods.
+- **Business Model and Pricing Support**: Provides customized quota plans for different customer segments (Free: 1000 requests/month, Basic: 10K/month, Premium: 100K/month, Enterprise: Unlimited), supports subscription models.
+- **Cost Control and Budget Management**: Makes cloud service costs predictable, monitors resource consumption per customer, prevents unexpected cost increases.
+- **SLA and Service Quality Guarantee**: Fulfills service level agreements, guarantees access to API resources for all users, prevents resource exhaustion.
+- **Abuse and Misuse Prevention**: Detects and prevents excessive usage, ensures fair distribution of API resources, prevents service interruptions.
+
+### Working Principle
+
+1. **Request Arrival**: For each HTTP/HTTPS request arriving at the API Gateway, the request's source information (IP, user, API key, etc.) and timestamp are detected.
+2. **Policy Check**: If the API Based Quota policy is active, the system checks in the following order:
+  - Is a Condition defined? If so, is the condition met?
+  - Is the policy active (active=true)?
+  - Is a Variable used or is Apinizer default?
+3. **Quota Key Creation and Counter Check**: A unique quota key is created for each request (format: `quota:{policy_id}:{apply_by_value}:{period}`). If Apply By parameter exists (IP address, user ID, API key), this value is included in the key. Current quota usage counter is queried from Redis cache. If Detail List is defined, it is compared with target value and the quota of the matching rule is used, otherwise default quota is applied.
+4. **Decision Making**:
+  - **If Quota Not Exceeded**:
+    - Counter is incremented by 1 and written to cache synchronously
+    - Request is forwarded to backend
+    - Quota information is updated to database asynchronously (does not affect API response time)
+    - If rate limit statistics is active, remaining quota information is added to response headers (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset)
+  - **If Quota Exceeded**:
+    - HTTP 429 (Too Many Requests) error is returned, request is not processed
+    - Quota renewal time is specified in response header
+    - In case of cache error, Cache Error Handling policy comes into play (REJECT: request is rejected, ALLOW: request continues)
+5. **Error Handling**: Returns customizable HTTP status code and error message for requests that do not comply with the policy rule.
+
+## Data Storage Architecture
+
+API Based Quota policy uses a two-tier storage strategy to ensure data consistency and persistence:
+
+**Cache (Redis) - Primary Tier:**
+- Used for real-time quota checks
+- Updated synchronously on every API request
+- Provides high performance and low latency
+- In distributed systems, all Gateway instances share the same counters
+
+**Database - Secondary Tier:**
+- Used for persistent storage of long-term quota data
+- Updated asynchronously to not affect API response time
+- Prevents data loss when system is restarted or in case of cache error
+- Provides reliable data source for reporting, analytics, and billing
+- Maintains archive for quota history and usage statistics
+
+**Synchronization Strategy:**
+After each successful request, quota information is updated in two stages:
+1. First, Redis cache is quickly updated (synchronous) - included in API response time
+2. Then database update is performed asynchronously - does not affect API response time
+
+This approach establishes an optimal balance between high performance and data durability.
+
+## Features and Capabilities
+
+### Basic Features
+
+- **Quota Count Limit**: Determines the maximum total number of requests allowed in a certain time period (minimum 1, integer).
+- **Long-Term Time Range Support**: Define quota periods on Hour, Day, Week, and Month basis. Customizable time intervals with period length multiplier (e.g., 7 days, 3 months).
+- **Apply By Variable**: Determines which criterion the quota will be applied by (user ID-based, API Key-based, customer ID-based, subscription type-based). A separate quota counter is maintained for each variable value.
+- **Active/Passive Status Control**: Easily change the active or passive status of the policy (active/passive toggle). In passive state, the policy is not applied but its configuration is preserved.
+- **Conditional Application**: Determine when the policy will be applied by creating complex conditions with Query Builder (e.g., only for specific endpoints or user types).
+
+### Advanced Features
+
+- **Target-Based Different Quotas (Detail List)**: Define special quota rules for specific target values (user levels, subscription plans, customer segments). Flexible target matches with regex support. Separate quota count and time period for each target.
+- **Interval Window Type Support**: SLIDING (Sliding Window) - Window is applied backwards from each request time, usage in last N days/hours. FIXED (Fixed Window) - Counter is reset at certain time intervals (1st of each month, beginning of each week), more common usage.
+- **Cache Connection and Error Management**: Set cache server connection timeout duration (seconds). Determine behavior if cache is inaccessible: REJECT (security and billing accuracy prioritized) or ALLOW (availability prioritized).
+- **Rate Limit Statistics**: Show remaining quota information in response headers (X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset). Enables clients and dashboards to track quota status.
+- **Distributed Architecture Support**: Multiple Gateway instances share the same quota counters thanks to centralized Redis cache usage. Guarantees consistent quota tracking regardless of which gateway the user connects to.
+- **Export/Import Feature**: Export policy configuration as a ZIP file. Import to different environments (Development, Test, Production). Version control and backup capability.
+- **Policy Group and Proxy Group Support**: Manage multiple policies within Policy Group. Bulk policy assignment to Proxy Groups. Centralized update and deploy operations.
+- **Deploy and Versioning**: Deploy policy changes to live environment. See which API Proxies use it (Policy Usage). Proxy Group and Policy Group usage reports.
+
+## Usage Scenarios
+
+API Based Quota policy manages total request count to limit and keep API usage under control in long-term periods (hourly, daily, weekly, monthly). The following example scenarios show how this policy can be applied in different usage situations.
+
+| **Scenario** | **Situation** | **Solution (Policy Application)** | **Expected Behavior / Result** |
+|:------------|:----------|:---------------------------------|:-------------------------------|
+| **Monthly Subscription Plans** | You want to set monthly quota according to different subscription levels | Apply By: `{user.subscription_plan}`, Quota: 1000/month (default), Detail List: free=1000/month, basic=10000/month, premium=100000/month, enterprise=1000000/month | Monthly quota is applied according to each subscription plan. Automatically reset at end of month. Free: 1K, Basic: 10K, Premium: 100K, Enterprise: 1M requests/month |
+| **API Key-Based Daily Quota** | You want to set daily usage limit for each API key | Apply By: `{request.header.X-API-Key}`, Quota: 5000, Period: 1 Day, Interval Window Type: FIXED | Each API key can make 5000 requests per day. Counter resets at beginning of each day. Customers can manage their daily quotas |
+| **Free Trial Period** | You want to give 7-day trial quota to free users | Quota: 500, Period: 7 Days, Interval Window Type: FIXED, Condition: `{user.account_type} = trial` | Trial accounts can make total 500 requests in 7 days. Quota does not reset after period ends, account upgrade is required |
+| **User-Based Weekly Limit** | You want to define weekly total quota for each user | Apply By: `{user.id}`, Quota: 10000, Period: 1 Week, Show Rate Limit Statistics: Active | Each user can make 10000 requests per week. Counter resets on Mondays. Users can see their remaining quotas |
+| **Special Quota for Premium Customers** | You want to give high monthly quota to special contract customers | Apply By: `{customer.id}`, Quota: 50000/month, Detail List: customer_A=500000/month, customer_B=1000000/month, customer_C=2000000/month | Standard customers get 50K/month, special contract customers get much higher quotas according to agreement |
+| **Endpoint-Based Different Quotas** | You want to apply lower quota for resource-intensive endpoints | Policy 1: Quota: 100/day, Condition: `{request.path} = /api/export`. Policy 2: Quota: 10000/day, Condition: others | Export endpoint can be used 100 times per day, normal endpoints 10000 times. Resource-intensive operations are limited |
+| **Flexible Quota with Sliding Window** | You want to set total usage limit in last 30 days | Quota: 100000, Period: 30 Days, Interval Window Type: SLIDING | Total request count in last 30 days is checked at all times. More flexible and fair quota management is provided |
+
+## Configuring Policy Parameters
+
+In this step, users can **create a new policy** or **configure existing policy parameters** to define access rules.
+
+### Creating New API Based Quota Policy
+
+<img src="/images/develop/politikalar/api-bazli-kota-1.png" alt="API Based Quota Policy Configuration" width="1000" />
+
+### Configuration Steps
+
+| **Step** | **Description / Operation** |
+|:---------|:---------------------|
+| **Step 1: Going to Creation Page** | - Go to **Development → Global Settings → Global Policies → API Based Quota** section from the left menu.<br />- Click the **[+ Create]** button at the top right. |
+| **Step 2: Entering Basic Information** | **Policy Status:** Shows Active/Passive status. New policies are active by default.<br /><br />**Name (Required):**<br />Example: `Monthly_Premium_User_Quota`<br />- Enter a unique name, does not start with space.<br />- System automatically checks. Green check: available. Red X: existing name.<br /><br />**Description:**<br />Example: "Monthly 100,000 request quota for Premium users"<br />- Max. 1000 characters.<br />- Describe the purpose of the policy. |
+| **Step 3: Configuring Quota Settings** | **Show Rate Limit Statistics in Response Header:**<br />- Activate/deactivate with toggle switch.<br />- When active, `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` information is shown in response headers.<br /><br />**Application Variable (Apply By):** Optional<br />- Click "Select Variable" button.<br />- Determines which criterion the quota will be applied by.<br />- Examples: `{user.id}` (user-based), `{user.subscription}` (subscription type-based), `{request.header.X-API-Key}` (API key-based)<br />- If variable is not selected, all requests share the same quota.<br /><br />**Quota Count:** Required, Minimum: 1<br />- Maximum total number of requests allowed.<br />- Example: 100000<br /><br />**per (visual text)**<br /><br />**Period Length:** Required, Minimum: 1<br />- Multiplier of time interval.<br />- Example: 1<br /><br />**Time Unit:** Required<br />- ONE_HOUR (Hour), ONE_DAY (Day), ONE_WEEK (Week), ONE_MONTH (Month)<br />- Example: Month<br /><br />**Example Configuration:** 100000 requests / 1 Month → Maximum 100000 requests per month |
+| **Step 4: Defining Target-Based Rules (Optional)** | **Detail List (Target-Based Quota Rules):**<br />- Define special quotas for different target values.<br />- Add new row by clicking "+" button.<br /><br />**Table Columns:**<br />- **Target Value:** Variable value (e.g., "premium", "enterprise", "trial")<br />- Required<br />- **Regex Expression:** Whether target value is regex<br />- Toggle (Boolean)<br />- **Quota Count:** Total request limit for this target<br />- Number (Min: 1)<br />- **Period Length:** Time interval multiplier<br />- Number (Min: 1)<br />- **Time Unit:** Hour/Day/Week/Month<br />- Dropdown<br /><br />**Usage Scenarios:**<br />- Free users: `free` → 1000 requests/month<br />- Basic users: `basic` → 10000 requests/month<br />- Premium users: `premium` → 100000 requests/month<br />- Enterprise customers: `enterprise` → 1000000 requests/month<br /><br />**Deletion:** Remove row with trash icon at end of row. |
+| **Step 5: Configuring Advanced Settings** | **Interval Window Type:** Required<br />- **SLIDING (Sliding Window):** Window is applied backwards from each request time. Example: Total request count in last 30 days. More flexible but calculation cost is high.<br />- **FIXED (Fixed Window):** Resets at certain time intervals. Example: Counter resets on 1st of each month. More common and performant. Compatible with billing cycles.<br /><br />**Cache Connection Timeout:** Required, Minimum: 0 seconds<br />- Connection timeout duration to cache server.<br />- Error management policy comes into play in timeout situation.<br />- Recommended: 1-3 seconds<br /><br />**Cache Error Management Type:** Required<br />- **REJECT:** Reject request, return error. Security and billing accuracy prioritized. Critical for paying customers.<br />- **ALLOW:** Allow request, continue. Availability prioritized. Service continues in temporary cache failures. Can be used in free tiers.<br /><br />**⚠️ Important Notes:**<br />**Time Zone Settings:** When using FIXED window, ensure system time zone settings are correctly configured. Especially in day/week/month-based periods, time zone differences can cause unexpected reset times. Reset times are always calculated according to server time zone.<br /><br />**Fixed Window Calculation (FIXED):**<br />- **For intervals shorter than one day (e.g., 6 hours):**<br />  - Formula: `Window Start = Day Start + (Elapsed Periods × Period Duration)`<br />  - Example: A request at 14:37, in 6-hour period → belongs to 12:00-17:59 window<br />- **For intervals one day or longer (e.g., 7 days, 1 month):**<br />  - Formula: `Window Start = Unix Epoch + (Elapsed Periods × Period Duration)`<br />  - Example: In 1-month period, counter resets on 1st of each month<br /><br />**Billing Integration:** In subscription-based systems, you can synchronize your billing cycle with quota renewal time using FIXED window type. This way, customer billing date and quota renewal date become the same. |
+| **Step 6: Defining Condition (Optional)** | - Go to **Condition** tab.<br />- Conditions determine when the policy will be active.<br /><br />**Examples:**<br />- User type-based: `Header = X-User-Type, Operator = Equals, Value = paid`<br />- Subscription-based: `Header = X-Subscription, Starts With = premium-`<br />- Account status: `Header = X-Account-Status, Equals = active` If no condition is defined, policy is always active<br /><br /> |
+| **Step 7: Error Message Customization (Optional)** | - Go to **Error Message Customization** tab.<br />- Customize the message to be returned when quota is exceeded.<br /><br />**Default:**<br />`{ "statusCode": 429, "message": "Quota Exceeded" }`<br /><br />**Custom:**<br />`{ "statusCode": 429, "errorCode": "MONTHLY_QUOTA_EXCEEDED", "message": "Your monthly quota has been exhausted. Renewal date: {reset_date}. To upgrade your plan: /upgrade" }` |
+| **Step 8: Saving** | - Click the **[Save]** button at the top right.<br /><br />**Checklist:** Unique name. Required fields filled. At least one message count and time interval defined<br /><br />**Result:**<br />- Policy is added to the list.<br />- Can be connected to APIs.<br />- If global policy, automatically applied. |
+
+For the description of **Conditions** and **Error Message Customization** panels, you can review the [Conditions](/en/concepts/core-concepts/what-is-policy#conditions) and [Error Message Customization (Error Message Customization)](/en/concepts/core-concepts/what-is-policy#error-message-customization-error-message-customization) sections on the [What is Policy?](/en/concepts/core-concepts/what-is-policy) page.
+
+## Deleting Policy
+
+For the deletion steps of this policy and operations to be applied while in use, you can refer to the [Removing Policy from Flow](/en/develop/api-proxy-configuration/policy-management#removing-policy-from-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
+
+## Exporting/Importing Policy
+
+For the export and import steps of this policy, you can refer to the [Export/Import](/en/admin/secrets-management/export-import) page.
+
+## Binding Policy to API
+
+For the process of how this policy will be bound to APIs, you can refer to the [Binding Policy to API](/en/develop/api-proxy-configuration/policy-management#adding-policy-to-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
+
+## Advanced Features
+
+In this section, users gain more flexible, dynamic, and enterprise-level control by using the advanced management capabilities of the **API Based Quota** policy.
+
+| **Feature** | **Description and Steps** |
+|:------------|:------------------------|
+| **Dynamic Quota Renewal** | - Set automatic reset on certain days with FIXED window type (e.g., 1st of each month).<br />- Synchronize with your billing cycle.<br />- Define special renewal dates according to customer billing date.<br />- This way, each customer's quota resets on their own subscription renewal day. |
+| **Quota Rollover Feature** | - Store unused quota amount in cache.<br />- Add as bonus in next period.<br />- Define maximum rollover limit (e.g., maximum 2-month accumulation).<br />- Increase customer satisfaction by transferring unused quotas to next period. |
+| **Soft Limit and Hard Limit** | - Create two different quota policies.<br />- Soft Limit (e.g., 80000/month): Show warning but allow.<br />- Hard Limit (e.g., 100000/month): Reject request.<br />- Prevent sudden interruptions by warning customers when quota is approaching. |
+| **Cache-Database Synchronization** | - Set up monitoring that regularly compares quota values in cache and database.<br />- Send alert if inconsistency is detected and trigger automatic correction mechanism.<br />- Increase asynchronous write frequency during high-traffic hours, decrease during low traffic.<br />- This way, increase system reliability while guaranteeing data consistency. |
+
+## Tips and Best Practices
+
+### Things to Do and Best Practices
+
+| **Category** | **Description / Recommendations** |
+|:-------------|:-------------------------|
+| **Determining Quota Values** | **Bad:** Determining arbitrary numbers (e.g., 12345 requests/month) - lack of analysis<br />**Good:** Determining quota according to past usage data<br />**Best:** Perform percentile analysis (e.g., 95% of users below 5K/month), add sufficient buffer (20-30% more), perform separate analysis for different user segments |
+| **Window Type Selection** | **Bad:** Using SLIDING for every scenario - unnecessary calculation load<br />**Good:** Preferring FIXED in subscription-based systems<br />**Best:** Synchronize billing cycle with FIXED window type, base on customer start date, plan reset at end/beginning of month |
+| **Apply By Variable Strategy** | **Bad:** Not using Apply By - all customers share same quota<br />**Good:** User-based quota with User ID<br />**Best:** Hierarchical structure: Organization → Team → User. Use organization ID in enterprise customers, user ID in individual users. Support multi-tenancy. |
+| **Segmentation with Detail List** | **Bad:** Single type quota - no flexibility<br />**Good:** Make Free/Premium distinction<br />**Best:** Multi-tier system: Trial/Free/Starter/Professional/Business/Enterprise. Separate pricing and quota for each segment. Keep upsell path open. |
+| **Rate Limit Header Usage** | **Bad:** Not showing headers - customer doesn't know quota<br />**Good:** Showing header only in authenticated requests<br />**Best:** Header active in all requests, provide dashboard/analytics integration, send email/notification when quota is 80% full, provide upgrade link |
+
+## Security Best Practices
+
+| **Security Area** | **Description / Warnings** |
+|:-------------------|:------------------------|
+| **Billing Accuracy** | Use REJECT in Cache Error Handling. It is critical that quota is counted absolutely correctly for paying customers. If cache problem occurs, service should temporarily interrupt, excess usage permission should not be given. Thanks to asynchronous database update, quota data is not lost even in cache error situation. Regularly check cache-database synchronization. |
+| **Fraud and Abuse Prevention** | Detect abnormal usage patterns (e.g., user making 1000 requests per day suddenly making 100K requests). Set alerts for sudden quota explosions. Automatically suspend suspicious accounts. |
+| **API Key Security** | Apply key rotation strategy when using API Key-based quota. Quota is very critical to limit damage of leaked keys. Do separate quota tracking for each key. |
+| **Tenant Isolation** | Maintain completely isolated quota counter for each tenant in multi-tenant systems. One tenant's usage should not affect others. tenant_id must be in cache keys. |
+| **Monitoring and Alerting** | Continuously monitor quota exceedances. Send warning at 80% fullness, alert at 100%. Perform revenue impact analysis (how many customers upgraded due to quota?). Detect abuse patterns. |
+
+## Things to Avoid
+
+| **Category** | **Description / Warnings** |
+|:-------------|:------------------------|
+| **Using ALLOW in Cache Error Handling (For Paying Customers)** | **Why to avoid:** When cache error occurs, quota control is disabled, customers can make unlimited usage, billing losses occur, abuse risk increases<br />**Alternative:** Use REJECT for paying customers, provide cache high availability, set up Redis cluster, create failover mechanism |
+| **Very Short Periods (E.g., Hourly Quota)** | **Why to avoid:** Quota resets too frequently, customer experience worsens, billing becomes complex, abuse becomes easy<br />**Alternative:** Use minimum daily, ideally monthly periods, add throttling policy for short-term protection, combine quota + throttling |
+| **Using Detail List Without Variable** | **Why to avoid:** Target matching doesn't work without Apply By, all Detail List rules become ineffective, different quotas cannot be applied<br />**Alternative:** Definitely define Apply By variable, plan so variable value matches target value |
+| **Very High Quota Values (In Free Plans)** | **Why to avoid:** Abuse risk is very high, no cost control, upgrade motivation decreases, server resources are exhausted<br />**Alternative:** Set reasonable limits for free plans (e.g., 1000-5000/month), clearly show upgrade path, emphasize advantages of paid plans |
+
+## Performance Tips
+
+| **Criterion** | **Recommendation / Impact** |
+|:-----------|:-----------------|
+| **Cache Strategy** | **Recommendation:** Use Redis cluster, activate connection pooling, add read replicas, optimize cache keys (short and unique)<br />**Impact:** Low latency even in high traffic, high availability, consistent quota tracking |
+| **Cache Connection Pooling** | **Recommendation:** Use Redis connection pool, optimize connection pool size according to your traffic (recommended: CPU core count × 2), set keepalive durations, determine connection timeouts<br />**Impact:** New connection is not opened for each request, connection cost decreases by 80%, latency decreases by 30-50%, cache server can serve more clients simultaneously |
+| **FIXED Window Preference** | **Recommendation:** Especially use FIXED window in monthly quotas, more performant than SLIDING, compatible with billing cycle<br />**Impact:** Cache reading decreases, transaction cost decreases, billing becomes simpler, customer experience becomes clearer |
+| **Detail List Optimization** | **Recommendation:** Limit Detail List to maximum 20-30 rules, keep most frequently used rules at top, do not use unnecessary regex, prefer simple string matching<br />**Impact:** Rule matching speeds up, CPU usage decreases, latency stays below 10ms |
+| **Batch Processing** | **Recommendation:** Do counter updates in batch in high-traffic systems, collect in buffer instead of separate write for each request, accumulate 100-1000 requests and write in bulk<br />**Impact:** Cache write load decreases by 90%, throughput increases 10x, cache server lifetime extends |
+| **Monitoring and Tuning** | **Recommendation:** Collect quota metrics (usage rate, reset frequency), monitor cache performance, detect slow queries, identify hotspot keys<br />**Impact:** Bottlenecks are detected early, proactive scaling is done, SLA guarantee is provided |
+
+## Frequently Asked Questions (FAQ)
+
+| **Category** | **Question** | **Answer** |
+|:-------------|:-------------|:--------------|
+| **General** | What is the difference between Quota and Throttling? | **Throttling:** Rate limiting in short time (seconds/minutes). For DDoS protection and burst control.<br />**Quota:** Total usage limit in long time (day/month). For billing and subscription management. Both should be used together: Throttling provides instant protection, Quota provides long-term control. |
+| **General** | Can both Throttling and Quota policies be added to an API? | Yes, definitely recommended. Example combination: Throttling: 100 requests/minute (burst protection), Quota: 100,000 requests/month (subscription limit). Both policies work independently, complement each other. |
+| **Technical** | Which should I choose, SLIDING vs FIXED window? | **Prefer FIXED because:** Compatible with billing cycle (resets on 1st of each month), more performant, clearer to customer (your quota will renew on X date), implementation is simpler.<br />**SLIDING only:** Use if more precise control is needed, if you want rolling period (last 30 days). |
+| **Technical** | Why is cache server necessary? | Redis is necessary to keep quota counters centrally. In distributed systems (multiple Gateways), each gateway should see the same counter.<br />Without cache: Gateways keep different counters, customer can use quota 2-3 times more, billing losses occur. |
+| **Technical** | Why are quota data also written to database? | While cache provides high performance, database guarantees data persistence. Important reasons: 1) Quota information is not lost when system is restarted, 2) Historical data is stored for reporting and analytics, 3) Maintains reliable records for billing, 4) Provides fallback in cache errors, 5) Creates audit trail for legal requirements. Database update does not affect API performance as it is asynchronous. |
+| **Usage** | What happens if I increase customer quota in the middle of the month? | Update policy, new limit is written to cache, current usage is preserved. Example: Customer used 5000/10000, if you increase limit to 20000 → becomes 5000/20000. Does not affect backwards, only affects forward. |
+| **Usage** | When can a customer who exceeded quota make requests again? | Must wait until reset time. In FIXED window: At beginning of next period (e.g., 1st of next month). In SLIDING window: When period duration passes from first request. Timestamp is given with X-RateLimit-Reset in response header. |
+
