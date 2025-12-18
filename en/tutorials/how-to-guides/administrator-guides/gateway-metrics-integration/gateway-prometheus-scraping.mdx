@@ -1,0 +1,356 @@
+---
+title: "Prometheus Installation and Scraping Configuration"
+description: "Provides necessary installation and configuration steps to collect Apinizer Gateway metrics with Prometheus. You can integrate Gateway metrics with Prometheus using Constant and Dynamic scraping methods, configure automatic metric collection in Kubernetes environment, and perform Prometheus installation."
+---
+
+## Scraping Methods
+
+Prometheus is a monitoring system that pulls metrics from specific targets and stores them as time series data. Scraping is the process by which Prometheus periodically collects metrics from target services. Apinizer Gateway's metrics are provided via port 9091, and Prometheus can pull these metrics in two different ways:
+
+<CardGroup cols={2}>
+  <Card title="Constant Scraping" icon="link">
+    In the fixed scraping method, services to be monitored are defined under static_configs with predetermined fixed IP addresses or DNS names. Prometheus queries these services at regular intervals. This method is useful when service addresses do not change or can be defined manually.
+  </Card>
+  <Card title="Dynamic Scraping" icon="network-wired">
+    In the dynamic scraping method, Prometheus automatically discovers services through a service discovery mechanism such as Kubernetes. kubernetes_sd_config or similar configurations enable Prometheus to automatically discover services without the need to update Prometheus configuration as services change. This method provides great advantages in microservice architectures and constantly changing infrastructures.
+  </Card>
+</CardGroup>
+
+## Fixed (Constant) Scraping Configuration
+
+For Apinizer Gateway to publish metrics via port 9091, the `METRICS_ENABLED=TRUE` parameter must be defined as an environment variable to the relevant container.
+
+```yaml
+...
+containers:
+  - env:
+    - name: METRICS_ENABLED
+      value: "true"
+...
+```
+
+In Constant Scraping configuration, the service name from which Prometheus will scrape metrics must be specified. Therefore, a service that will route to port 9091 of the Apinizer Worker component must be created.
+
+### Service Creation
+
+`apinizer-prometheus-svc.yaml` file:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-prometheus-service
+  namespace: <WORKER_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: worker
+  type: ClusterIP
+```
+
+### Prometheus ConfigMap Configuration
+
+For Apinizer Gateway to provide metrics to Prometheus from port 9091, Prometheus's scraping configuration must be done via ConfigMap. Constant scraping configuration is performed by defining Prometheus's worker-prometheus-service named service in static_configs at the specified address.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: 'my-app-static'
+        static_configs:
+          - targets: ['worker-prometheus-service.<WORKER_NAMESPACE>.svc.cluster.local:9091']
+```
+
+## Dynamic (Dynamic) Scraping Configuration
+
+The dynamic scraping method enables Prometheus to automatically discover pods within Kubernetes. Thanks to this method, there is no need to make manual scraping configuration for each new pod. Prometheus automatically pulls metrics using specific annotations added to pods.
+
+<Info>
+  For Gateway metrics to be collected by Prometheus, the `METRICS_ENABLED=TRUE` variable must be added by selecting Worker edit deployment option in the Deployments & Services section on the **Gateway Environments** page.
+</Info>
+
+### If Kubernetes Management is Not Done with Apinizer
+
+To enable Prometheus to collect metrics from Worker pods, relevant annotations must be added to the `spec.template.metadata.annotations` section of the relevant Deployment manifest. In addition, for Apinizer Gateway to publish metrics via port 9091, the `METRICS_ENABLED=TRUE` parameter must be defined as an environment variable to the relevant container.
+
+<Note>
+  This way, the metrics service will be exported via port 9091 and Prometheus will automatically discover and scrape metrics from the Apinizer Gateway pod running on port 9091.
+</Note>
+
+```yaml
+...
+template:
+  metadata:
+    annotations:
+      prometheus.io/port: "9091"
+      prometheus.io/scrape: "true"
+...
+```
+
+```yaml
+...
+containers:
+  - env:
+    - name: METRICS_ENABLED
+      value: "true"
+...
+```
+
+### Prometheus Scraping Configuration
+
+Dynamic scraping must be enabled using `kubernetes_sd_configs` in Prometheus's ConfigMap configuration to discover annotations in pods.
+
+<Info>
+  The ConfigMap example below enables Prometheus to dynamically discover Kubernetes pods. This configuration enables Prometheus to automatically discover Kubernetes pods and collect metrics only from pods with the `prometheus.io/scrape: "true"` annotation. Thus, metrics can be collected by Prometheus by applying dynamic scraping to Apinizer Gateway without the need for manual target definition.
+</Info>
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: 'kubernetes-pods'
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape_slow]
+            action: drop
+            regex: true
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scheme]
+            action: replace
+            regex: (https?)
+            target_label: __scheme__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\\d+);(([A-Fa-f0-9]{1,4}::?){1,7}[A-Fa-f0-9]{1,4})
+            replacement: '[$2]:$1'
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port, __meta_kubernetes_pod_ip]
+            action: replace
+            regex: (\\d+);((([0-9]+?)(\\.|$)){4})
+            replacement: $2:$1
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_annotation_prometheus_io_param_(.+)
+            replacement: __param_$1
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          - source_labels: [__meta_kubernetes_pod_phase]
+            regex: Pending|Succeeded|Failed|Completed
+            action: drop
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            action: replace
+            target_label: node
+```
+
+## Prometheus Installation
+
+### Persistent Storage Configuration
+
+Since Prometheus's metrics will be stored on a node in the Kubernetes cluster, **PersistentVolume (PV)** and **PersistentVolumeClaim (PVC)** definitions must be made. This configuration ensures that Prometheus preserves its data in case of shutdown or restart.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-pv
+  labels:
+    type: local
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/mnt/data/prometheus"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+<Warning>
+  The **PersistentVolume (PV) and PersistentVolumeClaim (PVC)** configuration above ensures that Prometheus stores its data on a specific node. However, the **hostPath** used here is dependent on the local file system of the specific node where Prometheus runs.
+
+**Therefore:**
+
+- If Prometheus pods are **moved to a different node**, they will **lose their data** unless the same **hostPath** directory exists on the new node.
+- To guarantee that pods always run on the same node, pods must be pinned to specific nodes using **nodeAffinity** or **nodeSelector**.
+
+Alternatively, **NFS, Ceph, Longhorn or a cloud-based storage solution** can be used to store data in a **node-independent** manner.
+</Warning>
+
+### ServiceAccount and RBAC Configuration
+
+Prometheus must have the necessary permissions to discover pods and collect their metrics. For this, the following ServiceAccount, ClusterRole and ClusterRoleBinding definitions must be made:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+```
+
+Load the Prometheus Deployment YAML file below into your Kubernetes Cluster by modifying it to suit your systems.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - <NODE_HOSTNAME>
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command: ["sh", "-c", "chown -R 65534:65534 /prometheus"]
+          volumeMounts:
+            - mountPath: /prometheus
+              name: prometheus-storage
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.3.0
+          imagePullPolicy: IfNotPresent
+          resources:
+            limits:
+              memory: 256Mi
+              cpu: 256m
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time=7d"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/prometheus
+            - name: prometheus-storage
+              mountPath: /prometheus
+      volumes:
+        - name: config-volume
+          configMap:
+            name: prometheus-config
+        - name: prometheus-storage
+          persistentVolumeClaim:
+            claimName: prometheus-pvc
+```
+
+Kubernetes Service for Prometheus is created.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-service
+  namespace: monitoring
+spec:
+  type: NodePort
+  ports:
+    - port: 9090
+      targetPort: 9090
+      nodePort: 30190
+  selector:
+    app: prometheus
+```
+
+<Note>
+  When Prometheus is deployed on Kubernetes, it creates a Kubernetes service named prometheus-service and of type NodePort. This service is necessary for accessing Prometheus from outside Kubernetes. However, you can adapt this service according to the structure you use for Ingress or connection method in your organization.
+</Note>
+

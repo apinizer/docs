@@ -1,0 +1,143 @@
+---
+title: XML to JSON Conversion and Unicode Character Normalization
+description: "Converting XML data to JSON format with Groovy script and converting Unicode escape sequences to readable characters"
+---
+
+This Groovy script **parses** **XML** data coming from the **responseBodyTextFromTargetAPI** variable, **converts** its hierarchical structure to **JSON format** while preserving it, and **converts** **Unicode** escape sequences (including Turkish characters in \uXXXX format) to readable real characters and **assigns** it to the **responseBodyTextToClient** variable.
+
+```groovy
+import groovy.json.JsonOutput
+import groovy.xml.XmlSlurper
+
+// Cleaning "<?...?>" lines
+def cleanedXml = responseBodyTextFromTargetAPI.readLines()
+  .findAll { !it.trim().startsWith("<?") }
+  .join("\n")
+  .trim()
+
+// Simplified XML to Map conversion function
+def convertToMap(node) {
+  def map = [:]
+  // Add attributes (starting with @ sign)
+  node.attributes().each { key, value ->
+    map["@${key}"] = value.toString()
+  }
+  // Check child elements
+  def hasElements = false
+  node.children().each { child ->
+    if (child.name()) {
+      hasElements = true
+      def childName = child.name()
+      // Do child elements have sub-elements?
+      def childText = child.text().trim()
+      def childHasElements = false
+      child.children().each { grandchild ->
+        if (grandchild.name()) {
+          childHasElements = true
+        }
+      }
+      // If no sub-element, use value directly, otherwise continue recursively
+      def childValue
+      if (!childHasElements) {
+        // If no sub-element, return empty string even if text content is empty
+        childValue = childText.isEmpty() ? "" : childText
+      } else {
+        // If sub-element exists, create recursive map
+        childValue = convertToMap(child)
+        // If this child is completely empty (contains no value), return empty string
+        if (childValue.isEmpty()) {
+          childValue = ""
+        }
+      }
+      // If multiple elements with same name exist, combine as list
+      if (map.containsKey(childName)) {
+        if (!(map[childName] instanceof List)) {
+          map[childName] = [map[childName]]
+        }
+        map[childName] << childValue
+      } else {
+        map[childName] = childValue
+      }
+    }
+  }
+  return map
+}
+
+try {
+  // XML parse
+  def xml = new XmlSlurper().parseText(cleanedXml)
+  def resultMap = [(xml.name()): convertToMap(xml)]
+
+  // JSON output - convert Unicode escape sequences to readable characters
+  def jsonOutput = new JsonOutput()
+  def jsonString = jsonOutput.toJson(resultMap)
+  // Pretty print
+  def prettyJson = jsonOutput.prettyPrint(jsonString)
+  // Fix Turkish characters
+  def normalizedJson = prettyJson.replaceAll('\\\\u([0-9A-Fa-f]{4})', { fullMatch, hexValue ->
+    try {
+      return new String(Character.toChars(Integer.parseInt(hexValue, 16)))
+    } catch (Exception e) {
+      return fullMatch // Preserve original value if cannot be converted
+    }
+  })
+
+  responseBodyTextToClient = normalizedJson
+} catch (Exception e) {
+  responseBodyTextToClient = JsonOutput.prettyPrint(JsonOutput.toJson([
+    error: "XML parsing error: ${e.message}"
+  ]))
+}
+```
+
+## Example
+
+### Response Coming as XML
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<Tarih_Date Tarih="02.05.2025" Date="05/02/2025" Bulten_No="test">
+  <Currency CrossOrder="0" Kod="1" CurrencyCode="2">
+    <Unit> 1 </Unit>
+    <Isim> 2 </Isim>
+    <CurrencyName> 3 </CurrencyName>
+  </Currency>
+</Tarih_Date>
+```
+
+### Converted JSON Response
+
+```json
+{
+  "Tarih_Date": {
+    "@Tarih": "02.05.2025",
+    "@Date": "05/02/2025",
+    "@Bulten_No": "test",
+    "Currency": [
+      {
+        "@CurrencyCode": "2",
+        "@Kod": "1",
+        "@CrossOrder": "0",
+        "Unit": "1",
+        "Isim": "2",
+        "CurrencyName": "3",
+      }
+    ]
+  }
+}
+```
+
+## Explanation
+
+This script performs the following operations:
+
+1. **XML Cleaning**: `<?...?>` lines in XML are cleaned
+2. **XML Parse**: XML data is parsed
+3. **JSON Conversion**: XML structure is converted to JSON format
+4. **Unicode Normalization**: Unicode escape sequences (including Turkish characters in \uXXXX format) are converted to readable characters
+5. **Error Management**: Returns error message in JSON format in case of error
+
+<Note>
+This script should be run on the response line (Response Policy) because it uses the `responseBodyTextFromTargetAPI` and `responseBodyTextToClient` variables.
+</Note>
+

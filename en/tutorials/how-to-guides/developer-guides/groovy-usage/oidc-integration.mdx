@@ -1,0 +1,156 @@
+---
+title: OIDC Integration
+description: "OIDC (OpenID Connect) integration with Groovy script policy"
+---
+
+**Groovy script to be added to API Proxy request line:**
+
+```groovy
+//v18
+import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
+import java.net.URLEncoder
+import java.net.URLDecoder
+import java.util.zip.GZIPOutputStream
+import java.util.zip.GZIPInputStream
+import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.time.Instant
+import java.util.Base64
+import java.util.UUID
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import org.apache.http.client.methods.HttpGet
+import org.apache.http.client.methods.HttpPost
+import org.apache.http.impl.client.HttpClients
+import org.apache.http.entity.StringEntity
+import org.apache.http.util.EntityUtils
+
+// ################## OIDC Configuration ##################
+def OIDC_CONFIG = [
+
+        clientId: "client_name",
+        clientSecret: "client_secret",
+        realm: "realm_name",
+        scope: "openid email",
+        discovery: "https://auth.keycloak.local/realms/realm_name/.well-known/openid-configuration",
+        authorizationEndpoint: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/auth",
+        introspectionEndpoint: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/token/introspect",
+        tokenEndpoint: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/token",
+        redirectAfterLogoutUri: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/logout",
+        postLogoutRedirectUri: "https://application.local/application_ui/", //mandatory 
+        logoutPath: "/logout",
+        redirectUri: "https://application.local/application_ui/",
+        redirectAfterLogoutWithIdTokenHint: true,
+
+        usePkce: true,
+        useNonce: true,
+
+        bearerJwtAuthEnable: true,  // Permission to authenticate with Header
+        accessTokenHeaderName: "Authorization", //which header can authenticate
+        accessTokenAsBearer: true, //should header be added as bearer token
+        addAccessTokenHeader: true, //should we add access token to request?
+        authAcceptTokenAs: "header_cookie", // "header", "cookie", or "header_cookie"
+        addTokenToCookie: true, // Transfer token from Header to cookie
+
+        addIdTokenHeader: false, //should we add id token value to request if available?
+        idTokenHeaderName: "IdToken", // what name should we add id token value with
+       
+        disableUserinfoHeader: false,       // Disable Userinfo header
+        userinfoHeaderName: "UserInfo",  // which header will we send user information in
+
+        ignoreRequestMethods: ["OPTIONS"],
+        ignoreRequestPatterns: "static/media,static/js,static/css,static/html,*.json,*.ico,*.png,*.svg,*.js,*.woff2,*.css,*.html,bnpl-result,bnpl-workflow-fail",
+        
+        accessTokenCookieName: "authorization",
+        enableRefreshTokenCookie: false, 
+        refreshTokenCookieName: "refresh-token-cookie",
+        enableIdTokenCookie: false, 
+        idTokenCookieName: "id-token-cookie",
+        validateAccessTokenWithApi: true,  
+
+        validateIssuer: true,         //if access token is jwt, should Issuer check be done?
+        expectedIssuer: "https://auth.keycloak.local/realms/realm_name", // Expected issuer value
+        validateAudience: false,       //if access token is jwt, should Audience check be done?
+        expectedAudience: "client name", // Expected audience value (usually same as clientId value)
+
+        // Session settings
+        sessionCookieName: "cookie name",
+        sessionCookieSecure: true, // Use false for HTTP testing
+        sessionAbsoluteTimeout: 34560000,
+
+        // Encryption settings (for cookie)
+        encryptionKey: "c2d6b2n4f6k6l7n8m9f0s1b5b4v3x1z2", // 32-byte key for AES-256
+        encryptionIv: "z9x8c7v6b5n4g7h8",  // 16-byte IV for AES
+        debugEnabled: true,
+        setCookieDelimiter: "#"
+]
+
+```
+
+GROOVY 
+
+  
+**Groovy script to be added to API Proxy error line:**
+
+```groovy
+if(customVariableMap.get("Location")!=null ){
+	responseHeaderMapToClient.put("Location", customVariableMap.get("Location"))
+	statusCodeToClient=302;
+}
+
+ 
+customVariableMap.each { key, value ->
+    if (key.toLowerCase().contains("cookie")) { 
+        responseHeaderMapToClient.put(key, value)
+    }
+}
+```
+
+GROOVY 
+
+When integrating OIDC (OpenID Connect) with gateway solutions, there are some **critical considerations** to keep in mind.
+
+## Important Notes
+
+### Issue 1: OIDC Parameter Transmission Mode
+
+**Issue:** By default, OIDC authentication returns parameters using URL fragments (#). However, fragment values remain in the browser and are not sent to the server. This causes authentication errors when a gateway solution is added in between.
+
+```
+# Fragment usage (WON'T WORK): https://example.com/callback#access_token=eyJ0...&token_type=bearer&...
+```
+
+**Solution:** You need to set the **response_mode** parameter to **"query"** in your OIDC configuration. This way, parameters are transmitted as query parameters (?) instead of fragments and are successfully transmitted to the server.
+
+```
+# Query usage (WILL WORK): https://example.com/callback?access_token=eyJ0...&token_type=bearer&...
+```
+
+**Configuration:**
+
+* **For Keycloak**: In client settings, under "Advanced Settings", set "Response Mode" value to "query".
+* **For other OIDC providers**: Add "response_mode=query" parameter in the relevant client configuration.
+
+### Issue 2: Header Size Limitations with Nginx Ingress Controller
+
+**Issue:** When using OIDC with Nginx Ingress Controller, authentication cookies and headers may exceed default buffer size limits. This causes `400 Bad Request` errors or truncated headers during authentication.
+
+**Solution:** Increase buffer size settings in your Nginx Ingress Controller configuration:
+
+  
+```
+nginx.ingress.kubernetes.io/proxy-buffer-size: "8k"
+
+nginx.ingress.kubernetes.io/client-header-buffer-size: "8k"
+
+nginx.ingress.kubernetes.io/large-client-header-buffers: "4 8k"
+```
+
+  
+These settings ensure that Nginx Ingress Controller properly handles the larger headers commonly encountered with OIDC authentication tokens and cookies.
+

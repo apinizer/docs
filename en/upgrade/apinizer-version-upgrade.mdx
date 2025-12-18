@@ -1,0 +1,492 @@
+---
+title: "Apinizer Version Upgrade"
+description: "You can perform version upgrade operations for Apinizer images running on Kubernetes. Supports online and offline update methods, can manage MongoDB backup operations, and can roll back update operations."
+---
+
+## Update Methods
+
+Apinizer version upgrade operations can be performed using two different methods depending on whether Kubernetes worker servers have internet access:
+
+<CardGroup cols={2}>
+  <Card title="Online Update" icon="cloud">
+    Used when the Kubernetes cluster has internet access. Docker images are pulled directly from Docker Hub and automatically updated. Provides a faster and easier update process.
+    
+    **When to Use:**
+    * If Kubernetes worker servers can access the internet
+    * If you want to perform a quick and easy update
+    * If you don't want to take extra steps for image transfer
+  </Card>
+  
+  <Card title="Offline Update" icon="server">
+    Used when the Kubernetes cluster does not have internet access or direct internet access is restricted due to security policies. Images are first pulled on a server with internet access, saved as `.tar` files, or uploaded to a local registry.
+    
+    **When to Use:**
+    * If Kubernetes worker servers cannot access the internet
+    * If direct internet access is restricted due to security policies
+    * If a local Docker registry (Nexus, Harbor, etc.) is used
+    
+    **Methods:**
+    * Manual Image Transfer
+    * Local Registry Usage
+  </Card>
+</CardGroup>
+
+Although not directly related to the update, it is recommended to always back up the database used by Apinizer in MongoDB to prevent possible rollback situations.
+
+<Warning>
+  Before the update operation, **it is recommended to review the Release Notes** to detect changes that may cause incompatibility with the current system configuration and take necessary precautions.
+</Warning>
+
+## 1) Taking MongoDB Backup
+
+MongoDB backup is taken before the update operation to prevent data loss. This command is run on the MongoDB server.
+
+```bash mongodump
+sudo mongodump \
+  --host <PRIMARY_MONGODB_IP_ADDRESS> \
+  --port=25080 \
+  --username=apinizer \
+  --password=<PASSWORD> \
+  --authenticationDatabase=admin \
+  --gzip \
+  --archive=<BACKUP_DIRECTORY>/apinizer-backup--<CURRENT_VERSION>--<BACKUP_DATE>--01.archive
+```
+
+<ParamField body="--host" type="string" required>
+Primary MongoDB server IP address
+</ParamField>
+
+<ParamField body="--port" type="number" default="25080">
+MongoDB port number
+</ParamField>
+
+<ParamField body="--username" type="string" required>
+MongoDB username
+</ParamField>
+
+<ParamField body="--password" type="string" required>
+MongoDB password
+</ParamField>
+
+<ParamField body="--authenticationDatabase" type="string" default="admin">
+Authentication database
+</ParamField>
+
+<ParamField body="--gzip" type="boolean">
+Compresses the backup file
+</ParamField>
+
+<ParamField body="--archive" type="string" required>
+Path and filename where the backup file will be saved
+</ParamField>
+
+<Note>
+For detailed information about backup, you can check the [Backup](/en/operations/backup-and-restore/backup) page.
+</Note>
+
+## 2) Updating Apinizer Applications
+
+The system basically consists of apimanager (manager in versions 2025.11.0 and earlier), worker, and cache applications. Depending on the license scope, integration and apiportal (portal in versions 2025.04.5 and earlier) applications may also be present.
+
+Current version information can be accessed from [Docker Hub](https://hub.docker.com/u/apinizercloud) or from the [release notes page](/en/release-notes/change-log).
+
+### Update Strategy and Downtime Risk
+
+The risk of traffic interruption during update may vary depending on factors such as pod count, update strategy, and adequacy of server resources.
+
+<CardGroup cols={3}>
+  <Card title="Replica/Pod Count" icon="server">
+    If the application to be updated is running on only 1 pod, a short interruption may occur. It is recommended that the Api Manager component runs with 1 pod.
+  </Card>
+  
+  <Card title="Update Strategy" icon="arrows-rotate">
+    Unless a special strategy is specified during installation, updates are performed using the RollingUpdate method with at least one pod remaining active. Recreate strategy can also be preferred for Api Manager and Cache components.
+  </Card>
+  
+  <Card title="Server Resources" icon="memory">
+    In environments where the number of Kubernetes worker servers is low and existing resources are used at the limit, manual intervention may be required during update and traffic flow interruption is likely.
+  </Card>
+</CardGroup>
+
+<Note>
+If the relevant servers have internet access, continue from **2.1 Online Update**, otherwise continue from **2.2 Offline Update** section.
+</Note>
+
+## 2.1) Online Update of Apinizer
+
+### 2.1.1) Apinizer Api Manager Update
+
+<Warning>
+  Apinizer Api Manager must be updated before updating other Apinizer components.
+
+  After Api Manager makes updates to the database, other Apinizer applications need to be fed from the database with current settings.
+
+  Therefore, **after Api Manager is updated, make sure that Api Manager pods on Kubernetes are in "ready" status and then update other components.**
+</Warning>
+
+Commands in this and subsequent steps are run on servers with Kubernetes Control Plane task.
+
+<Steps>
+  <Step title="Check deployment information">
+    ```bash
+    kubectl get deployments -Ao wide
+    ```
+  </Step>
+  
+  <Step title="Update Api Manager deployment image">
+    ```bash
+    kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=apinizercloud/apimanager:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod status">
+    Wait for the pod to be READY, monitor pod status and logs:
+    ```bash
+    kubectl get pods -n <MANAGER_NAMESPACE>
+    kubectl get logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+### 2.1.2) Apinizer Worker and Cache Update
+
+After ensuring that the Apinizer Api Manager image is updated, Apinizer Worker and Cache applications are updated.
+
+<Steps>
+  <Step title="Update Worker and Cache deployment images">
+    ```bash
+    kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=apinizercloud/worker:<NEW_VERSION>
+    kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=apinizercloud/cache:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod status">
+    Wait for pods to be READY, monitor pod status:
+    ```bash
+    kubectl get pods -n <WORKER_CACHE_NAMESPACE>
+    kubectl get logs -f -n <WORKER_CACHE_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+### 2.1.3) Apinizer Portal and Integration Update
+
+Apinizer Portal and Integration can be updated similarly.
+
+<Steps>
+  <Step title="Update Portal and Integration deployment images">
+    ```bash
+    kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=apinizercloud/apiportal:<NEW_VERSION>
+    kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=apinizercloud/integration:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod statuses">
+    Wait for pods to be READY, monitor pod statuses:
+    ```bash
+    kubectl get pods -n <PORTAL_NAMESPACE>
+    kubectl get logs -f -n <PORTAL_NAMESPACE> <POD_NAME>
+    kubectl get pods -n <INTEGRATION_NAMESPACE>
+    kubectl get logs -f -n <INTEGRATION_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+---
+
+## 2.2) Offline Update of Apinizer
+
+For offline systems that require updates in Kubernetes environments, two main methods can be used:
+
+<CardGroup cols={2}>
+  <Card title="Manual Image Transfer" icon="download">
+    Pulling image files to a server with internet and docker/containerd application and transferring these image files to the target Kubernetes cluster.
+  </Card>
+  
+  <Card title="Local Registry Usage" icon="database">
+    Using a repository application that the Kubernetes cluster will use (Nexus, Harbor, etc.).
+  </Card>
+</CardGroup>
+
+### 2.2.1) Pulling Images from Online Server and Transferring to Offline Servers
+
+If there is a machine with internet access and access to offline machines, the following steps can be performed.
+
+#### 2.2.1.1) Docker Usage
+
+```bash
+# All images required for upgrade are pulled from online server
+docker pull apinizercloud/apimanager:<NEW_VERSION>
+docker pull apinizercloud/worker:<NEW_VERSION>
+docker pull apinizercloud/cache:<NEW_VERSION>
+docker pull apinizercloud/apiportal:<NEW_VERSION>
+docker pull apinizercloud/integration:<NEW_VERSION>
+
+# To transfer relevant images to offline servers, images are saved in `.tar` format on online server
+docker save apinizercloud/apimanager:<NEW_VERSION> -o apinizercloud-apimanager.<NEW_VERSION>.tar
+docker save apinizercloud/worker:<NEW_VERSION> -o apinizercloud-worker.<NEW_VERSION>.tar
+docker save apinizercloud/cache:<NEW_VERSION> -o apinizercloud-cache.<NEW_VERSION>.tar
+docker save apinizercloud/apiportal:<NEW_VERSION> -o apinizercloud-apiportal.<NEW_VERSION>.tar
+docker save apinizercloud/integration:<NEW_VERSION> -o apinizercloud-integration.<NEW_VERSION>.tar
+
+# Each image is transferred to offline server
+scp apinizercloud-*.tar <OFFLINE_MACHINE_USER>@<OFFLINE_MACHINE_IP>:<TARGET_DIRECTORY>
+
+# Images are loaded on each offline server
+docker load -i apinizercloud-apimanager.<NEW_VERSION>.tar
+docker load -i apinizercloud-worker.<NEW_VERSION>.tar
+docker load -i apinizercloud-cache.<NEW_VERSION>.tar
+docker load -i apinizercloud-portal.<NEW_VERSION>.tar
+docker load -i apinizercloud-integration.<NEW_VERSION>.tar
+```
+
+#### 2.2.1.2) Containerd Usage
+
+```bash
+# All images required for upgrade are pulled from online server
+ctr image pull docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# To transfer relevant images to offline servers, images are saved in `.tar` format on online server
+ctr images export apinizercloud-apimanager.tar docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr images export apinizercloud-worker.tar docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr images export apinizercloud-cache.tar docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr images export apinizercloud-apiportal.tar docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr images export apinizercloud-integration.tar docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# Each image is transferred to offline kubernetes worker servers
+scp docker.io-apinizercloud-*.tar <OFFLINE_MACHINE_USER>@<OFFLINE_MACHINE_IP>:<TARGET_DIRECTORY>
+
+# Images are loaded on each offline server
+ctr images import apinizercloud-apimanager.tar
+ctr images import apinizercloud-worker.tar
+ctr images import apinizercloud-cache.tar
+ctr images import apinizercloud-apiportal.tar
+ctr images import apinizercloud-integration.tar
+```
+
+### 2.2.2) Using Local Image Registry or Repository
+
+Although different image registries and repositories work with different methods, in most of them, pulled images must be tagged and sent to the application.
+
+<Info>
+  If the application is used as a reverse proxy, it is sufficient to provide the necessary definition for the apinizercloud repo at hub.docker.com.
+</Info>
+
+#### 2.2.2.1) Docker Usage
+
+```bash
+# All required images are pulled
+docker pull apinizercloud/apimanager:<NEW_VERSION>
+docker pull apinizercloud/worker:<NEW_VERSION>
+docker pull apinizercloud/cache:<NEW_VERSION>
+docker pull apinizercloud/apiportal:<NEW_VERSION>
+docker pull apinizercloud/integration:<NEW_VERSION>
+
+# Pulled images are retagged with necessary tag information
+docker tag apinizercloud/apimanager:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+docker tag apinizercloud/worker:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+docker tag apinizercloud/cache:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+docker tag apinizercloud/apiportal:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+docker tag apinizercloud/integration:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+
+# Images are transferred to organization's local image registry:
+docker push <LOCAL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+docker push <LOCAL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+docker push <LOCAL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+docker push <LOCAL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+docker push <LOCAL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+```
+
+#### 2.2.2.2) Containerd Usage
+
+```bash
+# All required images are pulled
+ctr image pull docker.io/apinizercloud/apimanager:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/worker:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/cache:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/apiportal:<NEW_VERSION>
+ctr image pull docker.io/apinizercloud/integration:<NEW_VERSION>
+
+# Pulled images are retagged with necessary tag information
+ctr image tag docker.io/apinizercloud/apimanager:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/worker:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/cache:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/apiportal:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+ctr image tag docker.io/apinizercloud/integration:<NEW_VERSION> <LOCAL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+
+# Images are transferred to organization's local image registry:
+ctr images push <LOCAL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+ctr images push <LOCAL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+ctr images push <LOCAL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+ctr images push <LOCAL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+ctr images push <LOCAL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+```
+
+### 2.2.3) Apinizer Api Manager Update
+
+<Warning>
+  Apinizer Api Manager must be updated before updating other Apinizer components.
+
+  After Api Manager makes updates to the database, other Apinizer applications need to be fed from the database with current settings.
+
+  Therefore, **after Api Manager is updated, make sure that Api Manager pods on Kubernetes are in "ready" status and then update other components.**
+</Warning>
+
+Commands in this and subsequent steps are run on servers with Kubernetes Control Plane task.
+
+<Steps>
+  <Step title="Check deployment information">
+    ```bash
+    kubectl get deployments -Ao wide
+    ```
+  </Step>
+  
+  <Step title="Update Api Manager deployment image">
+    ```bash
+    kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=<LOCAL_REGISTRY>/apinizercloud/apimanager:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod status">
+    Wait for the pod to be READY, monitor pod status:
+    ```bash
+    kubectl get pods -n <MANAGER_NAMESPACE>
+    kubectl logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+### 2.2.4) Apinizer Worker and Cache Update
+
+After ensuring that the Apinizer Api Manager image is updated, Apinizer Worker and Cache applications are updated.
+
+<Steps>
+  <Step title="Update Worker and Cache deployment images">
+    ```bash
+    kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=<LOCAL_REGISTRY>/apinizercloud/worker:<NEW_VERSION>
+    kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=<LOCAL_REGISTRY>/apinizercloud/cache:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod status">
+    Wait for pods to be READY, monitor pod status:
+    ```bash
+    kubectl get pods -n <WORKER_CACHE_NAMESPACE>
+    kubectl logs -f -n <WORKER_CACHE_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+### 2.2.5) Apinizer Portal and Integration Update
+
+Apinizer Portal and Integration can be updated similarly.
+
+<Steps>
+  <Step title="Update Portal and Integration deployment images">
+    ```bash
+    kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=<LOCAL_REGISTRY>/apinizercloud/apiportal:<NEW_VERSION>
+    kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=<LOCAL_REGISTRY>/apinizercloud/integration:<NEW_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Monitor pod statuses">
+    Wait for pods to be READY, monitor pod statuses:
+    ```bash
+    kubectl get pods -n <PORTAL_NAMESPACE>
+    kubectl get logs -f -n <PORTAL_NAMESPACE> <POD_NAME>
+    kubectl get pods -n <INTEGRATION_NAMESPACE>
+    kubectl get logs -f -n <INTEGRATION_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+## 3) Rolling Back Apinizer Application Updates
+
+Version downgrade is not supported in Apinizer applications. However, if there are database backups, an updated version can be rolled back.
+
+<Warning>
+  When updates need to be rolled back for any reason, the first thing to do is **check that MongoDB backup was taken before the update**. If there is no database backup taken before the update, there is no way to roll back the changes Api Manager application will make to the database, so if there is a system backup of the database servers, you can return to the most recent backup at that date and return to that version.
+
+  This operation will cause loss of changes made since that date, so it should be done carefully. Since structural differences may occur with the update, this operation can only be considered for reference purposes.
+</Warning>
+
+### 3.1) MongoDB Database Restore
+
+Before this operation, it should be confirmed that the Api Manager application **is not in a restart loop with CrashLoopBackOff error** on Kubernetes. For the safest method, the Api Manager application should be stopped by reducing the replica count to 0.
+
+<Steps>
+  <Step title="Stop Api Manager">
+    Api Manager replica count is reduced to 0 and all pods are shut down:
+    ```bash
+    kubectl scale deploy <MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> --replicas=0
+    ```
+  </Step>
+  
+  <Step title="Restore MongoDB backup">
+    MongoDB should be returned to the most recent backup. The `--drop` parameter can be used to prevent possible conflicts during return. This will only drop collections that have a counterpart in the backup file and then perform the load.
+  </Step>
+</Steps>
+
+<Note>
+For detailed information, the [MongoDB Database Backup and Restore](/en/operations/backup-and-restore/mongodb-backup-and-restore) page can be reviewed.
+</Note>
+
+### 3.2) Rolling Back Api Manager Application Version
+
+<Note>
+  If a local registry will be used during rollback, commands should be updated accordingly.
+</Note>
+
+<Steps>
+  <Step title="Roll back Api Manager deployment image to old version">
+    ```bash
+    kubectl set image deployment/<MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> <MANAGER_CONTAINER_NAME>=apinizercloud/apimanager:<OLD_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Increase replica count to 1">
+    ```bash
+    kubectl scale deploy <MANAGER_DEPLOYMENT_NAME> -n <MANAGER_NAMESPACE> --replicas=1
+    ```
+  </Step>
+  
+  <Step title="Monitor pod status">
+    Wait for the pod to be READY, monitor pod status and logs:
+    ```bash
+    kubectl get pods -n <MANAGER_NAMESPACE>
+    kubectl logs -f -n <MANAGER_NAMESPACE> <POD_NAME>
+    ```
+  </Step>
+</Steps>
+
+### 3.3) Rolling Back Other Applications' Versions
+
+When the Api Manager application is running, other applications can be rolled back to the old version together.
+
+<Note>
+  If a local registry will be used during rollback, commands should be updated accordingly.
+</Note>
+
+<Steps>
+  <Step title="Roll back deployment images to old version">
+    ```bash
+    kubectl set image deployment/<WORKER_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <WORKER_CONTAINER_NAME>=apinizercloud/worker:<OLD_VERSION>
+    kubectl set image deployment/<CACHE_DEPLOYMENT_NAME> -n <WORKER_CACHE_NAMESPACE> <CACHE_CONTAINER_NAME>=apinizercloud/cache:<OLD_VERSION>
+    kubectl set image deployment/<PORTAL_DEPLOYMENT_NAME> -n <PORTAL_NAMESPACE> <PORTAL_CONTAINER_NAME>=apinizercloud/apiportal:<OLD_VERSION>
+    kubectl set image deployment/<INTEGRATION_DEPLOYMENT_NAME> -n <INTEGRATION_NAMESPACE> <INTEGRATION_CONTAINER_NAME>=apinizercloud/integration:<OLD_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Check pod statuses">
+    Wait for pods to be READY, monitor pod statuses and logs if necessary:
+    ```bash
+    kubectl get pods -A
+    ```
+  </Step>
+</Steps>
+
+

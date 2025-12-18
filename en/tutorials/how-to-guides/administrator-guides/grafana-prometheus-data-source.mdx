@@ -1,0 +1,185 @@
+# Grafana Installation and Prometheus Integration as Data Source
+
+## 1-) Grafana Installation
+
+### Persistent Storage Configuration
+
+Since Grafana's data will be stored on a node in the Kubernetes cluster, **PersistentVolume (PV)** and **PersistentVolumeClaim (PVC)** definitions must be made. This configuration ensures that Grafana preserves its data in case of shutdown or restart.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: grafana-pv
+  namespace: monitoring
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /mnt/data/grafana
+  persistentVolumeReclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: grafana-pvc
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+```
+
+<Warning>
+  The **PersistentVolume (PV) and PersistentVolumeClaim (PVC)** configuration above ensures that Grafana stores its data on a specific node. However, the **hostPath** used here is dependent on the local file system of the specific node where Grafana runs.
+
+**Therefore:**
+
+- If Grafana pods are **moved to a different node**, they will **lose their data** unless the same **hostPath** directory exists on the new node.
+- To guarantee that pods always run on the same node, pods must be pinned to specific nodes using **nodeAffinity** or **nodeSelector**.
+
+Alternatively, **NFS, Ceph, Longhorn or a cloud-based storage solution** can be used to store data in a **node-independent** manner.
+</Warning>
+
+### Grafana Secret Configuration
+
+```bash
+// Password and password for the admin user who will access the Grafana interface are determined.
+GF_SECURITY_ADMIN_USER=admin
+GF_SECURITY_ADMIN_PASSWORD=<YOUR_GRAFANA_PASSWORD>
+echo -n ${GF_SECURITY_ADMIN_USER} | base64 //We will put the output of this in place of the <ENCODED_GF_SECURITY_ADMIN_USER> variable in the next step
+echo -n ${GF_SECURITY_ADMIN_PASSWORD} | base64 //We will put the output of this in place of the <ENCODED_GF_SECURITY_ADMIN_PASSWORD> variable in the next step
+```
+
+The username and password to be used in the Grafana interface are stored with the secret given below.
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana-secrets
+  namespace: monitoring
+type: Opaque
+data:
+  GF_SECURITY_ADMIN_USER: <ENCODED_GF_SECURITY_ADMIN_USER>
+  GF_SECURITY_ADMIN_PASSWORD: <ENCODED_GF_SECURITY_ADMIN_PASSWORD>
+```
+
+### Grafana Deployment Configuration
+
+Load the Grafana Deployment YAML file below into your Kubernetes Cluster by modifying it to suit your systems.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: grafana
+  name: grafana
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - <NODE_HOSTNAME>
+      initContainers:
+        - name: init-permissions
+          image: busybox
+          command: ["sh", "-c", "chown -R 472:472 /var/lib/grafana"]
+          volumeMounts:
+            - mountPath: /var/lib/grafana
+              name: grafana-storage
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.6.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+              name: http-grafana
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 256m
+              memory: 256Mi
+          envFrom:
+            - secretRef:
+                name: grafana-secrets
+          volumeMounts:
+            - mountPath: /var/lib/grafana
+              name: grafana-storage
+      volumes:
+        - name: grafana-storage
+          persistentVolumeClaim:
+            claimName: grafana-pvc
+```
+
+### Kubernetes Service for Grafana is created.
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  ports:
+    - name: http
+      port: 3000
+      nodePort: 32181
+  selector:
+    app: grafana
+  type: NodePort
+```
+
+When Grafana is deployed on Kubernetes, it creates a Kubernetes service named grafana and of type NodePort. This service is necessary for accessing Grafana from outside Kubernetes. However, you can adapt this service according to the structure you use for Ingress or connection method in your organization.
+
+## 2) Setting Prometheus as Data Source on Grafana
+
+### 1. Log in to Grafana
+
+### 2. Click the Data Source tab from the left menu and select Add new data source option.
+
+### 3. Prometheus is selected as the data source. 4. Prometheus Connection url and other necessary settings are entered and saved.
+
+### 5. Click the Dashboard tab from the left menu and select the new dashboard option.
+
+### 6. A new dashboard is created and prometheus is selected as the data source.
+
