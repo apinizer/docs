@@ -1,0 +1,338 @@
+---
+title: "Red Hat Elasticsearch 8.17.10 Installation"
+description: "Step-by-step guide for installing Elasticsearch 8.17.10 on a server with Red Hat operating system. Red Hat 9.6 operating system is recommended."
+---
+
+## Checks Required Before Starting Installation
+
+<Warning>
+  **Important for Installation**
+
+  For the installation to be healthy, your servers must have access to the following addresses.
+
+  **For Elasticsearch installation:**
+  
+  [https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.17.10-linux-x86_64.tar.gz](https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.17.10-linux-x86_64.tar.gz)
+</Warning>
+
+
+## 1) Operating System Configurations
+
+```bash
+# Elasticsearch user is created and authorized.
+sudo adduser elasticsearch
+sudo passwd elasticsearch
+sudo usermod -aG wheel elasticsearch
+
+# Switch to the user to continue operations
+sudo su - elasticsearch
+
+# It is recommended that the following tools be installed on all servers.
+sudo yum update
+sudo yum install -y curl wget telnet zip lsof lvm2 net-tools yum-utils bind-utils device-mapper-persistent-data tar
+
+# Firewall is disabled
+sudo systemctl stop ufw
+sudo systemctl disable ufw
+
+# Firewall is disabled
+sudo systemctl stop firewalld
+sudo systemctl disable firewalld
+
+# SELinux is disabled to prevent communication problems on servers.
+sudo setenforce 0
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=disabled/' /etc/selinux/config
+
+# Swap is disabled and the swap line in /etc/fstab file is deleted to prevent it from restarting.
+sudo swapoff -a
+sudo vi /etc/fstab
+# Then close the vi file (:wq).
+```
+
+## 2) Elasticsearch Installation
+
+### 2.1) Operating System Configurations and Elasticsearch Application Installation
+
+```bash
+sudo vi /etc/security/limits.conf
+elasticsearch   -   nofile   65535
+elasticsearch soft memlock unlimited
+elasticsearch hard memlock unlimited
+
+sudo sysctl -w vm.swappiness=1
+sudo sysctl -w vm.max_map_count=262144
+
+sudo vi /etc/sysctl.conf
+vm.max_map_count=262144 elasticsearch
+
+sudo sysctl -p
+sudo sysctl vm.max_map_count
+```
+
+### 2.2) Elasticsearch Installation
+
+```bash
+sudo mkdir /opt/elasticsearch
+cd /opt/elasticsearch
+sudo wget https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.17.10-linux-x86_64.tar.gz
+
+sudo tar -xzf elasticsearch-8.17.10-linux-x86_64.tar.gz
+
+sudo chown -R elasticsearch:elasticsearch /opt/elasticsearch
+sudo chmod -Rf 775 /opt/elasticsearch
+
+##At this point, pay attention to where the appropriate disk is mounted or ask system administrators to add the disk to the following path
+#The following commands can be used for this check
+df -h
+lsblk
+
+sudo mkdir /data
+sudo mkdir /data/elastic-data/
+sudo mkdir /data/elastic-snapdata/
+
+sudo chown -Rf elasticsearch:elasticsearch /data/elastic-*
+sudo chmod -Rf 775 /data/elastic-*
+```
+
+### 2.3) Configuring Elasticsearch Parameters According to Environment
+
+The following parameters must be added by configuring them according to your own environment.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/elasticsearch.yml
+```
+
+<Info>
+  **Important**
+
+  Here, path.data and path.repo addresses must be given as the address of the disk where your log file will be stored in the system, in accordance with the previous item.
+</Info>
+
+```yaml
+cluster.name: ApinizerEsCluster
+node.name: "<NODE_IP>"
+network.host: "<NODE_IP>"
+http.port: 9200
+
+node.roles: ["master","data"]
+
+cluster.initial_master_nodes: ["<NODE_IP>"]
+
+discovery.seed_hosts: []
+path.data: /data/elastic-data/
+path.repo: ["/data/elastic-snapdata"]
+
+# Security
+xpack.security.enabled: true
+xpack.security.enrollment.enabled: true
+
+#xpack.security.http.ssl:
+#  enabled: true
+#  keystore.path: certs/elastic-certificates.p12
+#  truststore.path: certs/elastic-certificates.p12
+
+# Transport SSL:
+xpack.security.transport.ssl:
+  enabled: true
+  verification_mode: certificate
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+
+# CORS ayarları
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers: X-Requested-With, X-Auth-Token, Content-Type, Content-Length
+```
+
+You can configure the JVM (Java Virtual Machine) values and other JVM parameters that Elasticsearch will use as follows.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/jvm.options
+```
+
+<Info>
+  **Important**
+
+  Here, you can go up to half of the RAM amount that the operating system has, and this value should not exceed 32GB
+</Info>
+
+```yaml
+-Xms8g
+-Xmx8g
+```
+
+### 2.4) Setting Elasticsearch as Linux Service
+
+```bash
+sudo chmod -Rf 775 /opt/elasticsearch/elasticsearch-8.17.10/*
+
+sudo vi /etc/systemd/system/elasticsearch.service
+```
+
+```bash
+[Unit]
+Description=Elasticsearch 8.17.10
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=elasticsearch
+Group=elasticsearch
+ExecStart=/opt/elasticsearch/elasticsearch-8.17.10/bin/elasticsearch
+Environment=ES_PATH_CONF=/opt/elasticsearch/elasticsearch-8.17.10/config
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+TimeoutStopSec=0
+
+[Install]
+WantedBy=multi-user.target
+```
+
+<Warning>
+  The following commands should only be executed **during the initial installation**:
+
+  After the initial installation, all operations such as starting, stopping, or restarting Elasticsearch must be performed via **systemctl**.
+</Warning>
+
+```bash
+# The following command is used to create a certificate. It is not mandatory for this file to be protected with a password (and it is not recommended).
+# Adding a password to the .p12 file makes management more difficult, as it requires additional configuration (such as a keystore) for services to restart automatically, and is therefore generally not preferred.
+
+cd /opt/elasticsearch/elasticsearch-8.17.10/
+./bin/elasticsearch-certutil ca --days 3650
+./bin/elasticsearch-certutil cert --ca elastic-stack-ca.p12 --days 3650
+
+# The certificates are moved under the config/certs directory after creating it
+mkdir config/certs/
+mv elastic-certificates.p12 config/certs/
+mv elastic-stack-ca.p12 config/certs/
+cd /opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+openssl pkcs12 -in elastic-certificates.p12 -nokeys -out elastic-certificates.crt
+
+# Before proceeding, make sure that these certificate files have the same permissions and ownership as the Elasticsearch files.
+sudo chown -Rf elasticsearch:elasticsearch /opt/elasticsearch
+sudo chmod -Rf 775 /opt/elasticsearch
+
+# The following three certificates should be visible under the certs directory:
+elastic-certificates.crt  # Contains the trusted Root Certificate (CA) that validates this server’s identity, allowing other Elastic Stack components (Apinizer, Kibana, Logstash) to trust the server using this certificate.
+elastic-certificates.p12 # Used on the server side to store the private key and server certificate, enabling encryption of incoming TLS/SSL connections and proving the server’s identity.
+elastic-stack-ca.p12     # Contains the central Root Certificate Authority (CA) information that provides the trust chain and manages all certificates.
+```
+
+```bash
+sudo systemctl daemon-reload
+
+sudo systemctl start elasticsearch
+sudo systemctl status elasticsearch
+sudo systemctl enable elasticsearch
+```
+
+### 2.5) Built-in user password generation
+
+<Warning>
+  When the commands are executed, Elasticsearch usernames, certificate details, and other critical information will be displayed on the screen **ONE TIME ONLY**.
+
+  It is important to **store this information securely**.
+</Warning>
+
+Elasticsearch’s default built-in username is **elastic**. However, no password is set for this user by default.
+
+When assigning a password, the passwords of all built-in users will be changed.
+
+```bash
+cd /opt/elasticsearch/elasticsearch-8.17.10/
+# To automatically update the passwords, run the following command in the Elasticsearch directory.
+./bin/elasticsearch-setup-passwords auto
+
+# The output will be as follows
+Changed password for user elastic
+PASSWORD elastic = dd6mjMiemZlAKfOXkUAm
+```
+
+<Warning>
+  Do not move on to the next step before the password is created.
+</Warning>
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/elasticsearch.yml
+```
+
+Open the lines related to "xpack.security.http.ssl" and restart Elasticsearch.
+
+```yaml
+xpack.security.http.ssl:
+  enabled: true
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+```
+
+```bash
+sudo systemctl restart elasticsearch
+```
+
+<Info>
+  This step is necessary to create a new user after Elasticsearch security is enabled. The credentials here can also be defined in Apinizer API Manager.
+</Info>
+
+## 3) Adding an Elasticsearch Connector to Apinizer
+
+Go to Administration > Connection Management > Elasticsearch page and add the **username-password** created on the server and the **elastic-certificates.crt** certificate through the interface, along with the **server information**.
+
+<Frame caption="Apinizer - Apinizer – Elasticsearch Connector Addition Screen">
+  <img
+    src="/images/setup/elasticsearch/ubuntu-8.17.10/01-elasticsearch-connector.png"
+    alt="Elasticsearch Connector Addition"
+    width="1200"
+    height="567"
+    style={{ borderRadius: '0.5rem' }}
+  />
+</Frame>
+
+For detailed information, you can refer to [the documentation at this link](/tr/setup/elasticsearch/ubuntu-elasticsearch).
+
+<Info>
+  **Elasticsearch Master–Data Architecture High Availability (H.A.) Setup Information**
+
+  When setting up a High Availability (H.A.) architecture in an Elasticsearch environment by separating Master and Data nodes, the following steps should be followed:
+
+  1. **Certificate Creation**
+     TLS/SSL certificates are created only on the initial (primary) Elasticsearch server. The generated certificates are securely copied to all other Elasticsearch servers.
+
+  2. **Starting the Elasticsearch Service**
+     The Elasticsearch service is started on all nodes, and it is verified that basic cluster communication is established.
+
+  3. **User Creation**
+     After security is enabled, the necessary system and application users are created (e.g., elastic, kibana, application users).
+
+  4. **TLS Configuration in YAML File**
+     TLS settings are enabled in the elasticsearch.yml file, and the certificate paths are defined.
+
+  5. **Restarting Services**
+    All Elasticsearch services are restarted to apply the configuration changes.
+
+
+  **Node Role Definitions**
+  
+  Master and Data nodes are separated in the **elasticsearch.yml** file as follows:
+
+  **For Master Node:**
+  ```yaml
+  node.roles: ["master"]
+  ```
+
+  **For Data Node:**
+  ```yaml
+  node.roles: ["data"]
+  ```
+
+  With this setup:
+
+  - Cluster management is handled by the master nodes.
+  - Data operations and queries run on the data nodes.
+  - The system becomes highly available (High Availability) and scalable.
+</Info>
+
