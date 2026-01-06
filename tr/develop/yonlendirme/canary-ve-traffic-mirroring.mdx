@@ -1,0 +1,256 @@
+---
+title: "Canary Release ve Traffic Mirroring"
+description: "Yeni backend sürümlerini güvenli bir şekilde canlıya almak için canary release mekanizmasını kullanabilirsiniz. Belirli bir yüzdedeki trafiği canary backend'ine yönlendirerek riski minimize edebilirsiniz. Ayrıca, canlı trafiğin bir kopyasını test ortamına göndermek için traffic mirroring özelliğini kullanabilirsiniz. Her iki mekanizma da counter-based deterministic routing ile çalışır."
+---
+
+<Warning>
+Bu özellikler sadece HTTP tipindeki API Proxy'ler için kullanılabilir. gRPC ve WebSocket tipindeki API Proxy'ler için bu ayarlar geçerli değildir.
+</Warning>
+
+## Canary Release
+
+**Canary Release**, yeni bir backend sürümünü küçük bir trafik yüzdesiyle canlıya alarak riski minimize etmek için kullanılan bir deployment stratejisidir. Bu sayede yeni sürümün performansını ve kararlılığını gerçek trafik üzerinde test edebilirsiniz.
+
+### Canary Release Nasıl Çalışır?
+
+Canary release mekanizması şu şekilde çalışır:
+
+1. **Traffic Percentage:** Belirli bir yüzdedeki trafik (örn: %10) canary backend'ine yönlendirilir
+2. **Counter-Based Routing:** Deterministic routing için counter kullanılır (mod 100 ile)
+3. **Health Check Entegrasyonu:** Canary backend unhealthy olduğunda otomatik olarak cooldown period başlatılır
+4. **Cooldown Period:** Cooldown süresince canary'ye trafik gönderilmez, tüm trafik stable backend'e yönlendirilir
+
+### Canary Release Parametreleri
+
+| Parametre | Açıklama |
+|-----------|----------|
+| **Traffic Percentage** | Canary backend'ine yönlendirilecek trafik yüzdesi (0-100). |
+| **Cooldown Period (Saniye)** | Canary backend unhealthy olduğunda, trafiğin durdurulacağı süre. Varsayılan: 300 saniye (5 dakika). |
+
+### Canary Routing Karar Akışı
+
+Canary routing karar mekanizması şu adımlarla çalışır:
+
+1. **İstek geldiğinde**, canary release aktif mi kontrol edilir:
+   - Canary release aktif değilse: İstek doğrudan PRIMARY backend'e yönlendirilir
+
+2. **Canary release aktifse**, cooldown period kontrol edilir:
+   - Cooldown period aktifse: Tüm trafik PRIMARY backend'e yönlendirilir (canary'ye trafik gönderilmez)
+   - Cooldown period aktif değilse: Trafik dağıtımına geçilir
+
+3. **Trafik dağıtımı**:
+   - Counter artırılır ve mod 100 hesaplanır
+   - Mod değeri traffic percentage'den küçükse: İstek CANARY backend'e yönlendirilir
+   - Mod değeri traffic percentage'den büyük veya eşitse: İstek PRIMARY backend'e yönlendirilir
+
+4. **Canary backend'e yönlendirme sonrası**:
+   - İstek başarılıysa: İşlem tamamlanır
+   - İstek başarısızsa: Otomatik olarak PRIMARY backend'e failover yapılır
+
+### Counter-Based Deterministic Routing
+
+Canary release, trafik dağıtımını deterministic hale getirmek için counter-based routing kullanır:
+
+1. **Counter Artırma:** Her istek için counter artırılır (thread-safe atomik sayaç kullanılarak)
+2. **Mod 100 Hesaplama:** Counter değeri mod 100'e göre hesaplanır
+3. **Karar Verme:** Mod değeri traffic percentage'den küçükse canary'ye yönlendirilir
+4. **Overflow Önleme:** Counter 100'e ulaştığında otomatik olarak 0'a reset edilir
+
+```mermaid
+sequenceDiagram
+    participant R as Request
+    participant C as Counter
+    participant D as Decision Engine
+    participant BE as Backend
+    
+    R->>C: Increment Counter
+    C->>C: counter++ (thread-safe artırma)
+    C->>C: modValue = counter % 100
+    C->>D: modValue, trafficPercentage
+    
+    alt modValue < trafficPercentage
+        D->>BE: Route to Canary
+    else modValue >= trafficPercentage
+        D->>BE: Route to PRIMARY
+    end
+    
+    alt counter >= 100
+        C->>C: Reset to 0 (atomik reset işlemi)
+    end
+```
+
+<Info>
+Counter-based routing sayesinde, aynı istek her zaman aynı backend'e yönlendirilir. Bu, test senaryolarında tutarlılık sağlar.
+</Info>
+
+### Health Check ile Otomatik Failback
+
+Canary backend'in sağlık durumu, active health check mekanizması ile sürekli izlenir:
+
+- **Unhealthy Tespiti:** Health check fail threshold'u aşıldığında, canary backend unhealthy olarak işaretlenir
+- **Cooldown Başlatma:** Unhealthy tespit edildiğinde, otomatik olarak cooldown period başlatılır
+- **Trafik Durdurma:** Cooldown süresince canary'ye trafik gönderilmez
+- **Otomatik Recovery:** Cooldown süresi geçtikten sonra, health check tekrar başarılı olursa canary tekrar aktif hale gelir
+
+```mermaid
+sequenceDiagram
+    participant HC as Health Check Service
+    participant CB as Canary Backend
+    participant CM as Canary Manager
+    participant C as Cache (Cooldown)
+    
+    loop Her Interval Saniyesinde
+        HC->>CB: GET /health
+        CB-->>HC: Response
+        
+        alt Unhealthy Tespit Edildi
+            HC->>HC: Consecutive Failures >= Fail Threshold
+            HC->>CM: Canary Cooldown'ı Başlat
+            CM->>C: Set Cooldown Key (TTL)
+            Note over CM,C: Cooldown Period Başlatıldı<br/>(Traffic durdurulur)
+        end
+        
+        alt Cooldown Süresi Geçti
+            HC->>CB: GET /health
+            CB-->>HC: 200 OK
+            HC->>HC: Consecutive Successes >= Pass Threshold
+            Note over CM: Cooldown otomatik olarak<br/>TTL ile sona erer
+        end
+    end
+```
+
+## Traffic Mirroring
+
+**Traffic Mirroring**, canlı trafiğin bir kopyasını test ortamına göndermek için kullanılan bir mekanizmadır. Mirror request'ler asenkron olarak çalışır ve ana request'i etkilemez.
+
+### Traffic Mirroring Nasıl Çalışır?
+
+Traffic mirroring mekanizması şu şekilde çalışır:
+
+1. **Ana İstek:** Normal şekilde PRIMARY backend'e gönderilir
+2. **Mirror İstek:** Belirli bir yüzdedeki trafiğin kopyası MIRROR backend'ine asenkron olarak gönderilir
+3. **Asenkron İşleme:** Mirror request'ler ana request'i bloke etmez
+4. **Sonuç Etkisizliği:** Mirror request'lerin başarı/başarısızlığı ana request'i etkilemez
+
+### Traffic Mirroring Parametreleri
+
+| Parametre | Açıklama |
+|-----------|----------|
+| **Traffic Mirror Enabled** | Traffic mirroring'in aktif edilip edilmeyeceği. |
+| **Mirror Percentage** | Mirror yapılacak trafik yüzdesi (0-100). Counter-based routing ile belirlenir. |
+
+### Traffic Mirroring Mimarisi
+
+```mermaid
+graph TB
+    subgraph "Primary Request Flow"
+        A[Client Request] --> B[API Proxy]
+        B --> C[PRIMARY Backend]
+        C --> D[Response]
+        D --> E[Client]
+    end
+    
+        subgraph "Mirror Request Flow (Async)"
+        B --> F{Mirror Percentage?}
+        F -->|Selected| G[Asenkron İşleme]
+        G --> H[MIRROR Backend]
+        H --> I[Log Results]
+        I --> J[Elasticsearch]
+    end
+    
+    style G fill:#e1f5ff
+    style H fill:#e1f5ff
+    style I fill:#e1f5ff
+```
+
+### Asenkron Mirror İşleme
+
+Mirror request'ler asenkron olarak işlenir:
+
+1. **Asenkron Görev Oluşturma:** Her mirror adresi için bir asenkron görev oluşturulur
+2. **Asenkron Çalıştırma:** Mirror request'ler async executor üzerinde çalıştırılır
+3. **Sonuç Toplama:** Tüm mirror sonuçları toplanır ve mesaj bağlamına eklenir
+4. **Logging:** Mirror sonuçları Elasticsearch'e loglanır (LogHandler tarafından)
+
+```mermaid
+sequenceDiagram
+    participant RH as RoutingHandler
+    participant TMH as TrafficMirrorHandler
+    participant EX as Async Executor
+    participant MB as Mirror Backend
+    participant MC as Mesaj Bağlamı
+    participant ES as Elasticsearch
+    
+    RH->>TMH: executeMirrors(mirrorAddresses)
+    TMH->>TMH: Filter by Mirror Percentage
+    
+    loop Her Mirror Address
+        TMH->>EX: Asenkron Olarak Çalıştır (mirrorRequest)
+        EX->>MB: Send Mirror Request
+        MB-->>EX: Response
+        EX-->>TMH: Asenkron Sonuç
+    end
+    
+    TMH->>TMH: Aggregate Results
+    TMH->>MC: Mirror Sonuçlarını Ekle
+    TMH-->>RH: Asenkron İşleme Tamamlandı
+    
+    Note over RH: Primary request devam eder<br/>(mirror'ı beklemez)
+    
+    RH->>ES: Log Mirror Results (async)
+```
+
+<Warning>
+Mirror request'lerin başarısız olması durumunda ana request etkilenmez. Mirror sonuçları sadece loglama ve izleme amaçlı kullanılır.
+</Warning>
+
+### Percentage-Based Router
+
+Hem Canary Release hem de Traffic Mirroring, trafik dağıtımı için aynı `PercentageBasedRouter` utility sınıfını kullanır.
+
+#### Counter Yönetimi
+
+- **Local Counter:** Her pod'da bağımsız counter tutulur (thread-safe harita kullanılarak)
+- **Thread-Safety:** Atomik sayaç kullanılarak thread-safe işlemler yapılır
+- **Overflow Önleme:** Counter 100'e ulaştığında atomik reset işlemi ile 0'a reset edilir
+
+#### Counter Reset Mekanizması
+
+Counter reset mekanizması şu şekilde çalışır:
+
+1. **Counter 99'dan 100'e artırıldığında**, mod 100 hesaplaması 0 sonucunu verir
+
+2. **Atomik reset işlemi**:
+   - Counter değeri 100 ise, atomik işlem ile 0'a reset edilmeye çalışılır
+   - Reset işlemi başarılı olursa: Counter 0 olur ve sonraki istek için kullanılır
+   - Reset işlemi başarısız olursa (başka bir thread counter'ı değiştirmişse): Yeni counter değeri kullanılır
+
+Bu mekanizma sayesinde counter 100'ü aşmaz ve her zaman 0-99 aralığında kalır.
+
+### Lifecycle Yönetimi
+
+API Proxy deploy, update veya undeploy edildiğinde, canary ve mirror counter'ları otomatik olarak temizlenir:
+
+- **Deploy/Update:** Counter'lar reset edilir (fresh start)
+- **Undeploy:** Tüm counter'lar temizlenir
+
+<Note>
+Counter'ların reset edilmesi, yeni konfigürasyonla tutarlı bir başlangıç sağlar. Örneğin, traffic percentage değiştiğinde counter'ların sıfırlanması gerekir.
+</Note>
+
+## Canary vs Mirror Karşılaştırması
+
+| Özellik | Canary Release | Traffic Mirroring |
+|---------|---------------|-------------------|
+| **Amaç** | Yeni sürümü küçük trafikle test etmek | Canlı trafiği test ortamına kopyalamak |
+| **Backend Tipi** | CANARY | MIRROR |
+| **Trafik Etkisi** | Seçilen trafik canary'ye gider | Ana trafik PRIMARY'ye, kopya MIRROR'a gider |
+| **Başarısızlık Etkisi** | Canary başarısız olursa PRIMARY'ye failover | Mirror başarısız olsa bile ana request etkilenmez |
+| **Health Check** | Canary unhealthy ise cooldown başlatılır | Mirror için health check yapılmaz |
+| **Senkronizasyon** | Senkron (ana request canary'yi bekler) | Asenkron (ana request mirror'ı beklemez) |
+
+## İlgili Konular
+
+- [Tekrar Deneme ve Yük Devretme](/tr/develop/yonlendirme/tekrar-deneme-ve-yuk-devretme) - Health check ve circuit breaker entegrasyonu
+- [Yük Dengeleme](/tr/develop/yonlendirme/http-yonlendirme#yuk-dengeleme) - Backend adresleri arasında yük dağıtımı
+

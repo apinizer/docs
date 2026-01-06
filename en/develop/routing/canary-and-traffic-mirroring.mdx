@@ -1,0 +1,256 @@
+---
+title: "Canary Release and Traffic Mirroring"
+description: "You can use the canary release mechanism to safely deploy new backend versions to production. You can minimize risk by routing a certain percentage of traffic to the canary backend. Additionally, you can use the traffic mirroring feature to send a copy of live traffic to a test environment. Both mechanisms work with counter-based deterministic routing."
+---
+
+<Warning>
+These features are only available for HTTP type API Proxies. These settings are not valid for gRPC and WebSocket type API Proxies.
+</Warning>
+
+## Canary Release
+
+**Canary Release** is a deployment strategy used to minimize risk by deploying a new backend version to production with a small percentage of traffic. This allows you to test the performance and stability of the new version on real traffic.
+
+### How Does Canary Release Work?
+
+The canary release mechanism works as follows:
+
+1. **Traffic Percentage:** A certain percentage of traffic (e.g., 10%) is routed to the canary backend
+2. **Counter-Based Routing:** A counter is used for deterministic routing (with mod 100)
+3. **Health Check Integration:** When the canary backend becomes unhealthy, a cooldown period is automatically started
+4. **Cooldown Period:** During the cooldown period, no traffic is sent to canary, all traffic is routed to the stable backend
+
+### Canary Release Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| **Traffic Percentage** | Percentage of traffic to be routed to the canary backend (0-100). |
+| **Cooldown Period (Seconds)** | Duration during which traffic is stopped when the canary backend becomes unhealthy. Default: 300 seconds (5 minutes). |
+
+### Canary Routing Decision Flow
+
+The canary routing decision mechanism works as follows:
+
+1. **When a request arrives**, it is checked if canary release is enabled:
+   - If canary release is not enabled: Request is routed directly to PRIMARY backend
+
+2. **If canary release is enabled**, cooldown period is checked:
+   - If cooldown period is active: All traffic is routed to PRIMARY backend (no traffic is sent to canary)
+   - If cooldown period is not active: Traffic distribution is performed
+
+3. **Traffic distribution**:
+   - Counter is incremented and mod 100 is calculated
+   - If mod value is less than traffic percentage: Request is routed to CANARY backend
+   - If mod value is greater than or equal to traffic percentage: Request is routed to PRIMARY backend
+
+4. **After routing to canary backend**:
+   - If request is successful: Operation is completed
+   - If request fails: Automatic failover to PRIMARY backend is performed
+
+### Counter-Based Deterministic Routing
+
+Canary release uses counter-based routing to make traffic distribution deterministic:
+
+1. **Counter Increment:** Counter is incremented for each request (using thread-safe atomic counter)
+2. **Mod 100 Calculation:** Counter value is calculated with mod 100
+3. **Decision Making:** If mod value is less than traffic percentage, route to canary
+4. **Overflow Prevention:** When counter reaches 100, it is automatically reset to 0
+
+```mermaid
+sequenceDiagram
+    participant R as Request
+    participant C as Counter
+    participant D as Decision Engine
+    participant BE as Backend
+    
+    R->>C: Increment Counter
+    C->>C: counter++ (thread-safe increment)
+    C->>C: modValue = counter % 100
+    C->>D: modValue, trafficPercentage
+    
+    alt modValue < trafficPercentage
+        D->>BE: Route to Canary
+    else modValue >= trafficPercentage
+        D->>BE: Route to PRIMARY
+    end
+    
+    alt counter >= 100
+        C->>C: Reset to 0 (atomic reset operation)
+    end
+```
+
+<Info>
+Thanks to counter-based routing, the same request is always routed to the same backend. This provides consistency in test scenarios.
+</Info>
+
+### Automatic Failback with Health Check
+
+The health status of the canary backend is continuously monitored by the active health check mechanism:
+
+- **Unhealthy Detection:** When health check fail threshold is exceeded, canary backend is marked as unhealthy
+- **Cooldown Start:** When unhealthy is detected, cooldown period is automatically started
+- **Traffic Stop:** During cooldown period, no traffic is sent to canary
+- **Automatic Recovery:** After cooldown period passes, if health check becomes successful again, canary becomes active again
+
+```mermaid
+sequenceDiagram
+    participant HC as Health Check Service
+    participant CB as Canary Backend
+    participant CM as Canary Manager
+    participant C as Cache (Cooldown)
+    
+    loop Every Interval Seconds
+        HC->>CB: GET /health
+        CB-->>HC: Response
+        
+        alt Unhealthy Detected
+            HC->>HC: Consecutive Failures >= Fail Threshold
+            HC->>CM: triggerCanaryCooldown()
+            CM->>C: Set Cooldown Key (TTL)
+            Note over CM,C: Cooldown Period Started<br/>(Traffic stopped)
+        end
+        
+        alt Cooldown Period Passed
+            HC->>CB: GET /health
+            CB-->>HC: 200 OK
+            HC->>HC: Consecutive Successes >= Pass Threshold
+            Note over CM: Cooldown automatically ends<br/>with TTL
+        end
+    end
+```
+
+## Traffic Mirroring
+
+**Traffic Mirroring** is a mechanism used to send a copy of live traffic to a test environment. Mirror requests work asynchronously and do not affect the main request.
+
+### How Does Traffic Mirroring Work?
+
+The traffic mirroring mechanism works as follows:
+
+1. **Main Request:** Sent normally to PRIMARY backend
+2. **Mirror Request:** A copy of a certain percentage of traffic is sent asynchronously to MIRROR backend
+3. **Asynchronous Processing:** Mirror requests do not block the main request
+4. **Result Irrelevance:** Success/failure of mirror requests does not affect the main request
+
+### Traffic Mirroring Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| **Traffic Mirror Enabled** | Whether traffic mirroring is enabled. |
+| **Mirror Percentage** | Percentage of traffic to be mirrored (0-100). Determined with counter-based routing. |
+
+### Traffic Mirroring Architecture
+
+```mermaid
+graph TB
+    subgraph "Primary Request Flow"
+        A[Client Request] --> B[API Proxy]
+        B --> C[PRIMARY Backend]
+        C --> D[Response]
+        D --> E[Client]
+    end
+    
+        subgraph "Mirror Request Flow (Async)"
+        B --> F{Mirror Percentage?}
+        F -->|Selected| G[Async Processing]
+        G --> H[MIRROR Backend]
+        H --> I[Log Results]
+        I --> J[Elasticsearch]
+    end
+    
+    style G fill:#e1f5ff
+    style H fill:#e1f5ff
+    style I fill:#e1f5ff
+```
+
+### Asynchronous Mirror Processing
+
+Mirror requests are processed asynchronously:
+
+1. **Async Task Creation:** An asynchronous task is created for each mirror address
+2. **Async Execution:** Mirror requests run on async executor
+3. **Result Aggregation:** All mirror results are collected and added to message context
+4. **Logging:** Mirror results are logged to Elasticsearch (by LogHandler)
+
+```mermaid
+sequenceDiagram
+    participant RH as RoutingHandler
+    participant TMH as TrafficMirrorHandler
+    participant EX as Async Executor
+    participant MB as Mirror Backend
+    participant MC as Message Context
+    participant ES as Elasticsearch
+    
+    RH->>TMH: executeMirrors(mirrorAddresses)
+    TMH->>TMH: Filter by Mirror Percentage
+    
+    loop Each Mirror Address
+        TMH->>EX: Execute Async (mirrorRequest)
+        EX->>MB: Send Mirror Request
+        MB-->>EX: Response
+        EX-->>TMH: Async Result
+    end
+    
+    TMH->>TMH: Aggregate Results
+    TMH->>MC: Add Mirror Results
+    TMH-->>RH: Async Processing Complete
+    
+    Note over RH: Primary request continues<br/>(does not wait for mirror)
+    
+    RH->>ES: Log Mirror Results (async)
+```
+
+<Warning>
+If mirror requests fail, the main request is not affected. Mirror results are only used for logging and monitoring purposes.
+</Warning>
+
+### Percentage-Based Router
+
+Both Canary Release and Traffic Mirroring use the same `PercentageBasedRouter` utility class for traffic distribution.
+
+#### Counter Management
+
+- **Local Counter:** Independent counter is maintained in each pod (using thread-safe map)
+- **Thread-Safety:** Thread-safe operations are performed using atomic counter
+- **Overflow Prevention:** When counter reaches 100, it is automatically reset to 0 using atomic reset operation
+
+#### Counter Reset Mechanism
+
+The counter reset mechanism works as follows:
+
+1. **When counter is incremented from 99 to 100**, mod 100 calculation results in 0
+
+2. **Atomic reset operation**:
+   - If counter value is 100, it is attempted to be reset to 0 using atomic operation
+   - If reset operation succeeds: Counter becomes 0 and is used for next request
+   - If reset operation fails (another thread has changed the counter): New counter value is used
+
+This mechanism ensures that counter never exceeds 100 and always stays in the 0-99 range.
+
+### Lifecycle Management
+
+When an API Proxy is deployed, updated, or undeployed, canary and mirror counters are automatically cleaned up:
+
+- **Deploy/Update:** Counters are reset (fresh start)
+- **Undeploy:** All counters are cleaned up
+
+<Note>
+Resetting counters ensures a consistent start with the new configuration. For example, when traffic percentage changes, counters need to be reset.
+</Note>
+
+## Canary vs Mirror Comparison
+
+| Feature | Canary Release | Traffic Mirroring |
+|---------|---------------|-------------------|
+| **Purpose** | Test new version with small traffic | Copy live traffic to test environment |
+| **Backend Type** | CANARY | MIRROR |
+| **Traffic Impact** | Selected traffic goes to canary | Main traffic to PRIMARY, copy to MIRROR |
+| **Failure Impact** | If canary fails, failover to PRIMARY | If mirror fails, main request is not affected |
+| **Health Check** | If canary unhealthy, cooldown starts | Health check not performed for mirror |
+| **Synchronization** | Synchronous (main request waits for canary) | Asynchronous (main request does not wait for mirror) |
+
+## Related Topics
+
+- [Retry and Failover](/en/develop/routing/retry-and-failover) - Health check and circuit breaker integration
+- [Load Balancing](/en/develop/routing/http-routing#load-balancing) - Load distribution among backend addresses
+
