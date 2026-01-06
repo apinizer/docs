@@ -38,23 +38,47 @@ The canary routing decision mechanism works as follows:
    - If cooldown period is active: All traffic is routed to PRIMARY backend (no traffic is sent to canary)
    - If cooldown period is not active: Traffic distribution is performed
 
-3. **Traffic distribution**:
-   - Counter is incremented and mod 100 is calculated
-   - If mod value is less than traffic percentage: Request is routed to CANARY backend
-   - If mod value is greater than or equal to traffic percentage: Request is routed to PRIMARY backend
+3. **Traffic distribution** (Bresenham-style distribution algorithm):
+   - Counter is incremented for each request
+   - Distribution threshold is calculated: `floor(counter * percentage / 100)`
+   - If threshold changes from previous request: Request is routed to CANARY backend
+   - If threshold remains the same: Request is routed to PRIMARY backend
+   - This ensures even distribution across requests (e.g., for 50%: 1st→PRIMARY, 2nd→CANARY, 3rd→PRIMARY, 4th→CANARY, ...)
 
 4. **After routing to canary backend**:
    - If request is successful: Operation is completed
    - If request fails: Automatic failover to PRIMARY backend is performed
 
-### Counter-Based Deterministic Routing
+### Bresenham-Style Distribution Algorithm
 
-Canary release uses counter-based routing to make traffic distribution deterministic:
+Canary release uses **Bresenham-style distribution** to evenly distribute traffic across requests:
+
+#### How Does Bresenham Distribution Work?
+
+Unlike simple modulo-based approaches that create traffic bursts (e.g., first 50 requests to canary, next 50 to primary), Bresenham distribution ensures even spacing:
+
+**Example for 50% traffic:**
+- 1st request → PRIMARY
+- 2nd request → CANARY
+- 3rd request → PRIMARY
+- 4th request → CANARY
+- ... (alternating pattern continues)
+
+**Example for 33% traffic:**
+- 1st, 2nd → PRIMARY
+- 3rd → CANARY
+- 4th, 5th → PRIMARY
+- 6th → CANARY
+- ... (evenly spaced pattern continues)
+
+#### Algorithm Details
 
 1. **Counter Increment:** Counter is incremented for each request (using thread-safe atomic counter)
-2. **Mod 100 Calculation:** Counter value is calculated with mod 100
-3. **Decision Making:** If mod value is less than traffic percentage, route to canary
-4. **Overflow Prevention:** When counter reaches 100, it is automatically reset to 0
+2. **Threshold Calculation:** 
+   - Current threshold = `floor(counter × percentage / 100)`
+   - Previous threshold = `floor((counter-1) × percentage / 100)`
+3. **Decision Making:** If current threshold ≠ previous threshold, route to canary
+4. **Overflow Prevention:** When counter reaches 10,000, it is automatically reset to 0
 
 ```mermaid
 sequenceDiagram
@@ -65,23 +89,34 @@ sequenceDiagram
     
     R->>C: Increment Counter
     C->>C: counter++ (thread-safe increment)
-    C->>C: modValue = counter % 100
-    C->>D: modValue, trafficPercentage
+    C->>C: currentThreshold = (counter * percentage) / 100
+    C->>C: previousThreshold = ((counter-1) * percentage) / 100
+    C->>D: currentThreshold, previousThreshold
     
-    alt modValue < trafficPercentage
+    alt currentThreshold != previousThreshold
         D->>BE: Route to Canary
-    else modValue >= trafficPercentage
+        Note over D: Request selected for canary<br/>(threshold changed)
+    else currentThreshold == previousThreshold
         D->>BE: Route to PRIMARY
+        Note over D: Request not selected<br/>(threshold unchanged)
     end
     
-    alt counter >= 100
+    alt counter >= 10000
         C->>C: Reset to 0 (atomic reset operation)
     end
 ```
 
 <Info>
-Thanks to counter-based routing, the same request is always routed to the same backend. This provides consistency in test scenarios.
+**Why Bresenham?** This algorithm is named after Bresenham's line algorithm used in computer graphics. It ensures even distribution without clumping, providing a smooth traffic distribution pattern that's ideal for testing and monitoring.
 </Info>
+
+#### Distribution Quality
+
+The Bresenham distribution provides:
+- **Even Spacing:** Requests are evenly distributed, not clustered
+- **Deterministic:** Same counter value always produces same decision
+- **Thread-Safe:** Works correctly in multi-threaded environments
+- **Accurate:** Over any 100-request window, exactly the specified percentage routes to canary
 
 ### Automatic Failback with Health Check
 
@@ -216,16 +251,21 @@ Both Canary Release and Traffic Mirroring use the same `PercentageBasedRouter` u
 
 #### Counter Reset Mechanism
 
-The counter reset mechanism works as follows:
+The counter reset mechanism prevents Long overflow:
 
-1. **When counter is incremented from 99 to 100**, mod 100 calculation results in 0
+1. **When counter reaches 10,000**, it is reset to 0 using atomic operation
 
 2. **Atomic reset operation**:
-   - If counter value is 100, it is attempted to be reset to 0 using atomic operation
-   - If reset operation succeeds: Counter becomes 0 and is used for next request
-   - If reset operation fails (another thread has changed the counter): New counter value is used
+   - If counter value is 10,000, it is attempted to be reset to 0 using `compareAndSet`
+   - If reset operation succeeds: Counter becomes 0 and distribution continues
+   - If reset operation fails (another thread has already reset): Distribution continues with current value
 
-This mechanism ensures that counter never exceeds 100 and always stays in the 0-99 range.
+3. **Why 10,000?**: This threshold provides:
+   - Sufficient range for accurate percentage distribution
+   - Protection against Long.MAX_VALUE overflow
+   - Minimal performance overhead from reset operations
+
+This mechanism ensures Long overflow never occurs while maintaining accurate traffic distribution.
 
 ### Lifecycle Management
 

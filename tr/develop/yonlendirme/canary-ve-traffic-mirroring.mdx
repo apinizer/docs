@@ -38,23 +38,47 @@ Canary routing karar mekanizması şu adımlarla çalışır:
    - Cooldown period aktifse: Tüm trafik PRIMARY backend'e yönlendirilir (canary'ye trafik gönderilmez)
    - Cooldown period aktif değilse: Trafik dağıtımına geçilir
 
-3. **Trafik dağıtımı**:
-   - Counter artırılır ve mod 100 hesaplanır
-   - Mod değeri traffic percentage'den küçükse: İstek CANARY backend'e yönlendirilir
-   - Mod değeri traffic percentage'den büyük veya eşitse: İstek PRIMARY backend'e yönlendirilir
+3. **Trafik dağıtımı** (Bresenham-style distribution algoritması):
+   - Her istek için counter artırılır
+   - Dağıtım eşiği hesaplanır: `floor(counter * percentage / 100)`
+   - Eğer eşik önceki istekten farklıysa: İstek CANARY backend'e yönlendirilir
+   - Eğer eşik aynı kalmışsa: İstek PRIMARY backend'e yönlendirilir
+   - Bu sayede istekler eşit dağıtılır (örn: %50 için: 1.→PRIMARY, 2.→CANARY, 3.→PRIMARY, 4.→CANARY, ...)
 
 4. **Canary backend'e yönlendirme sonrası**:
    - İstek başarılıysa: İşlem tamamlanır
    - İstek başarısızsa: Otomatik olarak PRIMARY backend'e failover yapılır
 
-### Counter-Based Deterministic Routing
+### Bresenham-Style Distribution Algoritması
 
-Canary release, trafik dağıtımını deterministic hale getirmek için counter-based routing kullanır:
+Canary release, trafiği istekler arasında eşit dağıtmak için **Bresenham-style distribution** kullanır:
+
+#### Bresenham Dağıtımı Nasıl Çalışır?
+
+Basit modulo tabanlı yaklaşımların oluşturduğu trafik patlamalarının aksine (örn: ilk 50 istek canary'ye, sonraki 50 istek primary'ye), Bresenham dağıtımı eşit aralıklarla dağıtım sağlar:
+
+**%50 trafik için örnek:**
+- 1. istek → PRIMARY
+- 2. istek → CANARY
+- 3. istek → PRIMARY
+- 4. istek → CANARY
+- ... (dönüşümlü desen devam eder)
+
+**%33 trafik için örnek:**
+- 1., 2. → PRIMARY
+- 3. → CANARY
+- 4., 5. → PRIMARY
+- 6. → CANARY
+- ... (eşit aralıklı desen devam eder)
+
+#### Algoritma Detayları
 
 1. **Counter Artırma:** Her istek için counter artırılır (thread-safe atomik sayaç kullanılarak)
-2. **Mod 100 Hesaplama:** Counter değeri mod 100'e göre hesaplanır
-3. **Karar Verme:** Mod değeri traffic percentage'den küçükse canary'ye yönlendirilir
-4. **Overflow Önleme:** Counter 100'e ulaştığında otomatik olarak 0'a reset edilir
+2. **Eşik Hesaplama:** 
+   - Mevcut eşik = `floor(counter × yüzde / 100)`
+   - Önceki eşik = `floor((counter-1) × yüzde / 100)`
+3. **Karar Verme:** Mevcut eşik ≠ önceki eşik ise canary'ye yönlendir
+4. **Overflow Önleme:** Counter 10.000'e ulaştığında otomatik olarak 0'a reset edilir
 
 ```mermaid
 sequenceDiagram
@@ -65,23 +89,34 @@ sequenceDiagram
     
     R->>C: Increment Counter
     C->>C: counter++ (thread-safe artırma)
-    C->>C: modValue = counter % 100
-    C->>D: modValue, trafficPercentage
+    C->>C: currentThreshold = (counter * percentage) / 100
+    C->>C: previousThreshold = ((counter-1) * percentage) / 100
+    C->>D: currentThreshold, previousThreshold
     
-    alt modValue < trafficPercentage
+    alt currentThreshold != previousThreshold
         D->>BE: Route to Canary
-    else modValue >= trafficPercentage
+        Note over D: İstek canary için seçildi<br/>(eşik değişti)
+    else currentThreshold == previousThreshold
         D->>BE: Route to PRIMARY
+        Note over D: İstek seçilmedi<br/>(eşik aynı kaldı)
     end
     
-    alt counter >= 100
+    alt counter >= 10000
         C->>C: Reset to 0 (atomik reset işlemi)
     end
 ```
 
 <Info>
-Counter-based routing sayesinde, aynı istek her zaman aynı backend'e yönlendirilir. Bu, test senaryolarında tutarlılık sağlar.
+**Neden Bresenham?** Bu algoritma, bilgisayar grafiklerinde kullanılan Bresenham çizgi algoritmasından adını alır. Kümeleme olmadan eşit dağıtım sağlar, test ve izleme için ideal olan düzgün bir trafik dağıtım deseni sunar.
 </Info>
+
+#### Dağıtım Kalitesi
+
+Bresenham dağıtımı şunları sağlar:
+- **Eşit Aralık:** İstekler eşit dağıtılır, kümelenmez
+- **Deterministik:** Aynı counter değeri her zaman aynı kararı üretir
+- **Thread-Safe:** Çok iş parçacıklı ortamlarda doğru çalışır
+- **Hassas:** Herhangi bir 100 istek penceresinde, tam olarak belirtilen yüzde canary'ye yönlendirilir
 
 ### Health Check ile Otomatik Failback
 
@@ -216,16 +251,21 @@ Hem Canary Release hem de Traffic Mirroring, trafik dağıtımı için aynı `Pe
 
 #### Counter Reset Mekanizması
 
-Counter reset mekanizması şu şekilde çalışır:
+Counter reset mekanizması Long overflow'u önler:
 
-1. **Counter 99'dan 100'e artırıldığında**, mod 100 hesaplaması 0 sonucunu verir
+1. **Counter 10.000'e ulaştığında**, atomik işlem ile 0'a reset edilir
 
 2. **Atomik reset işlemi**:
-   - Counter değeri 100 ise, atomik işlem ile 0'a reset edilmeye çalışılır
-   - Reset işlemi başarılı olursa: Counter 0 olur ve sonraki istek için kullanılır
-   - Reset işlemi başarısız olursa (başka bir thread counter'ı değiştirmişse): Yeni counter değeri kullanılır
+   - Counter değeri 10.000 ise, `compareAndSet` kullanarak 0'a reset edilmeye çalışılır
+   - Reset işlemi başarılı olursa: Counter 0 olur ve dağıtım devam eder
+   - Reset işlemi başarısız olursa (başka bir thread zaten reset etmişse): Dağıtım mevcut değerle devam eder
 
-Bu mekanizma sayesinde counter 100'ü aşmaz ve her zaman 0-99 aralığında kalır.
+3. **Neden 10.000?**: Bu eşik şunları sağlar:
+   - Hassas yüzde dağıtımı için yeterli aralık
+   - Long.MAX_VALUE overflow'a karşı koruma
+   - Reset işlemlerinden minimal performans yükü
+
+Bu mekanizma sayesinde Long overflow asla oluşmaz ve hassas trafik dağıtımı korunur.
 
 ### Lifecycle Yönetimi
 
