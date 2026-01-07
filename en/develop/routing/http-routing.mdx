@@ -1,15 +1,11 @@
 ---
 title: "HTTP Routing"
-description: "You can configure routing settings for HTTP API Proxy type. You can manage backend API addresses, define conditional routing, select load balancing algorithms, configure connection settings, circuit breaker, SSE, download, proxy server, mTLS and NTLM settings."
+description: "You can configure routing settings for HTTP API Proxy type. You can manage backend API addresses, define conditional routing, select load balancing algorithms, configure sticky session, connection settings, circuit breaker, active health check with automatic failback, retry and failover mechanisms, SSE, download, proxy server, mTLS and NTLM settings."
 ---
 
 <Note>
 If API type is HTTP, this tab is visible.
 </Note>
-
-This section contains routing settings for HTTP API Proxy Type.
-
-After the API Proxy receives messages from clients and executes policies if any, it routes the message to the Backend API. The Routing tab is the tab where this routing operation is configured.
 
 
 
@@ -162,6 +158,16 @@ Which algorithm to use among the algorithms that can be used for load balancing 
 | **Random** | Request messages are routed to randomly selected addresses. |
 | **Load Balancing Type** | Apinizer can be configured to run multiple Workers in each [Environment](/en/concepts/core-concepts/what-is-environment). Thus, the load is distributed among API Proxies in that Environment. In this case, API Proxies on each Worker must know the Backend API addresses. The **Load Balancing Type** parameter determines how information about how many times or when each Backend API address was accessed will be maintained when load balancing is performed among Backend API addresses. If **Simple (Single)** is selected, each Worker operates the load balancing address independently from other Workers, while when **Distributed** is selected, Workers perform load balancing through the same single access data using distributed cache. Accordingly, **Simple (Single)** works faster, while **Distributed** works in a way that guarantees the load balancing algorithm is executed correctly. |
 
+## Sticky Session
+
+The **Sticky Session** mechanism ensures that the same client is always routed to the same backend. This mechanism can be used in scenarios such as session state, cache locality, or backend-specific data consistency.
+
+Apinizer supports three different sticky session types: **COOKIE_ONLY**, **IP_HASH**, and **HYBRID**. Cookie-based sticky session uses secure cookies signed with HMAC-SHA256 and works integrated with circuit breaker to automatically skip unhealthy backends.
+
+<Info>
+For detailed information, see the [Sticky Session](/en/develop/routing/sticky-session) page.
+</Info>
+
 ## Connection Settings Definition
 
 <img
@@ -221,6 +227,179 @@ The parameters used for Circuit Breaker configuration are shown below.
 | **Activate Half-Open** | If this option is checked, after the duration specified by the **Sleep Window** parameter passes, 1 request is sent to the relevant address to check if the problem at that address has been resolved. If the returned result is erroneous, this address is closed to new requests again for the **Sleep Window** duration. If this option is not checked, after the duration specified by the **Sleep Window** parameter passes, the values of the relevant address are reset and monitoring starts again for this address for the **Error Window** duration. |
 
 Circuit Breaker is applied separately for each address. When the error threshold and duration are exceeded, the circuit breaker only blocks access to the endpoint at the relevant address.
+
+## Automatic Failback with Health Check
+
+The **Active Health Check** mechanism periodically checks the health status of backends and works integrated with circuit breaker to provide automatic failback. This mechanism automatically removes unhealthy backends from traffic and re-includes them when they become healthy again.
+
+### How Does Health Check Work?
+
+The health check mechanism works as follows:
+
+1. **Periodic Check:** A request is sent to the health check endpoint for each backend at the specified interval (default: 30 seconds)
+2. **Health Status Tracking:** The backend's health status is tracked based on each health check result
+3. **Unhealthy Detection:** When consecutive failure count exceeds the fail threshold (default: 3), the backend is marked as unhealthy
+4. **Automatic Disabling:** Unhealthy backends are automatically removed from traffic via circuit breaker
+5. **Automatic Recovery:** When consecutive success count exceeds the pass threshold (default: 2), the backend is marked as healthy again and included in traffic
+
+### Health Check Parameters
+
+Health check parameters are configured at routing level and apply to all backend addresses:
+
+| Parameter | Description |
+|-----------|-------------|
+| **Health Path** | The backend's health check endpoint. Must be specified at address level for each address. Must be specified as a full URL (e.g., `https://backend.example.com/health`). |
+| **Interval (Seconds)** | How often health checks are performed. Default: 30 seconds. |
+| **Timeout (Seconds)** | Timeout duration for health check requests. Default: 5 seconds. |
+| **Fail Threshold** | Number of consecutive failures required to mark backend as unhealthy. Default: 3. |
+| **Pass Threshold** | Number of consecutive successes required to mark backend as healthy. Default: 2. |
+
+<Info>
+If Health Path is empty or null, health check is not performed for that backend and backend health status is not monitored. Health check is only performed for PRIMARY and FAILOVER_ONLY type addresses (if failover is enabled). For CANARY type addresses, health check is performed if canary release is enabled. Health check is not performed for MIRROR type addresses.
+</Info>
+
+### Health Check → Circuit Breaker Coordination
+
+The health check mechanism works coordinated with circuit breaker to automatically disable and re-enable backends based on their health status:
+
+- **Backend Unhealthy:** When health check fail threshold is exceeded, circuit breaker automatically transitions to OPEN state and backend is removed from traffic
+- **Backend Healthy:** When health check pass threshold is exceeded, circuit breaker automatically transitions to CLOSED state and backend is re-included in traffic
+- **Load Balancing Integration:** During load balancing, only healthy backends are selected, unhealthy backends are automatically filtered out
+
+```mermaid
+sequenceDiagram
+    participant HC as Health Check Service
+    participant BE as Backend
+    participant CB as Circuit Breaker
+    participant LB as Load Balancer
+    
+    loop Every Interval Seconds
+        HC->>BE: GET /health
+        BE-->>HC: Response (200/500)
+        
+        alt Backend Healthy
+            HC->>HC: Consecutive Successes++
+            alt Pass Threshold Exceeded
+                HC->>CB: Mark Backend as Healthy
+                CB->>CB: Circuit CLOSED
+                Note over CB: Backend available again
+                LB->>LB: Add backend to selectable list
+            end
+        else Backend Unhealthy
+            HC->>HC: Consecutive Failures++
+            alt Fail Threshold Exceeded
+                HC->>CB: Mark Backend as Unhealthy
+                CB->>CB: Circuit OPEN
+                Note over CB: Backend temporarily disabled
+                LB->>LB: Remove backend from selectable list
+            end
+        end
+    end
+```
+
+### Health Check Lifecycle Management
+
+When an API Proxy is deployed, updated, or undeployed, health check records are automatically managed:
+
+- **Deploy/Update:** New backends are added, removed backends are deleted, unchanged backends' config is updated (health status preserved)
+- **Undeploy:** All backends' health check records are cleaned up
+
+## Retry and Failover
+
+When requests sent to backend APIs fail, automatic retry and failover mechanisms are activated. These mechanisms automatically handle temporary errors and provide high availability.
+
+### Retry Mechanism
+
+The **Retry** mechanism ensures that when requests sent to backend fail, they are retried a certain number of times to the same backend address.
+
+#### Retry Parameters
+
+| Parameter | Description |
+|-----------|-------------|
+| **Retry Count** | When a request sent to the backend API fails, it is retried this many times. If the value is 0, no retry is performed. |
+| **Retry Delay Type** | Type of waiting time between retry attempts. Options: NO_DELAY, FIXED_DELAY, or EXPONENTIAL_BACKOFF. |
+| **Retry Fixed Delay (ms)** | If fixed delay is used, the waiting time between each retry attempt (milliseconds). |
+| **Retry Initial Delay (ms)** | If exponential backoff is used, the waiting time for the first retry attempt (milliseconds). |
+| **Retry Max Delay (ms)** | If exponential backoff is used, the maximum delay duration (milliseconds). |
+| **Retry Backoff Multiplier** | Exponential backoff multiplier (e.g., 2.0 = delay doubles with each attempt). |
+
+#### Retry Flow
+
+The retry mechanism is triggered in the following situations:
+
+- **Timeout:** When connection timeout or read timeout occurs
+- **Error Codes:** When HTTP error codes (4xx, 5xx) are returned from the backend
+- **Connection Errors:** When connection errors such as UnknownHostException, MalformedURLException occur
+
+The retry mechanism works as follows:
+
+1. **Initial request is sent** and result is checked:
+   - If request is successful: Operation is completed
+   - If request fails: Retry mechanism is activated
+
+2. **Retry mechanism**:
+   - If retry count is 0: Failover mechanism is activated
+   - If retry count is greater than 0: Retry loop is entered
+
+3. **Retry loop** (from i = 1 to retry count):
+   - If retry delay is active: Specified duration is waited (exponential backoff or fixed delay)
+   - Request is retried
+   - If request is successful: Operation is completed
+   - If request fails and i < retry count: i is incremented and loop continues
+   - If request fails and i = retry count: Failover mechanism is activated
+
+### Failover Mechanism
+
+The **Failover** mechanism automatically redirects requests to other backend addresses (addresses of type FAILOVER_ONLY) when one backend address fails.
+
+#### Failover Logic
+
+The failover mechanism works with a simple and clear logic:
+
+1. **Initial Request:** Sent to PRIMARY addresses (with load balancing)
+2. **Failure Condition:** If the initial request fails and `failoverOnlyEnabled=true`
+3. **Failover Addresses:** Requests are sent sequentially to addresses of type FAILOVER_ONLY
+4. **Failover Retry:** Each failover address is tried `failoverRetryCount` times
+
+<Warning>
+If `failoverOnlyEnabled=false` or `null`, the failover mechanism does not activate. In this case, after the retry mechanism is completed, an error is returned to the client.
+</Warning>
+
+#### Failover Flow
+
+The failover mechanism works as follows:
+
+1. **Request is sent to PRIMARY backend** and retry count attempts are made:
+   - If request is successful: Operation is completed
+   - If all attempts fail: Failover check is performed
+
+2. **Failover check**:
+   - If `failoverOnlyEnabled = false` or `null`: Error is returned
+   - If `failoverOnlyEnabled = true`: FAILOVER_ONLY type addresses are used
+
+3. **FAILOVER_ONLY addresses** (tried sequentially):
+   - First failover address is selected (from health check filtered healthy addresses)
+   - Failover retry count attempts are made
+   - If request is successful: Operation is completed
+   - If request fails: Next failover address is tried
+
+4. **Until all failover addresses are tried**:
+   - Each failover address is tried failover retry count times
+   - First successful address is used and operation is completed
+   - If all failover addresses fail: Error is returned
+
+#### Address Types
+
+| Address Type | Description |
+|--------------|-------------|
+| **PRIMARY** | Backend addresses used for normal traffic. Initial requests are sent to these addresses. |
+| **FAILOVER_ONLY** | Addresses used only in failover situations. Activated when `failoverOnlyEnabled=true`. |
+| **CANARY** | Addresses used for canary release. Not included in the failover mechanism. |
+| **MIRROR** | Addresses used for traffic mirroring. Not included in the failover mechanism. |
+
+<Info>
+For detailed information, see the [Retry and Failover](/en/develop/routing/retry-and-failover) page.
+</Info>
 
 ## Server Side Streaming (SSE)
 
