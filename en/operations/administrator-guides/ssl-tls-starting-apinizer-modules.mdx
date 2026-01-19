@@ -1,6 +1,6 @@
 ---
 title: "Starting Apinizer Modules with SSL/TLS"
-description: "Securely starts Apinizer modules (Manager, Gateway, Portal) with SSL/TLS certificates and provides HTTPS connections."
+description: "Securely starts Apinizer modules (Manager, Gateway, Portal) with SSL/TLS certificates and provides HTTPS connections. Detailed SSL configuration for API Manager, certificate creation, and Kubernetes deployment settings."
 ---
 
 ## Configuration Steps
@@ -72,12 +72,236 @@ description: "Securely starts Apinizer modules (Manager, Gateway, Portal) with S
     </Step>
 </Steps>
 
+## API Manager SSL Configuration
+
+### Certificate Loading
+
+First, load your certificate file with .p12 extension to Kubernetes as a secret.
+
+```bash
+kubectl create secret generic manager-tls --from-file=manager.p12 -n apinizer
+```
+
+### Finding Certificate Alias
+
+To find the Alias of a certificate:
+
+```bash
+keytool -list -v -keystore manager.p12 -storetype PKCS12
+```
+
+### Creating PKCS12 from JKS
+
+To convert certificate in JKS format to PKCS12 format:
+
+```bash
+keytool -genkeypair -alias <ALIAS> -keyalg RSA -keysize 4096 -storetype PKCS12 -keystore manager.p12 -validity 3650 -storepass <PASSWORD>
+```
+
+<Tip>
+Add your file with .p12 extension to `/etc/ssl/certs` directory.
+</Tip>
+
+### Required Environment Variables
+
+Variables that should be in deployment yaml definition:
+
+| Variable | Description |
+| --- | --- |
+| `SSL_KEY_STORE` | Path of the key store containing SSL certificate. In our example, we want Spring Boot to search for this in classpath. |
+| `SSL_KEY_STORE_PASSWORD` | Password used to access the key store. |
+| `SSL_KEY_STORE_TYPE` | Type of the key store (Usage: PKCS12). |
+| `SSL_KEY_ALIAS` | Alias identifying the key in the key store. |
+| `SSL_ENABLED` | Enables Spring Boot application to use HTTPS protocol. |
+| `SERVER_PORT` | Port the server listens on. 8443 should be used. |
+
+### Example API Manager Deployment File
+
+An example API Manager deployment file:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manager
+  namespace: apinizer
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: manager
+      version: v1
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 75%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: manager
+        version: v1
+    spec:
+      automountServiceAccountToken: true
+      volumes:
+        - name: manager-tls
+          secret:
+            secretName: manager-tls
+      containers:
+        - env:
+            - name: JAVA_OPTS
+              value: ' -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+            - name: LOGGING_LEVEL_ROOT
+              value: INFO
+            - name: LOGGING_LEVEL_com_apinizer_manager
+              value: INFO
+            - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE
+              value: 20MB
+            - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE
+              value: 50MB
+            - name: SPRING_PROFILES_ACTIVE
+              value: prod
+            - name: SSL_KEY_STORE
+              value: /etc/ssl/manager.p12
+            - name: SSL_KEY_STORE_PASSWORD
+              value: <PASSWORD>
+            - name: SSL_KEY_STORE_TYPE
+              value: PKCS12
+            - name: SSL_KEY_ALIAS
+              value: <ALIAS>
+            - name: SSL_ENABLED
+              value: "true"
+            - name: SERVER_PORT
+              value: "8443"
+            - name: SPRING_DATA_MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  key: dbUrl
+                  name: mongo-db-credentials
+            - name: SPRING_DATA_MONGODB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  key: dbName
+                  name: mongo-db-credentials
+          volumeMounts:
+            - name: manager-tls
+              mountPath: /etc/ssl/
+          image: apinizercloud/manager:<APINIZER_VERSION>
+          imagePullPolicy: IfNotPresent
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - sleep 10
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          name: manager
+          ports:
+            - containerPort: 8443
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          resources:
+            limits:
+              cpu: 1
+              memory: 3Gi
+          securityContext:
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            runAsGroup: 0
+            runAsNonRoot: false
+            runAsUser: 0
+          startupProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /apinizer/management/health
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 90
+            periodSeconds: 30
+            successThreshold: 1
+            timeoutSeconds: 30
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: manager
+  namespace: apinizer
+  labels:
+    app: manager
+spec:
+  selector:
+    app: manager
+  type: NodePort
+  ports:
+    - name: http
+      port: 8443
+      nodePort: 32843
+```
+
+## Certificate Creation
+
+Steps to be applied to create your own certificate:
+
+<Steps>
+  <Step>
+    **Creating Private Key**
+
+    ```bash
+    openssl genrsa -out server.key 2048
+    ```
+  </Step>
+  <Step>
+    **Creating CSR (Certificate Signing Request)**
+
+    ```bash
+    openssl req -new -key server.key -out server.csr
+    ```
+  </Step>
+  <Step>
+    **Creating Signed Certificate**
+
+    ```bash
+    openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+    ```
+  </Step>
+  <Step>
+    **Converting to PKCS#12 Format**
+
+    ```bash
+    openssl pkcs12 -export -out manager.p12 -inkey server.key -in server.crt
+    ```
+  </Step>
+</Steps>
+
 ## Related Resources
 
 <CardGroup cols={2}>
-  <Card title="API Manager SSL" icon="shield" href="/en/operations/administrator-guides/api-manager-ssl">
-    API Manager SSL configuration
-  </Card>
   <Card title="PFX JKS Conversion" icon="key" href="/en/operations/administrator-guides/pfx-to-jks-conversion">
     Converting PFX files to JKS format
   </Card>
