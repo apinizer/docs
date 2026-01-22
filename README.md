@@ -25,7 +25,7 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 
 ### Geliştirici Dokümantasyonu
 - **[API Proxy Oluşturma](/tr/develop/api-proxy-olusturma/api-creator-db-api-olusturma.mdx)** - REST, SOAP, gRPC, WebSocket API Proxy oluşturma
-- **[Politika Yönetimi](/tr/develop/politikalar/api-bazli-daraltma.mdx)** - Güvenlik, doğrulama, trafik yönetimi politikaları
+- **[Politika Yönetimi](/tr/develop/politikalar/plain-text)** - Güvenlik, doğrulama, trafik yönetimi politikaları
 - **[Monitoring ve Analytics](/tr/analytic/analytics)** - API performans izleme ve analiz
 
 ### Yönetici Dokümantasyonu
