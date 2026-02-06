@@ -29,10 +29,10 @@ import org.apache.http.client.methods.HttpPost
 import org.apache.http.impl.client.HttpClients
 import org.apache.http.entity.StringEntity
 import org.apache.http.util.EntityUtils
-
+ 
 // ################## OIDC Configuration ##################
 def OIDC_CONFIG = [
-
+ 
         clientId: "client_name",
         clientSecret: "client_secret",
         realm: "realm_name",
@@ -42,76 +42,1394 @@ def OIDC_CONFIG = [
         introspectionEndpoint: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/token/introspect",
         tokenEndpoint: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/token",
         redirectAfterLogoutUri: "https://auth.keycloak.local/realms/realm_name/protocol/openid-connect/logout",
-        postLogoutRedirectUri: "https://application.local/application_ui/", //zorunlu 
+        postLogoutRedirectUri: "https://application.local/application_ui/", //zorunlu
         logoutPath: "/logout",
         redirectUri: "https://application.local/application_ui/",
         redirectAfterLogoutWithIdTokenHint: true,
-
+ 
         usePkce: true,
         useNonce: true,
-
+ 
         bearerJwtAuthEnable: true,  // Header ile authentication izni
         accessTokenHeaderName: "Authorization", //hangi header ile authenticate olabilir
         accessTokenAsBearer: true, //header bearer token olarak mı eklensin
         addAccessTokenHeader: true, //access token'ı request'e ekleyelim mi?
         authAcceptTokenAs: "header_cookie", // "header", "cookie", veya "header_cookie"
         addTokenToCookie: true, // Header'daki token'ı cookie'ye taşı
-
+ 
         addIdTokenHeader: false, //id token değerini varsa request'e ekleyelim mi?
         idTokenHeaderName: "IdToken", // id token değerini hangi isim ile ekleyelim
-       
+        
         disableUserinfoHeader: false,       // Userinfo header'ı devre dışı bırak
         userinfoHeaderName: "UserInfo",  // Kullanıcı bilgilerini hangi header'da göndereceğiz
-
+ 
         ignoreRequestMethods: ["OPTIONS"],
         ignoreRequestPatterns: "static/media,static/js,static/css,static/html,*.json,*.ico,*.png,*.svg,*.js,*.woff2,*.css,*.html,bnpl-result,bnpl-workflow-fail",
-        
+         
         accessTokenCookieName: "authorization",
-        enableRefreshTokenCookie: false, 
+        enableRefreshTokenCookie: false,
         refreshTokenCookieName: "refresh-token-cookie",
-        enableIdTokenCookie: false, 
+        enableIdTokenCookie: false,
         idTokenCookieName: "id-token-cookie",
-        validateAccessTokenWithApi: true,  
-
+        validateAccessTokenWithApi: true, 
+ 
         validateIssuer: true,         //access token jwt ise, Issuer kontrolü yapılsın mı?
         expectedIssuer: "https://auth.keycloak.local/realms/realm_name", // Beklenen issuer değeri
         validateAudience: false,       //access token jwt ise, Audience kontrolü yapılsın mı?
         expectedAudience: "client name", // Beklenen audience değeri (genellikle clientId değeriyle aynıdır)
-
+ 
         // Session settings
         sessionCookieName: "cookie name",
         sessionCookieSecure: true, // Use false for HTTP testing
         sessionAbsoluteTimeout: 34560000,
-
+ 
         // Encryption settings (for cookie)
         encryptionKey: "c2d6b2n4f6k6l7n8m9f0s1b5b4v3x1z2", // 32-byte key for AES-256
         encryptionIv: "z9x8c7v6b5n4g7h8",  // 16-byte IV for AES
         debugEnabled: true,
         setCookieDelimiter: "#"
 ]
-
-```
-
-GROOVY 
-
-  
-**API Proxy hata hattına eklenecek olan groovy scripti:**
-
-```groovy
-if(customVariableMap.get("Location")!=null ){
-	responseHeaderMapToClient.put("Location", customVariableMap.get("Location"))
-	statusCodeToClient=302;
+// Stop flow according to business logic
+def stopFlow = { Integer statusCode, String message ->
+    statusCodeToTargetAPI = statusCode
+    requestErrorMessageToTargetAPI = message
 }
-
+// Handle OPTIONS requests immediately (pre-flight)
+if (request_httpMethod == "OPTIONS") {
+    stopFlow(200,"CORS preflight handled")
+    return
+}
  
-customVariableMap.each { key, value ->
-    if (key.toLowerCase().contains("cookie")) { 
-        responseHeaderMapToClient.put(key, value)
+ 
+// Debug helper - consistent function
+def debug = { String key, String value ->
+    if(OIDC_CONFIG.debugEnabled){
+        requestHeaderMapToTargetAPI.put(key, value)
+    }
+}
+// Parse JWT token and extract expiry
+def parseJwtToken = { String token ->
+    try {
+        if (token == null || !token.contains(".")) return null
+         
+        def parts = token.split("\\.")
+        if (parts.length < 2) { // İmza olmasa bile payload lazım
+             debug("jwt-parse-error", "Invalid JWT structure: less than 2 parts")
+             return null
+        }
+ 
+         
+        // Payload kısmını al (2. bölüm)
+        def payload = parts[1]
+         
+        // Base64Url decode için padding düzelt
+        while (payload.length() % 4 != 0) {
+            payload += "="
+        }
+         
+        // Decode ve parse et
+        def decodedPayload = new String(Base64.getUrlDecoder().decode(payload))
+        def claims = new JsonSlurper().parseText(decodedPayload)
+         
+        return claims
+    } catch (Exception e) {
+        debug("jwt-parse-error", "Error parsing JWT token: " + e.getMessage())
+        return null
+    }
+}
+// Create userinfo header from token
+def createUserinfoHeader = { String accessToken, String idToken ->
+    try {
+        def userinfo = [:]
+         
+        // ID Token'dan bilgileri al (öncelikli)
+        if (idToken) {
+            def idClaims = parseJwtToken(idToken)
+            if (idClaims) {
+                userinfo.sub = idClaims.sub
+                userinfo.name = idClaims.name
+                userinfo.given_name = idClaims.given_name
+                userinfo.family_name = idClaims.family_name
+                userinfo.preferred_username = idClaims.preferred_username
+                userinfo.email = idClaims.email
+                userinfo.email_verified = idClaims.email_verified
+                // Diğer standart OIDC claim'leri eklenebilir
+            }
+        }
+         
+        // Access Token'dan da bilgi alınabilir (ID token yoksa)
+        if (!userinfo.sub && accessToken) {
+            def accessClaims = parseJwtToken(accessToken)
+            if (accessClaims && accessClaims.sub) {
+                userinfo.sub = accessClaims.sub
+                // Access token'da genelde daha az bilgi olur
+                if (accessClaims.preferred_username) {
+                    userinfo.preferred_username = accessClaims.preferred_username
+                }
+            }
+        }
+         
+        // Userinfo objesini JSON string'e çevir ve Base64 encode et
+        if (userinfo && userinfo.sub) {
+            def userinfoJson = JsonOutput.toJson(userinfo)
+              
+            return userinfoJson
+        }
+         
+        return null
+    } catch (Exception e) {
+        debug("userinfo-create-error", "Error creating userinfo header: " + e.getMessage())
+        return null
+    }
+}
+ 
+//Set-Cookie header'larını birleştirmek için yardımcı metot
+def appendSetCookieHeader = { String newCookieValue ->
+    try {
+        def existingValue = customVariableMap.get("Set-Cookie")
+        def finalValue
+        if (existingValue) {
+            finalValue = existingValue + OIDC_CONFIG.setCookieDelimiter + newCookieValue
+        } else {
+            finalValue = newCookieValue
+        }
+        customVariableMap.put("Set-Cookie", finalValue)
+          
+        debug("Set-Cookie-finalValue", finalValue)
+ 
+    } catch (Exception e) {
+        debug("append-set-cookie-error", "Error appending Set-Cookie: ${e.message}")
+    }
+}
+ 
+// Check if token is expired based on expires_at field
+def isTokenExpired = { Long expiresAt ->
+    if (!expiresAt) return true
+     
+    def currentTime = Instant.now().epochSecond
+    return currentTime >= expiresAt
+}
+ 
+ 
+def compressData = { String data ->
+    try {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream()
+        GZIPOutputStream gzipOut = new GZIPOutputStream(baos)
+        gzipOut.write(data.getBytes("UTF-8"))
+        gzipOut.close()
+        return Base64.getEncoder().encodeToString(baos.toByteArray())
+    } catch (Exception e) {
+        debug("compressError", "Error compressing data: ${e.message}")
+        throw e
+    }
+}
+ 
+def decompressData = { String compressedData ->
+    try {
+        byte[] decoded = Base64.getDecoder().decode(compressedData)
+        GZIPInputStream gzipIn = new GZIPInputStream(new ByteArrayInputStream(decoded))
+        ByteArrayOutputStream baos = new ByteArrayOutputStream()
+ 
+        byte[] buffer = new byte[1024]
+        int len
+        while ((len = gzipIn.read(buffer)) > 0) {
+            baos.write(buffer, 0, len)
+        }
+        gzipIn.close()
+        baos.close()
+ 
+        return new String(baos.toByteArray(), "UTF-8")
+    } catch (Exception e) {
+        debug("decompressError", "Error decompressing data: ${e.message}")
+        throw e
+    }
+}
+ 
+// URL encode utility
+def encodeURIComponent = { String str ->
+    try {
+        return URLEncoder.encode(str, "UTF-8")
+                .replace("+", "%20")
+                .replace("%21", "!")
+                .replace("%27", "'")
+                .replace("%28", "(")
+                .replace("%29", ")")
+                .replace("%7E", "~")
+    } catch (Exception e) {
+        debug("encode-error", "Error encoding: " + e.getMessage())
+        return str
+    }
+}
+ 
+// Encrypt data
+def encryptData = { String data ->
+    try {
+        def cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        def secretKey = new SecretKeySpec(OIDC_CONFIG.encryptionKey.getBytes(), "AES")
+        def ivSpec = new IvParameterSpec(OIDC_CONFIG.encryptionIv.getBytes())
+ 
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey, ivSpec)
+        def encryptedBytes = cipher.doFinal(data.getBytes())
+        return Base64.getEncoder().encodeToString(encryptedBytes)
+    } catch (Exception e) {
+        debug("encryptError", "Error encrypting data: ${e.message}")
+        throw e
+    }
+}
+ 
+// Decrypt data
+def decryptData = { String encryptedData ->
+    try {
+        def cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        def secretKey = new SecretKeySpec(OIDC_CONFIG.encryptionKey.getBytes(), "AES")
+        def ivSpec = new IvParameterSpec(OIDC_CONFIG.encryptionIv.getBytes())
+ 
+        cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+        def decodedBytes = Base64.getDecoder().decode(encryptedData)
+        def decryptedBytes = cipher.doFinal(decodedBytes)
+        return new String(decryptedBytes)
+    } catch (Exception e) {
+        debug("decryptError", "Error decrypting data: ${e.message}")
+        throw e
+    }
+}
+ 
+ 
+ 
+ 
+// Validate JWT token locally (SÜRE, ISSUER, AUDIENCE kontrolü - İMZA DOĞRULAMAZ!)
+// GÜVENLİK UYARISI: Bu fonksiyon tek başına token'ın geçerliliğini garanti etmez.
+ 
+def validateJWTAccessToken = { String token ->
+    try {
+        def claims = parseJwtToken(token)
+        if (!claims) return false
+         
+        // 1. Expiration kontrolü
+        def exp = claims.exp
+        if (exp) {
+            def currentTime = Instant.now().epochSecond
+            if (currentTime >= exp) {
+                debug("jwt-expired", "JWT token expired")
+                return false
+            }
+        }
+         
+        // 2. İssuer kontrolü (konfigürasyon bazlı)
+        if (OIDC_CONFIG.validateIssuer) {
+            def iss = claims.iss
+            if (!iss || !iss.contains(OIDC_CONFIG.expectedIssuer)) {
+                debug("jwt-wrong-issuer", "JWT has incorrect issuer. Expected: ${OIDC_CONFIG.expectedIssuer}, Actual: ${iss}")
+                return false
+            }
+        }
+         
+        // 3. Audience kontrolü (konfigürasyon bazlı)
+        if (OIDC_CONFIG.validateAudience) {
+            def aud = claims.aud
+             
+            // Audience değeri bazen string, bazen array olabilir
+            boolean audValid = false
+             
+            if (aud instanceof List) {
+                // Array of audiences
+                audValid = aud.contains(OIDC_CONFIG.expectedAudience)
+            } else if (aud instanceof String) {
+                // Single audience
+                audValid = (aud == OIDC_CONFIG.expectedAudience)
+            }
+             
+            if (!audValid) {
+                debug("jwt-wrong-audience", "JWT has incorrect audience. Expected: ${OIDC_CONFIG.expectedAudience}, Actual: ${aud}")
+                return false
+            }
+        }
+ 
+        // Token geçerli kabul edildi
+        return true
+    } catch (Exception e) {
+        debug("jwt-validation-error", "Error validating JWT token locally: " + e.getMessage())
+        return false
+    }
+}
+ 
+// Determine if token is JWT
+def isJwtToken = { String token ->
+    try {
+        if (!token) return false
+         
+        // JWT formatı: header.payload.signature
+        def parts = token.split("\\.")
+        if (parts.length < 2) return false // En az header ve payload olmalı
+         
+        // Kaba bir kontrol: Her kısım Base64Url formatına uygun olmalı
+        def validBase64UrlPattern = ~/^[A-Za-z0-9_-]*$/
+        return parts.every { it.matches(validBase64UrlPattern) }
+    } catch (Exception e) {
+        debug("jwt-check-error", "Error checking if token is JWT: " + e.getMessage())
+        return false
+    }
+}
+  
+ 
+// Get tokens from cookies
+def getTokensFromCookies = {
+    debug("getTokensFromCookies", "Attempting to read token cookies.")
+    def tokens = [access_token: null, refresh_token: null, id_token: null]
+    try {
+        def cookieHeader = requestHeaderMapFromClient.get("Cookie")
+        if (cookieHeader == null) {
+            debug("token-cookies-read", "No Cookie header in request.")
+            return tokens // Boş map döndür
+        }
+ 
+        // Parse cookies into a map
+        def cookies = [:]
+        cookieHeader.split(";").each { cookie ->
+            def parts = cookie.trim().split("=", 2)
+            if (parts.length == 2 && !parts[0].isEmpty()) {
+                 cookies[parts[0]] = parts[1] // Get value as is; URL decode will happen later
+            }
+        }
+ 
+        // Helper closure to get a single token (UNENCRYPTED and UNCOMPRESSED)
+        def getSingleToken = { String cookieName ->
+            def encodedValue = cookies.get(cookieName)
+            if (encodedValue == null) return null
+ 
+            try {
+                 // ONLY URL Decode (No decrypt or decompress)
+                 def rawTokenValue = URLDecoder.decode(encodedValue, StandardCharsets.UTF_8.toString())
+                 if (rawTokenValue == null) throw new Exception("URL decoding failed for ${cookieName}")
+ 
+                 return rawTokenValue
+            } catch (Exception e) {
+                 debug("get-single-token-error", "Error reading/decoding ${cookieName}: ${e.message}. Cookie will be ignored.")
+                 return null
+            }
+        }
+ 
+ 
+        // Get each token
+        tokens.access_token = getSingleToken(OIDC_CONFIG.accessTokenCookieName)
+         // ID Token cookie kontrolü
+        if (OIDC_CONFIG.enableIdTokenCookie) {
+            tokens.id_token = getSingleToken(OIDC_CONFIG.idTokenCookieName)
+        } else {
+            debug("id-token-cookie-read-skipped", "ID token cookie reading is disabled")
+        }
+         
+        // Refresh Token cookie kontrolü
+        if (OIDC_CONFIG.enableRefreshTokenCookie) {
+            tokens.refresh_token = getSingleToken(OIDC_CONFIG.refreshTokenCookieName)
+        } else {
+            debug("refresh-token-cookie-read-skipped", "Refresh token cookie reading is disabled")
+        }
+ 
+        if (tokens.any { it.value != null }) {
+             debug("token-cookies-read", "Token cookies read. Found: " +
+                   (tokens.access_token ? "AT " : "") +
+                   (tokens.refresh_token ? "RT " : "") +
+                   (tokens.id_token ? "IDT" : "") )
+        } else {
+             debug("token-cookies-read", "No valid token cookies found.")
+        }
+ 
+    } catch (Exception e) {
+        debug("token-cookies-read-error", "General error reading token cookies: ${e.message}")
+        // Hata durumunda boş map döndürmek genellikle en güvenlisi
+        return [access_token: null, refresh_token: null, id_token: null]
+    }
+    return tokens
+}
+// Case-insensitive header okuma fonksiyonu
+def getHeaderCaseInsensitive = { String headerName ->
+    try {
+        // Önce direkt dene
+        def headerValue = requestHeaderMapFromClient.get(headerName)
+        if (headerValue) {
+            return headerValue
+        }
+         
+        // Bulunamadıysa case-insensitive arama yap
+        def lowerHeaderName = headerName.toLowerCase()
+        for (entry in requestHeaderMapFromClient) {
+            if (entry.key.toLowerCase() == lowerHeaderName) {
+                debug("header-case-insensitive", "Found header '${entry.key}' for requested '${headerName}'")
+                return entry.value
+            }
+        }
+         
+        return null
+    } catch (Exception e) {
+        debug("header-case-insensitive-error", "Error reading header case-insensitive: " + e.getMessage())
+        return null
+    }
+}
+ 
+// Extract token based on authAcceptTokenAs configuration
+def extractTokenBasedOnConfig = {
+    def token = null
+    def tokenSource = null // "header" veya "cookie" olacak
+     
+    try {
+        // Header'dan token okuma
+        if (OIDC_CONFIG.authAcceptTokenAs.contains("header")) {
+            def authHeader = getHeaderCaseInsensitive(OIDC_CONFIG.accessTokenHeaderName)
+ 
+            if (authHeader) {
+                if (OIDC_CONFIG.accessTokenAsBearer && (authHeader.startsWith("Bearer ") || authHeader.startsWith("bearer "))) {
+                    token = authHeader.substring(7)
+                    tokenSource = "header"
+                    debug("token-extract", "Token found in header")
+                } else if (!OIDC_CONFIG.accessTokenAsBearer) {
+                    token = authHeader
+                    tokenSource = "header"
+                    debug("token-extract", "Token found in header (non-bearer)")
+                }
+            }
+        }
+         
+        // Cookie'den token okuma (header'da bulunamadıysa)
+        if (!token && OIDC_CONFIG.authAcceptTokenAs.contains("cookie")) {
+            def tokenData = getTokensFromCookies()
+            if (tokenData && tokenData.access_token) {
+                token = tokenData.access_token
+                tokenSource = "cookie"
+                debug("token-extract", "Token found in cookie")
+            }
+        }
+         
+        return [token: token, source: tokenSource]
+    } catch (Exception e) {
+        debug("token-extract-error", "Error extracting token: " + e.getMessage())
+        return [token: null, source: null]
+    }
+}
+ 
+ 
+// Set separate token cookies
+// DİKKAT: Cookie için 4KB sınırına dikkat!
+ 
+def setTokenCookies = { String accessToken, String refreshToken, String idToken  ->
+    debug("setTokenCookies", "Attempting to set token cookies.")
+    boolean success = true // Genel başarı durumu
+ 
+    // Helper closure to set a single encrypted/compressed cookie
+    def setSingleTokenCookie = { String cookieName, String rawTokenValue ->
+        if (rawTokenValue == null) return // Token yoksa cookie set etme
+ 
+        try {
+            // ONLY URL Encode (No encryption or compression)
+            def encodedValue = encodeURIComponent(rawTokenValue) // Direct use of rawTokenValue
+            if (encodedValue == null) throw new Exception("URL encoding failed for ${cookieName}")
+ 
+             // Boyut kontrolü (opsiyonel ama önerilir)
+             // Tokens can be large, so size warning is still relevant.
+             if (encodedValue.length() > 3800) { // 4KB sınırına biraz pay bırakarak
+                 debug("cookie-size-warning", "${cookieName} size (${encodedValue.length()} bytes) is dangerously close to/over the limit!")
+             }
+ 
+            // Build cookie string
+            def cookieValue = cookieName + "=" + encodedValue + "; " +
+                              "Path=/; " +
+                              "Max-Age=" + OIDC_CONFIG.sessionAbsoluteTimeout + "; " +
+                              "HttpOnly; " + // Keep HttpOnly for security, preventing JS access
+                              "SameSite=Lax"
+            if (OIDC_CONFIG.sessionCookieSecure) {
+                cookieValue += "; Secure"
+            }
+ 
+            // Append using helper method
+            appendSetCookieHeader(cookieValue)
+            debug("set-token-cookie-success", "${cookieName} set successfully (unencrypted).") // Updated debug message
+ 
+ 
+        } catch (Exception e) {
+            debug("set-single-token-cookie-error", "Error setting ${cookieName}: ${e.message}")
+            success = false // Herhangi bir token set etme hatasında genel durumu false yap
+        }
+    }
+ 
+    // Set each token cookie
+    setSingleTokenCookie(OIDC_CONFIG.accessTokenCookieName, accessToken)
+     
+    // Refresh Token cookie kontrolü
+    if (OIDC_CONFIG.enableRefreshTokenCookie) {
+        setSingleTokenCookie(OIDC_CONFIG.refreshTokenCookieName, refreshToken)
+    } else {
+        debug("refresh-token-cookie-skipped", "Refresh token cookie is disabled")
+    }
+ 
+    // ID Token cookie kontrolü
+    if (OIDC_CONFIG.enableIdTokenCookie) {
+        setSingleTokenCookie(OIDC_CONFIG.idTokenCookieName, idToken)
+    } else {
+        debug("id-token-cookie-skipped", "ID token cookie is disabled")
+    }
+    return success // Genel başarı durumunu döndür
+}
+ 
+// Remove token cookies
+def removeTokenCookies = {
+    debug("removeTokenCookies", "Attempting to remove token cookies.")
+    boolean success = true
+ 
+    // Helper closure to remove a single cookie
+    def removeSingleCookie = { String cookieName ->
+         try {
+             def cookieValue = cookieName + "=; " +
+                               "Path=/; " +
+                               "Max-Age=0; " + // Expire immediately
+                               "Expires=Thu, 01 Jan 1970 00:00:00 GMT; " + // Geçmiş tarih
+                               "HttpOnly; " +
+                               "SameSite=Lax"
+             if (OIDC_CONFIG.sessionCookieSecure) {
+                 cookieValue += "; Secure"
+             }
+             appendSetCookieHeader(cookieValue)
+         } catch (Exception e) {
+             debug("remove-single-cookie-error", "Error removing ${cookieName}: ${e.message}")
+             success = false
+         }
+    }
+ 
+    // Remove each cookie
+    removeSingleCookie(OIDC_CONFIG.accessTokenCookieName)
+ 
+     // ID Token cookie kontrolü
+    if (OIDC_CONFIG.enableIdTokenCookie) {
+        removeSingleCookie(OIDC_CONFIG.idTokenCookieName)
+    } else {
+        debug("id-token-cookie-remove-skipped", "ID token cookie removal is disabled")
+    }
+     
+    // Refresh Token cookie kontrolü
+    if (OIDC_CONFIG.enableRefreshTokenCookie) {
+        removeSingleCookie(OIDC_CONFIG.refreshTokenCookieName)
+    } else {
+        debug("refresh-token-cookie-remove-skipped", "Refresh token cookie removal is disabled")
+    }
+ 
+    if (success) debug("token-cookies-remove", "Token removal headers appended.")
+    return success
+}
+ 
+ 
+// Create cookie and add to headers
+def setOidcCookie = { Map data  ->
+    try {
+        // Convert to JSON and encrypt
+        def jsonData = JsonOutput.toJson(data)
+    debug("setOidcCookie jsonData ", jsonData )
+  
+        // Compress the data
+        def compressedData = compressData(jsonData)
+    debug("setOidcCookie compressedData ", compressedData )
+  
+ 
+        // Encrypt the compressed data
+        def encryptedData = encryptData(compressedData)
+    debug("setOidcCookie compressed and encryptedData", encryptedData )
+ 
+        // URL encode the cookie value
+        def encodedValue = URLEncoder.encode(encryptedData, "UTF-8")
+    debug("setOidcCookie compressed and encrypted and encodedValue", encodedValue )
+ 
+ 
+        // Log the size of compressed data
+        debug("compression-stats", "Original size: ${jsonData.length()}, " +
+                "Compressed size: ${compressedData.length()}, " +
+        "Encrypted size: ${encryptedData.length()}, " +
+                "Final size: ${encodedValue.length()}")
+ 
+        // Cookie template
+        def cookieValue = OIDC_CONFIG.sessionCookieName + "=" + encodedValue + "; " +
+                "Path=/; " +
+                "Max-Age=" + OIDC_CONFIG.sessionAbsoluteTimeout + "; " +
+                "HttpOnly; " +
+                "SameSite=Lax"
+ 
+        if (OIDC_CONFIG.sessionCookieSecure) {
+            cookieValue += "; Secure"
+        }
+ 
+        appendSetCookieHeader(cookieValue)
+  
+ 
+        // Add debug information
+        debug("cookie-set", "Compressed OIDC cookie set, length: " + encodedValue.length())
+ 
+        return true
+    } catch (Exception e) {
+        debug("cookie-set-error", "Error setting compressed OIDC cookie: " + e.getMessage())
+        return false
+    }
+}
+ 
+def getOidcCookie = {
+    try {
+        // Get Cookie header
+        def cookieHeader = requestHeaderMapFromClient.get("Cookie")
+        if (!cookieHeader) {
+            debug("cookie-read", "No cookies in request")
+            return null
+        }
+ 
+        // Parse cookies
+        def cookies = [:]
+        cookieHeader.split(";").each { cookie ->
+            def parts = cookie.trim().split("=", 2)
+            if (parts.length == 2) {
+                cookies[parts[0]] = URLDecoder.decode(parts[1], "UTF-8")
+            }
+        }
+ 
+        // Find OIDC cookie
+        if (!cookies.containsKey(OIDC_CONFIG.sessionCookieName)) {
+            debug("cookie-read", "OIDC cookie not found")
+            return null
+        }
+ 
+        // Decrypt
+        def encryptedData = cookies[OIDC_CONFIG.sessionCookieName]
+    debug("getOidcCookie compressed and encrypted and decodedValue", encryptedData )
+ 
+        def compressedData = decryptData(encryptedData)
+    debug("getOidcCookie compressed and decrypted and decodedValue", compressedData )
+ 
+        // Decompress data
+        def jsonData = decompressData(compressedData)
+    debug("getOidcCookie decompressed and decrypted and decodedValue (plain json value)", jsonData )
+ 
+        // Convert to JSON
+        def sessionData = new JsonSlurper().parseText(jsonData)
+ 
+    debug("getOidcCookie cookie-value", sessionData.toString() )
+ 
+    debug("getOidcCookie result", "Compressed OIDC cookie read successfully")
+ 
+        return sessionData
+    } catch (Exception e) {
+        debug("cookie-read-error", "Error reading compressed OIDC cookie: " + e.getMessage())
+        return null
+    }
+}
+ 
+// Function to remove cookie
+def removeOidcCookie = {
+    try {
+        // Reset cookie and set Max-Age to 0
+        def cookieValue = OIDC_CONFIG.sessionCookieName + "=; " +
+                "Path=/; " +
+                "Max-Age=0; " +
+                "HttpOnly; " +
+                "SameSite=Lax"
+ 
+        if (OIDC_CONFIG.sessionCookieSecure) {
+            cookieValue += "; Secure"
+        }
+ 
+        // Add cookie to customVariableMap
+        appendSetCookieHeader(cookieValue)
+ 
+        debug("oidc-cookie-remove", "OIDC Login Flow cookie removal header appended.")
+ 
+        return true
+    } catch (Exception e) {
+        debug("cookie-remove-error", "Error removing OIDC cookie: " + e.getMessage())
+        return false
+    }
+}
+  
+ 
+// Validate token
+def validateAccessTokenWithApi = { String token ->
+    if (!token) return false
+ 
+    debug("validateAccessTokenWithApi", "Validating token via introspection endpoint.")
+ 
+    try {
+        def introspectionEndpoint = OIDC_CONFIG.introspectionEndpoint
+ 
+        // Prepare introspection request parameters
+        def params = [
+                token: token,
+                client_id: OIDC_CONFIG.clientId,
+                client_secret: OIDC_CONFIG.clientSecret
+        ]
+ 
+        // Build request body
+        StringBuilder bodyBuilder = new StringBuilder()
+        boolean first = true
+        params.each { key, value ->
+            if (!first) {
+                bodyBuilder.append("&")
+            }
+            bodyBuilder.append(encodeURIComponent(key.toString()))
+            bodyBuilder.append("=")
+            bodyBuilder.append(encodeURIComponent(value.toString()))
+            first = false
+        }
+        def requestBody = bodyBuilder.toString()
+ 
+        // Prepare HTTP client and request
+        def httpClient = HttpClients.createDefault()
+        def introspectRequest = new HttpPost(introspectionEndpoint)
+        introspectRequest.setHeader("Content-Type", "application/x-www-form-urlencoded")
+        introspectRequest.setEntity(new StringEntity(requestBody))
+ 
+        // Execute request
+        def response = httpClient.execute(introspectRequest)
+        def statusCode = response.getStatusLine().getStatusCode()
+        def responseBody = EntityUtils.toString(response.getEntity())
+ 
+        if (statusCode == 200) {
+            def introspectionResult = new JsonSlurper().parseText(responseBody)
+            boolean active = introspectionResult.active == true
+            debug("introspection-result", "Token active: ${active}")
+            return active
+        }else {
+            debug("introspection-error", "Introspection failed. Status: ${statusCode}, Body: ${responseBody}")
+           
+        }
+    } catch (Exception e) {
+        debug("tokenValidationError", "Error validating token: " + e.getMessage())
+    }
+ 
+    return false
+}
+ 
+ 
+// Helper function to start login flow
+def startLoginFlow = { String originalPath ->
+    debug("Login", "Login Process started")
+ 
+    // Create state, code_verifier and nonce
+    def state = UUID.randomUUID().toString()
+ 
+    // PKCE code verifier and challenge
+    def secureRandom = new SecureRandom()
+    byte[] bytes = new byte[32]
+    secureRandom.nextBytes(bytes)
+    def codeVerifier = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+ 
+    def digest = MessageDigest.getInstance("SHA-256")
+    byte[] hash = digest.digest(codeVerifier.getBytes(StandardCharsets.UTF_8))
+    def codeChallenge = Base64.getUrlEncoder().withoutPadding().encodeToString(hash)
+ 
+    // Create nonce
+    def nonce = OIDC_CONFIG.useNonce ? UUID.randomUUID().toString() : null
+ 
+    // Save original URL
+    def originalUrl = request_requestURI
+    if (request_queryString) {
+        originalUrl += "?" + request_queryString
+    }
+    if (originalUrl.trim() == "" || originalUrl == "/") {
+        originalUrl = "/"
+    }
+ 
+    // Store all data in a single cookie
+    def sessionData = [
+            flow: "login",                // Flow type
+            state: state,                 // CSRF protection
+            code_verifier: codeVerifier,  // For PKCE
+            code_challenge: codeChallenge, // For debugging
+            nonce: nonce,                 // Replay protection
+            original_url: originalUrl,    // Redirect after callback
+            created_at: Instant.now().epochSecond // Timestamp
+    ]
+ 
+    // Tüm token cookies'lerini temizle
+    removeTokenCookies()
+     
+    // Set cookie - use duration from OIDC_CONFIG for login
+    setOidcCookie(sessionData )
+ 
+    // Debug: Log state and code_verifier values
+    debug("state", state)
+    debug("code_verifier", codeVerifier.substring(0, 10) + "...")
+ 
+    // Create Keycloak auth URL
+    def authParams = [
+            client_id: OIDC_CONFIG.clientId,
+            response_type: "code",
+            redirect_uri: OIDC_CONFIG.redirectUri,
+            scope: OIDC_CONFIG.scope,
+            state: state
+    ]
+ 
+    // Add PKCE
+    if (OIDC_CONFIG.usePkce) {
+        authParams.code_challenge = codeChallenge
+        authParams.code_challenge_method = "S256"
+    }
+ 
+    // Add nonce
+    if (nonce && OIDC_CONFIG.useNonce) {
+        authParams.nonce = nonce
+    }
+ 
+    // Create URL
+    StringBuilder urlBuilder = new StringBuilder(OIDC_CONFIG.authorizationEndpoint)
+    urlBuilder.append("?")
+ 
+    boolean first = true
+    authParams.each { k, v ->
+        if (!first) {
+            urlBuilder.append("&")
+        }
+        urlBuilder.append(encodeURIComponent(k.toString()))
+        urlBuilder.append("=")
+        urlBuilder.append(encodeURIComponent(v.toString()))
+        first = false
+    }
+ 
+    def authUrl = urlBuilder.toString()
+ 
+    // Debug: Log auth URL
+    debug("auth_url", authUrl)
+    // Set redirection
+    customVariableMap.put("Location", authUrl)
+    // Redirect with 302
+    stopFlow(302,"Redirecting to authentication provider")
+}
+ 
+// ################## Path Matching Methods ##################
+ 
+// Method to check if a request should be ignored based on patterns from config
+def shouldIgnoreRequest(String requestPath, String configPatternsString) {
+    // Get patterns from config and trim each one
+    def patterns = configPatternsString.split(",").collect { it.trim() }
+ 
+    // Check each pattern
+    for (pattern in patterns) {
+        if (matchesPattern(requestPath, pattern)) {
+            return true
+        }
+    }
+ 
+    return false
+}
+ 
+// Method to check if a path matches a specific pattern (wildcard or exact)
+def matchesPattern(String path, String pattern) {
+    // File extension wildcard (*.ext)
+    if (pattern.startsWith("*.")) {
+        String extension = pattern.substring(2)
+        return path.endsWith("." + extension)
+    }
+    // Path wildcard (dir/*)
+    else if (pattern.endsWith("/*")) {
+        String prefix = pattern.substring(0, pattern.length() - 2)
+        return path.startsWith(prefix) || path.contains("/" + prefix + "/") || path.contains(prefix + "/")
+    }
+    // Exact pattern match
+    else {
+        return path.contains(pattern)
+    }
+}
+ 
+ 
+// ################## Main Process ##################
+def path = request_pathInfo
+def method = request_httpMethod
+ 
+ 
+// Check code and state parameters
+def code = requestUrlParamMapFromClient.get("code")
+def state = requestUrlParamMapFromClient.get("state")
+ 
+// ----------------- Callback Process -----------------
+if (code && state) {
+    debug("Callback", "Callback path detected: " + path)
+ 
+ 
+    // Get login data from cookie
+    def sessionData = getOidcCookie()
+ 
+    // Return error if no session or not a login flow
+    if (!sessionData || sessionData.flow != "login") {
+        debug("Callback-error", "No valid login session found")
+        stopFlow(400,"No valid login session found")
+        return
+    }
+ 
+    // Compare state value
+    if (state != sessionData.state) {
+        debug("Callback-error", "State mismatch. Expected: ${sessionData.state}, Got: ${state}")
+        stopFlow(400,"Invalid state parameter")
+        return
+    }
+ 
+    // Prepare parameters for token exchange
+    def tokenParams = [
+            grant_type: "authorization_code",
+            code: code,
+            redirect_uri: OIDC_CONFIG.redirectUri,
+            client_id: OIDC_CONFIG.clientId,
+            client_secret: OIDC_CONFIG.clientSecret
+    ]
+ 
+    // Add PKCE code_verifier
+    if (sessionData.code_verifier && OIDC_CONFIG.usePkce) {
+        tokenParams.code_verifier = sessionData.code_verifier
+        debug("Callback-pkce", "Added code_verifier to token request")
+    } else {
+        debug("Callback-error", "No code_verifier in session")
+        stopFlow(400,"PKCE code_verifier missing")
+        return
+    }
+ 
+    // Make HTTP request for token exchange
+    try {
+        // Create POST body
+        StringBuilder tokenBody = new StringBuilder()
+        boolean first = true
+        tokenParams.each { key, value ->
+            if (!first) tokenBody.append("&")
+            tokenBody.append(encodeURIComponent(key))
+            tokenBody.append("=")
+            tokenBody.append(encodeURIComponent(value))
+            first = false
+        }
+ 
+        // Retrieve certificate from environment and handle sslContext if needed
+        java.security.cert.X509Certificate  cert= environment_certificateMap.get("wildcard.local");
+ 
+        // Create a KeyStore with the certificate
+        def keyStore = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType());
+        keyStore.load(null, null);
+        keyStore.setCertificateEntry("cert-alias", cert);
+ 
+        // Create SSL context with the KeyStore
+        def sslContext = org.apache.http.ssl.SSLContexts.custom()
+                .loadTrustMaterial(keyStore, null)
+                .build();
+ 
+        // Create a custom SSL socket factory with the SSL context
+        def sslSocketFactory = new org.apache.http.conn.ssl.SSLConnectionSocketFactory( sslContext, null, null, org.apache.http.conn.ssl.NoopHostnameVerifier.INSTANCE);
+ 
+        // Register the SSL socket factory with connection manager
+        def connManager = new org.apache.http.impl.conn.PoolingHttpClientConnectionManager(
+                org.apache.http.config.RegistryBuilder.<org.apache.http.conn.socket.ConnectionSocketFactory>create()
+                        .register("https", sslSocketFactory)
+                        .register("http", new org.apache.http.conn.socket.PlainConnectionSocketFactory())
+                        .build()
+        );
+ 
+        // Build the HTTP client with the custom connection manager
+        def httpClient = HttpClients.custom()
+                .setConnectionManager(connManager)
+                .build();
+ 
+ 
+        // Create and execute the token request
+ 
+        def tokenRequest = new HttpPost(OIDC_CONFIG.tokenEndpoint)
+        tokenRequest.setHeader("Content-Type", "application/x-www-form-urlencoded")
+        tokenRequest.setEntity(new StringEntity(tokenBody.toString()))
+ 
+        def response = httpClient.execute(tokenRequest)
+        def statusCode = response.getStatusLine().getStatusCode()
+        def responseBody = EntityUtils.toString(response.getEntity())
+        debug("tokenResponse responseBody", responseBody)
+ 
+        // Process token response
+        if (statusCode == 200) {
+            def tokenResponse = new JsonSlurper().parseText(responseBody)
+ 
+    debug("callback-tokens", "Got tokens - AT: ${tokenResponse.access_token?.substring(0,20)}..., RT: ${tokenResponse.refresh_token ? 'yes' : 'no'}, IDT: ${tokenResponse.id_token ? 'yes' : 'no'}")
+ 
+ 
+            debug("tokenResponse id_token", tokenResponse.id_token)
+ 
+            // Extract user information from token
+            def idToken = tokenResponse.id_token
+            def tokenExpiration = null
+            def username = null
+            def email = null
+            def userId = null
+            String receivedNonce = null // Alınan nonce'ı saklamak için değişken
+ 
+            if (idToken) {
+                try {
+                    def parts = idToken.split("\\.")
+                    if (parts.length >= 2) {
+                        def payload = parts[1]
+                        while (payload.length() % 4 != 0) {
+                            payload += "="
+                        }
+                        def decodedPayload = new String(Base64.getUrlDecoder().decode(payload))
+                        def claims = new JsonSlurper().parseText(decodedPayload)
+ 
+                        tokenExpiration = claims.exp
+                        username = claims.preferred_username ?: claims.name
+                        email = claims.email
+                        userId = claims.sub
+                        receivedNonce = claims.nonce
+ 
+                    }
+                } catch (Exception e) {
+                    debug("token-parse-error", "Error parsing ID token: " + e.getMessage())
+                }
+            }
+ 
+            // ################## NONCE DOĞRULAMASI ##################
+            if (OIDC_CONFIG.useNonce) {
+                // sessionData callback bloğunun başında getOidcCookie() ile alınmıştı.
+                def expectedNonce = sessionData.nonce
+ 
+                if (!expectedNonce || !receivedNonce || expectedNonce != receivedNonce) {
+                    // Nonce'lar eşleşmiyorsa veya biri/ikisi de eksikse hata ver ve dur.
+                    debug("Callback-error", "Nonce mismatch or missing. Expected: '${expectedNonce}', Received: '${receivedNonce}'")
+                    stopFlow(400, "Invalid nonce") // Güvenlik ihlali olduğu için 400 Bad Request veya 401 Unauthorized
+                    removeOidcCookie() // Geçersiz oturum çerezini temizle
+                    removeTokenCookies() // Olası token çerezlerini temizle
+                    return 
+                } else {
+                    // Nonce geçerli
+                    debug("Nonce-validation", "Nonce validated successfully.")
+                }
+            }
+ 
+            // New session data
+            def newSessionData = [
+                    flow: "authenticated",
+                    created_at: Instant.now().epochSecond,
+                    expires_at: tokenExpiration ?: (Instant.now().epochSecond + tokenResponse.expires_in),
+                    user_info: [
+                            username: username,
+                            email: email,
+                            id: userId
+                    ]
+            ]
+       
+            // Set long-term session cookie - get duration from OIDC_CONFIG
+            setOidcCookie(newSessionData)
+ 
+ 
+            // Ayrıca token cookies'leri ayarla
+            setTokenCookies(
+                tokenResponse.access_token,
+                tokenResponse.refresh_token,
+                tokenResponse.id_token
+            )
+ 
+ 
+            // Redirect to original URL
+            def redirectUrl = sessionData.original_url ?: OIDC_CONFIG.postLogoutRedirectUri;
+         
+            customVariableMap.put("Location", redirectUrl)
+ 
+            debug("Authentication successful redirect path Location", redirectUrl)
+ 
+ 
+            stopFlow(302,"Authentication successful")
+            return
+        } else {
+            debug("token-error", "Failed to exchange code for tokens: " + responseBody)
+            stopFlow(500,"Token exchange failed")
+            return
+        }
+    } catch (Exception e) {
+        debug("token-exception", "Error during token exchange: " + e.getMessage())
+        stopFlow(500,"Error during token exchange")
+        return
+    }
+}
+// ----------------- Logout Process -----------------
+else if (path.contains(OIDC_CONFIG.logoutPath)) {
+    debug("Logout", "Logout path detected: " + path)
+ 
+     // Read session cookie
+    def sessionData = getOidcCookie()
+    def tokenData = getTokensFromCookies()
+ 
+    // Remove cookie
+    removeOidcCookie()
+    removeTokenCookies()
+ 
+    // Create Keycloak logout URL
+    def logoutUrl = OIDC_CONFIG.redirectAfterLogoutUri
+ 
+    // Add ID token as hint if available
+    if (tokenData && tokenData.id_token && OIDC_CONFIG.redirectAfterLogoutWithIdTokenHint) {
+        logoutUrl += "?id_token_hint=" + encodeURIComponent(tokenData.id_token)
+        // Add post-logout redirect URL
+        if (OIDC_CONFIG.postLogoutRedirectUri) {
+            logoutUrl += "&post_logout_redirect_uri=" + encodeURIComponent(OIDC_CONFIG.postLogoutRedirectUri)
+        }
+    } else if (OIDC_CONFIG.postLogoutRedirectUri) {
+        // Add only redirect URL if no ID token
+        logoutUrl += "?post_logout_redirect_uri=" + encodeURIComponent(OIDC_CONFIG.postLogoutRedirectUri)
+    }
+ 
+    debug("logoutUrl", logoutUrl)
+ 
+    // Redirect to Keycloak logout page
+    customVariableMap.put("Location", logoutUrl)
+ 
+    stopFlow(302,"Logout successful")
+    return
+}
+// ----------------- Regular API Requests -----------------
+else {
+    debug("ProtectedRequest", "Protected resource requested: " + path)
+ 
+    // Ignore path check
+    if (OIDC_CONFIG.ignoreRequestMethods.contains(request_httpMethod)) {
+        debug("IgnoreReason", "Request method " + request_httpMethod + " is ignored")
+        return
+    }
+ 
+    if (shouldIgnoreRequest(path, OIDC_CONFIG.ignoreRequestPatterns)) {
+        debug("PathIgnored", "Request will proceed without authentication")
+        return
+    }
+ 
+    // Bearer JWT authentication kontrolü
+    def bearerTokenHandled = false
+     
+    if (OIDC_CONFIG.bearerJwtAuthEnable) {
+        def tokenInfo = extractTokenBasedOnConfig()
+        def bearerToken = tokenInfo.token
+        def tokenSource = tokenInfo.source
+         
+        if (bearerToken) {
+            debug("bearer-auth", "Bearer token found from: " + tokenSource)
+             
+            // Token doğrulama
+            boolean isJwt = isJwtToken(bearerToken)
+            boolean tokenValid = false
+             
+            if (isJwt) {
+                boolean locallyValid = validateJWTAccessToken(bearerToken)
+                 
+                if (locallyValid) {
+                    if (OIDC_CONFIG.validateAccessTokenWithApi) {
+                        tokenValid = validateAccessTokenWithApi(bearerToken)
+                    } else {
+                        tokenValid = true
+                    }
+                } else {
+                    tokenValid = false
+                }
+            } else {
+                tokenValid = validateAccessTokenWithApi(bearerToken)
+            }
+             
+            if (tokenValid) {
+                debug("bearer-auth", "Bearer token is valid")
+                 
+                // HER DURUMDA TOKEN'I BACKEND'E GÖNDERİLMELİ
+                if (OIDC_CONFIG.addAccessTokenHeader) {
+                    def tokenPrefix = OIDC_CONFIG.accessTokenAsBearer ? "Bearer " : ""
+                    requestHeaderMapToTargetAPI.put(OIDC_CONFIG.accessTokenHeaderName, tokenPrefix + bearerToken)
+                    debug("bearer-auth", "Access token added to backend request headers from " + tokenSource)
+                }
+                 
+                // addTokenToCookie mantığı - sadece header'dan geliyorsa cookie'ye kaydet
+                if (OIDC_CONFIG.addTokenToCookie && tokenSource == "header") {
+                    // Header'dan gelen token'ı cookie'ye de kaydet
+                    def existingTokens = getTokensFromCookies()
+                    setTokenCookies(
+                        bearerToken,
+                        existingTokens?.refresh_token, // Mevcut refresh token'ı koru
+                        existingTokens?.id_token       // Mevcut ID token'ı koru
+                    )
+                    debug("bearer-auth", "Token moved from header to cookie, existing tokens preserved")
+                } else if (tokenSource == "cookie") {
+                    debug("bearer-auth", "Token from cookie used for backend authentication")
+                }
+                 
+                // Userinfo header ekle
+                if (!OIDC_CONFIG.disableUserinfoHeader) {
+                    // ID token'ı cookie'den almaya çalış
+                    def tokenData = getTokensFromCookies()
+                    def idToken = tokenData?.id_token
+                     
+                    def userinfoHeader = createUserinfoHeader(bearerToken, idToken)
+                    if (userinfoHeader) {
+                        requestHeaderMapToTargetAPI.put(OIDC_CONFIG.userinfoHeaderName, userinfoHeader)
+                        debug("userinfo-header", "Added userinfo header to request")
+                    }
+                }
+ 
+ 
+                bearerTokenHandled = true
+                return
+            } else {
+                // Token geçersiz - her zaman 401 döndür
+                debug("bearer-auth", "Bearer token is invalid")
+                removeTokenCookies()
+                removeOidcCookie()
+                stopFlow(401, "Invalid token")
+                return
+            }
+        } else if (OIDC_CONFIG.addTokenToCookie) {
+            // Header'da token yoksa ve addTokenToCookie true ise cookie'leri temizle
+            def existingAuthHeader = getHeaderCaseInsensitive(OIDC_CONFIG.accessTokenHeaderName)
+         
+             
+            // Token hiç yoksa normal cookie-based auth'a geç
+            debug("bearer-auth", "No bearer token found, falling back to cookie-based authentication")
+        }
+    }
+     
+    // Bearer token yoksa, cookie-based session kontrolü
+    if (!bearerTokenHandled) {
+        def sessionData = getOidcCookie()
+        def tokenData = getTokensFromCookies()
+ 
+    // Eğer bearerJwtAuthEnable true ve authAcceptTokenAs cookie içeriyorsa,
+    // cookie'deki token'ı da Bearer token mantığıyla kontrol et
+    if (OIDC_CONFIG.bearerJwtAuthEnable &&
+        OIDC_CONFIG.authAcceptTokenAs.contains("cookie") &&
+        tokenData && tokenData.access_token) {
+         
+        debug("cookie-bearer-auth", "Checking cookie token with Bearer auth logic")
+         
+        // Cookie'deki token'ı Bearer token mantığıyla validate et
+        boolean isJwt = isJwtToken(tokenData.access_token)
+        boolean tokenValid = false
+         
+        if (isJwt) {
+            boolean locallyValid = validateJWTAccessToken(tokenData.access_token)
+             
+            if (locallyValid) {
+                if (OIDC_CONFIG.validateAccessTokenWithApi) {
+                    tokenValid = validateAccessTokenWithApi(tokenData.access_token)
+                } else {
+                    tokenValid = true
+                }
+            } else {
+                tokenValid = false
+            }
+        } else {
+            tokenValid = validateAccessTokenWithApi(tokenData.access_token)
+        }
+         
+        if (tokenValid) {
+            debug("cookie-bearer-auth", "Cookie token is valid")
+             
+            // HER DURUMDA TOKEN'I BACKEND'E GÖNDERİLMELİ
+            if (OIDC_CONFIG.addAccessTokenHeader) {
+                def tokenPrefix = OIDC_CONFIG.accessTokenAsBearer ? "Bearer " : ""
+                requestHeaderMapToTargetAPI.put(OIDC_CONFIG.accessTokenHeaderName, tokenPrefix + tokenData.access_token)
+                debug("cookie-bearer-auth", "Access token added to backend request headers from cookie")
+            }
+             
+            if (OIDC_CONFIG.addIdTokenHeader && tokenData.id_token) {
+                requestHeaderMapToTargetAPI.put(OIDC_CONFIG.idTokenHeaderName, tokenData.id_token)
+            }
+             
+            // Userinfo header ekle
+            if (!OIDC_CONFIG.disableUserinfoHeader) {
+                def userinfoHeader = createUserinfoHeader(tokenData.access_token, tokenData.id_token)
+                if (userinfoHeader) {
+                    requestHeaderMapToTargetAPI.put(OIDC_CONFIG.userinfoHeaderName, userinfoHeader)
+                    debug("userinfo-header", "Added userinfo header to request from cookie")
+                }
+            }
+             
+            return // İşlem başarılı, devam et
+        } else {
+            // Cookie'deki token geçersiz - 401 döndür
+            debug("cookie-bearer-auth", "Cookie token is invalid")
+            removeTokenCookies()
+            removeOidcCookie()
+            stopFlow(401, "Invalid token")
+            return
+        }
+    }
+ 
+ 
+        // Session yoksa → Login'e yönlendir
+        if (!sessionData || sessionData.flow != "authenticated" ||
+            !tokenData || !tokenData.access_token) {
+            debug("no-session", "No valid session found, redirecting to login")
+            startLoginFlow(path)
+            return
+        }
+ 
+        // Token expire olmuşsa → Login'e yönlendir
+        if (isTokenExpired(sessionData.expires_at)) {
+            debug("token-expired", "Session token expired, redirecting to login")
+            startLoginFlow(path)
+            return
+        }
+ 
+        // Session varsa token'ı validate et (opsiyonel)
+        if (tokenData && tokenData.access_token) {
+            boolean isJwt = isJwtToken(tokenData.access_token)
+            boolean tokenValid = false
+             
+            if (isJwt) {
+                boolean locallyValid = validateJWTAccessToken(tokenData.access_token)
+                 
+                if (locallyValid) {
+                    if (OIDC_CONFIG.validateAccessTokenWithApi) {
+                        tokenValid = validateAccessTokenWithApi(tokenData.access_token)
+                    } else {
+                        tokenValid = true
+                    }
+                } else {
+                    tokenValid = false
+                }
+            } else if (OIDC_CONFIG.validateAccessTokenWithApi) {
+                tokenValid = validateAccessTokenWithApi(tokenData.access_token)
+            } else {
+                tokenValid = true
+            }
+             
+            if (!tokenValid) {
+                debug("session-token-invalid", "Session token is invalid, redirecting to login")
+                startLoginFlow(path)
+                return
+            }
+        }
+  
+ 
+        // Cookie'deki token'ları backend'e ekle
+        if (OIDC_CONFIG.addAccessTokenHeader && tokenData.access_token) {
+            def tokenPrefix = OIDC_CONFIG.accessTokenAsBearer ? "Bearer " : ""
+            requestHeaderMapToTargetAPI.put(OIDC_CONFIG.accessTokenHeaderName, tokenPrefix + tokenData.access_token)
+            debug("session-auth", "Access token added to backend request headers from cookie")
+        }
+ 
+        if (OIDC_CONFIG.addIdTokenHeader && tokenData.id_token) {
+            requestHeaderMapToTargetAPI.put(OIDC_CONFIG.idTokenHeaderName, tokenData.id_token)
+        }
+ 
+        // Userinfo header ekle
+        if (!OIDC_CONFIG.disableUserinfoHeader && tokenData) {
+            def userinfoHeader = createUserinfoHeader(tokenData.access_token, tokenData.id_token)
+            if (userinfoHeader) {
+                requestHeaderMapToTargetAPI.put(OIDC_CONFIG.userinfoHeaderName, userinfoHeader)
+                debug("userinfo-header", "Added userinfo header to request from session")
+            }
+        }
+ 
+        return
     }
 }
 ```
 
-GROOVY 
+**API Proxy hata hattına eklenecek olan groovy scripti:**
+
+```groovy
+if(customVariableMap.get("Location")!=null ){
+    responseHeaderMapToClient.put("Location", customVariableMap.get("Location"))
+    statusCodeToClient=302;
+}
+customVariableMap.each { key, value ->
+    if (key.toLowerCase().contains("cookie")) {
+        responseHeaderMapToClient.put(key, value)
+    }
+}
+``` 
 
 Gateway çözümleri ile OIDC (OpenID Connect) entegrasyonu yaparken dikkate alınması gereken bazı **kritik hususlar** bulunmaktadır.
 
@@ -150,6 +1468,4 @@ nginx.ingress.kubernetes.io/client-header-buffer-size: "8k"
 
 nginx.ingress.kubernetes.io/large-client-header-buffers: "4 8k"
 ```
-
-  
 Bu ayarlar, Nginx Ingress Controller'ın OIDC kimlik doğrulama token'ları ve çerezleriyle yaygın olarak karşılaşılan daha büyük başlıkları düzgün bir şekilde işlemesini sağlar.
