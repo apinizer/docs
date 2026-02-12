@@ -1,0 +1,117 @@
+---
+title: "Jenkins ile Ortamlar Arası API Proxy Senkronizasyonu"
+description: "Apinizer üzerinde bulunan API Proxy'lerin bir ortamdan (DEMO) diğerine (QA) Jenkins Pipeline kullanılarak otomatik taşınmasını (CI/CD) anlatır."
+---
+
+# Jenkins ile Ortamlar Arası API Proxy Senkronizasyonu
+
+Bu döküman, Apinizer üzerinde bulunan API Proxy'lerin bir ortamdan (örneğin DEMO) diğerine (örneğin QA) otomatik olarak nasıl taşınacağını (CI/CD) açıklamaktadır. Hazırlanan Jenkins Pipeline'ı, API Manager API'lerini kullanarak Proxy listesini alır, paketler ve hedef ortama aktarır.
+
+## 1. Ön Hazırlık ve Gereksinimler
+
+Pipeline'ın sorunsuz çalışması için aşağıdaki gereksinimlerin karşılandığından emin olunmalıdır:
+
+**Jenkins Eklentileri:**  
+JSON verilerini işleyebilmek için **Pipeline Utility Steps** eklentisi kurulu olmalıdır.
+
+**Kimlik Bilgileri (Credentials):**  
+Jenkins üzerinde her iki ortam için de **Secret Text** tipinde API Token'lar tanımlanmalıdır:
+
+Apinizer'da tokenınızı görmek için sağ üstte bulunan profil simgesine tıklanır açılan pencereden: Profilim -> Kişisel API Erişim Token'ları
+
+- `APINIZER_DEMO_TOKEN` → Kaynak ortamın erişim anahtarı  
+- `APINIZER_QA_TOKEN` → Hedef ortamın erişim anahtarı  
+
+**Bağlantı:**  
+Jenkins sunucusunun kaynak ve hedef Apinizer URL'lerine erişimi olmalıdır.
+
+---
+
+## 2. Pipeline Adımlarının Açıklaması
+
+Pipeline tek bir ana aşamadan (**Sync DEMO → QA**) oluşur ve şu mantıkla çalışır:
+
+### A. Kimlik Doğrulama ve Değişken Tanımlama
+
+`withCredentials` bloğu ile Jenkins'te saklanan token'lar güvenli bir şekilde çekilir ve geçici değişkenlere atanır. Bu sayede hassas veriler loglarda görünmez.
+
+### B. Mevcut Proxy Listesinin Alınması
+
+İlk `curl` komutu ile kaynak projedeki (`test-cid`) tüm API Proxy'lerin listesi JSON formatında (`demo.json`) indirilir. [API Listeleme](/api-reference/api-proxies/crud/list-api-proxies)
+
+### C. JSON Ayrıştırma ve Döngü
+
+`readJSON` komutu ile indirilen dosya okunur. `resultList` içerisindeki her bir proxy için bir döngü başlatılır. Proxy isimleri, URL uyumluluğu için UTF-8 formatında kodlanır (URL Encoding).
+
+### D. Export ve Import Süreci
+
+Döngü içerisinde her bir proxy için şu iki işlem sırayla yapılır:
+
+**Export:**  
+Kaynak ortamdan ilgili proxy `.zip` dosyası olarak dışa aktarılır. [API Proxy Dışa Aktar](/api-reference/api-proxies/crud/export-api-proxy)
+
+**Import:**  
+İndirilen `.zip` dosyası ve gerekli metadata dosyası hedef ortama `PUT` metodu ile gönderilir. [API Proxy İçe Aktar](/api-reference/api-proxies/crud/import-api-proxy-and-override)
+
+---
+
+## 3. Pipeline Scripti (Groovy)
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Sync DEMO → QA') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'APINIZER_DEMO_TOKEN', variable: 'DEMO_TOKEN'),
+                    string(credentialsId: 'APINIZER_QA_TOKEN',   variable: 'QA_TOKEN')
+                ]) {
+                    script {
+                        // 1. Kaynak ortamdaki proxy listesini çek
+                        sh 'curl -sf -H "Authorization: Bearer $DEMO_TOKEN" https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/ -o demo.json'
+                        
+                        def demo = readJSON file: 'demo.json'
+                        def demoList = demo?.resultList ?: []
+
+                        // 2. Her bir proxy'yi tek tek taşı
+                        demoList.each { proxy ->
+                            def proxyName = proxy.name
+                            def encodedName = java.net.URLEncoder.encode(proxyName, "UTF-8").replace("+", "%20")
+                            echo "--- Aktarılıyor: ${proxyName} ---"
+
+                            sh """
+                                set -e
+                                # Kaynak ortamdan export al
+                                curl -s -H "Authorization: Bearer \$DEMO_TOKEN" "https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/${encodedName}/export/" -o "export_tmp.zip"
+                                
+                                # Import için gerekli boş metadata dosyasını oluştur
+                                echo '{}' > metadata.json
+                                
+                                # Hedef ortama import et
+                                curl -s -X PUT -H "Authorization: Bearer \$QA_TOKEN" \
+                                     -F "apiProxyExportFile=@export_tmp.zip" \
+                                     -F "metadata=@metadata.json;type=application/json" \
+                                     "https://qa.apinizer.com/apiops/projects/prod-cid/apiProxies/${encodedName}/import/" \
+                                     -o import_response.json
+                                
+                                cat import_response.json
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## 4. Dikkat Edilmesi Gerekenler
+
+**Hata Yönetimi:**  
+`set -e` komutu sayesinde export veya import adımlarından biri başarısız olursa pipeline çalışmayı durdurur ve hatalı durumu bildirir.
+
+**Metadata:**  
+Import sırasında kullanılan `metadata.json`, varsayılan konfigürasyonlarla aktarımı sağlar. Özel konfigürasyonlar (örneğin farklı endpoint adresleri) bu dosya üzerinden yönetilebilir.

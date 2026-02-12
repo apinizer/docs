@@ -1,0 +1,121 @@
+---
+title: "API Proxy Synchronization Between Environments with Jenkins"
+description: "Explains how to automatically transfer API Proxies from one environment (DEMO) to another (QA) using Jenkins Pipeline (CI/CD) on Apinizer."
+---
+
+# API Proxy Synchronization Between Environments with Jenkins
+
+This document explains how to automatically transfer API Proxies from one environment (for example DEMO) to another (for example QA) using CI/CD. The prepared Jenkins Pipeline uses API Manager APIs to retrieve the Proxy list, package them, and deploy them to the target environment.
+
+## 1. Prerequisites and Requirements
+
+Ensure that the following requirements are met for the pipeline to run smoothly:
+
+**Jenkins Plugins:**  
+The **Pipeline Utility Steps** plugin must be installed in order to process JSON data.
+
+**Credentials:**  
+API Tokens must be defined in Jenkins as **Secret Text** for both environments:
+
+To view your token in Apinizer, click on the profile icon in the top right corner and navigate to:  
+My Profile → Personal API Access Tokens
+
+- `APINIZER_DEMO_TOKEN` → Source environment access token  
+- `APINIZER_QA_TOKEN` → Target environment access token  
+
+**Connectivity:**  
+The Jenkins server must have network access to both source and target Apinizer URLs.
+
+---
+
+## 2. Pipeline Step Explanation
+
+The pipeline consists of a single main stage (**Sync DEMO → QA**) and works as follows:
+
+### A. Authentication and Variable Definition
+
+The `withCredentials` block securely retrieves the tokens stored in Jenkins and assigns them to temporary variables. This ensures that sensitive information does not appear in logs.
+
+### B. Retrieving the Existing Proxy List
+
+The first `curl` command retrieves all API Proxies from the source project (`test-cid`) in JSON format (`demo.json`).  
+[API Listing](/api-reference/api-proxies/crud/list-api-proxies)
+
+### C. JSON Parsing and Loop
+
+The downloaded file is read using the `readJSON` command. A loop is started for each proxy inside `resultList`. Proxy names are encoded in UTF-8 format (URL Encoding) to ensure URL compatibility.
+
+### D. Export and Import Process
+
+For each proxy inside the loop, the following two operations are executed sequentially:
+
+**Export:**  
+The relevant proxy is exported from the source environment as a `.zip` file.  
+[Export API Proxy](/api-reference/api-proxies/crud/export-api-proxy)
+
+**Import:**  
+The downloaded `.zip` file and the required metadata file are sent to the target environment using the `PUT` method.  
+[Import API Proxy](/api-reference/api-proxies/crud/import-api-proxy-and-override)
+
+---
+
+## 3. Pipeline Script (Groovy)
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Sync DEMO → QA') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'APINIZER_DEMO_TOKEN', variable: 'DEMO_TOKEN'),
+                    string(credentialsId: 'APINIZER_QA_TOKEN',   variable: 'QA_TOKEN')
+                ]) {
+                    script {
+                        // 1. Retrieve proxy list from source environment
+                        sh 'curl -sf -H "Authorization: Bearer $DEMO_TOKEN" https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/ -o demo.json'
+                        
+                        def demo = readJSON file: 'demo.json'
+                        def demoList = demo?.resultList ?: []
+
+                        // 2. Transfer each proxy one by one
+                        demoList.each { proxy ->
+                            def proxyName = proxy.name
+                            def encodedName = java.net.URLEncoder.encode(proxyName, "UTF-8").replace("+", "%20")
+                            echo "--- Transferring: ${proxyName} ---"
+
+                            sh """
+                                set -e
+                                # Export from source environment
+                                curl -s -H "Authorization: Bearer \$DEMO_TOKEN" "https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/${encodedName}/export/" -o "export_tmp.zip"
+                                
+                                # Create empty metadata file for import
+                                echo '{}' > metadata.json
+                                
+                                # Import to target environment
+                                curl -s -X PUT -H "Authorization: Bearer \$QA_TOKEN" \
+                                     -F "apiProxyExportFile=@export_tmp.zip" \
+                                     -F "metadata=@metadata.json;type=application/json" \
+                                     "https://qa.apinizer.com/apiops/projects/prod-cid/apiProxies/${encodedName}/import/" \
+                                     -o import_response.json
+                                
+                                cat import_response.json
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## 4. Important Notes
+
+**Error Handling:**  
+Thanks to the `set -e` command, if either the export or import step fails, the pipeline execution will stop and report the error.
+
+**Metadata:**  
+The `metadata.json` file used during import applies default configurations. Custom configurations (such as different endpoint addresses) can be managed through this file.
