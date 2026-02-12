@@ -1,0 +1,405 @@
+---
+title: "Apinizer CI/CD Integration with GitHub Actions and Jenkins"
+description: "Automatically deploy your APIs to Apinizer using GitHub Actions and Jenkins"
+---
+
+## Overview
+
+This guide demonstrates how to automatically deploy your APIs to Apinizer using a modern CI/CD pipeline. The example scenario covers Docker image creation with GitHub Actions, Kubernetes deployment with Jenkins, and Apinizer proxy management.
+
+### Pipeline Flow
+
+```
+GitHub Push → GitHub Actions (Build & Tag) → Jenkins Trigger → 
+Kubernetes Deploy → Health Check → Apinizer Proxy Sync → Apinizer Deploy
+```
+
+## Architecture Overview
+
+This integration scenario uses the following components:
+
+- **GitHub Actions**: Docker image build and versioning
+- **Jenkins**: Orchestration and deployment management
+- **Kubernetes**: Container orchestration
+- **Apinizer**: API Gateway and API Proxy management
+
+## 1. GitHub Actions Workflow
+
+GitHub Actions automatically performs the following on each push to the main branch:
+- Creates a new semantic version
+- Builds Docker image and pushes to Docker Hub
+- Triggers the Jenkins pipeline
+
+### Workflow File
+
+Create `.github/workflows/docker-build-push.yml` file:
+
+```yaml
+name: Docker Build & Push
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '0'
+      
+      # Automatic version creation
+      - name: Bump version and push tag
+        id: tag_version
+        uses: anothrNick/github-tag-action@1.64.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      # Docker build and push
+      - name: Build and Push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/health-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/health-api:${{ steps.tag_version.outputs.new_tag }}
+      
+      # Jenkins trigger
+      - name: Trigger Jenkins Pipeline
+        run: |
+          curl -X POST ${{ secrets.JENKINS_URL }}/job/${{ secrets.JENKINS_JOB_NAME }}/buildWithParameters \
+            --user ${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }} \
+            --data IMAGE_TAG=${{ steps.tag_version.outputs.new_tag }}
+```
+
+### GitHub Secrets Configuration
+
+Add the following secrets from Repository Settings > Secrets and Variables > Actions:
+
+- `DOCKERHUB_USERNAME`: Your Docker Hub username
+- `DOCKERHUB_TOKEN`: Docker Hub access token
+- `JENKINS_URL`: Your Jenkins instance URL
+- `JENKINS_JOB_NAME`: Jenkins job name
+- `JENKINS_USER`: Jenkins username
+- `JENKINS_TOKEN`: Jenkins API token
+
+## 2. Jenkins Pipeline Configuration
+
+The Jenkins pipeline performs the following stages:
+
+1. **K8s Deploy**: Deploys the new Docker image to Kubernetes
+2. **Health Check**: Verifies the API is running healthy
+3. **Sync Apinizer Proxy**: Updates or creates the API Proxy
+4. **Deploy to Apinizer**: Deploys the proxy to the specified environment
+
+### Jenkinsfile
+
+```groovy
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'IMAGE_TAG', defaultValue: 'latest', description: 'Docker image tag from GitHub Actions')
+    }
+    
+    environment {
+        // Kubernetes configuration
+        NAMESPACE = "<your-namespace>" 
+        DEPLOYMENT_NAME = "<your-deployment-name>"
+        CONTAINER_NAME = "<your-container-name>" 
+        DOCKER_IMAGE = "<dockerhub-username>/<image-name>"
+        KUBECTL_PATH = "/usr/local/bin/kubectl"
+        
+        // API information
+        API_BACKEND_URL = "<backend-url>"
+        API_HEALTH_ENDPOINT = "${API_BACKEND_URL}/health"
+        API_SPEC_URL = "${API_BACKEND_URL}/api/v1/openapi.json"
+        
+        // Apinizer configuration
+        APINIZER_BASE_URL = "<apinizer-url>"
+        APINIZER_GATEWAY_URL = "<apinizer-gateway-url>"
+        APINIZER_PROJECT = "<project-name>"
+        APINIZER_ENVIRONMENT = "<environment-name>"
+        APINIZER_PROXY_NAME = "<proxy-name>"
+        APINIZER_PROXY_PATH = "<proxy-relative-path>"
+    }
+    
+    stages {
+        stage('K8s Deploy') {
+            steps {
+                echo "Deploying ${DOCKER_IMAGE}:${params.IMAGE_TAG} to K8s..."
+                sh """
+                    ${KUBECTL_PATH} set image deployment/${DEPLOYMENT_NAME} \
+                        ${CONTAINER_NAME}=${DOCKER_IMAGE}:${params.IMAGE_TAG} \
+                        -n ${NAMESPACE}
+                    
+                    ${KUBECTL_PATH} rollout status deployment/${DEPLOYMENT_NAME} -n ${NAMESPACE}
+                """
+            }
+        }
+        
+        stage('Health Check') {
+            steps {
+                echo "Checking API health at ${API_HEALTH_ENDPOINT}..."
+                sh """
+                    sleep 10
+                    curl -f ${API_HEALTH_ENDPOINT}
+                """
+            }
+        }
+        
+        stage('Sync Apinizer Proxy') {
+            steps {
+                withCredentials([string(credentialsId: 'APINIZER_TOKEN', variable: 'TOKEN')]) {
+                    script {
+                        echo "Checking if proxy exists..."
+                        
+                        def proxyCheckCode = sh(
+                            script: """
+                                curl -s -o /dev/null -w '%{http_code}' \
+                                    -H 'Authorization: Bearer ${TOKEN}' \
+                                    '${APINIZER_BASE_URL}/apiops/projects/${APINIZER_PROJECT}/apiProxies/${APINIZER_PROXY_NAME}/'
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        
+                        echo "Proxy check returned: ${proxyCheckCode}"
+                        def proxyExists = (proxyCheckCode == '200')
+                        
+                        if (proxyExists) {
+                            echo "Proxy exists, updating spec..."
+                            sh """
+                                curl -X PUT \
+                                    '${APINIZER_BASE_URL}/apiops/projects/${APINIZER_PROJECT}/apiProxies/url/' \
+                                    -H 'Authorization: Bearer ${TOKEN}' \
+                                    -H 'Content-Type: application/json' \
+                                    -d '{
+                                        "apiProxyName": "${APINIZER_PROXY_NAME}",
+                                        "apiProxyCreationType": "OPEN_API",
+                                        "specUrl": "${API_SPEC_URL}",
+                                        "clientRoute": {
+                                            "relativePathList": ["${APINIZER_PROXY_PATH}"]
+                                        },
+                                        "reParse": true,
+                                        "deploy": false
+                                    }'
+                            """
+                        } else {
+                            echo "Proxy doesn't exist, creating..."
+                            sh """
+                                curl -X POST \
+                                    '${APINIZER_BASE_URL}/apiops/projects/${APINIZER_PROJECT}/apiProxies/url/' \
+                                    -H 'Authorization: Bearer ${TOKEN}' \
+                                    -H 'Content-Type: application/json' \
+                                    -d '{
+                                        "apiProxyName": "${APINIZER_PROXY_NAME}",
+                                        "apiProxyDescription": "Auto-generated proxy for Health API",
+                                        "apiProxyCreationType": "OPEN_API",
+                                        "specUrl": "${API_SPEC_URL}",
+                                        "clientRoute": {
+                                            "relativePathList": ["${APINIZER_PROXY_PATH}"]
+                                        },
+                                        "routingInfo": {
+                                            "routingAddressList": [
+                                                {
+                                                    "address": "${API_BACKEND_URL}",
+                                                    "weight": 100
+                                                }
+                                            ]
+                                        },
+                                        "deploy": false,
+                                        "reParse": false
+                                    }'
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy to Apinizer') {
+            steps {
+                withCredentials([string(credentialsId: 'APINIZER_TOKEN', variable: 'TOKEN')]) {
+                    echo "Deploying proxy to Apinizer ${APINIZER_ENVIRONMENT}..."
+                    sh """
+                        curl -X POST \
+                            '${APINIZER_BASE_URL}/apiops/projects/${APINIZER_PROJECT}/apiProxies/${APINIZER_PROXY_NAME}/environments/${APINIZER_ENVIRONMENT}/' \
+                            -H 'Authorization: Bearer ${TOKEN}'
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "✅ Pipeline completed! API deployed to K8s and Apinizer successfully."
+        }
+        failure {
+            echo "❌ Pipeline failed! Check logs above."
+        }
+    }
+}
+```
+
+### Jenkins Credentials Configuration
+
+Add the following credential from Jenkins Manage Jenkins > Credentials:
+
+- `APINIZER_TOKEN`: Apinizer API token (Secret text)
+
+<Info>
+For detailed information on creating an Apinizer API token, see the [Token Acquisition Methods](/en/develop/policies/token-service/token-acquisition-methods) documentation.
+</Info>
+
+## 3. Pipeline Stage Details
+
+### Stage 1: Kubernetes Deployment
+
+In this stage, the Docker image created by GitHub Actions is deployed to the Kubernetes cluster. The deployment is updated using the `kubectl set image` command and the rollout status is monitored.
+
+```bash
+${KUBECTL_PATH} set image deployment/${DEPLOYMENT_NAME} \
+    ${CONTAINER_NAME}=${DOCKER_IMAGE}:${params.IMAGE_TAG} \
+    -n ${NAMESPACE}
+
+${KUBECTL_PATH} rollout status deployment/${DEPLOYMENT_NAME} -n ${NAMESPACE}
+```
+
+### Stage 2: Health Check
+
+The health endpoint is checked to verify the API has been successfully deployed. This step is critical to ensure the API is running before deploying to Apinizer.
+
+### Stage 3: Apinizer Proxy Synchronization
+
+In this critical stage:
+
+1. **Proxy Check**: Verifies whether the API Proxy exists
+2. **Update or Create**: 
+   - If proxy exists: Updates the OpenAPI spec (`PUT` request)
+   - If proxy doesn't exist: Creates a new proxy (`POST` request)
+
+#### Proxy Update (PUT)
+
+When updating an existing proxy, the OpenAPI specification is re-parsed with the `reParse: true` parameter:
+
+```json
+{
+  "apiProxyName": "health-api-proxy",
+  "apiProxyCreationType": "OPEN_API",
+  "specUrl": "<backend-url>/api/v1/openapi.json",
+  "clientRoute": {
+    "relativePathList": ["/health-api"]
+  },
+  "reParse": true,
+  "deploy": false
+}
+```
+
+<Info>
+For detailed information, see the [Update API Proxy](/api-reference/api-proxies/crud/update-api-proxy) API reference.
+</Info>
+
+#### Create New Proxy (POST)
+
+When creating a new proxy, backend routing information is also defined:
+
+```json
+{
+  "apiProxyName": "health-api-proxy",
+  "apiProxyDescription": "Auto-generated proxy for Health API",
+  "apiProxyCreationType": "OPEN_API",
+  "specUrl": "<backend-url>/api/v1/openapi.json",
+  "clientRoute": {
+    "relativePathList": ["/health-api"]
+  },
+  "routingInfo": {
+    "routingAddressList": [
+      {
+        "address": "<backend-url>",
+        "weight": 100
+      }
+    ]
+  },
+  "deploy": false
+}
+```
+
+<Info>
+For detailed information, see the [Create API Proxy from URL](/api-reference/api-proxies/crud/create-api-proxy-from-url) API reference.
+</Info>
+
+<Warning>
+With the `deploy: false` parameter, the proxy is not automatically deployed. This ensures controlled deployment in the next stage.
+</Warning>
+
+### Stage 4: Deploy to Apinizer Environment
+
+In the final stage, the updated or newly created proxy is deployed to the specified environment. This is done using Apinizer's deployment API:
+
+```bash
+POST /apiops/projects/{projectName}/apiProxies/{proxyName}/environments/{environmentName}/
+```
+
+<Info>
+For detailed information, see the [Deploy API Proxy](/api-reference/api-proxies/deployment/deploy-api-proxy) API reference.
+</Info>
+
+## Configuration Parameters
+
+### Environment Variables
+
+Key environment variables used in the pipeline:
+
+| Variable | Description | Example Value |
+|----------|-------------|---------------|
+| `APINIZER_BASE_URL` | Apinizer platform URL | `https://your-apinizer-instance.com` |
+| `APINIZER_PROJECT` | Apinizer project name | `your-project-name` |
+| `APINIZER_ENVIRONMENT` | Target deployment environment | `dev` / `test` / `prod` |
+| `APINIZER_PROXY_NAME` | API Proxy name | `your-api-proxy` |
+| `APINIZER_PROXY_PATH` | Relative path in gateway | `/your-api-path` |
+| `API_SPEC_URL` | OpenAPI specification URL | `https://api.example.com/openapi.json` |
+
+### Apinizer API Endpoints
+
+Apinizer API endpoints used in this pipeline:
+
+- **Proxy Check**: `GET /apiops/projects/{project}/apiProxies/{proxyName}/`
+- **Proxy Update**: `PUT /apiops/projects/{project}/apiProxies/url/`
+- **Proxy Create**: `POST /apiops/projects/{project}/apiProxies/url/`
+- **Environment Deploy**: `POST /apiops/projects/{project}/apiProxies/{proxyName}/environments/{env}/`
+
+<Info>
+For detailed information on Apinizer Management API, see the [API Overview](/api-reference/getting-started/overview) documentation.
+</Info>
+
+## Adapting to Your Pipeline
+
+This example scenario is designed for an API running on Kubernetes. To adapt to your infrastructure:
+
+1. **Deployment Mechanism**: If you're using a different orchestrator or direct VM deployment instead of Kubernetes, modify the `K8s Deploy` stage according to your deployment method.
+
+2. **Health Check**: If your API has a different health check mechanism, update the relevant endpoint and verification method.
+
+3. **OpenAPI Spec**: Ensure your API's OpenAPI specification is available at an accessible URL. This URL must be reachable by Apinizer.
+
+4. **Environment**: Specify the environment you want to use in Apinizer (`dev`, `test`, `prod`, etc.) in the configuration.
+
+5. **Security**: In production environments, securely store all credentials in Jenkins Credentials Manager and never hardcode them in the pipeline.
+
+## Conclusion
+
+This guide demonstrates how to set up a fully automated CI/CD pipeline using GitHub Actions, Jenkins, and Apinizer. Each code change is automatically built, tested, and deployed to Apinizer. This approach speeds up your deployment process by minimizing manual operations and reducing the likelihood of errors.
