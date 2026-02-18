@@ -1,94 +1,169 @@
 ---
 title: "Jenkins ile Ortamlar Arası API Proxy Senkronizasyonu"
-description: "Bu döküman, Apinizer üzerinde bulunan API Proxy’lerin bir ortamdan (örneğin DEMO) diğerine (örneğin QA) otomatik olarak nasıl taşınacağını (CI/CD) açıklamaktadır. Hazırlanan Jenkins Pipeline’ı, API Manager API’lerini kullanarak Proxy listesini alır, paketler ve hedef ortama aktarır."
+description: "Bu doküman, **TEST** ortamındaki API Proxy’lerin **PROD** ortamına CI/CD kullanılarak otomatik şekilde aktarılmasını açıklar.  
+              Hazırlanan Jenkins Pipeline, API Manager API’lerini kullanarak proxy listesini çeker, export eder ve hedef ortama import işlemini gerçekleştirir."
 ---
 
-## 1. Ön Hazırlık ve Gereksinimler
+# 1. Desteklenen Sistem ve Gereksinimler
 
-Pipeline'ın sorunsuz çalışması için aşağıdaki gereksinimlerin karşılandığından emin olunmalıdır:
+## İşletim Sistemi Uyumluluğu
 
-**Jenkins Eklentileri:**  
-JSON verilerini işleyebilmek için **Pipeline Utility Steps** eklentisi kurulu olmalıdır.
+Bu doküman ve pipeline scripti aşağıdaki sistemler için hazırlanmıştır:
 
-**Kimlik Bilgileri (Credentials):**  
-Jenkins üzerinde her iki ortam için de **Secret Text** tipinde API Token'lar tanımlanmalıdır:
+- Linux tabanlı Jenkins agent’ları (Önerilir)
+  - :contentReference[oaicite:0]{index=0} 20.04+
+  - :contentReference[oaicite:1]{index=1} 7+
+- Shell: `bash`
+- `curl` yüklü olmalıdır
 
-Apinizer'da tokenınızı görmek için sağ üstte bulunan profil simgesine tıklanır açılan pencereden: Profilim -> Kişisel API Erişim Token'ları
-
-- `APINIZER_DEMO_TOKEN` → Kaynak ortamın erişim anahtarı  
-- `APINIZER_QA_TOKEN` → Hedef ortamın erişim anahtarı  
-
-**Bağlantı:**  
-Jenkins sunucusunun kaynak ve hedef Apinizer URL'lerine erişimi olmalıdır.
+> ⚠️ Jenkins Windows agent üzerinde çalışıyorsa `sh` yerine `bat` kullanılmalı ve `curl` PATH içinde bulunmalıdır.
 
 ---
 
-## 2. Pipeline Adımlarının Açıklaması
+## Jenkins Versiyonu
 
-Pipeline tek bir ana aşamadan (**Sync DEMO → QA**) oluşur ve şu mantıkla çalışır:
+Test edilen versiyon:
 
-### A. Kimlik Doğrulama ve Değişken Tanımlama
-
-`withCredentials` bloğu ile Jenkins'te saklanan token'lar güvenli bir şekilde çekilir ve geçici değişkenlere atanır. Bu sayede hassas veriler loglarda görünmez.
-
-### B. Mevcut Proxy Listesinin Alınması
-
-İlk `curl` komutu ile kaynak projedeki (`test-cid`) tüm API Proxy'lerin listesi JSON formatında (`demo.json`) indirilir. [API Listeleme](/api-reference/api-proxies/crud/list-api-proxies)
-
-### C. JSON Ayrıştırma ve Döngü
-
-`readJSON` komutu ile indirilen dosya okunur. `resultList` içerisindeki her bir proxy için bir döngü başlatılır. Proxy isimleri, URL uyumluluğu için UTF-8 formatında kodlanır (URL Encoding).
-
-### D. Export ve Import Süreci
-
-Döngü içerisinde her bir proxy için şu iki işlem sırayla yapılır:
-
-**Export:**  
-Kaynak ortamdan ilgili proxy `.zip` dosyası olarak dışa aktarılır. [API Proxy Dışa Aktar](/api-reference/api-proxies/crud/export-api-proxy)
-
-**Import:**  
-İndirilen `.zip` dosyası ve gerekli metadata dosyası hedef ortama `PUT` metodu ile gönderilir. [API Proxy İçe Aktar](/api-reference/api-proxies/crud/import-api-proxy-and-override)
+- :contentReference[oaicite:2]{index=2} 2.401.x ve üzeri
 
 ---
 
-## 3. Pipeline Scripti (Groovy)
+## Gerekli Jenkins Eklentileri ve Versiyonları
+
+Aşağıdaki eklentiler kurulu olmalıdır:
+
+- Pipeline (2.6+)
+- Pipeline Utility Steps (2.15.0+)
+- Credentials Binding Plugin (1.27+)
+
+Kontrol etmek için:
+
+Manage Jenkins → Plugin Manager → Installed Plugins
+
+---
+
+## Gerekli Harici Araçlar
+
+- curl 7.68+
+- Java 11 (Jenkins runtime için önerilir)
+
+---
+
+# 2. Credential (Token) Tanımlama
+
+API Token’lar Jenkins içerisinde **Secret Text** olarak tanımlanmalıdır.
+
+Eklemek için:
+
+Manage Jenkins → Credentials → (Global) → Add Credentials  
+Kind: Secret Text
+
+Oluşturulması gereken credential’lar:
+
+- `APINIZER_TEST_TOKEN` → Kaynak ortam token’ı  
+- `APINIZER_PROD_TOKEN` → Hedef ortam token’ı  
+
+Apinizer üzerinde token almak için:
+
+Sağ üst profil ikonu → Profile → Personal API Access Tokens
+
+---
+
+# 3. Script Nereye Yazılır?
+
+Bu script bir **Jenkins Pipeline Job** içerisine eklenmelidir.
+
+İki yöntem vardır:
+
+## Seçenek A — Jenkins Arayüzünden
+
+1. New Item  
+2. Pipeline seç  
+3. Pipeline bölümüne git  
+4. “Pipeline script” seç  
+5. Groovy kodunu yapıştır
+
+---
+
+# 4. Pipeline Çalışma Mantığı
+
+Pipeline tek bir ana stage içerir:
+
+## Sync TEST → PROD
+
+### A. Kimlik Doğrulama
+
+`withCredentials` bloğu token’ları güvenli şekilde yükler:
+
+- `$TEST_TOKEN`
+- `$PROD_TOKEN`
+
+Log’larda maskelenir.
+
+---
+
+### B. TEST Ortamından Proxy Listesini Çekme
+
+TEST projesindeki (`test-cid`) tüm proxy’ler JSON formatında alınır.
+
+Export API dokümanı:  
+https://docs.apinizer.com/api-reference/api-proxies/crud/export-api-proxy  
+
+---
+
+### C. Export İşlemi
+
+Her proxy TEST ortamından `.zip` olarak export edilir.
+
+---
+
+### D. Import İşlemi (PROD)
+
+Export edilen `.zip` ve `metadata.json` dosyası HTTP PUT metodu ile PROD ortamına gönderilir.
+
+Import API dokümanı:  
+https://docs.apinizer.com/api-reference/api-proxies/crud/import-api-proxy  
+
+---
+
+# 5. Pipeline Scripti (Groovy)
 
 ```groovy
 pipeline {
     agent any
     stages {
-        stage('Sync DEMO → QA') {
+        stage('Sync TEST → PROD') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'APINIZER_DEMO_TOKEN', variable: 'DEMO_TOKEN'),
-                    string(credentialsId: 'APINIZER_QA_TOKEN',   variable: 'QA_TOKEN')
+                    string(credentialsId: 'APINIZER_TEST_TOKEN', variable: 'TEST_TOKEN'),
+                    string(credentialsId: 'APINIZER_PROD_TOKEN', variable: 'PROD_TOKEN')
                 ]) {
                     script {
-                        // 1. Kaynak ortamdaki proxy listesini çek
-                        sh 'curl -sf -H "Authorization: Bearer $DEMO_TOKEN" https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/ -o demo.json'
-                        
-                        def demo = readJSON file: 'demo.json'
-                        def demoList = demo?.resultList ?: []
 
-                        // 2. Her bir proxy'yi tek tek taşı
-                        demoList.each { proxy ->
+                        sh 'curl -sf -H "Authorization: Bearer $TEST_TOKEN" https://test.apinizer.com/apiops/projects/test-cid/apiProxies/ -o test.json'
+                        
+                        def test = readJSON file: 'test.json'
+                        def testList = test?.resultList ?: []
+
+                        testList.each { proxy ->
                             def proxyName = proxy.name
                             def encodedName = java.net.URLEncoder.encode(proxyName, "UTF-8").replace("+", "%20")
                             echo "--- Aktarılıyor: ${proxyName} ---"
 
                             sh """
                                 set -e
-                                # Kaynak ortamdan export al
-                                curl -s -H "Authorization: Bearer \$DEMO_TOKEN" "https://demo.apinizer.com/apiops/projects/test-cid/apiProxies/${encodedName}/export/" -o "export_tmp.zip"
                                 
-                                # Import için gerekli boş metadata dosyasını oluştur
+                                curl -s -H "Authorization: Bearer \$TEST_TOKEN" \
+                                "https://test.apinizer.com/apiops/projects/test-cid/apiProxies/${encodedName}/export/" \
+                                -o "export_tmp.zip"
+                                
                                 echo '{}' > metadata.json
                                 
-                                # Hedef ortama import et
-                                curl -s -X PUT -H "Authorization: Bearer \$QA_TOKEN" \
+                                curl -s -X PUT \
+                                     -H "Authorization: Bearer \$PROD_TOKEN" \
                                      -F "apiProxyExportFile=@export_tmp.zip" \
                                      -F "metadata=@metadata.json;type=application/json" \
-                                     "https://qa.apinizer.com/apiops/projects/prod-cid/apiProxies/${encodedName}/import/" \
+                                     "https://prod.apinizer.com/apiops/projects/prod-cid/apiProxies/${encodedName}/import/" \
                                      -o import_response.json
                                 
                                 cat import_response.json
@@ -104,10 +179,60 @@ pipeline {
 
 ---
 
-## 4. Dikkat Edilmesi Gerekenler
+# 6. Hata Yönetimi ve Bildirim Mekanizması
 
-**Hata Yönetimi:**  
-`set -e` komutu sayesinde export veya import adımlarından biri başarısız olursa pipeline çalışmayı durdurur ve hatalı durumu bildirir.
+## Hata Durumu
 
-**Metadata:**  
-Import sırasında kullanılan `metadata.json`, varsayılan konfigürasyonlarla aktarımı sağlar. Özel konfigürasyonlar (örneğin farklı endpoint adresleri) bu dosya üzerinden yönetilebilir.
+`set -e` sayesinde:
+
+- Export başarısız olursa
+- Import başarısız olursa
+- curl hata kodu dönerse
+
+Pipeline otomatik olarak durur ve build durumu:
+
+FAILED
+
+olarak işaretlenir.
+
+---
+
+## Hatalı Durum Kime Bildirilir?
+
+Varsayılan olarak Jenkins sadece build’i FAILED yapar.
+
+Bildirim için aşağıdaki entegrasyonlardan biri yapılandırılmalıdır:
+
+- Email Notification
+- Slack
+- Microsoft Teams Webhook
+- Jira
+
+Önerilen yapı:
+
+```
+post {
+    failure {
+        mail to: 'devops-team@company.com',
+             subject: "TEST → PROD Senkronizasyon Hatası",
+             body: "Detaylar için Jenkins loglarını kontrol ediniz."
+    }
+}
+```
+
+Bu yapı sayesinde DevOps veya API ekibi otomatik olarak bilgilendirilir.
+
+---
+
+# 7. Önemli Notlar
+
+- metadata.json şu anda `{}` (varsayılan) olarak kullanılmaktadır
+- Ortamlar arası endpoint farklılıkları metadata ile yönetilebilir
+- test-cid ve prod-cid proje ID’lerinin doğru olduğundan emin olun
+- PROD senkronizasyonu aktif edilmeden önce test ortamında doğrulama yapılmalıdır
+
+---
+
+**Doküman Versiyonu:** 1.1  
+**Kapsam:** TEST → PROD API Proxy Senkronizasyonu  
+**Amaç:** CI/CD Otomasyonu
