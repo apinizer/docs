@@ -1,0 +1,185 @@
+---
+title: "JSON Body Zenginleştirme"
+description: "İstek body, header, query parametresi ve bağlam değerlerini bir araya getirerek çoklu kaynak ve ara değişkenlerle zenginleştirilmiş bir JSON çıktısı oluşturabilirsiniz."
+---
+
+## Senaryo
+
+Bir evcil hayvan yönetim API'sine gelen istek body'si aşağıdaki yapıdadır:
+
+```json
+{
+  "id": 1,
+  "category": { "id": 10, "name": "Köpekler" },
+  "name": "Karabaş",
+  "photoUrls": ["foto1.jpg"],
+  "tags": [{ "id": 5, "name": "aşılı" }],
+  "status": "available"
+}
+```
+
+Hedef; istek header'ları, query parametresi, body alanları ve bağlam bilgilerini birleştirerek zenginleştirilmiş bir JSON mesajı oluşturmak ve bunu sonraki politikalar için özel bir değişkende saklamaktır. Ayrıca durum `available` ise iç içe geçmiş (`nested`) bir alan eklenecektir.
+
+---
+
+## Satır Yapılandırması
+
+Bu yapılandırma 6 satırdan oluşur. Satırlar sırasıyla çalışır; önceki satırda oluşturulan değişken sonraki satırlarda kullanılır.
+
+### Satır 1: Hayvan Adını Ara Değişkene Al
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | `#{body.$.name}` |
+| Hedef | Özel Değişken → `petName` |
+| Varsayılan Değer | `unknown` |
+
+### Satır 2: Kategori Etiketini Ara Değişkene Al
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | `#{body.$.category.name}` |
+| Hedef | Özel Değişken → `categoryLabel` |
+| Varsayılan Değer | _(boş)_ |
+
+### Satır 3: Durum Etiketini JEXL Ternary ile Üret
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | `#{body.$.status == 'available' ? 'SATIN_ALINABILIR' : body.$.status == 'pending' ? 'BEKLEMEDE' : 'SATILDI'}` |
+| Hedef | Özel Değişken → `statusLabel` |
+| Varsayılan Değer | _(boş)_ |
+
+### Satır 4: İç İçe Nesneyi Varsayılan Olarak `null` Yap
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | `null` |
+| Hedef | Özel Değişken → `nestedObject` |
+
+### Satır 5: Durum `available` İse İç İçe Nesneyi Doldur
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | `{"displayName":"#{petName} - #{categoryLabel}","statusLabel":"#{statusLabel}"}` |
+| Hedef | Özel Değişken → `nestedObject` |
+
+**Satır 5 Koşulu:**
+
+| Değişken | Operatör | Değer |
+|----------|----------|-------|
+| İstek Body → JSON Path `$.status` | Eşittir | `available` |
+
+### Satır 6: Tüm Kaynakları Birleştirerek Zenginleştirilmiş JSON Oluştur
+
+Şablon (tek satırda yazılır; okunabilirlik için aşağıda satırlara bölünmüştür):
+
+```
+{
+  "request": {
+    "headers": {
+      "contentType": "#{header.Content-Type}",
+      "xRequestId": "#{header.X-Request-Id}"
+    },
+    "query": {
+      "format": "#{query.format}"
+    },
+    "body": {
+      "id": #{body.$.id},
+      "name": "#{petName}",
+      "category": {
+        "id": #{body.$.category.id},
+        "name": "#{categoryLabel}",
+        "nested": #{nestedObject}
+      },
+      "photoUrls": #{body.$.photoUrls},
+      "tags": #{body.$.tags},
+      "status": "#{body.$.status}"
+    }
+  },
+  "context": {
+    "httpMethod": "#{context.request.httpMethod}",
+    "clientIp": "#{context.request.remoteAddress}",
+    "correlationId": "#{context.message.correlationId}",
+    "year": "#{context.system.year}",
+    "dateTime": "#{context.system.dateTime}",
+    "environment": "#{context.environment.name}"
+  },
+  "computed": {
+    "operationType": "#{context.request.httpMethod == 'POST' ? 'create' : context.request.httpMethod == 'PUT' ? 'update' : context.request.httpMethod == 'DELETE' ? 'delete' : 'read'}",
+    "summary": "#{petName} (#{categoryLabel}) - #{statusLabel}"
+  }
+}
+```
+
+| Alan | Değer |
+|------|-------|
+| Oluşturma Modu | Template |
+| Şablon | Yukarıdaki şablon (tek satır) |
+| Hedef | Özel Değişken → `enrichedPayload` |
+| Varsayılan Değer | `{}` |
+
+---
+
+## Beklenen Çıktı
+
+Örnek istek (`POST`, `Content-Type: application/json`, `X-Request-Id: req-001`, `?format=json`, `status=available`) için:
+
+```json
+{
+  "request": {
+    "headers": {
+      "contentType": "application/json",
+      "xRequestId": "req-001"
+    },
+    "query": {
+      "format": "json"
+    },
+    "body": {
+      "id": 1,
+      "name": "Karabaş",
+      "category": {
+        "id": 10,
+        "name": "Köpekler",
+        "nested": {"displayName":"Karabaş - Köpekler","statusLabel":"SATIN_ALINABILIR"}
+      },
+      "photoUrls": ["foto1.jpg"],
+      "tags": [{"id":5,"name":"aşılı"}],
+      "status": "available"
+    }
+  },
+  "context": {
+    "httpMethod": "POST",
+    "clientIp": "192.168.1.10",
+    "correlationId": "8260e8b4-29d7-479a-8266-5dbb29c0d0fa",
+    "year": "2026",
+    "dateTime": "2026-02-20T10:35:48.000Z",
+    "environment": "production"
+  },
+  "computed": {
+    "operationType": "create",
+    "summary": "Karabaş (Köpekler) - SATIN_ALINABILIR"
+  }
+}
+```
+
+---
+
+## Önemli Noktalar
+
+<Note>
+**Sayısal ve Dizi Alanlar:** `id`, `photoUrls`, `tags` gibi alanlar şablonda **tırnak içine alınmaz**; `"id": #{body.$.id}` ve `"photoUrls": #{body.$.photoUrls}` şeklinde yazılır. Aksi hâlde sayı dize, dizi ise dize olarak çıktıya yansır.
+</Note>
+
+<Note>
+**Ara Değişken Kullanımı:** `petName`, `categoryLabel`, `statusLabel` gibi ara değişkenler, hem koşul satırlarında hem de son şablonda yeniden kullanılabilir. Bu sayede tekrar eden JSONPath ifadelerinden kaçınılır ve bakım kolaylaşır.
+</Note>
+
+<Tip>
+**Koşullu İç İçe Eleman:** `nestedObject` değişkeni önce `null` ile başlatılır (Satır 4), ardından koşul sağlandığında gerçek JSON nesnesiyle güncellenir (Satır 5). Son şablonda `#{nestedObject}` tırnak içine alınmaz; değer doğrudan JSON'a gömülür.
+</Tip>
