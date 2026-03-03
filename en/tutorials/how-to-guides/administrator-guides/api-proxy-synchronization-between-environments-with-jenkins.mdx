@@ -1,0 +1,240 @@
+---
+title: "API Proxy Synchronization Between Environments with Jenkins"
+description: "This document explains how to automatically transfer API Proxies from **TEST** environment to **PROD** environment using CI/CD.  
+              The prepared Jenkins Pipeline uses API Manager APIs to retrieve the Proxy list, export them, and deploy them to the target environment."
+---
+
+# 1. Supported Environment and System Requirements
+
+## Operating System Compatibility
+
+This document and pipeline script are designed for:
+
+- **Linux-based Jenkins agents** (Recommended)
+    - Ubuntu 24.04
+    - CentOS 7+
+- Shell: `bash`
+- `curl` command must be installed
+
+> ⚠️ If Jenkins runs on Windows agents, the `sh` steps must be replaced with `bat` and curl must be available in PATH.
+
+---
+
+## Jenkins Version
+
+Tested with:
+
+- Jenkins `jenkins/jenkins:lts`
+
+---
+
+## Required Jenkins Plugins and Versions
+
+The following plugins must be installed:
+
+- **Pipeline** (2.6+)
+- **Pipeline Utility Steps** (2.15.0+)
+- **Credentials Binding Plugin** (1.27+)
+
+You can check plugin versions from:
+
+Manage Jenkins → Plugin Manager → Installed Plugins
+
+---
+
+## Required External Tools
+
+- `curl` 7.68+
+- Java 11 (recommended for Jenkins runtime)
+
+---
+
+# 2. Credential Configuration
+
+API Tokens must be defined in Jenkins as **Secret Text** credentials.
+
+To create credentials:
+
+Manage Jenkins → Credentials → (Global) → Add Credentials  
+Kind: Secret Text
+
+Create:
+
+- `APINIZER_TEST_TOKEN` → Source environment token  
+- `APINIZER_PROD_TOKEN` → Target environment token  
+
+To obtain your token in Apinizer:
+
+Profile Icon (top-right) → Profile → Personal API Access Tokens
+
+---
+
+# 3. Where to Write This Script?
+
+This script must be added inside a **Jenkins Pipeline Job**.
+
+There are two possible methods:
+
+## Option A — Pipeline Script (Classic UI)
+
+1. New Item  
+2. Select **Pipeline**  
+3. Scroll to Pipeline section  
+4. Choose **Pipeline script**
+5. Paste the Groovy script
+---
+
+# 4. Pipeline Step Explanation
+
+The pipeline contains one main stage:
+
+## Sync TEST → PROD
+
+### A. Authentication
+
+`withCredentials` securely loads tokens into environment variables:
+
+- `$TEST_TOKEN`
+- `$PROD_TOKEN`
+
+These are masked in logs automatically.
+
+---
+
+### B. Retrieve Proxy List (TEST)
+
+Proxy list is retrieved from TEST project (`test-cid`) as JSON.
+
+API Reference:  
+Export documentation:  
+https://docs.apinizer.com/api-reference/api-proxies/crud/export-api-proxy  
+
+---
+
+### C. Export Process
+
+Each proxy is exported as a `.zip` file from TEST.
+
+API Documentation:  
+https://docs.apinizer.com/api-reference/api-proxies/crud/export-api-proxy  
+
+---
+
+### D. Import Process (PROD)
+
+The exported `.zip` file and `metadata.json` are sent using HTTP PUT method.
+
+API Documentation:  
+https://docs.apinizer.com/api-reference/api-proxies/crud/import-api-proxy  
+
+---
+
+# 5. Pipeline Script (Groovy)
+
+```groovy
+pipeline {
+    agent any
+    stages {
+        stage('Sync TEST → PROD') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'APINIZER_TEST_TOKEN', variable: 'TEST_TOKEN'),
+                    string(credentialsId: 'APINIZER_PROD_TOKEN', variable: 'PROD_TOKEN')
+                ]) {
+                    script {
+
+                        sh 'curl -sf -H "Authorization: Bearer $TEST_TOKEN" https://test.apinizer.com/apiops/projects/test-cid/apiProxies/ -o test.json'
+                        
+                        def test = readJSON file: 'test.json'
+                        def testList = test?.resultList ?: []
+
+                        testList.each { proxy ->
+                            def proxyName = proxy.name
+                            def encodedName = java.net.URLEncoder.encode(proxyName, "UTF-8").replace("+", "%20")
+                            echo "--- Transferring: ${proxyName} ---"
+
+                            sh """
+                                set -e
+                                
+                                curl -s -H "Authorization: Bearer \$TEST_TOKEN" \
+                                "https://test.apinizer.com/apiops/projects/test-cid/apiProxies/${encodedName}/export/" \
+                                -o "export_tmp.zip"
+                                
+                                echo '{}' > metadata.json
+                                
+                                curl -s -X PUT \
+                                     -H "Authorization: Bearer \$PROD_TOKEN" \
+                                     -F "apiProxyExportFile=@export_tmp.zip" \
+                                     -F "metadata=@metadata.json;type=application/json" \
+                                     "https://prod.apinizer.com/apiops/projects/prod-cid/apiProxies/${encodedName}/import/" \
+                                     -o import_response.json
+                                
+                                cat import_response.json
+                            """
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+# 6. Error Handling and Notification
+
+## Pipeline Failure Behavior
+
+- `set -e` ensures the pipeline stops immediately if:
+  - Export fails
+  - Import fails
+  - curl returns non-zero exit code
+
+The build status becomes:
+
+FAILED
+
+---
+
+## Who Is Notified?
+
+By default, Jenkins only marks the build as failed.
+
+To notify responsible teams, one of the following should be configured:
+
+- Email Notification Plugin
+- Slack Notification Plugin
+- Microsoft Teams Webhook
+- Jira integration
+
+Recommended approach:
+
+Configure **Post Actions**:
+
+```
+post {
+    failure {
+        mail to: 'devops-team@company.com',
+             subject: "TEST → PROD Sync Failed",
+             body: "Please check Jenkins build logs."
+    }
+}
+```
+
+This ensures DevOps or API team is automatically informed.
+
+---
+
+# 7. Important Notes
+
+- Metadata file currently uses `{}` (default settings)
+- Custom environment-based configuration differences should be handled via metadata
+- Ensure project IDs (`test-cid`, `prod-cid`) are correct
+- Always test in non-production before enabling PROD sync
+
+---
+
+**Document Version:** 1.1  
+**Prepared For:** CI/CD Automation  
+**Scope:** TEST → PROD Proxy Synchronization
