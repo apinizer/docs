@@ -1,0 +1,374 @@
+---
+title: "JVM Garbage Collector Ayarlama"
+description: "Apinizer modüllerinin otomatik bellek yönetimi profillerini, GC seçeneklerini ve container ortamında güvenli heap yapılandırmasını açıklar."
+---
+
+## Otomatik Bellek Profili Sistemi
+
+Apinizer, tüm modüllerinde (Worker, Cache, Manager, Integration) container başlangıcında **otomatik bellek profili** sistemi kullanır. Bu sistem:
+
+1. Container'a ayrılan bellek miktarını cgroup üzerinden tespit eder
+2. Bellek miktarına göre uygun bir profil seçer
+3. Profil kapsamında GC algoritmasını ve heap yüzdesini otomatik belirler
+
+### Profil Seçim Tablosu
+
+| Profil | Container Bellek | GC Algoritması | Heap Yüzdesi | Stack Boyutu |
+|--------|-----------------|----------------|--------------|-------------|
+| **Low** (Düşük) | ≤ 768 MB | Serial GC | %50 | 512 KB |
+| **Medium** (Orta) | 769 – 1536 MB | G1GC | %60 | 512 KB |
+| **High** (Yüksek) | > 1536 MB | ZGC | %70 | Varsayılan |
+
+<Info>
+Profil seçimi container başlangıcında pod log'larına yazdırılır. Örnek:
+```
+Detected container memory: 4096MB
+JVM profile: HIGH MEMORY (ZGC, 70% heap, AlwaysPreTouch)
+```
+</Info>
+
+### Profil Seçim Öncelik Sırası
+
+Sistem, aşağıdaki sırayla karar verir:
+
+1. **`JVM_MEMORY_PROFILE` ortam değişkeni** — Ayarlanmışsa (`low`, `medium` veya `high`), doğrudan bu profil kullanılır
+2. **`JAVA_OPTS` içindeki GC/heap ayarları** — Kullanıcı `JAVA_OPTS`'da GC (`-XX:+UseG1GC` vb.) veya heap (`-XX:MaxRAMPercentage`, `-Xmx` vb.) belirtmişse, otomatik değerler geçersiz kılınır
+3. **Otomatik algılama** — Yukarıdakiler yoksa, container belleği cgroup'tan okunur ve profil tablosuna göre seçim yapılır
+
+## Garbage Collector Türleri
+
+Apinizer'ın kullandığı base image **Eclipse Temurin 25** olduğundan, aşağıdaki GC algoritmaları desteklenir:
+
+### Serial GC
+
+Tek thread'li, en basit GC algoritmasıdır. Küçük heap boyutlarında ek thread ve bellek yükü oluşturmaz.
+
+- **Ne zaman kullanılır**: ≤ 768 MB bellek, düşük trafikli ortamlar, test/geliştirme
+- **Avantaj**: Minimum CPU ve bellek overhead'i
+- **Dezavantaj**: GC sırasında uygulama tamamen durur (Stop-the-World)
+- **JVM parametresi**: `-XX:+UseSerialGC`
+
+### G1GC (Garbage-First)
+
+Region tabanlı, paralel ve eş zamanlı çalışabilen GC'dir. Heap'i eşit bölgelere ayırarak çöp toplama süresini tahmin edilebilir kılar.
+
+- **Ne zaman kullanılır**: 769 MB – 1536 MB bellek, orta trafikli ortamlar
+- **Avantaj**: Dengeli throughput ve düşük GC duraklaması
+- **Dezavantaj**: Serial GC'ye göre daha fazla CPU kullanır
+- **JVM parametreleri**: `-XX:+UseG1GC -XX:G1HeapRegionSize=1m`
+
+### ZGC (Z Garbage Collector)
+
+Düşük gecikmeli, ölçeklenebilir GC'dir. GC duraklamaları heap boyutundan bağımsız olarak genellikle 1 ms altındadır.
+
+- **Ne zaman kullanılır**: > 1536 MB bellek, yüksek trafikli production ortamları
+- **Avantaj**: Sabit ve çok düşük GC duraklaması (sub-millisecond), büyük heap'lerde mükemmel performans
+- **Dezavantaj**: Colored pointer ve multi-mapping nedeniyle daha fazla native bellek tüketir (~%15-20 ek yük)
+- **JVM parametreleri**: `-XX:+UseZGC -XX:+AlwaysPreTouch`
+
+### Karşılaştırma Tablosu
+
+| Özellik | Serial GC | G1GC | ZGC |
+|---------|-----------|------|-----|
+| **GC Duraklaması** | Yüksek (heap ile orantılı) | Orta (tahmin edilebilir) | Çok düşük (< 1 ms) |
+| **Throughput** | Küçük heap'te iyi | Dengeli | Büyük heap'te iyi |
+| **Bellek Overhead** | Minimum | Orta | Yüksek (~%15-20 ek) |
+| **CPU Kullanımı** | Tek core | Multi-core | Multi-core |
+| **Uygun Heap Aralığı** | < 512 MB | 512 MB – 4 GB | > 1 GB |
+| **Apinizer Profil** | Low (≤ 768 MB) | Medium (769-1536 MB) | High (> 1536 MB) |
+
+## ZGC Güvenlik Sınırı
+
+### Sorun
+
+ZGC, colored pointer ve multi-mapping mekanizmaları nedeniyle diğer GC'lere kıyasla önemli ölçüde daha fazla **native bellek** (heap dışı bellek) kullanır. Mevcut kurulumlardan upgrade yapıldığında, eski `MaxRAMPercentage=80.0` ayarı G1GC için güvenli olsa da ZGC için container OOM Kill'e neden olabilir.
+
+### Otomatik Cap Mekanizması
+
+Apinizer, bu durumu önlemek için bir güvenlik mekanizması uygular:
+
+- ZGC **otomatik** seçildiğinde ve kullanıcı `JAVA_OPTS`'da `MaxRAMPercentage` değerini **%70'in üzerinde** ayarlamışsa:
+  - Heap yüzdesi otomatik olarak **%70'e düşürülür**
+  - Pod log'larında aşağıdaki uyarı mesajı görünür:
+
+```
+WARNING: MaxRAMPercentage=80% is too high for ZGC (needs extra native memory).
+         Capping heap to 70% to prevent container OOM kill.
+         To suppress this, explicitly set a GC in JAVA_OPTS (e.g. -XX:+UseG1GC).
+```
+
+### Devre Dışı Bırakma
+
+Cap mekanizmasını devre dışı bırakmak için `JAVA_OPTS`'da GC'yi **açıkça** belirtin. Bu durumda otomatik GC seçimi ve güvenlik cap'i devreden çıkar:
+
+```yaml
+env:
+  - name: JAVA_OPTS
+    value: "-XX:+UseG1GC -XX:MaxRAMPercentage=80.0"
+```
+
+<Warning>
+GC'yi kendiniz belirttiğinizde güvenlik cap'i devreden çıkar. ZGC ile `MaxRAMPercentage=80.0` kullanırsanız OOM Kill riski taşırsınız. ZGC için **%70'i aşmayın**.
+</Warning>
+
+## Modül Bazlı Öneriler
+
+### Worker (Gateway)
+
+Gateway pod'ları yüksek eşzamanlı HTTP trafiği işler. Bellek yapılandırması trafik yoğunluğuna göre belirlenir.
+
+**Düşük trafik (≤ 500 TPS):**
+```yaml
+resources:
+  requests:
+    memory: "1Gi"
+  limits:
+    memory: "1Gi"
+# Otomatik profil: Medium (G1GC, %60 heap)
+```
+
+**Orta trafik (500 – 2000 TPS):**
+```yaml
+resources:
+  requests:
+    memory: "2Gi"
+  limits:
+    memory: "2Gi"
+# Otomatik profil: High (ZGC, %70 heap)
+```
+
+**Yüksek trafik (> 2000 TPS):**
+```yaml
+resources:
+  requests:
+    memory: "4Gi"
+  limits:
+    memory: "4Gi"
+# Otomatik profil: High (ZGC, %70 heap)
+```
+
+<Tip>
+Gateway pod'larında yüksek eşzamanlı istek sayısı nedeniyle ZGC'nin sub-millisecond GC duraklaması özellikle faydalıdır. P99 latency değerlerinde belirgin iyileşme sağlar.
+</Tip>
+
+### Cache (Hazelcast)
+
+Cache Server pod'ları büyük veri yapıları tutar ve uzun ömürlü nesnelere sahiptir. Büyük heap boyutlarında ZGC'nin düşük GC duraklaması, Hazelcast cluster iletişiminde timeout riskini azaltır.
+
+**Standart cache kullanımı:**
+```yaml
+resources:
+  requests:
+    memory: "2Gi"
+  limits:
+    memory: "2Gi"
+# Otomatik profil: High (ZGC, %70 heap)
+```
+
+**Büyük cache kapasitesi:**
+```yaml
+resources:
+  requests:
+    memory: "4Gi"
+  limits:
+    memory: "4Gi"
+# Otomatik profil: High (ZGC, %70 heap)
+```
+
+<Tip>
+Hazelcast büyük heap kullandığında G1GC ile uzun GC duraklamaları cluster partition'a neden olabilir. ZGC bu riski ortadan kaldırır.
+</Tip>
+
+### Manager
+
+Manager pod'ları web arayüzü ve konfigürasyon yönetimi sağlar. Yoğun trafik işlemez, standart otomatik profil yeterlidir.
+
+```yaml
+resources:
+  requests:
+    memory: "2Gi"
+  limits:
+    memory: "2Gi"
+# Otomatik profil: High (ZGC, %70 heap)
+```
+
+### Integration
+
+Integration pod'ları zamanlanmış görevleri çalıştırır. Standart otomatik profil yeterlidir.
+
+```yaml
+resources:
+  requests:
+    memory: "1Gi"
+  limits:
+    memory: "1Gi"
+# Otomatik profil: Medium (G1GC, %60 heap)
+```
+
+### Portal
+
+Portal modülü **sabit olarak ZGC** kullanır (otomatik profil sistemi yoktur). ZGC güvenlik cap'i uygulanır — `MaxRAMPercentage` %70'in üzerinde ayarlanırsa otomatik olarak %70'e düşürülür.
+
+```yaml
+resources:
+  requests:
+    memory: "512Mi"
+  limits:
+    memory: "512Mi"
+# Sabit: ZGC + AlwaysPreTouch
+```
+
+## Yapılandırma Örnekleri
+
+### Otomatik Profil (Önerilen)
+
+En basit kullanım — `JAVA_OPTS` boş bırakılır veya GC/heap dışı parametreler eklenir:
+
+```yaml
+env:
+  - name: JAVA_OPTS
+    value: ""
+```
+
+Sistem container belleğine göre en uygun GC ve heap yüzdesini otomatik seçer.
+
+### Manuel GC Seçimi
+
+Belirli bir GC kullanmak istiyorsanız `JAVA_OPTS`'da belirtin. Otomatik GC seçimi devreden çıkar, ancak heap yüzdesi hala otomatik ayarlanır:
+
+```yaml
+env:
+  - name: JAVA_OPTS
+    value: "-XX:+UseG1GC"
+```
+
+### Manuel Heap Ayarı
+
+Heap yüzdesini kendiniz belirlemek istiyorsanız:
+
+```yaml
+env:
+  - name: JAVA_OPTS
+    value: "-XX:MaxRAMPercentage=65.0"
+```
+
+<Warning>
+ZGC otomatik seçilecek ortamlarda (> 1536 MB bellek) `MaxRAMPercentage=70`'in üzerinde değer kullanmayın. Güvenlik cap'i devreye girer ve değer %70'e düşürülür.
+</Warning>
+
+### Manuel Profil Seçimi (JVM_MEMORY_PROFILE)
+
+Otomatik algılamayı atlamak ve belirli bir profili zorlamak için:
+
+```yaml
+env:
+  - name: JVM_MEMORY_PROFILE
+    value: "medium"  # low, medium veya high
+```
+
+Bu, container bellek miktarından bağımsız olarak seçilen profilin GC ve heap ayarlarını uygular.
+
+### Tier Bazlı Hazır Şablonlar
+
+**Tier 1 — Geliştirme/Test (1 Core / 512 MB):**
+```yaml
+env:
+  - name: JVM_MEMORY_PROFILE
+    value: "low"
+resources:
+  requests:
+    memory: "512Mi"
+  limits:
+    memory: "512Mi"
+# Sonuç: SerialGC, %50 heap (256 MB), 512k stack
+```
+
+**Tier 2 — Staging (2 Core / 2 GB):**
+```yaml
+resources:
+  requests:
+    memory: "2Gi"
+  limits:
+    memory: "2Gi"
+# Otomatik: ZGC, %70 heap (~1.4 GB)
+```
+
+**Tier 3 — Production (4 Core / 4 GB):**
+```yaml
+resources:
+  requests:
+    memory: "4Gi"
+  limits:
+    memory: "4Gi"
+# Otomatik: ZGC, %70 heap (~2.8 GB)
+```
+
+**Tier 4 — Yüksek Yük Production (8 Core / 8 GB):**
+```yaml
+resources:
+  requests:
+    memory: "8Gi"
+  limits:
+    memory: "8Gi"
+# Otomatik: ZGC, %70 heap (~5.6 GB)
+```
+
+## MaxRAMPercentage Güvenli Sınırlar Tablosu
+
+| GC Türü | Güvenli Maks Yüzde | Neden |
+|---------|-------------------|-------|
+| **Serial GC** | %80 | Minimum native bellek overhead'i |
+| **G1GC** | %75 | Orta düzeyde native bellek kullanımı (region metadata, remembered sets) |
+| **ZGC** | %70 | Colored pointer ve multi-mapping nedeniyle yüksek native bellek tüketimi |
+
+<Warning>
+Bu sınırlar genel önerilerdir. Yoğun thread kullanımı, büyük native buffer'lar veya çok sayıda dosya tanımlayıcı kullanan iş yükleri için daha düşük değerler gerekebilir.
+</Warning>
+
+## Sorun Giderme
+
+### OOM Kill
+
+**Belirti**: Pod sürekli restart oluyor, `kubectl describe pod` çıktısında `OOMKilled` görünüyor.
+
+**Olası Nedenler ve Çözümler:**
+
+| Neden | Çözüm |
+|-------|-------|
+| ZGC ile yüksek `MaxRAMPercentage` | `JAVA_OPTS`'dan `MaxRAMPercentage` ayarını kaldırın (otomatik profil %70 kullanır) veya %70'in altına düşürün |
+| Container belleği yetersiz | `resources.limits.memory` değerini artırın |
+| Thread stack'leri çok fazla bellek tüketiyor | `-Xss512k` veya `-Xss256k` ekleyin |
+| Native bellek sızıntısı | [Bellek Sızıntıları ve OOM Hataları](/tr/operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors) sayfasına bakın |
+
+### Yüksek GC Duraklaması
+
+**Belirti**: Yanıt süreleri periyodik olarak artıyor, P99 latency yüksek.
+
+**Çözümler:**
+- **G1GC kullanıyorsanız**: Container belleğini > 1536 MB'a çıkarın (otomatik olarak ZGC seçilir) veya `JVM_MEMORY_PROFILE=high` ayarlayın
+- **Serial GC kullanıyorsanız**: Container belleğini artırın veya en az `medium` profile geçin
+- G1GC'de `-XX:MaxGCPauseMillis=200` parametresi eklenebilir
+
+### Log'da WARNING Mesajı
+
+Pod log'larında aşağıdaki mesajı görüyorsanız:
+
+```
+WARNING: MaxRAMPercentage=80% is too high for ZGC (needs extra native memory).
+         Capping heap to 70% to prevent container OOM kill.
+```
+
+**Anlamı**: Ortam değişkenlerinde `MaxRAMPercentage=80` (veya %70'in üzerinde bir değer) ayarlanmış, ancak otomatik profil ZGC seçmiş. Güvenlik cap'i devreye girerek heap yüzdesini %70'e düşürmüştür.
+
+**Çözüm seçenekleri:**
+1. `JAVA_OPTS`'dan `MaxRAMPercentage` ayarını tamamen kaldırın — otomatik profil en uygun değeri seçer
+2. GC'yi açıkça belirtin: `-XX:+UseG1GC -XX:MaxRAMPercentage=80.0` (cap devreden çıkar)
+3. `MaxRAMPercentage` değerini %70 veya altına düşürün
+
+## İlgili Sayfalar
+
+- [Kapasite Planlama](/tr/concepts/deployment/kapasite-planlama)
+- [Bellek Sızıntıları ve OOM Hataları](/tr/operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors)
+- [Podların Anlık Thread Sayılarının Periyodik İzlenmesi](/tr/operations/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme)
+- [Gateway Runtime'ları](/tr/admin/server-management/gateway-runtime-lari)
+- [Dağıtık Cache](/tr/admin/server-management/dagitik-cache)
