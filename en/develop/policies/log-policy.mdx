@@ -1,0 +1,331 @@
+---
+title: "Log Policy"
+description: "Capture the message state at any point in the API Gateway pipeline and send it to selected connectors. Perform synchronous or asynchronous logging to Elasticsearch, databases, Graylog, Webhook, and Syslog targets."
+---
+
+<Tip>
+This document explains the detailed usage of a specific policy. If you are using the Apinizer policy framework for the first time or want to learn about the general working principles of policies, we recommend reading the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page first.
+</Tip>
+
+## Overview
+
+The Log policy captures the current message state (headers, parameters, body, user info, error status, etc.) at any desired point in the API Gateway pipeline and sends it to configured connectors. Unlike standard API traffic logging, it can be placed at any stage of the pipeline and uses a lightweight data structure containing only the relevant fields.
+
+### Use Cases
+
+- Monitor message state at specific pipeline stages (before/after policy comparison)
+- Collect detailed logs for debugging and troubleshooting
+- Meet audit and compliance requirements
+- Send real-time data to external systems (SIEM, log analysis platforms)
+
+### Supported Targets
+
+| Target | Protocol |
+|--------|----------|
+| Elasticsearch | REST/HTTP |
+| Database (MySQL, MariaDB, Oracle, MongoDB) | JDBC / MongoDB Driver |
+| Graylog | GELF |
+| Webhook | HTTP POST |
+| Syslog | Syslog Protocol |
+| Kafka | Kafka Producer |
+| RabbitMQ | AMQP |
+
+### Execution Modes
+
+| Mode | Behavior |
+|------|----------|
+| **Synchronous** | Pipeline waits until log delivery completes. Delivery errors break the pipeline. |
+| **Asynchronous** | Log delivery happens in the background. Pipeline continues without interruption. Errors are only logged. |
+
+## Configuration Fields
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| Connector Selection | Yes | - | One or more connectors to send log data to |
+| Execution Mode | No | Synchronous | Synchronous or Asynchronous delivery |
+| Correlation ID | No | Enabled | Include request tracking ID |
+| Environment Info | No | Enabled | Include gateway environment info |
+| API Proxy Info | No | Enabled | Include API Proxy and method info |
+| User Info | No | Enabled | Include username or API key |
+| HTTP Context | No | Enabled | Include HTTP status code |
+| Result Info | No | Enabled | Include operation result and error type |
+| Headers | No | Enabled | Include request headers |
+| Parameters | No | Enabled | Include query parameters |
+| Body | No | Enabled | Include request body |
+| Body Mode | No | Full | Full body or partial body (with byte limit) |
+| Body Byte Limit | No | - | Maximum bytes in partial mode |
+| Privacy | No | Disabled | Mask sensitive data |
+
+## Data Structure
+
+The Log policy uses a lightweight data structure that is different from standard API traffic logs. The following table lists the fields sent and their Elasticsearch/database equivalents.
+
+| Field Name | Short Name (ES/JSON) | Type | Description |
+|------------|---------------------|------|-------------|
+| Timestamp | @timestamp | Date | Log record creation time |
+| Correlation ID | aci | String | Apinizer request tracking ID |
+| Environment ID | ei | String | Gateway environment identifier |
+| API Proxy ID | api | String | API Proxy identifier |
+| API Proxy Name | apn | String | API Proxy name |
+| API Proxy Method ID | apmi | String | API Proxy method identifier |
+| API Proxy Method Name | apmn | String | API Proxy method name |
+| User/Key | uok | String | Authenticated username or API key |
+| HTTP Status Code | sc | Number | HTTP response status code |
+| Result Type | rt | String | Operation result (SUCCESS, ERROR, etc.) |
+| Error Type | et | String | Error type (if any) |
+| Request Headers | fcrh | List | Request headers as key-value pairs |
+| Request Parameters | fcrp | List | Query parameters as key-value pairs |
+| Request Body | fcrb | String | Request body content |
+
+### Example JSON Output
+
+```json
+{
+  "@timestamp": "2026-03-31T12:30:45.123Z",
+  "aci": "550e8400-e29b-41d4-a716-446655440000",
+  "ei": "env-production-001",
+  "api": "proxy-payment-api",
+  "apn": "Payment API",
+  "apmi": "method-create-payment",
+  "apmn": "POST /payments",
+  "uok": "merchant-api-key-123",
+  "sc": 200,
+  "rt": "SUCCESS",
+  "fcrh": [
+    { "k": "Content-Type", "v": "application/json" },
+    { "k": "Authorization", "v": "Bearer eyJhbGciOi..." },
+    { "k": "X-Request-ID", "v": "req-abc-123" }
+  ],
+  "fcrp": [
+    { "k": "currency", "v": "TRY" },
+    { "k": "lang", "v": "tr" }
+  ],
+  "fcrb": "{\"amount\": 150.00, \"merchantId\": \"M-001\"}"
+}
+```
+
+<Info>
+Each entry in the header and parameter fields consists of **k** (key) and **v** (value) pairs. This structure is indexed as `nested` type in Elasticsearch.
+</Info>
+
+## Elasticsearch Integration
+
+A separate index template must be created for log policy data in Elasticsearch. This template is different from the standard API traffic log template and contains only the fields sent by the log policy.
+
+<Warning>
+The Elasticsearch index template and ILM policy for log policy data are not automatically created from the Apinizer UI. You need to manually apply the following steps on Elasticsearch.
+</Warning>
+
+### Step 1: Create ILM Policy
+
+Create an ILM policy for index lifecycle management. The following example creates a policy that rolls over at 30 GB or 1 day and deletes after 30 days. Adjust the values according to your needs.
+
+```bash
+PUT _ilm/policy/apinizer-log-policy-capture-ilm
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "30gb",
+            "max_age": "1d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "30d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+### Step 2: Create Index Template
+
+Run the following command using Elasticsearch Kibana Dev Tools or curl. The template includes data stream support.
+
+<Warning>
+The field types in the template must exactly match the JSON structure sent by the log policy. Do not change field types.
+</Warning>
+
+```bash
+PUT _index_template/apinizer-log-policy-capture-template
+{
+  "index_patterns": ["apinizer-log-policy-capture*"],
+  "data_stream": {},
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": {
+          "name": "apinizer-log-policy-capture-ilm"
+        },
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": {
+          "type": "date",
+          "format": "yyyy-MM-dd'T'HH:mm:ss.S'Z'||yyyy-MM-dd'T'HH:mm:ss.SS'Z'||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        },
+        "aci": {
+          "type": "keyword"
+        },
+        "ei": {
+          "type": "keyword"
+        },
+        "api": {
+          "type": "keyword"
+        },
+        "apn": {
+          "type": "keyword"
+        },
+        "apmi": {
+          "type": "keyword"
+        },
+        "apmn": {
+          "type": "keyword"
+        },
+        "uok": {
+          "type": "keyword",
+          "ignore_above": 50
+        },
+        "sc": {
+          "type": "short"
+        },
+        "rt": {
+          "type": "keyword",
+          "ignore_above": 7
+        },
+        "et": {
+          "type": "keyword",
+          "ignore_above": 75
+        },
+        "fcrh": {
+          "type": "nested",
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "keyword"
+            }
+          }
+        },
+        "fcrp": {
+          "type": "nested",
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "keyword"
+            }
+          }
+        },
+        "fcrb": {
+          "type": "text"
+        }
+      }
+    }
+  }
+}
+```
+
+### Step 3: Create Data Stream
+
+After the template is created, the data stream is automatically created when the first data arrives. To create manually:
+
+```bash
+PUT _data_stream/apinizer-log-policy-capture
+```
+
+### Connector Configuration
+
+Enter `apinizer-log-policy-capture` in the Elasticsearch connector's **Index Name** field. This name must match the `index_patterns` in the template.
+
+<Info>
+If you want to use a different index name, update the `index_patterns` field in the template accordingly. For example, for project-based separation you can use `apinizer-log-policy-capture-projectname`.
+</Info>
+
+## Database Integration
+
+To send log policy data to a relational database (MySQL/MariaDB or Oracle), you need to create the following table structure.
+
+<Warning>
+You must create this table in the target database before using the database connector. The table is not created automatically.
+</Warning>
+
+<CodeGroup>
+```sql MySQL/MariaDB
+CREATE TABLE log_PolicyCapture (
+  id VARCHAR(255) PRIMARY KEY,
+  created TIMESTAMP,
+  apinizer_correlation_id VARCHAR(255),
+  environment_id VARCHAR(255),
+  api_proxy_id VARCHAR(255),
+  api_proxy_name VARCHAR(255),
+  api_proxy_method_id VARCHAR(255),
+  api_proxy_method_name VARCHAR(255),
+  username_or_key VARCHAR(255),
+  status_code INTEGER,
+  result_type VARCHAR(255),
+  error_type VARCHAR(255),
+  from_client_read_only_header TEXT,
+  from_client_read_only_parameter TEXT,
+  from_client_read_only_body LONGTEXT
+);
+```
+
+```sql Oracle
+CREATE TABLE log_PolicyCapture (
+  id VARCHAR2(255) PRIMARY KEY,
+  created TIMESTAMP,
+  apinizer_correlation_id VARCHAR2(255),
+  environment_id VARCHAR2(255),
+  api_proxy_id VARCHAR2(255),
+  api_proxy_name VARCHAR2(255),
+  api_proxy_method_id VARCHAR2(255),
+  api_proxy_method_name VARCHAR2(255),
+  username_or_key VARCHAR2(255),
+  status_code NUMBER,
+  result_type VARCHAR2(255),
+  error_type VARCHAR2(255),
+  from_client_read_only_header CLOB,
+  from_client_read_only_parameter CLOB,
+  from_client_read_only_body CLOB
+);
+```
+</CodeGroup>
+
+<Info>
+Header and parameter fields (`from_client_read_only_header`, `from_client_read_only_parameter`) are stored in JSON format. Each record contains an array of key-value pairs.
+</Info>
+
+### MongoDB
+
+When using the MongoDB connector, no table creation is needed. Data is automatically written to the `log_policycapture` collection.
+
+## Privacy Settings
+
+When privacy is enabled in the log policy, header, parameter, and body data matching the specified field names are masked. This feature can be used to meet data protection requirements such as GDPR.
+
+Masking is applied **before** data is sent to connectors. Connector-level privacy settings are applied separately and independently.
+
+## Deleting the Policy
+
+For the steps to delete this policy and the actions to be taken when it is in use, see the [Deleting a Policy](/en/concepts/core-concepts/what-is-policy#deleting-a-policy) section on the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
+
+## Exporting/Importing the Policy
+
+For the export steps and available options for this policy, see the [Exporting/Importing a Policy](/en/concepts/core-concepts/what-is-policy#exportingimporting-a-policy) section on the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
+
+## Attaching the Policy to an API
+
+For the process of attaching this policy to APIs, see the [Attaching a Policy to an API](/en/develop/api-proxy-configuration/policy-management#adding-a-policy-to-the-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
