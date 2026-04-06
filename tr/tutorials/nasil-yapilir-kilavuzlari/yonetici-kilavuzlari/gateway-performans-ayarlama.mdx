@@ -1,0 +1,260 @@
+---
+title: "Gateway Performans Ayarlama"
+description: "Apinizer Gateway Worker pod'larının thread, connection pool, timeout ve async executor parametrelerini ortam kaynaklarına göre optimize etme rehberi."
+---
+
+## Genel Bakış
+
+Gateway performansı birçok faktöre bağlıdır:
+
+- **Donanım kaynakları**: CPU core sayısı, bellek miktarı
+- **Trafik profili**: Eşzamanlı istek sayısı, istek boyutu, SSE/streaming kullanımı
+- **Politika karmaşıklığı**: Uygulanan politikaların sayısı ve ağırlığı (örneğin Content Filtering gibi CPU-yoğun politikalar)
+- **Backend yanıt süresi**: Hedef servisin gecikme profili
+
+<Info>
+**Tuning yaklaşımı — öncelik sırası:**
+
+1. **Otomatik profil** — Çoğu ortam için yeterlidir, müdahale gerekmez
+2. **Tier önerileri** — Kaynak boyutuna göre hazır parametre setleri (bu sayfa)
+3. **Manuel ayar** — Yük testi sonuçlarına göre ince ayar
+</Info>
+
+## Tier Bazlı Önerilen Ayarlar
+
+Aşağıdaki tablolar, farklı donanım profilleri için önerilen Gateway Worker ayarlarını göstermektedir. Bu değerler, üretim öncesi yük testleri ile doğrulanmalıdır.
+
+### Tier 1 — 2 Core / 2 GB RAM
+
+Düşük trafikli ortamlar, geliştirme ve PoC senaryoları için uygundur.
+
+| Parametre | Önerilen Değer |
+|-----------|---------------|
+| `tuneIoThreads` | 2 |
+| `tuneWorkerThreads` | 512 |
+| `tuneWorkerMaxThreads` | 1024 |
+| `tuneRoutingConnectionPoolMinThreadCount` | 512 |
+| `tuneRoutingConnectionPoolMaxThreadCount` | 2048 |
+| `tuneRoutingConnectionPoolMaxConnectionTotal` | 2048 |
+| `tuneElasticsearchClientIoThreadCount` | 8 |
+| `tuneAsyncExecutorCorePoolSize` | 512 |
+| `tuneAsyncExecutorMaxPoolSize` | 1024 |
+| `tuneAsyncExecutorQueueCapacity` | 1000 |
+
+<Tip>
+**Tier 1 Ortam Değişken Bloğu Örneği:**
+
+```yaml
+tuneIoThreads=2
+tuneWorkerThreads=512
+tuneWorkerMaxThreads=1024
+tuneRoutingConnectionPoolMinThreadCount=512
+tuneRoutingConnectionPoolMaxThreadCount=2048
+tuneRoutingConnectionPoolMaxConnectionTotal=2048
+tuneElasticsearchClientIoThreadCount=8
+```
+</Tip>
+
+### Tier 2 — 4 Core / 4 GB RAM
+
+Orta ölçekli üretim ortamları için önerilir. Çoğu kurulum için dengeli bir başlangıç noktasıdır.
+
+| Parametre | Önerilen Değer |
+|-----------|---------------|
+| `tuneIoThreads` | 4 |
+| `tuneWorkerThreads` | 1024 |
+| `tuneWorkerMaxThreads` | 2048 |
+| `tuneRoutingConnectionPoolMinThreadCount` | 1024 |
+| `tuneRoutingConnectionPoolMaxThreadCount` | 4096 |
+| `tuneRoutingConnectionPoolMaxConnectionTotal` | 4096 |
+| `tuneElasticsearchClientIoThreadCount` | 16 |
+| `tuneAsyncExecutorCorePoolSize` | 1024 |
+| `tuneAsyncExecutorMaxPoolSize` | 2048 |
+| `tuneAsyncExecutorQueueCapacity` | 1000 |
+
+<Tip>
+**Tier 2 Ortam Değişken Bloğu Örneği:**
+
+```yaml
+tuneIoThreads=4
+tuneWorkerThreads=1024
+tuneWorkerMaxThreads=2048
+tuneRoutingConnectionPoolMinThreadCount=1024
+tuneRoutingConnectionPoolMaxThreadCount=4096
+tuneRoutingConnectionPoolMaxConnectionTotal=4096
+tuneElasticsearchClientIoThreadCount=16
+```
+</Tip>
+
+### Tier 3 — 8 Core / 8 GB RAM
+
+Yüksek trafikli üretim ortamları için önerilir.
+
+| Parametre | Önerilen Değer |
+|-----------|---------------|
+| `tuneIoThreads` | 8 |
+| `tuneWorkerThreads` | 2048 |
+| `tuneWorkerMaxThreads` | 4096 |
+| `tuneRoutingConnectionPoolMinThreadCount` | 1024 |
+| `tuneRoutingConnectionPoolMaxThreadCount` | 8192 |
+| `tuneRoutingConnectionPoolMaxConnectionTotal` | 8192 |
+| `tuneElasticsearchClientIoThreadCount` | 32 |
+| `tuneAsyncExecutorCorePoolSize` | 2048 |
+| `tuneAsyncExecutorMaxPoolSize` | 4096 |
+| `tuneAsyncExecutorQueueCapacity` | 2000 |
+
+<Tip>
+**Tier 3 Ortam Değişken Bloğu Örneği:**
+
+```yaml
+tuneIoThreads=8
+tuneWorkerThreads=2048
+tuneWorkerMaxThreads=4096
+tuneRoutingConnectionPoolMinThreadCount=1024
+tuneRoutingConnectionPoolMaxThreadCount=8192
+tuneRoutingConnectionPoolMaxConnectionTotal=8192
+tuneElasticsearchClientIoThreadCount=32
+```
+</Tip>
+
+<Warning>
+**JVM Parametreleri:** Tüm tier'larda otomatik bellek profili sistemi önerilir (`JAVA_OPTS` eklemeye gerek yoktur). Profil detayları ve manuel GC yapılandırması için [JVM Garbage Collector Ayarlama](/tr/operations/yonetici-kilavuzlari/jvm-garbage-collector-ayarlama) sayfasına bakın.
+</Warning>
+
+## Thread Tuning
+
+### Worker Threads
+
+Worker thread'ler, gelen HTTP isteklerini işleyen temel thread pool'dur.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneWorkerThreads` | 1024 | Minimum Worker thread sayısı — sunucu başlangıcında oluşturulan thread'ler |
+| `tuneWorkerMaxThreads` | 2048 | Maksimum Worker thread sayısı — yük altında büyüyebileceği üst sınır |
+
+#### CPU'ya Göre Önerilen Thread Değerleri
+
+| CPU Core | `tuneWorkerThreads` | `tuneWorkerMaxThreads` |
+|----------|---------------------|------------------------|
+| 1 | 512 | 1024 |
+| 2 | 1024 | 2048 |
+| 4 | 2048 | 4096 |
+| 8 | 4096 | 8192 |
+
+<Info>
+**Genel kural:** `tuneWorkerThreads` ≈ CPU × 512, `tuneWorkerMaxThreads` ≈ CPU × 1024. Bu değerler Undertow'un (Gateway'in kullandığı HTTP sunucusu) thread yönetim modeline dayanır.
+</Info>
+
+### IO Threads
+
+IO thread'ler, network I/O işlemlerini (socket okuma/yazma) yöneten düşük seviyeli thread'lerdir.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneIoThreads` | CPU core sayısı | IO Thread sayısı |
+
+<Info>
+IO thread sayısı genellikle CPU core sayısına eşit tutulur. Artırmak çoğu senaryoda fayda sağlamaz; bağlam değiştirme (context switching) maliyetine yol açabilir.
+</Info>
+
+### Async Executor Thread Pool
+
+RestApi Politikası, Script Politikası, loglama ve trafik aynalama gibi asenkron işlemler bu ayrı thread pool'u kullanır.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneAsyncExecutorCorePoolSize` | `tuneWorkerThreads` ile aynı | Pool'da canlı tutulan minimum thread sayısı |
+| `tuneAsyncExecutorMaxPoolSize` | `tuneWorkerMaxThreads` ile aynı | Oluşturulabilecek maksimum thread sayısı |
+| `tuneAsyncExecutorQueueCapacity` | `tuneMaxQueueSize` > 0 ise bu değer, aksi halde 1000 | Thread'ler dolduğunda kuyrukta bekleyebilecek maksimum görev sayısı |
+
+<Warning>
+**Thread Pool Boyutlandırma Uyarısı:**
+
+Asenkron executor thread pool'u, ana worker thread pool'undan bağımsızdır. Toplam thread sayısının (worker + async executor) sisteminizin kapasitesini aşmadığından emin olun. Thread sayılarını belirlerken CPU core sayısı ve kullanılabilir belleği göz önünde bulundurun.
+</Warning>
+
+## Connection Pool Tuning
+
+### Routing Connection Pool
+
+Backend servislere yapılan HTTP bağlantılarını yöneten pool'dur. Yüksek eşzamanlı istek hacminde bu değerler kritiktir.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneRoutingConnectionPoolMinThreadCount` | — | Minimum bağlantı thread sayısı |
+| `tuneRoutingConnectionPoolMaxThreadCount` | — | Maksimum bağlantı thread sayısı |
+| `tuneRoutingConnectionPoolMaxConnectionPerHost` | 1024 | Tek bir backend host'a açılabilecek maksimum bağlantı sayısı |
+| `tuneRoutingConnectionPoolMaxConnectionTotal` | 2048 | Tüm backend host'lara açılabilecek toplam maksimum bağlantı sayısı |
+
+**Ne zaman artırılmalı:**
+- 503 hataları veya connection timeout logları görüldüğünde
+- Backend servisler yavaş yanıt verdiğinde ve bağlantılar tükendiğinde
+- Eşzamanlı istek sayısı mevcut pool limitlerini aştığında
+
+### Cache Connection Pool
+
+Cache servisleriyle yapılan bağlantıları yönetir.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneCacheConnectionPoolMaxConnectionTotal` | 2048 | Cache Connection Pool toplam maksimum bağlantı sayısı |
+
+### API Call Connection Pool
+
+Rest API Politikası ve benzeri politikalar tarafından yapılan harici API çağrılarını yönetir.
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneApiCallConnectionPoolMaxConnectionPerHost` | 256 | Host başına maksimum bağlantı sayısı |
+| `tuneApiCallConnectionPoolMaxConnectionTotal` | 4096 | Toplam maksimum bağlantı sayısı |
+
+## Timeout Tuning
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `tuneReadTimeout` | 30000 ms (30 sn) | İstemciden veri okuma timeout'u. Client veri göndermezse bu süre sonunda bağlantı kapatılır |
+| `tuneStreamingReadTimeout` | 0 ms (sınırsız) | SSE/LLM streaming bağlantıları için istemci tarafı okuma timeout'u |
+| `tuneNoRequestTimeout` | 60000 ms (60 sn) | Bağlantı kurulduktan sonra istek gelmeme timeout'u |
+
+### Timeout Parametrelerinin Birbirleriyle İlişkisi
+
+```
+İstemci bağlantısı → tuneNoRequestTimeout (istek bekleme)
+                   → İstek geldi → tuneReadTimeout (veri okuma)
+                                 → Streaming? → tuneStreamingReadTimeout
+```
+
+- **`tuneNoRequestTimeout`**: Bağlantı açıldı ancak HTTP isteği gönderilmedi — boş bağlantıları temizler
+- **`tuneReadTimeout`**: İstek işlenirken istemci veri göndermeyi durdurdu — takılı istekleri temizler
+- **`tuneStreamingReadTimeout`**: SSE, Server-Sent Events, LLM streaming gibi uzun ömürlü bağlantılarda normal `tuneReadTimeout` yetersiz kalır
+
+<Info>
+**SSE/LLM Streaming Senaryoları:**
+
+Streaming bağlantılarda istemci uzun süre veri göndermediği için normal `tuneReadTimeout` bağlantıyı erken kapatabilir. `tuneStreamingReadTimeout` ile streaming bağlantılarına özel timeout değeri atanır. Varsayılan 0 (sınırsız) değeri çoğu senaryo için uygundur; ancak kaynak sızıntısını önlemek için ortamınıza uygun bir üst limit belirleyebilirsiniz.
+</Info>
+
+## Benchmark Referans
+
+Tier bazlı performans karşılaştırmaları ve detaylı benchmark sonuçları için [Kapasite Planlama](/tr/concepts/deployment/kapasite-planlama) sayfasına bakın.
+
+<Warning>
+Benchmark sonuçları ideal koşullarda (hızlı backend, minimal network gecikmesi, sade politika zinciri) ölçülmüştür. **Production ortamları için mutlaka kendi trafik desenlerinize göre yük testleri yapın.**
+</Warning>
+
+## İlgili Sayfalar
+
+<CardGroup cols={2}>
+  <Card title="JVM Garbage Collector Ayarlama" icon="memory" href="/tr/operations/yonetici-kilavuzlari/jvm-garbage-collector-ayarlama">
+    Otomatik bellek profili, GC seçenekleri ve heap yapılandırması
+  </Card>
+  <Card title="Kapasite Planlama" icon="server" href="/tr/concepts/deployment/kapasite-planlama">
+    Donanım boyutlandırma, RAM hesaplama ve benchmark sonuçları
+  </Card>
+  <Card title="Gateway Runtime'ları" icon="gauge-high" href="/tr/admin/server-management/gateway-runtime-lari">
+    Gateway ortamlarının UI üzerinden yapılandırılması ve parametre referansı
+  </Card>
+  <Card title="Pod Thread Sayısı Periyodik İzleme" icon="chart-line" href="/tr/operations/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme">
+    Thread kullanımının zamana göre izlenmesi ve uyarı mekanizmaları
+  </Card>
+</CardGroup>
