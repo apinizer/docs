@@ -1,0 +1,268 @@
+---
+title: "Curator Operations"
+description: "You can manage indexes with Elasticsearch Curator. You can automate tasks such as taking snapshots, deleting old indexes, setting to readonly mode, and shrink operations, create scheduled tasks, and manage index lifecycle."
+---
+
+## Installation
+
+### CentOS/RHEL
+
+```bash
+# Create Curator repository file
+vi /etc/yum.repos.d/curator.repo
+```
+
+Add the following content to the repository file:
+
+```ini
+[curator-5]
+name=CentOS/RHEL 6 repository for Elasticsearch Curator 5.x packages
+baseurl=https://packages.elastic.co/curator/5/centos/6
+gpgcheck=1
+gpgkey=https://packages.elastic.co/GPG-KEY-elasticsearch
+enabled=1
+```
+
+Install Curator:
+
+```bash
+yum install elasticsearch-curator
+```
+
+### Ubuntu/Debian
+
+```bash
+# Add GPG key
+wget -qO - https://packages.elastic.co/GPG-KEY-elasticsearch | sudo apt-key add -
+
+# Add repository
+echo "deb https://packages.elastic.co/curator/5/debian stable main" | sudo tee -a /etc/apt/sources.list.d/curator.list
+
+# Update and install
+sudo apt-get update
+sudo apt-get install elasticsearch-curator
+```
+
+### Creating Cron Job
+
+Create a cron job to run every day at 03:00:
+
+```bash
+crontab -e
+```
+
+Add the following line:
+
+```bash
+0 3 * * * /usr/bin/curator --config /mnt/ElasticData/curator/curator.yml /mnt/ElasticData/curator/readonly_shrink.yml
+```
+
+Restart cron service:
+
+```bash
+service crond restart
+```
+
+To check logs:
+
+```bash
+sudo tail -900f /var/log/cron
+```
+
+<Note>
+For troubleshooting, you can check these resources:
+- [Elasticsearch Cheat Sheet](https://logz.io/blog/elasticsearch-cheat-sheet/)
+- [Red Elasticsearch Cluster Panic No Longer](https://www.elastic.co/blog/red-elasticsearch-cluster-panic-no-longer)
+</Note>
+
+## Curator.yml Configuration
+
+A `curator.yml` file is needed to run Curator. This file content specifies where and how curator should connect:
+
+```yaml
+---
+# Remember, leave a key empty if there is no value.  None will be a string,
+# not a Python "NoneType"
+client:
+  hosts:
+    - 10.6.1.11
+  port: 9200
+  url_prefix:
+  use_ssl: False
+  certificate:
+  client_cert:
+  client_key:
+  ssl_no_validate: False
+  http_auth:
+  timeout: 30
+  master_only: False
+
+logging:
+  loglevel: INFO
+  logfile: curator.log
+  logformat: default
+# default: blacklist: ['elasticsearch', 'urllib3']
+```
+
+## Snapshot Operations
+
+A yml file containing snapshot settings is needed to take snapshots.
+
+For this, a `snapshot.yml` file is created in addition to `curator.yml`:
+
+```yaml
+actions:
+  1:
+    action: snapshot
+    options:
+      disable_action: False
+      repository: "es_apinizer_snapshot_20200914"
+      ignore_empty_list: True
+      wait_interval: 10
+      max_wait: -1
+    filters:
+    - filtertype: age
+      source: creation_date
+      direction: older
+      unit: days
+      unit_count: 90
+```
+
+### Creating Snapshot Repository and Taking Snapshot
+
+With the following commands, repository is first created in Elasticsearch, then curator is run with `snapshot.yml`:
+
+```bash
+# Create snapshot directory
+mkdir -p /LOGARSIV/arsiv/apinizerLogBackup/es_apinizer_snapshot_20200914
+
+# To add repository:
+es_repo_mgr --config /mnt/ElasticData/curator/curator.yml \
+  create fs \
+  --repository es_apinizer_snapshot_20200914 \
+  --location /LOGARSIV/arsiv/apinizerLogBackup/es_apinizer_snapshot_20200914 \
+  --compression true
+
+# To delete repository:
+es_repo_mgr --config /mnt/ElasticData/curator/curator.yml \
+  delete --repository es_apinizer_snapshot_20200914
+
+# Start snapshot operation
+curator --config /mnt/ElasticData/curator/curator.yml \
+  /mnt/ElasticData/curator/snapshot.yml &
+
+# Check snapshot status
+curl -X GET "<ELASTICSEARCH_IP>:9200/_snapshot/_status?pretty" > status.json
+
+# List all snapshots
+curl -X GET "<ELASTICSEARCH_IP>:9200/_snapshot/_all?pretty"
+
+# List snapshots in specific repository
+curl -X GET "<ELASTICSEARCH_IP>:9200/_cat/snapshots/es_apinizer_snapshot_20200914?v&s=id&pretty"
+```
+
+## Delete Operations
+
+A yml file containing deletion settings is needed to delete indexes we want.
+
+For this, a `delete.yml` file is created in addition to `curator.yml`:
+
+<Warning>
+Delete operation cannot be undone. It should be ensured that necessary backups are taken before deletion operation.
+</Warning>
+
+```yaml
+actions:
+  1:
+    action: delete_indices
+    description: >-
+      Delete indices older than 90 days
+    options:
+      ignore_empty_list: True
+      disable_action: False
+    filters:
+    - filtertype: age
+      source: creation_date
+      direction: older
+      unit: days
+      unit_count: 90
+```
+
+Curator is run with the following command to delete indexes:
+
+```bash
+curator --config /mnt/ElasticData/curator/curator.yml \
+  /mnt/ElasticData/curator/delete.yml &
+```
+
+## Readonly & Shrink Operations
+
+A yml file containing these settings is needed to set indexes we want to readonly mode and shrink them.
+
+For this, a `readonly_shrink.yml` file is created in addition to `curator.yml`:
+
+<Note>
+Shrink operation optimizes disk usage by reducing the number of shards in indexes. Indexes set to readonly mode are closed to write operations.
+</Note>
+
+```yaml
+actions:
+  1:
+    action: index_settings
+    description: >-
+      Set log indices older than 2 days to be read only (block writes)
+    options:
+      disable_action: False
+      index_settings:
+        index:
+          blocks:
+            write: True
+      ignore_unavailable: False
+      preserve_existing: False
+      indices: 
+      continue_if_exception: True
+    filters:
+    - filtertype: age
+      source: creation_date
+      direction: older
+      unit: days
+      unit_count: 2
+  2:
+    action: shrink
+    options:
+      disable_action: False
+      ignore_empty_list: True
+      shrink_node: DETERMINISTIC
+      node_filters:
+        permit_masters: True
+      number_of_shards: 1
+      number_of_replicas: 0
+      indices:
+      continue_if_exception: True
+      shrink_prefix:
+      shrink_suffix: '-shrink'
+      delete_after: True
+      post_allocation:
+        allocation_type: include
+        key: node_tag
+        value: cold
+      wait_for_active_shards: 1
+      wait_for_completion: True
+      wait_for_rebalance: True
+      wait_interval: 9
+      max_wait: -1
+    filters:
+    - filtertype: age
+      source: creation_date
+      direction: older
+      unit: days
+      unit_count: 2
+```
+
+Curator is run with the following command to set indexes to readonly and then shrink them:
+
+```bash
+curator --config /mnt/ElasticData/curator/curator.yml \
+  /mnt/ElasticData/curator/readonly_shrink.yml &
+```
+

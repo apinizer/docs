@@ -1,0 +1,167 @@
+---
+title: "Elasticsearch Reindex İşlemi"
+description: "Elasticsearch'te tutulan verilerin mapping type değerinin değişmesi gerektiğinde reindex işlemi gerçekleştirebilir. Eski index'lerin mapping type'larını güncelleyerek doğru arama sonuçlarının gelmesini sağlar ve veri kaybı olmadan mapping değişikliklerini uygulayabilir."
+---
+
+<Info>
+Apinizer'ın güncel index ve mapping type'larına [bu sayfadan](/tr/setup/elasticsearch/manuel-ilm-politikasi-ve-template-olusturma) erişebilirsiniz.
+</Info>
+
+## Yapılacaklar
+
+### 1. Mapping'de Field Type Görüntüleme
+
+```bash
+curl --location --request GET 'http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-<XXXX>/_field_caps?fields=hr1ra'
+```
+
+### 2. Yeni Template Oluşturulması
+
+<Note>
+Apinizer'da bu işlem 2022.12.01 versiyonunda kod ile yapıldı, bu düzenlemeyi manuel yapmak için lütfen şu adresi inceleyiniz:
+
+[Elasticsearch Index Templates](https://www.elastic.co/guide/en/elasticsearch/reference/7.9/indices-templates-v1.html)
+</Note>
+
+### 3. ILM Poll Interval Ayarlama
+
+Yeni template'in geçerli olabilmesi için ILM'nin kriterinin ekrandan değiştirilmesi ve yeni indekse geçmesi için arkaplanda servis trafiğinin akmaya devam etmesi gerekir. Bunun da hemen yansıması için aşağıdaki kod ile `poll_interval`'in düşürülmesi işleri hızlandırır:
+
+```bash
+curl --location --request PUT 'http://<ELASTICSEARCH_IP>:9200/_cluster/settings' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "persistent": {
+      "indices.lifecycle.poll_interval": "10s"
+    }
+  }'
+```
+
+### 4. ILM Poll Interval'i Eski Haline Alma
+
+Değişiklik yansıyıp yeni index oluştuktan sonra ILM'nin ve `poll_interval`'in eski haline alınması gerekir:
+
+```bash
+curl --location --request PUT 'http://<ELASTICSEARCH_IP>:9200/_cluster/settings' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "persistent": {
+      "indices.lifecycle.poll_interval": null
+    }
+  }'
+```
+
+### 5. Reindex İşlemi
+
+Reindex işlemi ile datastream'deki eski mapping type'da kalan index'in "reindexed" olarak başka bir index'e taşınması:
+
+<Note>
+Reindekste yeni mapping kullanılacak. Yeni mapping template'den alınacağı için template'in geçerli olabilmesi için yeni indexin adının "apinizer-log-apiproxy-{`<env adi:test>`}-" içermesi gerekli.
+</Note>
+
+```bash
+curl --location --request POST 'http://<ELASTICSEARCH_IP>:9200/_reindex' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "conflicts": "proceed",
+    "source": {
+      "index": ".ds-apinizer-log-apiproxy-test-000001"
+    },
+    "dest": {
+      "index": ".ds-apinizer-log-apiproxy-test-000001-reindexed",
+      "op_type": "create"
+    }
+  }'
+```
+
+### 6. Eski Index'i Silme
+
+Eski mapping type'da kalan indexin silinmesi:
+
+```bash
+curl --location --request DELETE 'http://<ELASTICSEARCH_IP>:9200/.ds-apinizer-log-apiproxy-test-000001'
+```
+
+<Warning>
+Eğer yeni indeksi mevcut sistemden farklı bir isim ile oluşturursanız aşağıdaki adımlarla devam etmeniz gerekmektedir.
+
+Aşağıdaki adımlarda, yukarıdaki isimlemenin ".ds" ifadesini kapsamadığı varsayılarak devam edilmiştir.
+</Warning>
+
+### 7. Farklı İsimle Oluşturulan Index İçin Ek Adımlar
+
+"apinizer-log-apiproxy-test-000001-reindexed" isimli index'e taşınan verilerin manager üzerinde görüntülenebilmesi için isminin değiştirilmesi gerekir.
+
+#### Yeni Index'i Read-Only Moda Alma
+
+```bash
+curl --location --request PUT 'http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-test-000001-reindexed/_settings' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "settings": {
+      "index.blocks.write": "true"
+    }
+  }'
+```
+
+#### Yeni Indexi Orijinal İsme Klonlama ve Read-Only Moddan Çıkarma
+
+```bash
+curl --location --request PUT 'http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-test-000001-reindexed/_clone/.ds-apinizer-log-apiproxy-test-000001' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{
+    "settings": {
+      "index.blocks.write": null 
+    }
+  }'
+```
+
+#### Hedef Index'in Durumunu Kontrol Etme
+
+Hedef indeksin durumu green olana kadar beklenir:
+
+```bash
+GET /_cluster/health/target_index?wait_for_status=green&timeout=30s
+```
+
+#### Sorun Kontrolü
+
+Normalde hızlıca gerçekleşen bu işlem uzun süre alıyorsa aşağıdaki komutlar ile sorun var mı diye kontrol yapılır:
+
+```bash
+GET /_cat/indices/target_index
+GET /_cat/recovery/target_index
+GET /_cluster/allocation/explain
+```
+
+#### Eski Index'i Silme
+
+```bash
+curl --location --request DELETE 'http://<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-test-000001-reindexed'
+```
+
+#### ILM Politikası Ekleme
+
+Reindex yapsaydık template'den dolayı ILM otomatik yakalanır ve eklenirdi, fakat clone yaptığımızda sadece adı değişti diğer tüm ayarlar olduğu gibi yenisine geçti. ILM kontrol ettiğimizde boş olduğunu görürüz:
+
+```bash
+curl -X GET "http://<ELASTICSEARCH_IP>:9200/.ds-apinizer-log-apiproxy-test-000001/_ilm/explain?pretty"
+```
+
+Bu yüzden yeni index'e ILM'nin eklenmesi gerekir:
+
+```bash
+curl -X PUT "http://<ELASTICSEARCH_IP>:9200/.ds-apinizer-log-apiproxy-test-000001/_settings?pretty" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "index": {
+      "lifecycle": {
+        "name": "apinizer-log-ilm-policy-test"
+      }
+    }
+  }'
+```
+
+<Info>
+Reindeks işlemi için detaylı bilgi: [Elasticsearch Reindex API](https://www.elastic.co/guide/en/elasticsearch/reference/7.9/docs-reindex.html)
+</Info>

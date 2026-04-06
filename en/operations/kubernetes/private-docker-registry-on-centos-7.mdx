@@ -1,0 +1,347 @@
+---
+title: "Private Docker Registry on CentOS 7"
+description: "Provides the necessary steps for installing and configuring Docker registry on a server with CentOS 7 operating system. With Private Docker Registry installation, you can store and manage Docker images locally."
+---
+
+<Info>
+  The docker distribution package is available in the extras repository on CentOS 7.4. If it is disabled on your CentOS 7 system, you may need to enable it.
+</Info>
+
+## Installation Steps
+
+<Steps>
+  <Step title="Docker Distribution installation">
+    Install the Docker Distribution package:
+
+    ```bash
+    sudo yum -y install docker-distribution
+    ```
+  </Step>
+  
+  <Step title="Configuring Docker Registry">
+    The Docker registry configuration file is located at **/etc/docker-distribution/registry/config.yml**. It is in YAML format. If you need to make any changes, do so here.
+
+    Example configuration file:
+    
+    ```yaml
+    version: 0.1
+    log:
+      fields:
+        service: registry
+    storage:
+      cache:
+        layerinfo: inmemory
+      filesystem:
+        rootdirectory: /var/lib/registry
+    http:
+      addr: :5000
+    ```
+    
+    <Info>
+      From the default configuration file:
+      
+      * **/var/lib/registry**: Directory where Docker images will be stored
+      * **Service**: Binds to port 5000 on all network interfaces
+    </Info>
+  </Step>
+  
+  <Step title="SELinux and Firewall configuration">
+    <Warning>
+      If you have enabled SELinux, you may encounter an issue when using port 5000. Consider disabling SELinux or setting it to permissive mode if you encounter problems.
+    </Warning>
+    
+    If the firewall is enabled and running, allow the port in the firewall:
+    
+    ```bash
+    firewall-cmd --add-port=5000/tcp
+    firewall-cmd --reload
+    ```
+  </Step>
+  
+  <Step title="Starting Docker Registry">
+    Start the service and set it to start on boot:
+    
+    ```bash
+    systemctl start docker-distribution
+    systemctl enable docker-distribution
+    ```
+    
+    Verify that the Docker distribution service is running:
+    
+    ```bash
+    systemctl status docker-distribution
+    ```
+  </Step>
+</Steps>
+
+Example output:
+
+```
+● docker-distribution.service - v2 Registry server for Docker
+   Loaded: loaded (/usr/lib/systemd/system/docker-distribution.service; disabled; vendor preset: disabled)
+   Active: active (running) since Sat 2018-03-31 14:31:16 EDT; 2min 20s ago
+ Main PID: 16262 (registry)
+   CGroup: /system.slice/docker-distribution.service
+           └─16262 /usr/bin/registry serve /etc/docker-distribution/registry/...
+```
+
+## Adding Registry to Docker Engine
+
+<Info>
+  The following information will be used when Kubernetes 1.18.x and Docker applications are installed together in Apinizer installation.
+</Info>
+
+By default, Docker uses HTTPS to connect to Docker registry. If you are on a trusted network, you can use an insecure registry. This eliminates the need for a CA-signed certificate for internal use or trusting a self-signed certificate on all Docker nodes.
+
+<Steps>
+  <Step title="Docker daemon.json configuration">
+    Edit the **/etc/docker/daemon.json** file:
+    
+    ```bash
+    vi /etc/docker/daemon.json
+    ```
+    
+    Delete all lines in the file and add the following line:
+    
+    ```json
+    {
+      "insecure-registries" : ["dockerregistry.local:5000"]
+    }
+    ```
+    
+    <Warning>
+      The above line must be added to **/etc/docker/daemon.json** on all servers that will connect to the Docker registry.
+    </Warning>
+    
+    <Info>
+      It can also be added as `"insecure-registries" : ["192.168.X.X:5000"]`.
+    </Info>
+  </Step>
+  
+  <Step title="Hostname configuration">
+    If you don't have a DNS server, use the /etc/hosts file to map the hostname to IP address:
+    
+    ```bash
+    cat /etc/hosts
+    192.168.X.X dockerregistry.local
+    ```
+    
+    <Note>
+      If a hostname is written, it must be specified in the host files of other machines in the Kubernetes cluster.
+    </Note>
+  </Step>
+  
+  <Step title="Restarting Docker">
+    Restart Docker to apply changes:
+    
+    ```bash
+    systemctl restart docker
+    ```
+  </Step>
+</Steps>
+
+## Docker Registry Usage
+
+Follow the steps below to upload and manage images to the Private Docker Registry.
+
+<Steps>
+  <Step title="Downloading image">
+    Download images to the environment where Docker registry is installed:
+    
+    ```bash
+    sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
+    ```
+  </Step>
+  
+  <Step title="Tagging image">
+    Tag the image as **dockerregistry.local:5000/manager:{`<APINIZER_VERSION>`}**. This creates an additional tag for the existing image:
+    
+    ```bash
+    docker tag apinizercloud/manager:<APINIZER_VERSION> dockerregistry.local:5000/manager:<APINIZER_VERSION>
+    ```
+    
+    <Info>
+      When the first part of the tag is a hostname and port, Docker interprets this as the location of a registry during push.
+    </Info>
+  </Step>
+  
+  <Step title="Pushing image to registry">
+    Push the image to the local registry:
+    
+    ```bash
+    docker push dockerregistry.local:5000/manager:<APINIZER_VERSION>
+    ```
+    
+    <Info>
+      If the image upload was successful, you should get a sha256 hash at the end. Transferred images are stored under the **/var/lib/registry/docker/registry/v2/repositories** directory.
+    </Info>
+  </Step>
+  
+  <Step title="Repository check">
+    Check the transferred images:
+    
+    ```bash
+    ls /var/lib/registry/docker/registry/v2/repositories
+    ```
+  </Step>
+</Steps>
+
+### Example Usage
+
+#### Loading Manager, Worker and Cache Images
+
+To push images pulled to local registry:
+
+```bash
+# Loading Apinizer Image
+--- Manager ---
+sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
+sudo docker tag apinizercloud/manager:<APINIZER_VERSION> <YOUR_IP>:5000/manager:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/manager:<APINIZER_VERSION>
+
+--- Worker ---
+sudo docker pull apinizercloud/worker:<APINIZER_VERSION>
+sudo docker tag apinizercloud/worker:<APINIZER_VERSION> <YOUR_IP>:5000/worker:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/worker:<APINIZER_VERSION>
+
+--- Cache ---
+sudo docker pull apinizercloud/cache:<APINIZER_VERSION>
+sudo docker tag apinizercloud/cache:<APINIZER_VERSION> <YOUR_IP>:5000/cache:<APINIZER_VERSION>
+sudo docker push <YOUR_IP>:5000/cache:<APINIZER_VERSION>
+```
+
+#### Loading Image from .tar File
+
+Loading an Apinizer image received as .tar to registry:
+
+```bash
+# Loading Apinizer Image
+docker image load < apinizer-manager.tar
+docker tag apinizer-manager:latest <YOUR_IP>:5000/apinizer-manager:latest
+docker push <YOUR_IP>:5000/apinizer-manager:latest
+```
+
+## Adding Images to Local Docker Registry with Linux Shell Script
+
+### Automatic Image Loading Script
+
+You can use the following script to automatically load Apinizer images to local Docker registry:
+
+```bash
+vi pullApinizerImages.sh
+```
+
+Script content:
+
+```bash
+#!/bin/bash
+
+localRepositoryUrl=<YOUR_IP>:5000
+
+if [ "$localRepositoryUrl" == "$localRepositoryUrl" ]; then
+  echo "Please enter your local Docker Repository URL"
+else
+  echo "Your Local Repository Url : "$localRepositoryUrl
+fi
+
+if [ $# -eq 0 ]; then
+  echo "Please enter the version information as a parameter."
+  exit
+fi
+
+echo 'Version = ' $1
+version=$1
+
+docker pull apinizercloud/manager:"$version"
+docker tag apinizercloud/manager:$version $localRepositoryUrl/manager:$version
+docker push $localRepositoryUrl/manager:$version
+
+docker pull apinizercloud/worker:$version
+docker tag apinizercloud/worker:$version $localRepositoryUrl/worker:$version
+docker push $localRepositoryUrl/worker:$version
+
+docker pull apinizercloud/cache:$version
+docker tag apinizercloud/cache:$version $localRepositoryUrl/cache:$version
+docker push $localRepositoryUrl/cache:$version
+
+echo "Image pull operation completed."
+```
+
+**Usage:**
+
+```bash
+sh pullApinizerImages.sh <APINIZER_VERSION>
+```
+
+## Registry API Usage
+
+### Querying Catalog Information
+
+To list all repositories in the registry:
+
+```bash
+curl http://<YOUR_IP>:5000/v2/_catalog
+```
+
+Example output:
+
+```json
+{
+  "repositories": [
+    "cache",
+    "manager",
+    "worker"
+  ]
+}
+```
+
+### Listing Image Tags
+
+To list tags of a specific image:
+
+```bash
+curl http://<YOUR_IP>:5000/v2/manager/tags/list
+```
+
+Example output:
+
+```json
+{
+  "name": "manager",
+  "tags": [
+    "<APINIZER_VERSION>"
+  ]
+}
+```
+
+## Kubernetes Deployment Configuration
+
+To use private registry in Apinizer deploy files in Kubernetes:
+
+```yaml
+image: myregistry.local:5000/apinizercloud/manager:<APINIZER_VERSION>
+```
+
+## Repository Cleanup
+
+To delete images in the repository:
+
+```bash
+cd /var/lib/registry/docker/registry/v2/repositories
+sudo rm -rf *
+```
+
+<Note>
+  Another issue to consider when installing Local Docker Registry is SSL.
+  
+  For more information: [https://github.com/Juniper/contrail-docker/wiki/Configure-docker-service-to-use-insecure-registry](https://github.com/Juniper/contrail-docker/wiki/Configure-docker-service-to-use-insecure-registry)
+</Note>
+
+### Cleaning Unused Images
+
+To clean unused images:
+
+```bash
+docker image prune -a
+```
+

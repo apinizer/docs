@@ -1,0 +1,201 @@
+---
+title: "MongoDB Possible Issues and Solutions"
+description: "Provides common issues and solutions that may be encountered during MongoDB installations and usage. Offers practical solutions for topics such as CentOS installation errors, disk usage, project and proxy deletion operations, hostname changes."
+---
+
+## If error is received during MongoDB installation on CentOS 7
+
+<p><strong>Reason/Why:</strong> warning: /var/cache/yum/x86_64/7/MongoDB/packages/mongodb-org-mongos-4.2.13-1.el7.x86_64.rpm: Header V3 RSA/SHA1 Signature, key ID 058f8b6b: NOKEY</p>
+
+<p>Retrieving key from <a href="https://www.mongodb.org/static/pgp/server-4.2.asc">https://www.mongodb.org/static/pgp/server-4.2.asc</a></p>
+
+### Solution
+
+Set <code>gpgcheck=0</code> in the following file
+
+```bash
+sudo vi /etc/yum.repos.d/mongodb.repo
+```
+
+```ini
+[MongoDB]
+name=MongoDB Repository
+baseurl=http://repo.mongodb.org/yum/redhat/$releasever/mongodb-org/4.2/$basearch/
+gpgcheck=0
+enabled=1
+gpgkey=https://www.mongodb.org/static/pgp/server-4.2.asc
+```
+
+---
+
+## If error is received during MongoDB installation on CentOS 8
+
+### Reason/Why
+
+If you see an output like the following in the "systemctl status mongodb.service -l" command:
+
+```bash
+SELinux is preventing /usr/bin/mongod from read access on the file snmp.
+```
+
+### Solution
+
+Run the following commands and check mongodb.service status until errors disappear:
+
+```bash
+grep mongod /var/log/audit/audit.log | audit2allow -M mypol
+semodule -i mypol.pp
+grep ftdc /var/log/audit/audit.log | audit2allow -M mypol
+semodule -i mypol.pp
+```
+
+---
+
+## /var/lib/mongodb path taking up too much space
+
+### Reason/Why
+
+While this is not a problem, in some cases it can affect insufficient disk and therefore system operation. This situation can be seen especially when journaling is enabled and a multi-node structure is used in replicaset.
+
+### Solution
+
+<p><strong>In multi-node usage:</strong> One of the running mongod services is closed and it is waited for the primary to pass to mongo on another server. Then all files in the /var/lib/mongodb path are deleted. When Mongod service is restarted, only necessary files will be created with automatic synchronization. <strong>Does not cause interruption in operations.</strong></p>
+
+<p><strong>In single node usage:</strong> <strong>Can be performed with interruption in operations.</strong> Backup of existing database is taken, running manager is stopped, database is dropped, /var/lib/mongodb path is cleaned, mongo is restored, manager is run again.</p>
+
+---
+
+## If a project and proxies inside it need to be manually deleted
+
+### Reason/Why
+
+While this is not a problem, these can be applied if they are desired to be manually deleted.
+
+### Solution
+
+The following steps can be followed for the solution:
+
+<p><strong>1. Get and convert ids in existing projects to string:</strong></p>
+
+```javascript
+var validProjectIds = db.project.find({}, {_id: 1}).toArray().map(function(item){ return item._id.toString(); });
+```
+
+<p><strong>2. Find project ids that don't have a match by going through API proxies:</strong></p>
+
+```javascript
+var invalidProjectIds = [];
+db.api_proxy.find({}).forEach(function(doc) {
+    if( doc.projectId && doc.projectId!=='admin' && !validProjectIds.includes(doc.projectId.toString())) {
+        if( !invalidProjectIds.includes(doc.projectId.toString())) {
+            invalidProjectIds.push(doc.projectId);
+        }
+    }
+});
+```
+
+<p><strong>3. Delete api_proxy's without relation:</strong></p>
+
+```javascript
+invalidProjectIds.forEach(function(invalidProjectId) {
+    db.api_proxy.deleteMany({projectId: invalidProjectId});
+});
+```
+
+---
+
+## Adding admin user as project owner to a project
+
+### Reason/Why
+
+While this is not a problem, it can be applied in situations where quick access to the project is required.
+
+### Solution
+
+```javascript
+// Switch to Apinizer database
+use apinizerdb
+
+// Run the following command and get the content of the ObjectId value that comes
+db.role.find({name:"Project Owner"}, {_id:1})
+
+// Write the obtained value to the <OBJECT_ID> field in the following command and write the desired project name to the <PROJECT_NAME> field and run the command
+db.project.updateOne(
+    { name:"<PROJECT_NAME>" },
+    {
+        $push: {
+            "projectMember.teamMemberList": {
+                userId: "admin",
+                roleList: [
+                    {
+                        $ref: "role",
+                        $id: ObjectId("<OBJECT_ID>")
+                    }
+                ]
+            }
+        }
+    }
+)
+```
+
+---
+
+## If Hostname of Node in MongoDB Cluster Will Change
+
+<Warning>
+<strong>Things to Consider Before Work:</strong>
+<ul>
+<li>These operations should be performed paying attention to error tolerance in MongoDB replicaset, otherwise interruptions may occur (MongoDB (n-1)/2 tolerance)</li>
+<li>It is recommended to take a full system backup before such an operation.</li>
+</ul>
+</Warning>
+
+### Reason/Why
+
+When the hostname of a node already running in a MongoDB cluster is changed, some configurations and credentials may conflict with the old hostname. Therefore, when performing this operation, the node whose hostname will be changed should be removed from the replicaset and added again after the hostname information is changed.
+
+### Solution
+
+#### 1. MongoDB Backup is Taken Before Work
+
+Connect to primary node and backup Apinizer's MongoDB database.
+
+```bash
+mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+show dbs
+use apinizerdb
+
+# High-sized collections in the database are checked
+db.getCollectionNames().map(name => ({storageSizeMB: (db.getCollection.stats().storageSize / (1024*1024)).toFixed(2), name: name})).sort((a,b) => a.storageSizeMB - b.storageSizeMB).forEach(printjson);
+
+# If there is a high-sized collection and it is not desired to backup, --excludeCollection <Collection_Name> parameter can be used
+sudo mongodump --host localhost --port=25080 --username=apinizer --password=passwd -d apinizerdb --authenticationDatabase=admin --gzip --archive=/home/apinizer/mongodump/apinizer-backup-v<Apinizer Version>-<Date>--1.archive
+```
+
+#### 2. Node Whose Hostname Will Change is Removed from MongoDB Replicaset
+
+```bash
+mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+rs.status()
+
+# If the server is primary node, it is first converted to secondary and connected to new primary (rs.stepDown())
+rs.remove("<NODES_OLD_HOSTNAME>")
+rs.status()
+
+# Connect to server whose hostname will be changed, mongodb service is stopped
+sudo systemctl stop mongod
+sudo hostnamectl set-hostname <NODES_NEW_HOSTNAME>
+sudo reboot
+
+hostname
+# If the old hostname corresponding to 127.0.0.1 ip is still on /etc/hosts, this part should be replaced with the new hostname
+sudo vi /etc/hosts
+sudo systemctl start mongod
+
+# Connect to primary server and node whose hostname changed is added to replica set
+rs.add("<NODES_NEW_HOSTNAME>")
+
+# Wait for data synchronization to complete
+rs.status()
+```
+

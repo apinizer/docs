@@ -1,0 +1,331 @@
+---
+title: "MongoDB Frequently Used Commands"
+description: "You can connect to MongoDB database, query, update, and delete collections. You can manage replicaset operations, perform backup and restore operations. You can recreate API Proxy and access Elasticsearch logs."
+---
+
+<Warning>
+Direct intervention to data in production environments is never recommended. Before any operation or change to be made in production environments, the relevant steps must be tested in the test environment and a current backup of the system must be taken.
+</Warning>
+
+## Connecting to MongoDB
+
+```bash
+mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+```
+
+## For All Operations After Connection
+
+You should switch to the correct database and work here:
+
+```bash
+use apinizerdb
+```
+
+## General Commands
+
+```bash
+# Show replicaset details
+rs.status()
+
+# Show users
+db.getUsers()
+
+# Show names and information of collections in the current database
+db.getCollectionNames()
+db.getCollectionInfos()
+
+# View the size of any collection in MB
+db.audit_event.stats().storageSize/1024/1024
+```
+
+## Search
+
+```bash
+db.user.find( { login: "admin" } );
+ 
+db.db_to_api.find().pretty().limit(10)
+ 
+#Full text search in API Proxy
+db.api_proxy.ensureIndex(
+    { "$**": "text" },
+    { name: "TextIndex" }
+);
+ 
+#Performs a text search in a specific collection.
+db.api_proxy.find(
+    {
+      $text: {
+        $search: "XMLRESULTwithNS"
+      }
+    },{
+        "name":1
+    }
+)
+ 
+ #Search with criteria
+db.api_proxy.find( {importedUrl: /.*kps.*/ })
+ 
+#Search with multiple criteria
+db.getCollection('api_proxy').find({$and: [{'routing.kpsSettings': { $exists: true }},{importedUrl: /.*kps.*/ }]})
+ 
+#Regex usage
+db.api_proxy.find({ "apiMethodList": { "$elemMatch": { "requestPolicyList": { "$elemMatch": { "name": { "$regex" : /^PolicyJwt3rdAuthentication/i } } } } } });
+db.api_proxy.find({ "requestPolicyList": { "$elemMatch": { "name": { "$regex" : /^PolicyJwt3rdAuthentication/i } } } });
+db.api_proxy.find({ "requestPolicyList": { "$elemMatch": { "_class": { "$regex" : /.*jwt.*/i } } } } , {"name":1,"requestPolicyList.name":1,"requestPolicyList._class":1});
+ 
+#Search in all fields
+db.api_proxy.find({ $where: function() {
+  for (var key in this) {
+    if (JSON.stringify(this[key]).indexOf("172.16.1.1") !== -1) {
+      return true;
+    }
+  }
+  return false;
+}}, {_id: 0,name:1,projectId:1})
+ 
+ 
+#Gets the count of logs up to the last 2 hours
+mongosh mongodb://localhost:25080/apinizerdb --authenticationDatabase "admin" -u "apinizer" -p "password" --eval 'db.apinizer_log.find({"date":{"$lte": new Date((new Date().getTime() - (2 * 60 * 60 * 1000)))}}).count()'
+ 
+#Searches for the expression <SEARCH_TERM> in all fields in all collections
+db.getCollectionNames().forEach(function(collName) {
+    var cursor = db[collName].find();
+    while (cursor.hasNext()) {
+        var doc = cursor.next();
+        if (JSON.stringify(doc).includes("<SEARCH_TERM>")) {
+            print("Found in " + collName);
+            printjson(doc);
+        }
+    }
+});
+```
+
+### Searching Which Variable is Used in Which Methods of Which API Proxies
+
+<Note>
+Before running the function, you must switch to the correct database with the `use apinizerdb` command.
+</Note>
+
+```javascript
+#Before running the function, you must switch to the correct database with the "use apinizerdb" command.
+ 
+function getApiMethodListObjectsWithFilledRequestPolicyList(nameToCheck) {
+    let skipCount = 0;
+    const limitCount = 1000;
+    console.log("Output format: Proxy Name;Method Name;Request/Response Line;Policy type.")
+    console.log("")
+    while (true) {
+        const cursor = db.api_proxy.find(
+            { "apiMethodList": { $exists: true, $ne: [] } }
+        ).skip(skipCount).limit(limitCount);
+ 
+        if (!cursor.hasNext()) {
+            break;
+        }
+        cursor.forEach(doc => {
+            doc.apiMethodList.forEach(object => {
+                if (object.requestPolicyList && object.requestPolicyList.length > 0) {
+                    object.requestPolicyList.forEach(policy => {
+                     if (JSON.stringify(policy).includes(nameToCheck)) {
+                            console.log(doc.name + ";" + object.name + ";Request;" + policy._class)
+                    }
+                    });
+                }
+                if (object.responsePolicyList && object.responsePolicyList.length > 0) {
+                    object.responsePolicyList.forEach(policy => {
+                        if (JSON.stringify(policy).includes(nameToCheck)) {
+                           console.log(doc.name + ";" + object.name + ";Response;" + policy._class)
+                        }
+                    });
+                }
+            });
+            if (doc.requestPolicyList && doc.requestPolicyList.length > 0) {
+                doc.requestPolicyList.forEach(policy => {
+                    if (JSON.stringify(policy).includes(nameToCheck)) {
+                        console.log(doc.name + ";ALL;Request;" + policy._class)
+                    }
+                });
+            }
+            if (doc.responsePolicyList && doc.responsePolicyList.length > 0) {
+                doc.responsePolicyList.forEach(policy => {
+                    if (JSON.stringify(policy).includes(nameToCheck)) {
+                        console.log(doc.name + ";ALL;Response;" + policy._class)
+                    }
+                });
+            }
+        });
+        skipCount += limitCount;
+    }
+  console.log("")
+}
+ 
+getApiMethodListObjectsWithFilledRequestPolicyList("KEYWORDTOSEARCH");
+```
+
+## Update
+
+```bash
+#Updating sub-element
+db.api_proxy.update( {name :"KYS Yabanci AdSoyad Getir GW"}, {$set: {"routing.connectTimeout": "30"}} );
+ 
+#Converting all "unwrapelement" objects' value to true in a proxy of Soap-2-Rest type (if editing is done in multiple arrays within 1 record, result returns as 1)
+db.api_proxy.updateMany({relativePath:"/tarServis"},{$set:{"apiMethodList.$[].protocolTransformation.unwrapElement":true}});
+ 
+#Adding object to sub-element (adds the relevant field to the second object of the array in the object)
+db.api_proxy.update( {"relativePath":"/ydsSorgulamaServisi"}, {$push: {"requestPolicyList.1.unPasswordDecrypted": "false"}} );
+ 
+ 
+#Setting admin user's password to "admin"
+db.user.update({"login" : "admin"},{$set: { "password" : "$2a$10$Wv6i9IIdNzlxgDdaf13UdOl7uumVcG7zkSEKaOG4Xqn6IlLuwA13e"}});
+ 
+#Unlocking admin user after lock
+db.user.updateOne({ _id: "admin" },{ $set: { locked: false } })
+ 
+ 
+#Checking a table and changing the value of records matching a criteria
+db.getCollection('patch_history').find({})
+db.patch_history.update({"status" : "RUNNING"},{$set: { "status" : "COMPLETED"}});
+ 
+db.api_proxy.update( {},
+    { 
+        "$pull": { 
+            "apiProxyDeployList": { 
+                "environmentSettingsId": "60e2ad54d5ba7a7636db3aa6" 
+            }
+        } 
+    }, { "multi": true }
+);
+ 
+ 
+db.api_proxy.update( {_id : ObjectId("611628a3c21a5c04977e98e2")},
+    { 
+        "$pull": { 
+            "apiProxyDeployList": { 
+                "environmentSettingsId": "60e2ad54d5ba7a7636db3aa6" 
+            }
+        } 
+    }, { "multi": true }
+);
+```
+
+## Delete
+
+```bash
+#Delete object (deletes everything matching the where condition)
+db.privacy_settings.remove({ "salt":"UCPyFvw0EAnOgfOJ"  })
+ 
+#Clearing apiProxyDeployList under api_proxy
+//first line's where condition is empty because update is wanted on all documents
+//second line's where condition is empty because everything under apiProxyDeployList will be deleted
+db.api_proxy.update(
+  {  },
+  {$pull : {"apiProxyDeployList" : {} }}
+)
+ 
+#Delete all records in collection (truncate)
+db.db_to_api.remove({})
+ 
+#Drop collection
+db.db_to_api.drop()
+ 
+#Drop collection without entering mongo
+mongo "mongodb://<IP_ADDRESS>:25080/apinizerdb" --eval 'db.getSiblingDB("admin").auth("apinizer", "PASSWORD"); db.getSiblingDB("apinizerdb").apinizer_log.drop();'
+ 
+#Drop database
+db.dropDatabase()
+```
+
+## Replicaset Operations
+
+```bash
+# Force replica to sync from master in replicaset system
+rs.syncFrom("hostname:port");
+```
+
+## Backup and Restore
+
+<AccordionGroup>
+  <Accordion title="Taking Backup">
+    ```bash
+    sudo mongodump --host <IP_ADDRESS> --port=25080 --username=apinizer --password=<PASSWORD> --authenticationDatabase=admin --gzip --archive=/home/apinizer/apinizer-backup-2023-01-31--1.archive
+    ```
+  </Accordion>
+
+  <Accordion title="Taking Backup Excluding Some Large Tables">
+    ```bash
+    sudo mongodump --host <IP_ADDRESS> --port 25080 --excludeCollection apinizer_log --excludeCollection audit_event -d apinizerdb --authenticationDatabase "admin" -u apinizer -p <PASSWORD> --gzip --archive=/home/apinizer/apinizer-backup-2023-01-31--1.archive
+    ```
+  </Accordion>
+
+  <Accordion title="Restoring from Backup">
+    ```bash
+    sudo mongorestore --drop --host <IP_ADDRESS> --port 25080 -u apinizer -p <PASSWORD> --authenticationDatabase=admin --gzip --archive=/home/apinizer/apinizer-backup-2023-01-31--1.archive
+    ```
+  </Accordion>
+
+  <Accordion title="Backing Up Single Collection">
+    ```bash
+    sudo mongodump --host <IP_ADDRESS> --port=25080 --authenticationDatabase "admin" -d apinizerdb -u apinizer -p <PASSWORD> --collection=<COLLECTION_NAME> --out=/home/apinizer/
+    ```
+  </Accordion>
+
+  <Accordion title="Restoring from Single Collection Backup">
+    ```bash
+    sudo mongorestore --drop --host <IP_ADDRESS> --port 25080 --authenticationDatabase "admin" -d apinizerdb -u apinizer -p <PASSWORD> --collection=<COLLECTION_NAME> /home/apinizer/apinizerdb/<COLLECTION_NAME>.bson
+    ```
+  </Accordion>
+
+  <Accordion title="Compressing with Gzip in Bulk Database Backups">
+    <Note>
+      Bulk database backups can be compressed with gzip, in this case you can create a proper archive using the command below and run the above command again.
+    </Note>
+
+    ```bash
+    gunzip < all-dbs-backup-2023-10-5--02.archive > all-dbs-backup-2023-10-5--02
+    ```
+  </Accordion>
+
+  <Accordion title="Restoring Single Collection from Bulk Database Backup">
+    ```bash
+    mongorestore --host <IP_ADDRESS> --port 25080 --username apinizer --password <PASSWORD> --authenticationDatabase admin --drop --nsInclude 'apinizer-dev.environment_settings' --archive=all-dbs-backup-2023-10-5--02
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Logs
+
+```bash
+# Application logs
+sudo tail -999f /var/log/mongodb/mongod.log
+```
+
+## Recreating API Proxy in Apinizer and Accessing Elasticsearch Logs
+
+These commands are used to access Elasticsearch logs through the same API Proxy when an API Proxy is deleted and recreated or when export/import operations are performed.
+
+```bash
+# Store proxy document in a variable
+doc = db.api_proxy.findOne({_id: ObjectId("WRONGPROXYID")})
+
+# Set a new _id
+doc._id = ObjectId("SHOULDBEPROXYID")
+
+# Insert document with new _id
+db.api_proxy.insert(doc)
+
+# Delete document with old _id
+db.api_proxy.remove({_id: ObjectId("WRONGPROXYID")})
+
+# Required update for Apinizer
+db.api_proxy_revision.update(
+  { apiProxyId: "WRONGPROXYID" },
+  { $set: { apiProxyId: "SHOULDBEPROXYID" } }
+)
+
+# Updating permissions
+db.credential_allowed_api_proxy.updateMany(
+  { apiProxyId: "WRONGPROXYID" },
+  { $set: { apiProxyId: "SHOULDBEPROXYID" } }
+)
+```
+

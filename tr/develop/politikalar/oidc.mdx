@@ -1,0 +1,474 @@
+---
+title: "OIDC Kimlik Doğrulama"
+description: "OIDC sağlayıcısıyla entegre olup kullanıcı oturumlarını doğrulayabilir ve API erişimini kontrol edebilirsiniz"
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+## Genel Bakış
+
+### Amacı Nedir?
+
+- API Proxy (API Vekil Sunucusu) trafiğini harici OIDC sağlayıcılarına yönlendirerek uç kullanıcı kimlik doğrulamasını standartlaştırmak.
+- ID token ve access token doğrulamasıyla mikro servislerin kimlik doğrulama yükünü hafifletmek ve güvenliği merkezileştirmek.
+- Oturum, cookie ve cache yönetimi sayesinde uzun süreli kullanıcı oturumlarını güvenli biçimde sürdürebilmek.
+- Rol haritalama ve header enjeksiyonlarıyla API katmanında ince taneli yetkilendirme kuralları uygulamak.
+
+### Çalışma Prensibi
+
+1. **İstek Gelişi**: API Gateway'e gelen her HTTP/HTTPS isteği için, istemin kaynak IP adresi tespit edilir.
+2. **Politika Kontrolü**: OIDC Kimlik Doğrulama politikası aktif ise, sistem aşağıdaki sırayla kontrol yapar:
+   - Condition (koşul) tanımlı mı? Varsa koşul sağlanıyor mu?
+   - Politika aktif mi (active=true)?
+   - Variable kullanılıyor mu yoksa Apinizer default mı?
+3. **OIDC Yetkilendirme Akışı**: İstek, seçilen OIDC/OAuth2 flow tipine göre yönlendirilir; issuer/discovery metadatası çekilir, PKCE ve nonce/state değerleri üretilir, token valide edilir.
+4. **Karar Verme**:
+   - **Eşleşme Var**: Doğrulanmış token'dan kullanıcı bilgileri çıkarılır, header/cookie güncellenir, opsiyonel yetkilendirme servisi tetiklenir ve isteğe izin verilir.
+   - **Eşleşme Yok**: Yetkilendirme başarısız olur, tanımlanan hata mesajı veya redirect kuralı uygulanır.
+5. **Hata İşleme**: Politika kuralına uymayan istekler için özelleştirilebilir HTTP durum kodu ve hata mesajı döndürülür.
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Dinamik OIDC Keşfi**: Well-known endpoint üzerinden issuer, JWKS ve diğer metadata bilgilerini otomatik keşfederek manuel yapılandırma ihtiyacını azaltır.
+- **Çoklu Akış Desteği**: Authorization Code, Implicit, Hybrid ve saf OAuth2 Authorization Code akışlarını aynı politikada yönetir; PKCE desteğiyle güvenliği artırır.
+- **Token Doğrulama Kontrolleri**: ID/Access token doğrulaması, imza algoritması kontrolü, kullanıcı bilgisi alma ve API tabanlı token doğrulama seçeneklerini sunar.
+- **Aktif/Pasif Durum Kontrolü**: Politikanın aktif veya pasif durumunu kolayca değiştirme (active/passive toggle). Pasif durumda politika uygulanmaz ancak yapılandırması saklanır.
+- **Koşul Bazlı Uygulama**: Query Builder ile karmaşık koşullar oluşturarak politikanın ne zaman uygulanacağını belirleme (örn: sadece belirli endpoint'lere veya header değerlerine göre).
+
+### İleri Düzey Özellikler
+
+- **Gelişmiş Oturum Yönetimi**: Session cookie adı, timeout, state/nonce doğrulaması, oturum şifreleme ve sıkıştırma ayarları ile kurumsal güvenlik standartlarını karşılar.
+- **Rol ve Yetkilendirme Entegrasyonu**: Rol haritalama, header'a rol ekleme, harici yetkilendirme servisi veya Credential Role Service ile derinlemesine erişim yönetimi sağlar.
+- **Uyarlanabilir Token Taşıma**: Token'ı header, cookie veya her ikisi üzerinden kabul edebilir; bearer formatını zorunlu kılabilir, özel header isimleri kullanabilir.
+- **Export/Import Özelliği**: Politika yapılandırmasını ZIP dosyası olarak export etme. Farklı ortamlara (Development, Test, Production) import etme. Versiyon kontrolü ve yedekleme imkanı.
+- **Policy Group ve Proxy Group Desteği**: Birden fazla politikayı Policy Group içinde yönetme. Proxy Group'lara toplu politika atama. Merkezi güncelleme ve deploy işlemleri.
+- **Deploy ve Versiyonlama**: Politika değişikliklerini canlı ortama deploy etme. Hangi API Proxy'lerde kullanıldığını görme (Policy Usage). Proxy Group ve Policy Group kullanım raporları.
+
+## Kullanım Senaryoları
+
+| Senaryo | Durum | Çözüm (Politika Uygulaması) | Beklenen Davranış / Sonuç |
+|---------|-------|----------------------------|---------------------------|
+| Kurumsal Portal SSO | Tek oturum açma sağlanmak isteniyor | Authorization Code + PKCE, global politika | Kullanıcı tek girişle bütün API Proxy'lerde yetkilendirilir. |
+| Mobil Uygulama Güvenliği | Mobil istemcilerde token sızıntısı riski var | PKCE etkin, kısa token cache süresi | Mobil uygulama token'ı secure storage'da tutar, süresi dolunca yeniler. |
+| Legacy API Koruması | Eski servisler Basic Authentication kullanıyor | Token validation + header enjeksiyonu | Kimlik doğrulama gateway'de yapılır, servis yalnızca header'ı okur. |
+| Harici İş Ortağı Entegrasyonu | Dış sistemler cookie tabanlı erişim istiyor | Token cookie'lere yazılır, SameSite/secure ayarlanır | İş ortağı tarayıcıları ek config olmadan oturum taşır. |
+| Çoklu OIDC Sağlayıcı Yönetimi | Farklı tenant'lar farklı issuer kullanıyor | Özel condition + discovery URL değişkeni | Her tenant isteği kendi issuer'ına yönelir ve doğrulanır. |
+| Yüksek Güvenlikli API | Token imzası ve aud doğrulaması zorunlu | ValidateJwtSignature + ExpectedAudience listesi | Yanlış issuer/audience içeren token'lar 403 ile reddedilir. |
+| Geliştirici Sandbox *(opsiyonel)* | Test ortamında hafif doğrulama gerekli | Condition ile /sandbox/* path seçimi, debug logging açık | Sadece sandbox çağrıları zayıf doğrulamadan geçer, canlı trafik etkilenmez. |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** erişim kurallarını belirleyebilir. Tanımlanan parametreler, politikanın çalışma şeklini (örneğin hangi IP'lerin izinli olacağı, coğrafi kısıtlamalar, koşullu aktivasyonlar vb.) doğrudan etkiler. Bu sayede politika hem kuruma özel gereksinimlere göre özelleştirilebilir hem de merkezi olarak yönetilebilir.
+
+### Yeni OIDC Kimlik Doğrulama Politikası Oluşturma
+
+Aşağıda **OIDC (Keycloak, Okta, Azure AD, …)** yapılandırma profiline ait sekmeler sırayla anlatılır; ekran görüntüleri ve alan tabloları bu profile göredir. **OAuth2 (External OAuth2 Provider)** ile nelerin değiştiğini karşılaştırmak için önce bu OIDC bölümünü okuyun; ardından **OIDC sekmelerinin** ve tabloların hemen sonrasında yer alan **OIDC ve OAuth2 yapılandırma profili — UI farkları** bölümüne geçin (OAuth2’ye özel **OAuth2 Parameters** ve **Session & HTML** görselleri de oradadır).
+
+#### Connection sekmesi
+
+<img src="/images/develop/politikalar/oidc-ui-connection.png" alt="OIDC Connection: sağlayıcı, uç noktalar ve istemci" loading="lazy" />
+
+<img src="/images/develop/politikalar/oidc-ui-connection-flow.png" alt="OIDC Connection: akış ve ek yetkilendirme parametreleri" loading="lazy" />
+
+**Configuration Profile:** **OIDC (Keycloak, Okta, Azure AD, …)** veya **OAuth2 (External OAuth2 Provider)** — akış tipi, görünen sekmeler ve alanları belirler; seçim sonrası birçok alan düzenlenebilir kalır.
+
+| Bölüm | Alan | Not |
+|-------|------|-----|
+| **Provider Configuration** | **OIDC Issuer URL** *(zorunlu)* | Örn. `https://accounts.google.com`. Yanında **Auto Discover** ile metadata keşfi. |
+| | **Discovery URL** | Boş bırakılırsa issuer’dan türetilir; ayrıca `…/.well-known/openid-configuration` adresi girilebilir. |
+| **Endpoint Configuration** | **Authorization Endpoint** *(zorunlu)* | Yetkilendirme uç noktası. |
+| | **Token Endpoint** *(zorunlu)* | Token uç noktası. |
+| | **UserInfo Endpoint** | Kullanıcı bilgisi. **Yalnızca OIDC profilinde** gösterilir. |
+| | **JWKS Endpoint** | İmza doğrulama anahtarları. **Yalnızca OIDC profilinde** gösterilir. |
+| | **Introspection Endpoint** | Token introspection. **Yalnızca OIDC profilinde** gösterilir. |
+| | **Token Revocation Endpoint** | Token iptali. **Yalnızca OIDC profilinde** gösterilir. |
+| | **oauth2ResourceEndpoint** *(zorunlu)* | **Yalnızca OAuth2 profilinde** gösterilir; yukarıdaki dörtlünün yerini alır. |
+| **Client Information** | **Client ID** *(zorunlu)* | OAuth/OIDC istemci kimliği. |
+| | **Client Secret** | İstemci sırrı (göster/gizle). |
+| | **Redirect URI** *(zorunlu)* | OAuth redirect URI. |
+| | **Realm** | Sağlayıcıya özel realm (varsa). **OAuth2 profilinde gizlenir.** |
+| **Flow Configuration** | **Flow Type** *(zorunlu)* | OIDC: listeden seçim. OAuth2: arka planda **`OAUTH2_AUTHORIZATION_CODE`** sabitlenir; **OAuth2 Username Extraction Path** bu profilde eklenir. |
+| | **Authentication Mode** | Örn. External OIDC Provider Only (ekranda akış bölümünde yer alır). |
+| | **Enable PKCE** | PKCE (Proof Key for Code Exchange) açık/kapalı. |
+| | **Scopes** | Virgülle ayrılmış scope listesi; örn. `openid`, `profile`, `email`. |
+| **Additional Auth Parameters** | Tablo: **Header Name** / **Header Value** | Yetkilendirme isteğine eklenecek ek parametreler (`acr_values`, `login_hint`, `prompt` vb.). **Yalnızca OIDC profilinde**; OAuth2’de **OAuth2 Parameters** sekmesindeki tablolar kullanılır. |
+
+#### Token & Validation sekmesi
+
+**Yalnızca OIDC yapılandırma profilinde** gösterilir. OAuth2 profilinde bu sekme yerine **OAuth2 Parameters** kullanılır.
+
+Gelen token’ların nasıl doğrulanacağı, backend’e nasıl iletileceği ve JWT doğrulama ayrıntıları bu sekmede tanımlanır.
+
+<img src="/images/develop/politikalar/oidc-ui-token-validation.png" alt="OIDC Token ve doğrulama sekmesi" loading="lazy" />
+
+**Token Validation**
+
+| Alan | Açıklama |
+|------|----------|
+| **Bearer JWT Authentication** | Bearer JWT ile kimlik doğrulama. |
+| **Validate ID Token** | ID token doğrulaması. |
+| **Validate Access Token** | Access token doğrulaması. |
+| **Validate Token with API** | Token’ı API üzerinden doğrulama. |
+| **Call Userinfo Endpoint** | UserInfo çağrısı; ek kullanıcı bilgisi alınıp backend’e header olarak iletilebilir. |
+| **Token Cache Timeout (sec)** | Token önbellek süresi (saniye). |
+| **JWK Cache Timeout (sec)** | JWKS önbellek süresi (saniye). |
+
+**Token Accept Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Accept Token As** | Örn. Header and Cookie — token’ın nereden kabul edileceği. |
+| **Add Token to Cookie** | Token’ı cookie’ye yazma. |
+| **Add as Bearer** | Bearer formatı. |
+| **Add Access Token to Header** | Access token’ı header’a ekleme. |
+| **Access Token Header Name** | Örn. `Authorization`. |
+| **Add ID Token to Header** | ID token’ı header’a ekleme. |
+| **ID Token Header Name** | Örn. `IdToken`. |
+| **Disable UserInfo Header** | UserInfo header’ını devre dışı bırakma. |
+| **UserInfo Header Name** | Örn. `UserInfo`. |
+
+**JWT Validation Details**
+
+| Alan | Açıklama |
+|------|----------|
+| **Validate Issuer** | Issuer (`iss`) doğrulaması; açıkken **Expected Issuer** doldurulabilir. |
+| **Validate Audience** | Audience (`aud`) doğrulaması. |
+| **Validate JWT Locally** | JWT’nin yerel doğrulaması. |
+| **Validate JWT Signature** | İmza doğrulaması. |
+
+**Cache Settings** (ekranda tekrar eden blok)
+
+| Alan | Açıklama |
+|------|----------|
+| **Token Cache Timeout (sec)** | Token önbellek süresi. |
+| **JWK Cache Timeout (sec)** | JWK önbellek süresi. |
+
+#### Session & Logout sekmesi
+
+**Yalnızca OIDC yapılandırma profilinde** gösterilir (tam oturum ve çıkış seti). OAuth2 profilinde bu sekme yerine **Session & HTML** kullanılır (sadeleştirilmiş oturum + HTML şablonları).
+
+Oturum çerezi, token çerezleri ve çıkış (logout) davranışı bu sekmede yapılandırılır.
+
+<img src="/images/develop/politikalar/oidc-ui-session-logout.png" alt="OIDC Session ve Logout sekmesi" loading="lazy" />
+
+**Session Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Session Cookie Name** | Oturum çerezi adı (örn. `OIDC_SESSION`). |
+| **Session Timeout (min)** | Oturum zaman aşımı (dakika). |
+| **Absolute Timeout (sec)** | Mutlak oturum süresi (saniye). |
+| **Secure Cookie** | Yalnızca HTTPS’te çerez gönderimi. |
+| **Enable State Validation** | OAuth `state` parametresi doğrulaması. |
+| **Enable Nonce Validation** | OpenID `nonce` doğrulaması. |
+
+**Token Cookie Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Renew Access Token on Expiry** | Access token süresi dolunca yenileme. |
+| **Access Token Cookie Name** | Access token için çerez adı. |
+| **Enable ID Token Cookie** | ID token’ı cookie’ye yazma. |
+| **ID Token Cookie Name** | ID token çerez adı. |
+| **Enable Refresh Token Cookie** | Refresh token’ı cookie’ye yazma. |
+| **Refresh Token Cookie Name** | Refresh token çerez adı. |
+
+**Logout Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Logout Path** | Çıkış URL yolu (örn. `/logout`). |
+| **Post Logout Redirect URI** | Sağlayıcı çıkış sonrası yönlendirme. |
+| **Redirect After Logout URI** | Apinizer çıkış sonrası yönlendirme. |
+| **ID Token Hint in Logout** | Logout isteğinde `id_token_hint` kullanımı. |
+| **Revoke Tokens on Logout** | Çıkışta token’ları iptal etme. |
+| **Token Revocation Endpoint** | İptal (revocation) uç noktası. |
+
+#### User Mapping sekmesi
+
+**Yalnızca OIDC yapılandırma profilinde** gösterilir. OAuth2 profilinde bu sekme yoktur; kullanıcı adı çıkarma için Connection akışındaki **OAuth2 Username Extraction Path** ve **OAuth2 Parameters** sekmesine bakın.
+
+OIDC claim’lerinin kullanıcı alanlarına, rollere ve backend header’larına eşlenmesi bu sekmede yapılır.
+
+<img src="/images/develop/politikalar/oidc-ui-user-mapping.png" alt="OIDC User Mapping sekmesi" loading="lazy" />
+
+**Claim Paths**
+
+| Alan | Açıklama |
+|------|----------|
+| **Username Claim Path** | Kullanıcı adı için claim yolu (örn. `sub`). |
+| **Email Claim Path** | E-posta için claim yolu (örn. `email`). |
+| **Display Name Claim Path** | Görünen ad için claim yolu (örn. `name`). |
+
+**Role Mappings** (tablo)
+
+| Sütun | Açıklama |
+|-------|----------|
+| **Claim Path** | Eşleştirilecek claim yolu. |
+| **Claim Value** | Beklenen değer. |
+| **Target Role** | Atanacak rol. |
+
+**Custom Claim Mappings** (tablo: **Header Name** / **Header Value**)
+
+**Backend Header Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Disable UserInfo Header** | UserInfo içeriğinin backend header’ına eklenmesini kapatma. |
+| **UserInfo Header Name** | UserInfo’nun iletileceği header adı (örn. `UserInfo`). |
+
+**Custom HTTP Headers** (tablo: **Header Name** / **Header Value**) — backend’e eklenecek ek HTTP başlıkları.
+
+#### Security & Other sekmesi
+
+Sağlayıcıya TLS/mTLS, zaman aşımı, istek filtreleme, hata yönlendirme ve hata ayıklama bu sekmede yönetilir.
+
+<img src="/images/develop/politikalar/oidc-ui-security-other.png" alt="OIDC Security ve diğer ayarlar sekmesi" loading="lazy" />
+
+**Secure Connection Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Enable Secure Connection Settings** | Güvenli bağlantı / sertifika ayarlarını etkinleştirme. |
+| **Skip SSL Verification** | Sunucu sertifikası doğrulamasını atlama (yalnızca test için önerilir). |
+| **TrustStore (JKS/PKCS12)** | Güvenilen sertifika deposu (accordion). |
+| **Certificate (PEM)** | PEM sertifika (accordion). |
+| **KeyStore (Client Certificate)** | İstemci sertifikası / mTLS (accordion). |
+| **Protocol & Verification Settings** | Protokol ve doğrulama (accordion). |
+
+OIDC sağlayıcısına yapılan **tüm** bağlantıları etkiler; yanlış mTLS ayarı bağlantı hatalarına yol açabilir.
+
+**IP and Security Control**
+
+| Alan | Açıklama |
+|------|----------|
+| **Check Client IP** | İstemci IP kontrolü. **Yalnızca OIDC yapılandırma profilinde** gösterilir. |
+
+**Timeout Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Connection Timeout (sec)** | Bağlantı zaman aşımı. |
+| **Read Timeout (sec)** | Okuma zaman aşımı. |
+| **Max Clock Skew (sec)** | Saat farkı toleransı (JWT `iat`/`exp` vb.). |
+
+**Request Filtering**
+
+| Alan | Açıklama |
+|------|----------|
+| **Ignored Methods** | Politikanın uygulanmayacağı HTTP metodları (örn. `OPTIONS`). **Yalnızca OIDC yapılandırma profilinde** gösterilir. |
+| **Ignored Patterns** | Virgülle ayrılmış path/dosya desenleri (örn. `static/js`, `*.css`, `*.png`). **Yalnızca OIDC yapılandırma profilinde** gösterilir. |
+
+**Error Handling**
+
+| Alan | Açıklama |
+|------|----------|
+| **Error Redirect URL** | Hata durumunda yönlendirme adresi. |
+| **Include Error Details** | Yanıta hata detayı ekleme. |
+| **Error Message Template** | Özel hata mesajı şablonu. |
+
+**Debug and Logging**
+
+| Alan | Açıklama |
+|------|----------|
+| **Debug Logging** | Ayrıntılı günlük. |
+| **User Agent** | OIDC isteklerinde kullanılacak User-Agent (örn. `Apinizer-OIDC-Client/1.0`). |
+
+**Diğer**
+
+| Alan | Açıklama |
+|------|----------|
+| **Clear Authorization** | İstek içeriğindeki mevcut kimlik doğrulama bilgisini silme. |
+| **Add User to Header** | Başarılı kimlik doğrulamada kullanıcı adını / clientId’yi header’a ekleme. |
+| **User Header Name** | Yukarıdaki header adı (varsayılan yardım metninde örn. `X-Authenticated-UserId`; ekranda örn. `User`). |
+
+### OIDC ve OAuth2 yapılandırma profili — UI farkları
+
+Yukarıdaki tablolar **OIDC** profilindeki sekmeleri adım adım anlatır. **Configuration Profile** olarak **OAuth2 (External OAuth2 Provider)** seçildiğinde Manager aynı politika ekranında **farklı sekmeleri** ve **koşullu alanları** gösterir veya gizler; özeti burada topluyoruz.
+
+Apinizer Manager’da **OIDC Kimlik Doğrulama** politikasını düzenlerken üstteki **Configuration Profile** radyo düğmeleri (**OIDC** / **OAuth2**) bu davranışı belirler.
+
+#### Özet tablo
+
+| | **OIDC (Keycloak, Okta, Azure AD, …)** | **OAuth2 (External OAuth2 Provider)** |
+|---|----------------------------------------|----------------------------------------|
+| **Arka planda `flowType`** | Açılır listeden seçilir: Authorization Code, Implicit, Hybrid (listeden saf OAuth2 Authorization Code çıkarılmıştır) | Sabit: **`OAUTH2_AUTHORIZATION_CODE`** — profil değişince kod tarafında atanır |
+| **Bağlantı — uç noktalar** | **UserInfo**, **JWKS**, **Introspection**, **Revocation** alanları görünür | Bu dörtlü gösterilmez; bunun yerine zorunlu **`oauth2ResourceEndpoint`** alanı görünür |
+| **Realm** | Görünür | Gizlenir |
+| **Ek yetkilendirme parametreleri** | **Additional Auth Params** paneli (OIDC) | Bu panel yok; bunun yerine ayrı sekmede **OAuth2 Auth / Token / Resource** parametre tabloları |
+| **Akış paneli** | OAuth2’ye özel **Username Extraction Path** yok | **OAuth2 Username Extraction Path** görünür |
+| **Sekme sırası** | Connection → **Token & Validation** → **Session & Logout** (tam) → **User Mapping** → Security & Other | Connection → **OAuth2 Parameters** → **Session & HTML** → Security & Other |
+
+Son iki sekme grubu her iki profilde de tipik olarak şunları içerir: **Conditions**, **Error Message Customization**, **API Proxies Using Policy**, **API Proxy Groups Using Policy** (profil seçiminden bağımsız mantık).
+
+#### OIDC profilinde varken OAuth2 profilinde gizlenen veya karşılığı farklı olanlar
+
+- **Token & Validation** sekmesi: Bearer JWT, ID/access token doğrulamaları, UserInfo, JWT issuer/audience/imza, token kabul ayarları vb.
+- **Session & Logout** sekmesinin OIDC sürümü: state/nonce, mutlak timeout, token çerez adları, logout path, revoke, post logout vb. tam set.
+- **User Mapping** sekmesi: claim path’ler, rol eşlemeleri, custom claim mappings.
+- **Security & Other** içinde **Check Client IP** ve **Ignored Methods / Patterns** — yalnızca OIDC profilinde.
+
+#### OAuth2 profilinde ek / farklı olanlar
+
+Aşağıdaki sekmeler ve ekran görüntüleri **yalnızca OAuth2 (External OAuth2 Provider)** profili seçiliyken görünür. Her bölümde **Header Name** / **Header Value** veya şablon alanları anahtar-değer veya metin düzenleyici ile doldurulur.
+
+##### OAuth2 Parameters sekmesi
+
+<img src="/images/develop/politikalar/oidc-ui-oauth2-parameters.png" alt="OAuth2 Parameters sekmesi: Authorization, Token, Resource ve Backend Request Headers" loading="lazy" />
+
+| Bölüm | Açıklama |
+|-------|----------|
+| **Authorization Parameters** | Yetkilendirme isteğine eklenecek ek HTTP başlıkları (`oauth2AuthParams`). Tablo: **Header Name** / **Header Value**; **+** ile satır eklenir. |
+| **Token Parameters** | Token (access token) alışverişi isteğine eklenecek ek başlıklar (`oauth2TokenParams`). |
+| **Resource Parameters** | Kaynak veya kullanıcı bilgisi isteğine eklenecek ek başlıklar (`oauth2ResourceParams`). |
+| **Backend Request Headers** | Kimlik doğrulama başarılı olduktan sonra backend’e iletilecek ek HTTP başlıkları; bölüm accordion ile açılıp kapanır, **+** ile satır eklenir. |
+
+##### Session & HTML sekmesi
+
+<img src="/images/develop/politikalar/oidc-ui-session-html.png" alt="Session & HTML sekmesi: oturum ayarları ve HTML yanıt sayfaları" loading="lazy" />
+
+OIDC’deki tam **Session & Logout** ve **User Mapping** yerine bu sekme kullanılır: oturum alanları sadeleştirilir; isteğe bağlı **HTML Response Pages** ile giriş/hata/başarı sayfaları şablonlanır.
+
+**Session Settings**
+
+| Alan | Açıklama |
+|------|----------|
+| **Session Cookie Name** | Oturum çerezi adı (örn. `OIDC_SESSION`). |
+| **Session Timeout (min)** | Oturum süresi (dakika). |
+| **Secure Cookie** | Çerezin yalnızca HTTPS üzerinden gönderilmesi. |
+| **Renew Access Token on Expiry** | Access token süresi dolunca yenileme denemesi. |
+
+**HTML Response Pages** *(etkinleştirildiğinde)*
+
+| Alan | Açıklama |
+|------|----------|
+| **HTML Response Pages** | Özel HTML sayfalarını açar / kapatır (`enableHtmlResponsePages` benzeri davranış). |
+| **Application Title** | Sayfalarda gösterilecek başlık (şablonlarda `{{APP_TITLE}}` gibi yer tutucularla kullanılabilir). |
+| **Success Page Call** | Başarılı kimlik doğrulama sonrası yönlendirme kullanılsın mı. |
+| **Success Page URL** | Başarı sonrası yönlendirme adresi. |
+| **Login / Error / Success Page Template** | Üç alt sekme: giriş, hata ve başarı sayfaları için HTML şablonları (örnekte OAuth butonu ve stil içeren HTML metni). |
+
+#### Her iki profilde ortak kalanlar
+
+- **Connection** büyük ölçüde ortak: Issuer, Discovery URL, Authorization Endpoint, Token Endpoint, Client ID, Client Secret, Redirect URI, PKCE, Scopes, Authentication Mode seçimi (OAuth2’de uç nokta ve akış alanları yukarıdaki özet tabloya göre farklılaşır).
+- **Security & Other**: mTLS/SSL ayarları, connection/read timeout, max clock skew, hata yönlendirme, debug, kullanıcı header’ları; **Conditions** ve **Error Message Customization** panelleri profilden bağımsız mantıkta kalır.
+
+Dokümantasyonda **“tek sekme sırası her iki profil için aynı”** denirse bu, Manager arayüzüyle **tam örtüşmez**: OAuth2 seçildiğinde **Token & Validation**, tam **Session & Logout** ve **User Mapping** yerine **OAuth2 Parameters** ve **Session & HTML** kullanılır.
+
+*Not: Arayüz davranışı `isOIDCProfile` / `isOAuth2Profile` benzeri koşullara bağlıdır; Apinizer sürümüne göre alanlar güncellenebilir.*
+
+### Yapılandırma Adımları
+
+**OIDC profili** için önerilen sekme sırası: **Connection** → **Token & Validation** → **Session & Logout** → **User Mapping** → **Security & Other** → isteğe bağlı **Conditions**, **Error Message Customization**, API kullanım sekmeleri.
+
+**OAuth2 profili** için sıra farklıdır: **Connection** → **OAuth2 Parameters** → **Session & HTML** → **Security & Other** → aynı isteğe bağlı sekmeler. Bu sayfada önce **OIDC** sekmeleri tablolarla anlatıldı; **OAuth2** farkları doğrudan üstteki **OIDC ve OAuth2 yapılandırma profili — UI farkları** bölümündedir.
+
+Aşağıdaki adımlar öncelikle **OIDC** akışına göre yazılmıştır; OAuth2 seçtiyseniz **Adım 4**’te Connection alanlarını o bölümdeki özet tabloya göre doldurun, **Adım 5–6** yerine **OAuth2 Parameters** ve **Session & HTML** sekmelerini kullanın.
+
+| Adım | Açıklama / İşlem |
+|------|------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → OIDC Kimlik Doğrulama Politikası** bölümüne gidin.<br />- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br /><br />**Name (İsim) Zorunlu:** Örnek: `Production_OIDCAuth`<br />- Benzersiz isim girin, boşlukla başlamaz.<br />- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br /><br />**Description (Açıklama):** Örnek: "Kurumsal kullanıcılar için OIDC SSO"<br />- Maks. 1000 karakter.<br />- Politikanın amacını açıklayın. |
+| **Adım 3: Variable Kullanımı** | - Sayfanın üst kısmındaki işlem butonları alanında, **[&lt;&gt; Variable]** butonunu kullanarak dinamik değer seçebilirsiniz.<br />- Context/global variable ifadeleri sayesinde politika parametrelerini sabit değer yerine değişken tabanlı yönetebilirsiniz.<br />- Bu kullanım, değişen değerlerde manuel güncelleme ihtiyacını azaltır ve operasyonel kolaylık sağlar.<br />- Detaylı bilgi için [Dinamik Değişkenler](/tr/concepts/temel-kavramlar/dinamik-degiskenler) sayfasını inceleyebilirsiniz. |
+| **Adım 4: Connection — sağlayıcı, uç nokta, istemci ve akış** | - **Configuration Profile** olarak OIDC veya OAuth2 seçin.<br />- **OIDC Issuer URL** girin; gerekirse **Auto Discover** veya **Discovery URL** kullanın.<br />- **OIDC:** Keşif sonrası veya manuel olarak **Authorization**, **Token**, **UserInfo**, **JWKS**, **Introspection**, **Token Revocation** uç noktalarını doğrulayın; **Realm** ve **Additional Auth Parameters** (OIDC) bu profilde kullanılır.<br />- **OAuth2:** **UserInfo / JWKS / Introspection / Revocation** alanları gösterilmez; zorunlu **oauth2ResourceEndpoint** alanını doldurun; **Realm** ve Connection’daki **Additional Auth Parameters** paneli yoktur (parametreler **OAuth2 Parameters** sekmesinde). Akış kod tarafında **`OAUTH2_AUTHORIZATION_CODE`** ile sabitlenir; **OAuth2 Username Extraction Path** alanını gerektiğinde doldurun.<br />- **Client ID**, **Client Secret**, **Redirect URI** ortaktır. **Redirect URI**’yi sağlayıcı konsolundaki kayıtla **birebir** eşleştirin.<br />- **Enable PKCE**, **Scopes**, **Authentication Mode** vb. ortak alanları ayarlayın. |
+| **Adım 5: Token & oturum veya OAuth2 sekmeleri → Security & Other** | **OIDC profili:** Aynı politika içinde sırayla **(1) Token & Validation**, **(2) Session & Logout**, **(3) Security & Other** — üstteki tablolarla uyumludur. Token doğrulama, UserInfo, cache; oturum/çıkış; üretimde SSL atlama yok; OIDC’de **Check Client IP**, **Ignored Methods** / **Ignored Patterns** bu sekmede. **Error Redirect URL** ile **Adım 8** JSON gövdesini karıştırmayın; **Debug Logging**’i geçici açın.<br /><br />**OAuth2 profili:** **Token & Validation** ve tam **Session & Logout** yoktur. Bunun yerine **OAuth2 Parameters** (`oauth2AuthParams`, `oauth2TokenParams`, `oauth2ResourceParams`, **Backend Request Headers**) ve **Session & HTML** (sadeleştirilmiş oturum + HTML login/error/success) sekmelerini doldurun; ardından **Security & Other** (ortak TLS, timeout, hata yönlendirme, debug, kullanıcı header’ları — OAuth2’de **Check Client IP** ve ignore alanları gösterilmez). |
+| **Adım 6: User Mapping (OIDC) veya backend başlıkları** | **OIDC profili:** **Claim Paths**, **Role Mappings**, **Custom Claim Mappings**, **Backend Header Settings**, **Custom HTTP Headers** — **Token & Validation** ile UserInfo/header tutarlılığını birlikte kontrol edin.<br /><br />**OAuth2 profili:** Bu adım yerine **OAuth2 Parameters** içindeki **Backend Request Headers** ve Connection’daki kullanıcı adı çıkarma yolunu kullanın; klasik **User Mapping** sekmesi yoktur. |
+| **Adım 7: Koşul Tanımlama (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br />- Koşullar, politikanın hangi durumda aktif olacağını belirler.<br /><br />**Örnekler:**<br />- Ortam bazlı: `Header = X-Environment, Operator = Equals, Value = production`<br />- API Key bazlı: `Header = X-API-Key, Starts With = PROD-`<br />- Endpoint bazlı: `Path = /api/admin/*`<br /><br />Koşul tanımlamazsa politika her zaman aktif<br /> |
+| **Adım 8: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br />- Erişim reddedildiğinde dönecek **API yanıt gövdesini** (JSON) özelleştirin. Bu, **Security & Other** sekmesindeki **Error Redirect URL** (sayfa yönlendirmesi) ile farklı amaçlara hizmet eder; ikisini birlikte kullanırken davranışı test edin.<br /><br />**Varsayılan:**<br />`{ "statusCode": 403, "message": "[Default hata mesajı]" }`<br /><br />**Özel:**<br />`{ "statusCode": 403, "errorCode": "[CUSTOM_ERROR_CODE]", "message": "[Özel mesaj]" }` |
+| **Adım 9: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br /><br />**Kontrol listesi (özet):**<br />- Benzersiz **Name** ve Connection zorunluları: **OIDC Issuer URL**; **Authorization** / **Token**; **Client ID**; **Redirect URI**; OIDC için **Flow Type**, OAuth2 için **oauth2ResourceEndpoint**.<br />- **Redirect URI** sağlayıcı kaydıyla aynı mı?<br />- **OIDC:** **Token & Validation** / **Session & Logout** / **User Mapping** gereksinimleri; **OAuth2:** **OAuth2 Parameters** ve **Session & HTML** tamamlandı mı?<br />- İsteğe bağlı **Conditions** / **Error Message Customization** test edildi mi?<br /><br />**Sonuç:** Politika listeye eklenir; API’lere bağlanabilir; global politikaysa otomatik uygulanır. |
+
+**Koşullar** ve **Hata Mesajı Özelleştirme** panellerinin açıklaması için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Koşullar](/tr/concepts/temel-kavramlar/politika-nedir#koşullar) ve [Hata Mesajı Özelleştirme (Error Message Customization)](/tr/concepts/temel-kavramlar/politika-nedir#hata-mesajı-özelleştirme-error-message-customization) bölümlerini inceleyebilirsiniz.
+
+Hata mesajı yapılandırmasının tüm katmanları, öncelik sırası ve senaryo örnekleri için [Hata Mesajı Yapılandırma Rehberi](/tr/concepts/temel-kavramlar/hata-mesaji-yapilandirma) sayfasına bakın.
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Akıştan Politika Kaldırma](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akıştan-politika-kaldırma) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) ve içe aktarma (Import) adımları için [Export/Import](/tr/admin/secrets-management/export-import) sayfasına bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akisa-politika-ekleme) bölümüne bakabilirsiniz.
+
+## İleri Düzey Özellikler
+
+| Özellik | Açıklama ve Adımlar |
+|---------|---------------------|
+| **Dinamik Metadata Keşfi** | - Discovery URL girildiğinde issuer, JWKS, endpoint bilgilerini otomatik çeker.<br />- Metadata cache timeout ile performans ayarı yapılır.<br />- Keşif başarısızsa politika hata mesajı döndürür. |
+| **Oturum Yönetimi** | - Oturum verisi dağıtık cache'te saklanır (zorunlu).<br />- Oturum şifreleme anahtarı ve IV politika ID'sinden otomatik üretilir.<br />- Session cookie adı, timeout, mutlak timeout ve cookie ayırıcı ile yapılandırılır. |
+| **mTLS Yapılandırması** | - OIDC sağlayıcısına bağlantıda mTLS kullanılabilir.<br />- KeyStore/TrustStore tabanlı SSL bağlantısı ve SSL doğrulama atlama seçeneği sunulur. |
+| **Token Cookie Yapılandırması** | - Access token, ID token ve refresh token cookie adları özelleştirilebilir.<br />- Hangi token'ların cookie'ye yazılacağı belirlenir. |
+| **Token Kabul Yolu** | - Token'ın header, cookie veya her ikisinden okunacağı belirlenir. |
+| **Logout ve Token İptali** | - Çıkışta token'lar revocation endpoint üzerinden iptal edilir.<br />- Çıkış sonrası yönlendirme adresi tanımlanır. |
+| **Kimlik Doğrulama Modu** | - EXTERNAL_ONLY (harici OIDC), INTERNAL_ONLY (sadece Bearer), HYBRID (her ikisi).<br />- Hybrid modda her iki doğrulamanın da zorunlu olması sağlanabilir. |
+| **OAuth 2.0 HTML Sayfaları** | - OAuth 2.0 akışında özel login, error ve success sayfaları gösterilir.<br />- Sayfa şablonları özelleştirilebilir.<br />- Kimlik doğrulama sonrası yönlendirme yapılandırılır. |
+| **Rol Haritalama ve Header Enjeksiyonu** | - Claim path ve hedef rol eşlemesi yapılır.<br />- Roller header'a eklenebilir, header isimleri özelleştirilebilir.<br />- Identity Role Group Service ile rol seçimi yapılır. |
+
+## Best Practices
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| Kategori | Açıklama / Öneriler |
+|----------|---------------------|
+| **OIDC Sağlayıcı Yönetimi** | **Kötü:** Tüm ortamlar için tek issuer kullanmak.<br />**İyi:** Test ve canlı için farklı issuer tanımlamak.<br />**En İyi:** Condition ile ortam bazlı issuer seçimi yapmak. |
+| **Token Güvenliği** | **Kötü:** Imza doğrulamasını kapatmak.<br />**İyi:** JWT signature doğrulaması yapmak.<br />**En İyi:** JWKS anahtarlarını cache'leyip periyodik yenilemek. |
+| **Oturum Süreleri** | **Kötü:** Süreleri varsayılanda bırakmak.<br />**İyi:** Kullanıcı profiline göre timeout belirlemek.<br />**En İyi:** Session absolute timeout + refresh token stratejisi uygulamak. |
+| **Rol Yönetimi** | **Kötü:** Roller için tek claim kullanmak.<br />**İyi:** Claim path ile rol çıkarmak.<br />**En İyi:** Identity Role Group Service ile merkezi rol haritalama yapmak. |
+| **Hata Yönetimi** | **Kötü:** Genel hata mesajı iletilmesi.<br />**İyi:** OIDC'e özgü hata mesajı belirtmek.<br />**En İyi:** Error Message Customization'da kullanıcı dostu ve log dostu farklı içerik sağlamak. |
+
+### Güvenlik En İyi Uygulamaları
+
+| Güvenlik Alanı | Açıklama / Uyarılar |
+|----------------|---------------------|
+| **TLS Zorunluluğu** | Tüm endpoint adresleri HTTPS olmalı; allowInsecureConnections=true yalnızca geçici kullanım için önerilir. |
+| **PKCE Kullanımı** | Mobil ve SPAs için enablePKCE=true yapılandırılmalı, code verifier loglanmamalı. |
+| **Nonce/State Koruması** | Nonce ve state doğrulaması devre dışı bırakılmamalı; replay saldırılarına karşı zorunludur. |
+| **Oturum Güvenliği** | Oturum verisi cache'te saklanır; şifreleme anahtarı politika ID'sinden otomatik üretilir. TLS zorunlu kılınmalıdır. |
+| **Cookie Güvenliği** | Secure, HttpOnly ve SameSite politikaları etkinleştirilmeli; token cookie'leri minimum yetkilerle gönderilmelidir. |
+
+### Kaçınılması Gerekenler
+
+| Kategori | Açıklama / Uyarılar |
+|----------|---------------------|
+| **Varsayılan Key Kullanımı** | **Neden kaçınılmalı:** Manuel session key değerleri tahmin edilebilir olabilir.<br />**Alternatif:** Oturum şifreleme politika ID'sinden otomatik üretilir; politika ID'sinin benzersiz olduğundan emin olun. |
+| **Geniş Scope Tanımları** | **Neden kaçınılmalı:** Fazla scope, yetki genişlemesine sebep olur.<br />**Alternatif:** En az ayrıcalık prensibiyle yalnızca gerekli scope'ları ekleyin. |
+| **Uzun Cache Süreleri** | **Neden kaçınılmalı:** JWKS/token cache'i uzun tutulursa anahtar rotasyonuna uyum zayıflar.<br />**Alternatif:** 15-60 dk arası cache süresi seçin ve refresh mekanizması kurun. |
+| **Debug Logları Canlıda Açık Tutmak** | **Neden kaçınılmalı:** Hassas token bilgileri loglara düşebilir.<br />**Alternatif:** Debug logging'i sadece sorun giderme anında kısa süre açın. |
+
+### Performans İpuçları
+
+| Kriter | Öneri / Etki |
+|--------|--------------|
+| **Metadata Cache** | **Öneri:** providerMetadataCacheTimeoutSeconds değerini 900-1800 sn aralığında tutun.<br />**Etki:** Discovery endpoint çağrıları azalır, latency düşer. |
+| **Token Cache Timeout** | **Öneri:** tokenCacheTimeoutSeconds'ı OIDC access token yaşam süresine göre ayarlayın.<br />**Etki:** Gereksiz yeniden doğrulamalar engellenir, back-end yükü azalır. |
+| **JWKS Önbelleği** | **Öneri:** jwkCacheTimeoutSeconds için 3600 sn üst sınırı aşmayın.<br />**Etki:** Anahtar rotasyonunda hatalı imzaların kabul edilmesi engellenir. |
+| **Ignore Patterns** | **Öneri:** Statik içerik path'lerini ignore patterns alanına ekleyin.<br />**Etki:** Statik dosyalar gereksiz yönlendirmeden kurtulur, yanıt süresi artar. |
+| **Backend Header Yönetimi** | **Öneri:** Gerekmeyen backend header girişlerini kaldırın.<br />**Etki:** Backend'e giden istek boyutu ve işleme süresi düşer. |
+
+## Sık Sorulan Sorular (SSS)
+
+| Kategori | Soru | Cevap |
+|----------|----------|-----------|
+| **Genel** | OIDC kimlik doğrulama nedir? | OpenID Connect (OIDC), OAuth 2.0 üzerine kurulu kimlik doğrulama protokolüdür. ID token ve access token kullanarak kullanıcı kimliğini doğrular. |
+| **Genel** | Hangi flow type'lar destekleniyor? | Authorization Code, Implicit, Hybrid ve saf OAuth2 Authorization Code flow type'ları desteklenir. |
+| **Teknik** | Token nasıl doğrulanır? | Gateway, token'ı alır, JWT signature'ını JWKS endpoint'inden alınan public key ile doğrular, audience ve issuer kontrolü yapar. |
+| **Teknik** | PKCE nedir? | Proof Key for Code Exchange (PKCE), authorization code interception saldırılarına karşı koruma sağlayan güvenlik mekanizmasıdır. |
+| **Kullanım** | Farklı tenant'lar için farklı OIDC sağlayıcıları nasıl kullanılır? | Condition ile tenant bazlı issuer seçimi yapılabilir veya discovery URL değişkeni kullanılabilir. |
+| **Kullanım** | Varsayılan hata mesajını nasıl değiştirebilirim? | Error Message Customization sekmesinden durum kodu, hata kodu ve mesaj alanlarını düzenleyebilirsiniz. |
+| **Genel** | OIDC politikası Basic Authentication politikasıyla birlikte çalışabilir mi? | Evet, ancak Basic Authentication yalnızca fallback olarak önerilir; koşul bazlı olarak hangi politikanın çalışacağını belirleyebilirsiniz. |
+| **Genel** | Politikayı local'e çevirdiğimde global kopya etkilenir mi? | Hayır, Localize işlemi yeni bir local politika oluşturur; global politika değişmeden kalır. |
+| **Teknik** | Discovery URL kullanmazsam hangi alanları doldurmalıyım? | Authorization, Token, UserInfo, JWKS ve Introspection endpoint adreslerini manuel girmeniz gerekir. |
+| **Teknik** | Token doğrulaması başarısız olduğunda hangi log mesajlarını aramalıyım? | Policy debug loglarını açarak validateAccessTokenWithApi ve validateJwtSignature adımlarının hata detaylarını inceleyebilirsiniz. |
+| **Kullanım** | Birden fazla API Proxy (API Vekil Sunucusu) için aynı politikayı nasıl paylaşırım? | Politikayı global olarak oluşturup ilgili API Proxy'lere atayabilir veya Policy Group kullanabilirsiniz. |
+| **Kullanım** | Mobil uygulamalar için PKCE zorunlu mu? | Güçlü güvenlik için önerilir; kod yakalama saldırılarını önlemek adına enablePKCE=true ayarını aktif edin. |
+| **Teknik** | Kimlik doğrulama modu (EXTERNAL_ONLY, INTERNAL_ONLY, HYBRID) ne anlama gelir? | EXTERNAL_ONLY: Sadece OIDC yönlendirmesi. INTERNAL_ONLY: Sadece Bearer token (header/cookie). HYBRID: Her ikisi; Hybrid modda her ikisinin de geçerli olması zorunlu kılınabilir. |
+| **Teknik** | Çıkışta token iptali nasıl yapılır? | Çıkışta token iptali seçeneğini açıp revocation endpoint adresini tanımlayın. Adres belirtilmezse introspection endpoint'ten türetilir (/introspect → /revoke). |
+
+

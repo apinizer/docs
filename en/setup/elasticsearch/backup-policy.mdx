@@ -1,0 +1,467 @@
+---
+title: "Backup Policy"
+description: "Explains log backup policies that can be used when API Traffic logs are stored in the Elasticsearch database managed by Apinizer. Details Elasticsearch snapshot creation, restoration, and automatic backup operations."
+---
+
+First, it should be clarified how the backup will be performed. Commonly used methods are:
+
+1. **The path.data address written in Elasticsearch's configuration file can be backed up incrementally or at certain intervals as is by system administrators.**
+
+   <Info>
+     **PRO** Access to historical data will always continue with the same ease.
+   </Info>
+
+   <Warning>
+     **CON** Both active and backup disks will continue to grow continuously.
+   </Warning>
+
+   <Warning>
+     **CON** When there is a problem with the main disk, a reinstallation will be required to access the data on the backup disk.
+   </Warning>
+
+2. **The server where Elasticsearch is located can be backed up using Raid-0 method or at certain intervals as is.**
+
+   <Info>
+     **PRO** Access to historical data will always continue with the same ease.
+   </Info>
+
+   <Info>
+     **PRO** When there is a problem with the main disk, the backup disk can be started immediately with network routing.
+   </Info>
+
+   <Warning>
+     **CON** Both active and backup disks will continue to grow continuously.
+   </Warning>
+
+3. **Elasticsearch data can be dumped using Elasticsearch Snapshot API. By setting a snapshot policy, these backup files can be extracted to a specific system address, and then these backup files should be backed up separately to a different server.**
+
+   <Info>
+     **PRO** Access to historical data will always continue with the same ease.
+   </Info>
+
+   <Warning>
+     **CON** Both active and backup disks will continue to grow continuously.
+   </Warning>
+
+<Info>
+  **RECOMMENDATION** Regardless of which method above is used, after regular backup is set up, backed up logs can be set to automatically delete with Elasticsearch ILM or can be manually deleted as desired using Elasticsearch API.
+
+  <Info>
+    **PRO** Work will continue with much lower disk resources on the active server.
+  </Info>
+
+  <Warning>
+    **CON** To access historical data, an application will need to be installed on the backup disk or backups will need to be transferred to a specific server to work.
+  </Warning>
+
+  <Warning>
+    **CON** Only the backup disk will continue to grow continuously.
+  </Warning>
+</Info>
+
+## Elasticsearch Manual Backup and Restore
+
+This section explains how to create the Snapshot Lifecycle Management (SLM) policy created for automatic backup of logs on Elasticsearch through cron definition and methods for instant backup and restore.
+
+### Variables
+
+Dynamic values and their descriptions in the requests are shown in the table below.
+
+| Variable | Description |
+|----------|----------|
+| `&#60;ELASTICSEARCH_IP_ADDRESS&#62;` | Host information of the Elasticsearch cluster. |
+| `&#60;INDEX_KEY&#62;` | This value must be unique as it is identifying at the cluster level. Therefore, the same value should be used in all requests. |
+
+### Specifying Backup File Location
+
+By adding the **path.repo** field to the **elasticsearch.yml** configuration file of all nodes in the cluster, the file location where backup files will be stored is written.
+
+<Warning>
+  If this information was added to the configuration file later, the node must be restarted.
+</Warning>
+
+```yaml
+path:
+  repo:
+    - /backups/my_backup_location
+```
+
+### Defining Snapshot Repository Information
+
+Repository holds information about where files to be backed up in snapshot operations will be stored.
+
+```bash
+curl -X PUT "http://<ELASTICSEARCH_IP_ADDRESS>:9200/_snapshot/apinizer-repository-<INDEX_KEY>?pretty" -H 'Content-Type: application/json' -d'
+{
+  "type": "fs",
+  "settings": {
+    "location": "/backups/my_backup_location",
+ 	"compress": true
+  }
+}
+'
+```
+
+### Repository Verification Request (Verify Location)
+
+It should be checked whether Elasticsearch has access to the file.
+
+<Info>
+  If verification is successful, the list of nodes using the repository is returned. If verification fails, an error is returned from the request.
+</Info>
+
+```bash
+curl -X POST "http://&#60;ELASTICSEARCH_IP_ADDRESS&#62;:9200/_snapshot/apinizer-repository-&#60;INDEX_KEY&#62;/_verify?pretty"
+```
+
+If automatic backup will be performed, SLM Policy commands should be executed. If backup will be taken at desired times, Instant Backup commands should be executed.
+
+### Creating SLM Policy
+
+#### Creating Snapshot Policy Request
+
+```bash
+curl -X PUT "http://<ELASTICSEARCH_IP_ADDRESS>:9200/_slm/policy/apinizer-slm-policy-<INDEX_KEY>?pretty" -H 'Content-Type: application/json' -d'
+{
+  "schedule": "0 0 0 ? * 1#1 *", 
+  "name": "<apinizer-snapshot-<INDEX_KEY>-{now/d}>", 
+  "repository": "apinizer-repository-<INDEX_KEY>", 
+  "config": { 
+    "indices": ["apinizer-log-apiproxy-<INDEX_KEY>"],  
+	"ignore_unavailable": false,
+    "partial": false   
+  },
+  "retention": { 
+    "expire_after": "30d", 
+    "min_count": 5, 
+    "max_count": 50 
+  }
+}
+'
+```
+
+#### Manually Executing Policy Request
+
+```bash
+curl -X POST "http://&#60;ELASTICSEARCH_IP_ADDRESS&#62;:9200/_slm/policy/apinizer-slm-policy-&#60;INDEX_KEY&#62;/_execute?pretty"
+```
+
+#### Viewing Snapshot Records
+
+```bash
+curl -X GET "http://&#60;ELASTICSEARCH_IP_ADDRESS&#62;:9200/_snapshot/apinizer-repository-&#60;INDEX_KEY&#62;/apinizer-snapshot-&#60;INDEX_KEY&#62;*?pretty"
+```
+
+<Info>
+  Generally, backups (snapshots) made in organizations are kept in the same environment where indexing takes place. Later, these snapshots may be required to be stored in a different environment. In Elasticsearch, data is not automatically thrown into another Elasticsearch cluster just by file transfer. In addition to file transfer, the snapshot structure must also be moved in the same way. Moving only files can both break the structure within the snapshot and prevent the backup from being restored.
+
+  When moving a snapshot to another cluster, the repository must be created first, then the snapshot.
+</Info>
+
+<Info>
+  When the snapshot operation is completed, the backed up indices are not deleted. If the delete phase is activated in the index's ILM policy, it is deleted.
+</Info>
+
+### Instant Backup
+
+#### Creating Snapshot Request
+
+```bash
+curl –XPUT "http://&#60;ELASTICSEARCH_IP_ADDRESS&#62;:9200/_snapshot/apinizer-repository-&#60;INDEX_KEY&#62;/apinizer-snapshot-&#60;INDEX_KEY&#62;?wait_for_completion=true" -H 'Content-Type: application/json' –d '{
+  "indices":"index001, index002, index003",
+  "ignore_unavailable":true,
+  "include_global_state": false
+}'
+```
+
+#### Restoring All/Part of Indices in Snapshot Request
+
+<Tip>
+  Multiple values can be entered in the indices section of the command, or the wildcard value * can also be used.
+</Tip>
+
+```bash
+curl -XPOST "http://&#60;ELASTICSEARCH_IP_ADDRESS&#62;:9200/_snapshot/apinizer-repository-&#60;INDEX_KEY&#62;/apinizer-snapshot-&#60;INDEX_KEY&#62;/_restore?pretty" -H 'Content-Type: application/json' -d '{
+  "indices":"index00*",
+  "ignore_unavailable":true,
+  "include_global_state": false
+}'
+```
+
+## Elasticsearch Snapshot Transfer and Restore Script
+
+This script transfers snapshot files created at a specific address after the Snapshot policy is set up to the backup server, restores them there, and keeps them ready to read.
+
+**There are certain requirements for the script to run:**
+
+* Log and backup servers must be running on a Linux server that supports shell scripts.
+* An Elasticsearch server running the same or supported version as the current Elasticsearch server must be running on the backup server.
+* Communication must be possible between the log server and backup server through protocols such as ssh, scp.
+* The log server must support crontab (available by default in many popular Linux distributions).
+* Basic Linux shell knowledge
+
+**The steps to be applied in the script are as follows:**
+
+1. Repository will be checked
+2. Snapshot file name and address will be obtained
+3. Snapshot file will be sent to restore server
+4. Snapshot restore operation will be started
+5. Restore operation status will be checked
+
+```bash
+#!/bin/bash
+
+#Logs will be written to a file
+current_date=$(date +'%d-%m-%Y')
+exec > logfile$current_date.log 2>&1
+
+#Server IP's need to be set
+es_snapshot_ip="<ELASTICSEARCH_IP_ADDRESS>"
+es_restore_ip="<ELASTICSEARCH_BACKUP_SERVER>"
+repository_dst_location="<BACKUP_PATH_REPO>"
+log_key="<INDEX_KEY>"
+
+
+time_start=`date +%s`
+
+echo -e "\n\nScript has started on \"`date`\""
+
+es_snapshot_address="http://$es_snapshot_ip:9200"
+es_restore_address="http://$es_restore_ip:9200"
+echo "Variables:"
+echo " es_snapshot_address: $es_snapshot_address"
+echo " es_restore_address: $es_restore_address"
+echo " repository_dst_location: $repository_dst_location"
+
+
+##Show repositories, take name and path
+repository_name=$(curl -XGET -s "$es_snapshot_address/_snapshot/_all" |  jq -r 'keys[] | select(contains("repository"))')
+repository_src_location=$(curl -XGET -s "$es_snapshot_address/_snapshot/_all" | jq -r ' .[].settings.location ' | head -1)
+echo " repository_name: $repository_name"
+echo " repository_src_location: $repository_src_location"
+
+##Show snapshots on repository
+echo -e "Command to be used: curl -XGET -s \"$es_snapshot_address/_snapshot/apinizer-repository-$log_key/_all\" | jq '.snapshots[].snapshot' | tr -d '\"' \n"
+snapshot_name=$(curl -XGET -s "$es_snapshot_address/_snapshot/apinizer-repository-$log_key/_all" | jq '.snapshots[].snapshot' | tr -d '"')
+echo " snapshot_name: $snapshot_name"
+time_1=`date +%s`
+echo -e "\nduration - since beginning: $((time_1-time_start)) seconds"
+
+##Move Snapshot files to remote server
+echo "---Moving Snapshot to remote server: Started"
+size_snapshot=$(du -sh $repository_src_location)
+echo "Snapshot file size: $size_snapshot"
+
+size_dst_initial=$(ssh elasticsearch@$es_restore_ip "du -sh ${repository_dst_location/}")
+echo "Target disk size before moving snapshot: $size_dst_initial"
+
+echo "scp -r $repository_src_location/* elasticsearch@$es_restore_ip:$repository_dst_location/ &"
+scp -r $repository_src_location/* elasticsearch@$es_restore_ip:$repository_dst_location/ &
+SCP_PID=$!
+wait $SCP_PID
+
+echo "---Moving Snapshot to remote server: Done"
+size_dst_afterscp=$(ssh elasticsearch@$es_restore_ip "du -sh ${repository_dst_location/}")
+echo "Target disk size after moving snapshot: $size_dst_afterscp"
+
+time_2=`date +%s`
+echo "---duration - scp: $((time_2-time_1)) seconds"
+
+if [ "$size_dst_initial" = "$size_dst_afterscp" ];
+then
+  echo "Moving snapshot file has failed. Script is being terminated."
+  exit
+fi
+
+
+
+##Register repository on remote server
+time_3=`date +%s`
+echo -e "Command to be used: curl -XPUT \"$es_restore_address/_snapshot/$repository_name?pretty\" -H \"Content-Type: application/json\" -d '{   \"type\": \"fs\",   \"settings\": {     \"compress\" : \"true\",     \"location\": \"$repository_dst_location\"   } }' \n"
+curl -XPUT "$es_restore_address/_snapshot/$repository_name?pretty" -H "Content-Type: application/json" -d '{
+  "type": "fs",
+  "settings": {
+    "compress" : "true",
+    "location": "'$repository_dst_location'"
+  }
+}'
+
+
+##Start restoring snapshot
+echo -e "\nRestore: Started"
+echo "Command to be used: curl -XPOST -s \"$es_restore_address/_snapshot/$repository_name/$snapshot_name/_restore?pretty\" -H \"Content-Type: application/json\" -d '{   \"indices\": \".ds-apinizer-log-token-$log_key-*,.ds-apinizer-token-oauth-$log_key-*,.ds-apinizer-log-apiproxy-$log_key-*\",   \"rename_pattern\": \"(.ds-apinizer-)(.*$)\",   \"rename_replacement\": \"restored_$1$2\" }'"
+index_to_close_list=()
+
+while [ true ]
+do
+curl -XPOST -s "$es_restore_address/_snapshot/$repository_name/$snapshot_name/_restore?pretty" -H "Content-Type: application/json" -d '{
+  "indices": ".ds-apinizer-log-token-$log_key-*,.ds-apinizer-log-apiproxy-$log_key-*",
+  "rename_pattern": "(.ds-apinizer-)(.*$)",
+  "rename_replacement": "restored_$1$2"
+}' -o  restore.output
+
+is_error_exist=$(grep -oPm 1 'error' < restore.output)
+if [ "$is_error_exist" = "error" ];then
+##There are always expected to be at least 1 conflicted index (The last one). Those indexes needs to be closed to write on them
+	index_to_close=$(grep -oPm 1 'restored_.ds-apinizer-.*$log_key-\d{6}' < restore.output)
+	curl -XPOST -s "$es_restore_address/$index_to_close/_close?pretty" >> closed_indexes.output
+	index_to_close_list+=($index_to_close)
+	echo "Conflicted index has closed: $index_to_close"
+else
+	echo "There is no conflicted indeks. Script is being continued."
+	break
+fi
+done
+
+##Check restore process hourly
+echo -e "Command to be used: curl -XGET -s \"$es_restore_address/_cluster/state\" | jq '.restore.snapshots[].state' \n"
+echo "Restore process will be checked every hour before continuing to script."
+while [ true ]
+do
+sleep 3600
+restore_result=$(curl -XGET -s "$es_restore_address/_cluster/state" | jq '.restore.snapshots[].state')
+
+
+if [[ "$restore_result" = "STARTED" ] || [ "$restore_result" = "INIT" ]];then
+	echo "Status of Restore process as per _cluster/state: $restore_result. Restore is in progress."
+elif [ "$restore_result" = "DONE" ]; then
+	echo "Status of Restore process as per _cluster/state: $restore_result. Continuing to script."
+	break
+elif [ "$restore_result" = "" ]; then
+	echo "Status of Restore process could not obtained from _cluster/state. Continuing to script."
+	break
+fi
+done
+
+
+time_4=`date +%s`
+echo "duration - restore: $((time_4-time_3)) seconds"
+
+##Open closed indexes if there are any
+for index in $index_to_close_list; do
+  curl -XPOST -s "$es_restore_address/$index/_open"
+done
+
+##Setting visibility of restored indexes to visible
+echo -e "\nSet visibility of restored indexes: Started"
+cluster_dst_state=$(curl -s "$es_restore_address/_cluster/state")
+restored_indices=$(echo "$cluster_dst_state" | jq '.metadata.indices | keys | .[]' | grep '^"restored_.*"')
+restored_indices=${restored_indices//\"}
+
+echo -e "Command to be used: curl -XPUT -s \"$es_restore_address/INDEX/_settings?pretty\" -H 'Content-Type: application/json' -d'{     \"index.hidden\": false   }' \n"
+for index in $restored_indices; do
+  curl -XPUT -s "$es_restore_address/$index/_settings?pretty" -H 'Content-Type: application/json' -d'{
+    "index.hidden": false
+  }'
+done
+
+echo "Set visibility of restored indexes: Done"
+time_5=`date +%s`
+echo "duration - restored visibility: $((time_5-time_4)) seconds"
+
+
+
+
+##Making sure of if the restore process done. Index counts should be the same as snapshot file has
+echo -e "\nChecking restore results: Started"
+echo -e "Command to be used: curl -s \"$es_restore_address/_snapshot/$repository_name/$snapshot_name?pretty\" \n"
+snapshot_json=$(curl -s "$es_restore_address/_snapshot/$repository_name/$snapshot_name?pretty")
+snapshot_indices_array=$(echo "$snapshot_json" | jq -r '.snapshots[0].indices[]')
+snapshot_index_count=$(echo "$snapshot_indices_array" | grep -c ".")
+echo "Total number of indices in snapshot: $snapshot_index_count"
+
+recovery_info=$(curl -s "$es_restore_address/_cat/recovery")
+filtered_lines=$(echo "$recovery_info" | grep "$snapshot_name" | awk '$14 == "100.0%" || $4 == "100.0%"')
+
+completed_count=$(echo "$filtered_lines" | grep -c "100.0%")
+uncompleted_count=$(echo "$filtered_lines" | grep -cv "100.0%")
+
+echo "-Restore completed: $completed_count"
+echo "-Restore uncompleted: $uncompleted_count"
+
+if [ "$uncompleted_count" -gt 0 ];
+  then
+	echo -e "\nUncompleted Indices:"
+	echo "$filtered_lines" | grep -v "100.0%"
+	echo -e "\n\n---There are indexes that could not be restored!---\n\n"
+  elif [ "$uncompleted_count" -e 0 ];
+  then
+	echo -e "\n\n---Restore was successful."
+	echo "Snapshot file will be deleted by Elasticsearch according to SLM policy."
+    echo -e "To manually delete, following command can be used: curl -XDELETE \"$es_snapshot_address/_snapshot/$repository_name/$snapshot_name\" \n"
+  else
+	echo "Checking restore results has failed. Please check results manually."
+fi
+echo "Checking restore results: Done"
+time_6=`date +%s`
+
+echo "duration - checking restore results: $((time_6-time_5)) seconds"
+
+
+time_end=`date +%s`
+echo "\nduration - total time of script: $((time_end-time_start)) seconds"
+
+##Clear the variables set to shell just in case
+unset time_1 time_2 time_3 time_4 time_5 time_6 time_start time_end snapshot_json snapshot_indices_array snapshot_index_count recovery_info filtered_lines completed_count uncompleted_count current_date es_snapshot_address es_restore_address repository_dst_location repository_name repository_src_location snapshot_name cluster_dst_state restored_indices size_dst_afterscp size_dst_initial size_snapshot restore_result es_snapshot_ip es_restore_ip is_error_exist index_to_close_list index_to_close apinizer_adres
+echo "Used variables has been cleansed."
+
+
+
+echo -e "\n\nScript is done on \"`date`\" \n"
+
+echo "Note: If there is a error log like -All shards failed-, those indexes needs to be deleted from remote cluster and restore process needs to be initialized partially."
+##Script Ends##
+```
+
+### How It Works:
+
+1. **Save it as a file** with a name like **"ESMoveSnapshotAndRestore.sh"** to an appropriate address on your Log server. The script can be copied through editors like vi, nano on Linux shell, or saved to a file from a Windows server and transferred via sftp using applications like winscp, mobaxterm.
+
+2. Give permission to the file to run with the command `chmod +x ESMoveSnapshotAndRestore.sh`.
+
+3. To avoid password prompts and enable automatic connection with scp, use scp's ssh key authentication feature.
+   * Create a key on the log server with ssh-keygen. This key is sent to the backup server with the ssh-copy-id command.
+
+4. If jq package is not available on the log server, install it. For Ubuntu use `apt install jq`, for Redhat use `yum install jq` command.
+
+5. Check the data.path and repo.path values in the config file for Elasticsearch on both servers.
+
+6. Variables in the script are set according to your environments.
+   * ELASTICSEARCH_SERVER
+   * ELASTICSEARCH_BACKUP_SERVER
+   * LOG_KEY
+   * BACKUP_PATH_REPO
+
+### Usage:
+
+Enter your own information into Elasticsearch variables before running the script.
+
+```bash
+chmod +x /path/to/ESMoveSnapshotAndRestore.sh
+./path/to/ESMoveSnapshotAndRestore.sh &
+```
+
+This operation can be done manually or can be repeated at certain intervals. To repeat it, this record must be entered into Linux cronjob settings.
+
+### CronJob Usage:
+
+1) Open the cron scheduler by running the following command in the terminal;
+
+```bash
+crontab -e
+```
+
+2) Add a line to the opened editor according to how frequently you want to run your script.
+
+For example, to run it on the 3rd day of every month at 23:00, you can write as follows:
+
+```bash
+0 23 3 * * /path/to/ESMoveSnapshotAndRestore.sh
+```
+
+To save the line you added, press Esc and type :wq and press Enter.
+
+<Info>
+  In both methods, when the script is run, the operations inside it will be written to a file named "logfile&#60;DATE&#62;.log" in the same folder as the script.
+</Info>
+

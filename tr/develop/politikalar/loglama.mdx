@@ -1,0 +1,331 @@
+---
+title: "Loglama"
+description: "API Gateway pipeline'inda herhangi bir noktada mesaj durumunu yakalayarak seçili konnektorlere gönderebilirsiniz. Elasticsearch, veritabanı, Graylog, Webhook ve Syslog hedeflerine senkron veya asenkron loglama yapabilirsiniz."
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+## Genel Bakış
+
+Loglama politikası, API Gateway pipeline'inin istenilen noktasında mesajın anlık durumunu (başlıklar, parametreler, gövde, kullanıcı bilgisi, hata durumu vb.) yakalar ve yapılandırılmış konnektörlere gönderir. Standart API trafik loglamasından farklı olarak, pipeline'ın herhangi bir aşamasına yerleştirilebilir ve sadece ilgili alanları içeren hafif bir veri yapısı kullanır.
+
+### Kullanım Alanları
+
+- Pipeline'ın belirli aşamalarında mesaj durumunu izlemek (politika öncesi/sonrası karşılaştırma)
+- Hata ayıklama ve sorun giderme için detaylı log toplamak
+- Denetim ve uyumluluk gereksinimlerini karşılamak
+- Harici sistemlere (SIEM, log analiz platformları) gerçek zamanlı veri göndermek
+
+### Desteklenen Hedefler
+
+| Hedef | Protokol |
+|-------|----------|
+| Elasticsearch | REST/HTTP |
+| Veritabanı (MySQL, MariaDB, Oracle, MongoDB) | JDBC / MongoDB Driver |
+| Graylog | GELF |
+| Webhook | HTTP POST |
+| Syslog | Syslog Protocol |
+| Kafka | Kafka Producer |
+| RabbitMQ | AMQP |
+
+### Çalışma Modu
+
+| Mod | Davranış |
+|-----|----------|
+| **Senkron** | Log gönderimi tamamlanana kadar pipeline bekler. Gönderim hatası pipeline'ı durdurur. |
+| **Asenkron** | Log gönderimi arka planda yapılır. Pipeline kesintisiz devam eder. Hatalar sadece loglanır. |
+
+## Yapılandırma Alanları
+
+| Alan | Zorunlu | Varsayılan | Açıklama |
+|------|---------|------------|----------|
+| Konnektör Seçimi | Evet | - | Log verisinin gönderileceği bir veya birden fazla konnektör |
+| Çalışma Modu | Hayır | Senkron | Senkron veya Asenkron gönderim |
+| Korelasyon Kimliği | Hayır | Aktif | İstek izleme kimliğini dahil eder |
+| Ortam Bilgisi | Hayır | Aktif | Gateway ortam bilgisini dahil eder |
+| API Proxy Bilgisi | Hayır | Aktif | API Proxy ve metot bilgilerini dahil eder |
+| Kullanıcı Bilgisi | Hayır | Aktif | Kullanıcı adı veya API anahtarını dahil eder |
+| HTTP Bağlam Bilgisi | Hayır | Aktif | HTTP durum kodunu dahil eder |
+| Sonuç Bilgisi | Hayır | Aktif | İşlem sonucu ve hata tipini dahil eder |
+| Başlıklar | Hayır | Aktif | İstek başlıklarını dahil eder |
+| Parametreler | Hayır | Aktif | Sorgu parametrelerini dahil eder |
+| Gövde | Hayır | Aktif | İstek gövdesini dahil eder |
+| Gövde Modu | Hayır | Tam | Tam gövde veya kısmi gövde (bayt sınırı ile) |
+| Gövde Bayt Sınırı | Hayır | - | Kısmi modda maksimum bayt sayısı |
+| Gizlilik | Hayır | Pasif | Hassas verileri maskeleme |
+
+## Veri Yapısı
+
+Loglama politikası, standart API trafik loglarından farklı ve daha hafif bir veri yapısı kullanır. Aşağıdaki tabloda gönderilen alanlar ve Elasticsearch/veritabanı karşılıkları listelenmiştir.
+
+| Alan Adı | Kısa Ad (ES/JSON) | Tip | Açıklama |
+|----------|-------------------|-----|----------|
+| Zaman Damgası | @timestamp | Tarih | Log kaydının oluşturulma zamanı |
+| Korelasyon Kimliği | aci | Metin | Apinizer istek izleme kimliği |
+| Ortam Kimliği | ei | Metin | Gateway ortam tanımlayıcısı |
+| API Proxy Kimliği | api | Metin | API Proxy tanımlayıcısı |
+| API Proxy Adı | apn | Metin | API Proxy adı |
+| API Proxy Metot Kimliği | apmi | Metin | API Proxy metot tanımlayıcısı |
+| API Proxy Metot Adı | apmn | Metin | API Proxy metot adı |
+| Kullanıcı/Anahtar | uok | Metin | Kimliği doğrulanmış kullanıcı adı veya API anahtarı |
+| HTTP Durum Kodu | sc | Sayı | HTTP yanıt durum kodu |
+| Sonuç Tipi | rt | Metin | İşlem sonucu (SUCCESS, ERROR vb.) |
+| Hata Tipi | et | Metin | Hata tipi (varsa) |
+| İstek Başlıkları | fcrh | Liste | Anahtar-değer çiftleri olarak istek başlıkları |
+| İstek Parametreleri | fcrp | Liste | Anahtar-değer çiftleri olarak sorgu parametreleri |
+| İstek Gövdesi | fcrb | Metin | İstek gövde içeriği |
+
+### Örnek JSON Çıktısı
+
+```json
+{
+  "@timestamp": "2026-03-31T12:30:45.123Z",
+  "aci": "550e8400-e29b-41d4-a716-446655440000",
+  "ei": "env-production-001",
+  "api": "proxy-payment-api",
+  "apn": "Payment API",
+  "apmi": "method-create-payment",
+  "apmn": "POST /payments",
+  "uok": "merchant-api-key-123",
+  "sc": 200,
+  "rt": "SUCCESS",
+  "fcrh": [
+    { "k": "Content-Type", "v": "application/json" },
+    { "k": "Authorization", "v": "Bearer eyJhbGciOi..." },
+    { "k": "X-Request-ID", "v": "req-abc-123" }
+  ],
+  "fcrp": [
+    { "k": "currency", "v": "TRY" },
+    { "k": "lang", "v": "tr" }
+  ],
+  "fcrb": "{\"amount\": 150.00, \"merchantId\": \"M-001\"}"
+}
+```
+
+<Info>
+Başlık ve parametre alanlarındaki her bir girdi, **k** (anahtar) ve **v** (değer) çiftlerinden oluşur. Bu yapı, Elasticsearch'te `nested` tipinde indekslenir.
+</Info>
+
+## Elasticsearch Entegrasyonu
+
+Loglama politikasının verilerini Elasticsearch'e göndermek için ayrı bir index template oluşturulmalıdır. Bu template, standart API trafik log template'inden farklıdır ve sadece loglama politikasının gönderdiği alanları içerir.
+
+<Warning>
+Loglama politikası verileri için Elasticsearch index template'i ve ILM politikası Apinizer arayüzünden otomatik oluşturulmaz. Aşağıdaki adımları Elasticsearch üzerinde manuel olarak uygulamanız gerekmektedir.
+</Warning>
+
+### Adım 1: ILM Politikası Oluşturma
+
+Index yaşam döngüsü yönetimi için bir ILM politikası oluşturun. Aşağıdaki örnek, 30 GB veya 1 gün sonra rollover yapan ve 30 gün sonra silen bir politikadır. Değerleri ihtiyacınıza göre ayarlayabilirsiniz.
+
+```bash
+PUT _ilm/policy/apinizer-log-policy-capture-ilm
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "30gb",
+            "max_age": "1d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "30d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+### Adım 2: Index Template Oluşturma
+
+Aşağıdaki komutu Elasticsearch Kibana Dev Tools veya curl ile çalıştırın. Template, data stream desteği ile birlikte gelir.
+
+<Warning>
+Template'deki alan tipleri, loglama politikasının gönderdiği JSON yapısıyla birebir eşleşmelidir. Alan tiplerini değiştirmeyin.
+</Warning>
+
+```bash
+PUT _index_template/apinizer-log-policy-capture-template
+{
+  "index_patterns": ["apinizer-log-policy-capture*"],
+  "data_stream": {},
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": {
+          "name": "apinizer-log-policy-capture-ilm"
+        },
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": {
+          "type": "date",
+          "format": "yyyy-MM-dd'T'HH:mm:ss.S'Z'||yyyy-MM-dd'T'HH:mm:ss.SS'Z'||yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        },
+        "aci": {
+          "type": "keyword"
+        },
+        "ei": {
+          "type": "keyword"
+        },
+        "api": {
+          "type": "keyword"
+        },
+        "apn": {
+          "type": "keyword"
+        },
+        "apmi": {
+          "type": "keyword"
+        },
+        "apmn": {
+          "type": "keyword"
+        },
+        "uok": {
+          "type": "keyword",
+          "ignore_above": 50
+        },
+        "sc": {
+          "type": "short"
+        },
+        "rt": {
+          "type": "keyword",
+          "ignore_above": 7
+        },
+        "et": {
+          "type": "keyword",
+          "ignore_above": 75
+        },
+        "fcrh": {
+          "type": "nested",
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "keyword"
+            }
+          }
+        },
+        "fcrp": {
+          "type": "nested",
+          "properties": {
+            "k": {
+              "type": "keyword"
+            },
+            "v": {
+              "type": "keyword"
+            }
+          }
+        },
+        "fcrb": {
+          "type": "text"
+        }
+      }
+    }
+  }
+}
+```
+
+### Adım 3: Data Stream Oluşturma
+
+Template oluşturulduktan sonra, ilk veri geldiğinde data stream otomatik oluşur. Manuel oluşturmak isterseniz:
+
+```bash
+PUT _data_stream/apinizer-log-policy-capture
+```
+
+### Konnektör Yapılandırması
+
+Elasticsearch konnektörünün **Index Name** alanına `apinizer-log-policy-capture` yazın. Bu isim, template'deki `index_patterns` ile eşleşmelidir.
+
+<Info>
+Farklı bir index adı kullanmak isterseniz, template'deki `index_patterns` alanını da buna uygun şekilde güncelleyin. Örneğin, proje bazlı ayırım için `apinizer-log-policy-capture-projectname` kullanabilirsiniz.
+</Info>
+
+## Veritabanı Entegrasyonu
+
+Loglama politikası verilerini ilişkisel veritabanına (MySQL/MariaDB veya Oracle) göndermek için aşağıdaki tablo yapısını oluşturmanız gerekmektedir.
+
+<Warning>
+Veritabanı konnektörü kullanmadan önce hedef veritabanında bu tabloyu oluşturmanız gerekmektedir. Tablo otomatik oluşturulmaz.
+</Warning>
+
+<CodeGroup>
+```sql MySQL/MariaDB
+CREATE TABLE log_PolicyCapture (
+  id VARCHAR(255) PRIMARY KEY,
+  created TIMESTAMP,
+  apinizer_correlation_id VARCHAR(255),
+  environment_id VARCHAR(255),
+  api_proxy_id VARCHAR(255),
+  api_proxy_name VARCHAR(255),
+  api_proxy_method_id VARCHAR(255),
+  api_proxy_method_name VARCHAR(255),
+  username_or_key VARCHAR(255),
+  status_code INTEGER,
+  result_type VARCHAR(255),
+  error_type VARCHAR(255),
+  from_client_read_only_header TEXT,
+  from_client_read_only_parameter TEXT,
+  from_client_read_only_body LONGTEXT
+);
+```
+
+```sql Oracle
+CREATE TABLE log_PolicyCapture (
+  id VARCHAR2(255) PRIMARY KEY,
+  created TIMESTAMP,
+  apinizer_correlation_id VARCHAR2(255),
+  environment_id VARCHAR2(255),
+  api_proxy_id VARCHAR2(255),
+  api_proxy_name VARCHAR2(255),
+  api_proxy_method_id VARCHAR2(255),
+  api_proxy_method_name VARCHAR2(255),
+  username_or_key VARCHAR2(255),
+  status_code NUMBER,
+  result_type VARCHAR2(255),
+  error_type VARCHAR2(255),
+  from_client_read_only_header CLOB,
+  from_client_read_only_parameter CLOB,
+  from_client_read_only_body CLOB
+);
+```
+</CodeGroup>
+
+<Info>
+Başlık ve parametre alanları (`from_client_read_only_header`, `from_client_read_only_parameter`) JSON formatında saklanır. Her kayıt, anahtar-değer çiftlerinden oluşan bir dizi içerir.
+</Info>
+
+### MongoDB
+
+MongoDB konnektörü kullanıldığında tablo oluşturma gerekmez. Veriler `log_policycapture` koleksiyonuna otomatik olarak yazılır.
+
+## Gizlilik Ayarları
+
+Loglama politikasında gizlilik aktif edildiğinde, belirtilen alan adlarına sahip başlık, parametre ve gövde verileri maskelenir. Bu özellik KVKK/GDPR gibi veri koruma gereksinimlerini karşılamak için kullanılabilir.
+
+Maskeleme işlemi, veriler konnektöre gönderilmeden **önce** uygulanır. Konnektör seviyesindeki gizlilik ayarları ise bundan bağımsız olarak ayrıca uygulanır.
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Politikayı Silme](/tr/concepts/temel-kavramlar/politika-nedir#politikayı-silme) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Politikayı Dışa/İçe Aktarma](/tr/concepts/temel-kavramlar/politika-nedir#politikayı-dışa-içe-aktarma) bölümüne bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akisa-politika-ekleme) bölümüne bakabilirsiniz.

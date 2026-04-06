@@ -1,0 +1,774 @@
+---
+title: "Kubernetes Docker Containerd Troubleshooting"
+description: "Provides possible issues and solutions that may be encountered during Kubernetes, Docker, and Containerd installations and usage. Offers practical solution recommendations for common issues."
+---
+
+## Overlay Network IP Issue When Adding a Server Removed from a Kubernetes Cluster to Another Cluster
+
+### Issue
+
+Flannel files and settings used for pod overlay network remain on the server and need to be manually deleted.
+
+### Solution
+
+<Steps>
+  <Step title="Removing node from cluster">
+    Remove the relevant server from the cluster on the control-plane Kubernetes node:
+    
+    ```bash
+    kubectl delete node <NODE_NAME>
+    ```
+  </Step>
+  
+  <Step title="Cleaning Kubernetes settings">
+    Clean Kubernetes settings on the server to be disconnected:
+    
+    ```bash
+    sudo kubeadm reset
+    ```
+  </Step>
+  
+  <Step title="Cleaning CNI and overlay network">
+    Clean CNI and overlay network components:
+    
+    ```bash
+    systemctl stop kubelet && systemctl stop containerd
+    rm -rf /var/lib/cni/
+    rm -rf /var/lib/kubelet/*
+    rm -rf /etc/cni/
+    ifconfig cni0 down && ip link delete cni0
+    ifconfig flannel.1 down && ip link delete flannel.1
+    systemctl restart containerd && systemctl restart kubelet
+    ```
+  </Step>
+</Steps>
+
+## Error During Docker Installation on CentOS 8.3.x Servers
+
+### Issue
+
+With the release of RHEL 8 and CentOS 8, the Docker package was removed from default package repositories and replaced with Docker, Podman, and Buildah. RedHat decided not to provide official support for Docker. Therefore, these packages prevent Docker installation.
+
+### Solution
+
+Remove blocking packages:
+
+```bash
+yum remove podman* -y
+yum remove buildah* -y
+```
+
+## kubeadm Error: "kubelet isn't running or healthy and connection refused"
+
+### Issue
+
+"swap" and "selinux" which are usually active in Linux operating systems should be disabled.
+
+### Solution
+
+<Steps>
+  <Step title="Disabling swap">
+    Disable swap and make it permanent:
+    
+    ```bash
+    sudo swapoff -a
+    sudo sed -i '/ swap / s/^/#/' /etc/fstab
+    ```
+  </Step>
+  
+  <Step title="System reboot">
+    Reboot the system:
+    
+    ```bash
+    sudo reboot
+    ```
+  </Step>
+  
+  <Step title="Kubernetes installation">
+    Reinstall Kubernetes:
+    
+    ```bash
+    kubeadm reset
+    kubeadm init --ignore-preflight-errors all
+    ```
+  </Step>
+</Steps>
+
+## Namespace Stuck in "Terminating" State
+
+### Issue
+
+Namespace deletion operation gets stuck in "Terminating" state.
+
+### Solution
+
+Force delete namespace by removing finalizers:
+
+```bash
+kubectl get namespace "<NAMESPACE>" -o json | tr -d "\n" | sed "s/\"finalizers\": \[[^]]\+\]/\"finalizers\": []/" | kubectl replace --raw /api/v1/namespaces/<NAMESPACE>/finalize -f -
+```
+
+## "x509 Certificate" Issue During Docker Pull
+
+### Issue (If HTTP is Used)
+
+If the relevant organization is not using HTTPS, insecure-registries is added to Docker's daemon file. This operation is repeated for all nodes using Docker.
+
+### Solution (If HTTP is Used)
+
+<Steps>
+  <Step title="Editing daemon.json file">
+    Edit Docker daemon configuration file:
+    
+    ```bash
+    sudo vi /etc/docker/daemon.json
+    ```
+    
+    Add the following line:
+    
+    ```json
+    "insecure-registries" : ["hub.docker.com:443", "registry-1.docker.io:443", "quay.io"]
+    ```
+  </Step>
+  
+  <Step title="Restarting Docker">
+    Restart Docker service:
+    
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl restart docker
+    docker info
+    ```
+  </Step>
+</Steps>
+
+### Issue (If HTTPS is Used)
+
+If the relevant organization is using HTTPS, SSL certificate ("crt") from the relevant organization needs to be added to servers.
+
+### Solution (If HTTPS is Used)
+
+**For Ubuntu/Debian:**
+
+```bash
+cp ssl.crt /usr/local/share/ca-certificates/
+update-ca-certificates
+service docker restart
+```
+
+**For CentOS 7:**
+
+```bash
+sudo cp -p ssl.crt /etc/pki/ca-trust/source
+sudo cp ssl.crt /etc/pki/ca-trust/source/anchors/myregistrydomain.com.crt
+sudo update-ca-trust extract
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+## If Nexus proxy is used
+
+### Reason/Why
+
+If the relevant organization uses Nexus proxy, Docker servers are redirected to this address.
+
+### Solution
+
+```bash
+$ sudo vi /etc/docker/daemon.json
+```
+
+```json
+{
+  "data-root":"/docker-data",
+  "insecure-registries":["nexusdocker.kurumunadresi.com.tr"],
+  "registry-mirrors":["https://nexusdocker.kurumunadresi.com.tr"],
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+```
+
+## Kubernetes DNS Problem (connection timed out; no servers could be reached)
+
+### Reason/Why
+
+Node stays on Ready,SchedulingDisabled
+
+### Test
+
+```bash
+kubectl apply -f https://k8s.io/examples/admin/dns/dnsutils.yaml
+kubectl get pods dnsutils
+kubectl exec -i -t dnsutils -- nslookup kubernetes.default
+```
+
+**If we get the following result, everything is correct:**
+
+```
+Server: 10.0.0.10
+Address 1: 10.0.0.10
+
+Name: kubernetes.default
+Address 1: 10.0.0.1
+```
+
+**If we get the following result, there is an error and the following steps need to be checked.**
+
+```
+Server: 10.96.0.10
+Address 1: 10.96.0.10
+nslookup: can't resolve 'kubernetes.default'
+command terminated with exit code 1
+```
+
+**Take a look at the resolv.conf file.**
+
+```bash
+$ kubectl exec -ti dnsutils -- cat /etc/resolv.conf
+```
+
+**(correct)**
+
+```
+nameserver 10.96.0.10
+search default.svc.cluster.local svc.cluster.local cluster.local kurum.gov.tr
+options ndots:5
+```
+
+**(incorrect)**
+
+```
+nameserver 10.96.0.10
+search default.svc.cluster.local svc.cluster.local cluster.local
+options ndots:5
+```
+
+```bash
+kubectl rollout restart -n kube-system deployment/coredns
+```
+
+### Solution
+
+It was resolved by adding the organization's domain address to the /etc/resolv.conf file in a customer.
+
+**search kurum.gov.tr**
+
+## HOST Name Resolution Due to DNS Setting Changes Not Reflecting in /etc/resolv.conf File on Ubuntu Servers Where Kubernetes Clusters Are Located
+
+### Reason/Why
+
+On Ubuntu operating system servers, changes made regarding DNS server may not always reflect in resolv.conf or may be skipped. Since Kubernetes by default looks at the cat /etc/resolv.conf file on the server after its internal DNS, this file must be ensured to be correct.
+
+### Solution
+
+**On all servers:**
+
+```bash
+sudo rm /etc/resolv.conf
+sudo ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
+sudo systemctl restart systemd-resolved
+ls -l /etc/resolv.conf
+cat /etc/resolv.conf
+```
+
+**Only on master server:**
+
+```bash
+kubectl -n kube-system rollout restart deployment coredns
+```
+
+## docker: Error response from daemon: Get https://registry-1.docker.io/v2/: x509: certificate signed by unknown authority (possibly because of "crypto/rsa: verification error" while trying to verify candidate authority certificate "kurumSertifikasıAdı-CA")
+
+### Reason/Why
+
+Firewall performs SSL inspection and adds its own certificate.
+
+### Solution
+
+docker.io should be added to "ssl inspection exception" on the firewall.
+
+## Node Stays NotReady and "Unable to update cni config: no networks found in /etc/cni/net.d"
+
+### Reason/Why
+
+kube-flannel on Master cannot create the necessary folder and files somehow.
+
+### Solution
+
+(Alternative solutions are also available: https://github.com/kubernetes/kubernetes/issues/54918)
+
+```bash
+$ sudo mkdir -p /etc/cni/net.d
+$ sudo vi /etc/cni/net.d/10-flannel.conflist
+```
+
+#the following is added.
+
+```json
+{
+  "name": "cbr0",
+  "plugins": [
+    {
+      "type": "flannel",
+      "delegate": {
+        "hairpinMode": true,
+        "isDefaultGateway": true
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": {
+        "portMappings": true
+      }
+    }
+  ]
+}
+```
+
+```json
+{
+  "name": "cbr0",
+  "cniVersion": "0.3.1",
+  "plugins": [
+    {
+      "type": "flannel",
+      "delegate": {
+        "isDefaultGateway": true
+      }
+    },
+    {
+      "type": "portmap",
+      "capabilities": {
+        "portMappings": true
+      }
+    }
+  ]
+}
+```
+
+```bash
+sudo chmod -Rf 777 /etc/cni /etc/cni/*
+sudo chown -Rf apinizer:apinizer /etc/cni /etc/cni/*
+sudo systemctl daemon-reload
+sudo systemctl restart kubelet
+
+#Check if there are pods that still cannot pull images:
+kubectl get pods -n kube-system
+describe pod podAdi -n kube-system
+```
+
+## Client certificates generated by kubeadm expire after 1 year - "internal server error. Error Detail: operation: [list] for kind: [pod] with name: [null] in namespace: [prod] failed"
+
+### Reason/Why
+
+Unable to connect to the server: x509: certificate has expired or is not yet
+
+### Solution
+
+#These operations must be performed on all master servers
+
+```bash
+sudo kubeadm alpha certs check-expiration
+sudo kubeadm alpha certs renew all
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+#all the master/control-plane nodes
+sudo reboot -i
+```
+
+#further readings:
+- https://serverfault.com/questions/1065444/how-can-i-find-which-kubernetes-certificate-has-expired
+- https://www.oak-tree.tech/blog/k8s-cert-yearly-renewwal
+
+## Error: "The connection to the server x.x.x.:6443 was refused - did you specify the right host or port?"
+
+### Reason/Why
+
+The above problem can occur due to any of the following reasons.
+
+- Swap may need to be closed again as it can be opened when disk is added.
+- User may not have permissions.
+- We may not be on the master server.
+
+### Solution
+
+```bash
+sudo swapoff -a
+sudo vi /etc/fstab (swap line will be closed or deleted)
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+sudo reboot (optional)
+```
+
+## kubelet.service: Main process exited, code=exited, status=255
+
+### Reason/Why
+
+While this problem has various causes, if the error says that any .conf file such as /etc/kubernetes/bootstrap-kubelet.conf cannot be found, all configs can be recreated from scratch by applying the following operations.
+
+### Solution
+
+#Operations are performed by backing up existing configs and certificates
+
+```bash
+cd /etc/kubernetes/pki/
+sudo mkdir /tmp/backup | sudo mkdir /tmp/backup2
+sudo mv {apiserver.crt,apiserver-etcd-client.key,apiserver-kubelet-client.crt,front-proxy-ca.crt,front-proxy-client.crt,front-proxy-client.key,front-proxy-ca.key,apiserver-kubelet-client.key,apiserver.key,apiserver-etcd-client.crt} /tmp/backup/
+sudo kubeadm init phase certs all --apiserver-advertise-address <MASTER_NODE_IP>
+cd /etc/kubernetes/
+sudo mv {admin.conf,controller-manager.conf,kubelet.conf,scheduler.conf} /tmp/backup2
+sudo kubeadm init phase kubeconfig all
+sudo systemctl restart docker && sudo systemctl restart containerd && sudo systemctl restart kubelet
+```
+
+---
+
+# If the error of not finding the /etc/kubernetes/bootstrap-kubelet.conf file occurs on **Worker Nodes** as well, removing the node from the cluster and adding it again will solve the problem.
+
+# Commands to be run on master node:
+
+```bash
+# First, the problematic worker node is removed from the cluster
+kubectl delete node <WORKER_NODE_NAME>
+
+# Then a new join token is created
+sudo kubeadm token create --print-join-command
+```
+
+# Commands to be run on worker node
+
+```bash
+# Kubernetes configuration is reset.
+sudo kubeadm reset
+
+# The join command received from master is executed.
+sudo kubeadm join <MASTER_IP>:<PORT> --token <TOKEN> --discovery-token-ca-cert-hash sha256:<HASH>
+```
+
+## ctr: failed to verify certificate: x509: certificate is not valid
+
+### Reason/Why
+
+The above problem is an issue that occurs when you don't have a trusted certificate when pulling images from Private registry
+
+### Solution
+
+We solve it with the -skip-verify parameter.
+
+Example command including it in the "k8s.io" namespace:
+
+```bash
+ctr --namespace k8s.io images pull xxx.harbor.com/apinizercloud/managerxxxx -skip-verify
+```
+
+## Pods Cannot Be Distributed in a Balanced Manner
+
+### Reason/Why
+
+Kubernetes does not distribute pods in a balanced manner because by default, pods are placed on nodes that seem most suitable according to available resources, without a specific strategy or constraint.
+
+### Solution
+
+Add the YAML file showing how pods will be distributed in a balanced manner using **Pod Topology Spread Constraints** after the second spec section.
+
+```yaml
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchExpressions:
+          - key: node-role.kubernetes.io/control-plane
+            operator: DoesNotExist
+```
+
+**Warning:** If you want to prevent pods from being placed on these nodes using the control plane label, make sure that control plane nodes are labeled correctly.
+
+**Check:** You can check if the `node-role.kubernetes.io/control-plane` label exists on the node with the following command.
+
+```bash
+kubectl get nodes --show-labels
+```
+
+## Non-Graceful Node Shutdown in Kubernetes (Unexpected Shutdown of K8s Node)
+
+### Reason/Why
+
+When a node shuts down unexpectedly in Kubernetes (**Non-Graceful Shutdown**), Kubernetes Master detects this situation and performs necessary operations. However, this detection process may be delayed as it depends on the system's timeout parameters.
+
+### Solution
+
+The main parameters to consider for adjusting this time are:
+
+**1. Node Status Update Frequency**
+
+```bash
+kubelet --node-status-update-frequency=5s
+```
+
+- The **Node Status Update Frequency** parameter determines how often **Kubelet** running on a node will update the node's status to the Kubernetes API server, **default value is 10s**.
+- We can enter this value lower than the default value for Kubelet to update node status more frequently, which allows Kubernetes to detect interruptions faster.
+
+**2. Node Monitor Grace Period**
+
+```bash
+kube-apiserver --node-monitor-grace-period=20s
+```
+
+- The Node Monitor Grace Period parameter determines the maximum time the API server will wait before marking a node as "NotReady", **default value is 40s**.
+- This default value can be changed for the API server to mark the node as "NotReady" sooner or later.
+
+**3. Pod Eviction Timeout**
+
+```bash
+kube-controller-manager --pod-eviction-timeout=2m
+```
+
+- **Pod Eviction Timeout** defines the maximum time to wait for pods on a node to be relocated (**eviction**) to other nodes after a node goes to "NotReady" state, **default value is 5 minutes**.
+- The default value can be changed for pods on the node to be moved to other nodes faster.
+
+## Preventing Possible Conflicts When Adding a Cloned Worker Node to Cluster in Kubernetes
+
+### Reason/Why
+
+When a clone of a worker node already running in a Kubernetes cluster is added to the cluster, some configurations and credentials may conflict with the old node.
+
+These conflicts include:
+
+- Duplicate machine-id values
+- Old Kubernetes configuration remnants
+- CNI and overlay network configuration conflicts
+
+### Solution
+
+**1. Kubeadm reset.**
+
+The cloned worker node's existing cluster configuration is completely reset:
+
+```bash
+sudo kubeadm reset
+sudo rm -rf $HOME/.kube
+```
+
+**2. Kubernetes Created Overlay Network is Cleaned.**
+
+CNI and other network components are cleaned:
+
+```bash
+rm -rf /var/lib/cni/
+rm -rf /var/lib/kubelet/*
+rm -rf /etc/cni/
+ifconfig cni0 down && ip link delete cni0
+ifconfig flannel.1 down && ip link delete flannel.1
+systemctl restart containerd && systemctl restart kubelet
+```
+
+**3. Cloned Machine's machine-id is Reset.**
+
+machine-id is regenerated according to the operating system:
+
+```bash
+---Command to change machine-id for RHEL---
+rm -f /etc/machine-id
+systemd-machine-id-setup
+
+---Command to change machine-id for Ubuntu---
+rm -f /etc/machine-id /var/lib/dbus/machine-id
+systemd-machine-id-setup
+cat /etc/machine-id > /var/lib/dbus/machine-id
+```
+
+**4. Rejoining Cluster.**
+
+Join command is obtained from master node and executed on cloned node:
+
+```bash
+kubeadm token create --print-join-command
+```
+
+## If Hostname of Worker Node in Existing Cluster Will Change in Kubernetes
+
+### Reason/Why
+
+When the hostname of a worker node already running in a Kubernetes cluster is changed, some configurations and credentials may conflict with the old hostname. Therefore, when performing this operation, the worker node whose hostname will be changed should be removed from the cluster and added again after the hostname information is changed. (These operations should be performed knowing that they may cause interruptions in the existing working environment)
+
+### Solution
+
+**1. Drain and Delete Node.**
+
+Connect to master node in cluster:
+
+```bash
+kubectl get nodes
+kubectl drain <NODES_OLD_HOSTNAME> --ignore-daemonsets --delete-emptydir-data
+kubectl delete node <NODES_OLD_HOSTNAME>
+```
+
+**2. Connect to Worker Node Whose Hostname Will Change.**
+
+After hostname is changed, CNI and other network components are cleaned:
+
+```bash
+sudo kubeadm reset
+sudo hostnamectl set-hostname <NODES_NEW_HOSTNAME>
+sudo reboot
+
+hostname
+
+# If the old hostname corresponding to 127.0.0.1 ip is still on /etc/hosts, this part should also be replaced with the new hostname.
+sudo vi /etc/hosts
+rm -rf /var/lib/cni/
+rm -rf /var/lib/kubelet/*
+rm -rf /etc/cni/
+systemctl stop kubelet && systemctl stop containerd
+ifconfig cni0 down && ip link delete cni0
+ifconfig flannel.1 down && ip link delete flannel.1
+systemctl restart containerd && systemctl restart kubelet
+```
+
+**3. Rejoining Cluster.**
+
+Join command is obtained from master node and executed on cloned node:
+
+```bash
+kubeadm token create --print-join-command
+```
+
+## Issue on Node Due to Read-Only Disk
+
+### Reason/Why
+
+When Linux kernel detects an error in the underlying file system (ext4, xfs, etc.), it automatically puts the relevant disk partition into read-only mode to protect data integrity.
+
+When Kubernetes detects a disk error or other critical system issues on a node, it automatically adds a taint to prevent that node from accepting pods:
+
+```
+node.kubernetes.io/unschedulable:NoSchedule
+```
+
+### Solution
+
+**1. Server is rebooted**
+
+```bash
+sudo reboot
+```
+
+If the node has disk or system errors, some issues may be fixed after reboot.
+
+**2. Taint on node is removed**
+
+```bash
+kubectl taint nodes <node-name> node.kubernetes.io/unschedulable:NoSchedule-
+```
+
+**3. If node still doesn't accept pods, uncordon is applied**
+
+```bash
+kubectl uncordon <node-name>
+```
+
+The uncordon command makes the node schedulable and ensures that the unschedulable taint is removed in the background.
+
+## ImageStatus failed: Id or size of image "k8s.gcr.io/kube-scheduler:v1.18.20" is not set
+
+### Reason/Why
+
+This is an error encountered when **Docker** version is upgraded along with server package update. Kubernetes 1.18 does not support Docker version, causing incompatibility in communication between kubelet and Docker.
+
+### Solution
+
+The problem is solved by downgrading Docker version to versions 18-19-20 compatible with Kubernetes 1.18.
+
+```bash
+# Check if image exists and inspect works.
+docker inspect k8s.gcr.io/kube-scheduler:v1.18.20
+
+# Check Docker version.
+docker --version
+
+# Remove existing docker packages
+sudo apt remove -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# List suitable docker versions
+apt-cache madison docker-ce | grep 19.03
+
+# Install Docker 19.03 version
+sudo apt install -y docker-ce=5:19.03.15~3-0~ubuntu-focal \
+    docker-ce-cli=5:19.03.15~3-0~ubuntu-focal \
+    containerd.io
+
+# Check version.
+docker --version
+
+# Packages are pinned with hold command to prevent incorrect updates.
+sudo apt-mark hold docker-ce docker-ce-cli containerd.io
+
+# Docker and kubelet services are restarted.
+sudo systemctl restart docker.service
+sudo systemctl restart kubelet.service
+```
+
+## Intermittent Timeout Error from Manager Pod to Worker Pod via ClusterIP (Service)
+
+### Reason/Why
+
+Missing `net.bridge.bridge-nf-call-iptables` setting. Kubernetes' `kube-proxy` component running in `iptables` mode uses Linux bridges to route Service traffic. Having `net.bridge.bridge-nf-call-iptables` set to 0 prevents bridge traffic from being routed through iptables. This causes confusion in routing from Service ClusterIP to pod IPs. Kube-proxy usually gives the following warning in this case: "Missing br-netfilter module or unset sysctl br-nf-call-iptables..."
+
+### Solution
+
+You need to enable Service routing by fixing the sysctl setting.
+
+**Must Be Applied on All Kubernetes Nodes:**
+
+**1) Adding Setting to Configuration File (or Checking):**
+
+Make sure the following setting is set to 1.
+
+You can open the configuration file with the following command:
+
+```bash
+sudo vi /etc/sysctl.d/k8s.conf
+```
+
+**Add the following line to the file (or edit it to 1 if it exists):**
+
+```bash
+net.bridge.bridge-nf-call-iptables = 1
+```
+
+**2) Loading Settings Immediately:**
+
+Run the following command to load changes in the file to the system:
+
+```bash
+sudo sysctl --system
+```
+
+**3) Verifying Settings**
+
+Use the following command to verify configuration:
+
+```bash
+sudo sysctl net.bridge.bridge-nf-call-iptables
+```
+
+Output should return 1.
+
+**4) Restarting Kube-proxy**
+
+Restart the pod with the following command so kube-proxy can receive new settings:
+
+```bash
+kubectl delete pod -n kube-system -l k8s-app=kube-proxy
+```
+
+When these steps are applied, timeout issues occurring in connections from Manager Pod to Worker Pod via ClusterIP will be resolved.
+

@@ -1,0 +1,525 @@
+---
+title: "Benchmark Sonuçları"
+description: "Apinizer Gateway'in farklı kaynak konfigürasyonlarında ulaşabileceği maksimum istek kapasitesini, CPU ölçekleme verimliliğini ve Elasticsearch trafik loglama maliyetini ölçen bağımsız yük testi sonuçlarını inceleyebilirsiniz."
+---
+
+<Warning>
+  Bu sonuçlar **politikasız (zero-policy)** senaryoya aittir: yalnızca yönlendirme ve asenkron trafik loglama ölçülmüştür. Üretim ortamında aktif politikaların türüne ve sayısına göre değerler bu tabanın altında gerçekleşir. CPU'ya yoğun politikalar (XSLT, XSD doğrulama, şifreleme) throughput'u düşürürken; dış sistem çağrısı gerektiren politikalar (LDAP, OAuth2 introspeksiyon) yanıt süresini uzatır. Detaylar için [Politika Performans Etkisi](#politika-performans-etkisi) bölümüne bakınız.
+</Warning>
+
+## Test Ortamı
+
+Benchmark, birbirinden izole dört farklı sunucu üzerinde gerçekleştirilmiştir. Her bileşen, ölçümlerin birbirini etkilememesi için ayrı makinelere konuşlandırılmıştır.
+
+<CardGroup cols={2}>
+  <Card title="Load Generator" icon="server">
+    * 6 vCPU · 12 GB RAM · 100 GB NVMe
+    * **wrk2** yük üretici aracı
+    * CentOS, tek sunucu
+  </Card>
+  <Card title="Upstream (Backend)" icon="arrow-right-arrow-left">
+    * 6 vCPU · 12 GB RAM · 100 GB NVMe
+    * Go tabanlı yüksek kapasiteli HTTP sunucusu (~70K RPS)
+    * Yük üretici ile ağ gecikmesi: **~0,5 ms**
+  </Card>
+  <Card title="Elasticsearch" icon="database">
+    * 8 vCPU · 24 GB RAM · 200 GB NVMe
+    * Elasticsearch 8 — trafik log hedefi
+    * Gateway sunucusundan fiziksel olarak ayrı
+  </Card>
+  <Card title="API Gateway (Worker)" icon="shield">
+    * 12 vCPU (Intel Broadwell @ 2.0 GHz) · 48 GB RAM · 250 GB NVMe
+    * Kubernetes üzerinde çalışır
+    * Yalnızca Worker pod'ları barındırır
+  </Card>
+</CardGroup>
+
+<Info>
+  API Manager, MongoDB ve Kubernetes master ayrı bir sunucuda çalışmaktadır. Bu bileşenler gateway performansını doğrudan etkilemez; yük testi süresince yalnızca yapılandırma verisi sağlarlar.
+</Info>
+
+### Gateway Kaynak Konfigürasyonları (Tier'lar)
+
+Gateway, Kubernetes üzerinde dört farklı kaynak kısıtlamasıyla test edilmiştir. Her tier, gerçek üretim dağıtım senaryolarını temsil eder.
+
+| Tier | CPU | Bellek | IO Thread | Worker Thread | VT Parallelism |
+|------|:---:|:------:|:---------:|:-------------:|:--------------:|
+| **W1** | 1 | 2 GB | 2 | 256 | 1 |
+| **W2** | 2 | 2 GB | 4 | 512 | 2 |
+| **W4** | 4 | 4 GB | 8 | 1.024 | 4 |
+| **W8** | 8 | 8 GB | 16 | 3.072 | 8 |
+
+<Note>
+  JVM motoru tüm tier'larda **G1GC**'dir. Heap boyutu, Direct Memory ve GC bölge boyutu entrypoint tarafından tier'a göre otomatik belirlenir (W1/W2: Heap %60, W4/W8: Heap %65). Backend I/O ve trafik loglama **Virtual Thread (VT)**, HTTP dispatch ise **Platform Thread (PT)** üzerinde çalışır.
+</Note>
+
+---
+
+## Metodoloji
+
+### Load Generator: wrk2
+
+Testler **wrk2** ile gerçekleştirilmiştir. wrk2, koordinasyon sapmalarını (coordinated omission) önlemek amacıyla gerçek istek hızlarını izlemek üzere tasarlanmış yüksek hassasiyetli bir HTTP load generator'dır.
+
+**Temel parametre — R=999999 Overload Yöntemi:**
+
+```bash
+wrk2 -t<thread> -c<connections> -d300s -R999999 --latency <url>
+```
+
+`R=999999` hedef hızı, gateway'in kaldırabileceği maksimum RPS'nin çok üzerinde tutulmaktadır. Bu sayede ölçülen değer "ayarlanan oran" değil, sistemin ulaşabildiği **gerçek maksimum throughput**'tur.
+
+### Test Parametreleri
+
+| Parametre | Değer |
+|-----------|-------|
+| İstek tipleri | GET · POST 1KB · POST 5KB |
+| Süre | 300 saniye |
+| Tekrar | Her bağlantı noktasında 3 kez |
+| Raporlanan değer | 3 tekrarın ortalaması |
+| Latency metrikleri | P50 · P99 |
+| ES modları | ES Kapalı · ES Açık |
+| Politika | Yok (zero-policy, saf yönlendirme) |
+
+### Upstream Bottleneck Değil
+
+Upstream sunucusu, gateway'in maksimum throughput'unun yaklaşık 4–5 katını (~70.000 RPS) işleyebilmektedir. Ölçülen tüm sınırlar gateway kapasitesinden kaynaklanmaktadır; upstream bir darboğaz oluşturmamaktadır.
+
+Yük üretici ile gateway arasındaki ağ gecikmesi **~0,5 ms** olarak ölçülmüştür.
+
+### ES Modları
+
+- **ES Kapalı**: Trafik logları Elasticsearch'e yazılmaz. Saf gateway overhead'ini ölçer.
+- **ES Açık**: Her istek için Elasticsearch'e asenkron trafik logu yazılır. Gerçek üretim senaryosunu simüle eder.
+
+---
+
+## Sonuçlar
+
+### 1. Peak Throughput Özeti
+
+Her tier ve istek tipi için tüm bağlantı noktaları arasında gözlemlenen maksimum RPS değerleri.
+
+#### ES Kapalı
+
+| Tier | CPU | GET (RPS) | POST 1KB (RPS) | POST 5KB (RPS) |
+|------|:---:|----------:|---------------:|---------------:|
+| W1 | 1 | **1.638** | 1.480 | 1.352 |
+| W2 | 2 | **3.842** | 3.322 | 3.097 |
+| W4 | 4 | **9.078** | 8.019 | 6.573 |
+| W8 | 8 | **15.692** | 12.992 | 6.431 |
+
+#### ES Açık
+
+| Tier | CPU | GET (RPS) | POST 1KB (RPS) | POST 5KB (RPS) |
+|------|:---:|----------:|---------------:|---------------:|
+| W1 | 1 | **1.422** | 1.342 | 1.148 |
+| W2 | 2 | **3.385** | 2.498 | 2.237 |
+| W4 | 4 | **7.490** | 5.980 | 5.147 |
+| W8 | 8 | **14.256** | 12.704 | 6.543 |
+
+<img src="/images/develop/benchmark/peak-throughput-es-kapali.png" alt="Peak Throughput — ES Kapalı" width="1000" />
+
+<Tip>
+  W8 tier'ında ES açık/kapalı farkı diğer tier'lara kıyasla çok küçüktür. 8 CPU'nun sağladığı asenkron işleme kapasitesi, Elasticsearch yazma gecikmesini büyük ölçüde absorbe etmektedir.
+</Tip>
+
+---
+
+### 2. CPU Ölçekleme Verimliliği
+
+Birim CPU başına düşen RPS ve W1'e göre ölçekleme oranı (ES kapalı, GET).
+
+| Tier | CPU | Peak RPS | RPS/CPU | Ölçekleme |
+|------|:---:|----------:|---------:|----------:|
+| W1 | 1 | 1.638 | 1.638 | 1.00× |
+| W2 | 2 | 3.842 | 1.921 | **1.17×** |
+| W4 | 4 | 9.078 | 2.269 | **1.38×** |
+| W8 | 8 | 15.692 | 1.961 | **1.20×** |
+
+<img src="/images/develop/benchmark/cpu-olcekleme-verimliligi.png" alt="CPU Ölçekleme Verimliliği" width="900" />
+
+<Info>
+  W1'den W8'e toplam artış **9,6×**'tir. 8 CPU için teorik ideal olan 8×'in üzerine çıkılması (%120 verimlilik), gateway'in paylaşılan bağlantı havuzu ve sanal thread modeli sayesinde süper-lineer ölçeklenebildiğini göstermektedir.
+</Info>
+
+---
+
+### 3. ES Açık / Kapalı Karşılaştırması
+
+<Tabs>
+  <Tab title="GET">
+    | Tier | ES Kapalı | ES Açık | Maliyet |
+    |------|----------:|--------:|--------:|
+    | W1 | 1.638 | 1.422 | %13,2 |
+    | W2 | 3.842 | 3.385 | %11,9 |
+    | W4 | 9.078 | 7.490 | %17,5 |
+    | W8 | 15.692 | 14.256 | **%9,2** |
+  </Tab>
+  <Tab title="POST 1KB">
+    | Tier | ES Kapalı | ES Açık | Maliyet |
+    |------|----------:|--------:|--------:|
+    | W1 | 1.480 | 1.342 | %9,3 |
+    | W2 | 3.322 | 2.498 | %24,8 |
+    | W4 | 8.019 | 5.980 | %25,4 |
+    | W8 | 12.992 | 12.704 | **%2,2** |
+  </Tab>
+  <Tab title="POST 5KB">
+    | Tier | ES Kapalı | ES Açık | Maliyet |
+    |------|----------:|--------:|--------:|
+    | W1 | 1.352 | 1.148 | %15,1 |
+    | W2 | 3.097 | 2.237 | %27,8 |
+    | W4 | 6.573 | 5.147 | %21,7 |
+    | W8 | 6.431 | 6.543 | ~%0 |
+  </Tab>
+</Tabs>
+
+<img src="/images/develop/benchmark/es-kapali-vs-acik.png" alt="ES Kapalı vs ES Açık Karşılaştırması" width="1000" />
+
+---
+
+### 4. Concurrency Eğrileri (Tier Bazlı)
+
+<Tabs>
+  <Tab title="W1 (1 CPU / 2GB)">
+    **GET**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 100 | 1.447 | 56 ms | 3,15 s | 1.198 | 29 ms | 720 ms |
+    | 250 | 1.448 | 57 ms | 384 ms | 1.198 | 31 ms | 165 ms |
+    | 500 | **1.638** | 55 ms | 461 ms | **1.422** | 65 ms | 304 ms |
+
+    **POST 1KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 100 | 1.338 | 2,48 s | 5,91 s | 1.097 | 36 ms | 652 ms |
+    | 250 | 1.348 | 103 ms | 1,57 s | 1.099 | 45 ms | 658 ms |
+    | 500 | **1.480** | 93 ms | 1,11 s | **1.342** | 65 ms | 297 ms |
+
+    **POST 5KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 100 | 1.196 | 61 ms | 1,38 s | 899 | 27 ms | 225 ms |
+    | 250 | 1.199 | 70 ms | 796 ms | 898 | 32 ms | 211 ms |
+    | 500 | **1.352** | 107 ms | 540 ms | **1.148** | 45 ms | 496 ms |
+  </Tab>
+  <Tab title="W2 (2 CPU / 2GB)">
+    **GET**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 3.498 | 58 ms | 3,03 s | 2.995 | 43 ms | 1,30 s |
+    | 500 | 3.493 | 73 ms | 653 ms | 2.996 | 92 ms | 2,79 s |
+    | 750 | 3.493 | 57 ms | 427 ms | 2.993 | 91 ms | 1,52 s |
+    | 1.000 | **3.842** | 81 ms | 396 ms | **3.385** | 74 ms | 1,29 s |
+
+    **POST 1KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 2.746 | 45 ms | 1,32 s | 2.246 | 13 ms | 313 ms |
+    | 500 | 2.745 | 41 ms | 305 ms | 2.246 | 23 ms | 709 ms |
+    | 750 | 2.746 | 31 ms | 222 ms | 2.246 | 48 ms | 531 ms |
+    | 1.000 | **3.322** | 56 ms | 391 ms | **2.498** | 95 ms | 550 ms |
+
+    **POST 5KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 2.496 | 26 ms | 413 ms | 1.996 | 42 ms | 320 ms |
+    | 500 | 2.497 | 44 ms | 880 ms | 1.997 | 69 ms | 2,33 s |
+    | 750 | 2.494 | 73 ms | 293 ms | 1.997 | 59 ms | 967 ms |
+    | 1.000 | **3.097** | 87 ms | 319 ms | **2.237** | 139 ms | 1,63 s |
+  </Tab>
+  <Tab title="W4 (4 CPU / 4GB)">
+    **GET**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 8.441 | 10,9 s | 21,0 s | 7.145 | 10,7 s | 17,1 s |
+    | 500 | 8.898 | 1,75 s | 7,96 s | 7.490 | 56 ms | 1,37 s |
+    | 1.000 | 8.929 | 772 ms | 5,06 s | 7.478 | 162 ms | 2,68 s |
+    | 2.000 | **9.078** | 193 ms | 4,00 s | 6.836 | 12,4 s | 26,6 s |
+
+    **POST 1KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 7.382 | 22,7 s | 35,7 s | 5.104 | 24,5 s | 49,9 s |
+    | 500 | 7.377 | 14,8 s | 37,8 s | 5.699 | 11,2 s | 31,2 s |
+    | 1.000 | 7.727 | 8,88 s | 25,3 s | 5.656 | 7,06 s | 34,0 s |
+    | 2.000 | **8.019** | 1,65 s | 8,79 s | **5.980** | 7,41 s | 20,4 s |
+
+    **POST 5KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 5.215 | 24,4 s | 42,5 s | 4.330 | 13,2 s | 29,1 s |
+    | 500 | 5.919 | 6,26 s | 18,1 s | 4.700 | 2,23 s | 8,15 s |
+    | 1.000 | 6.071 | 2,13 s | 12,4 s | 4.705 | 2,02 s | 8,52 s |
+    | 2.000 | **6.573** | 630 ms | 6,56 s | **5.147** | 1,44 s | 7,89 s |
+  </Tab>
+  <Tab title="W8 (8 CPU / 8GB)">
+    **GET**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 13.893 | 33 ms | 3,74 s | 12.983 | 21 ms | 2,90 s |
+    | 500 | 13.964 | 32 ms | 2,10 s | 12.893 | 115 ms | 2,08 s |
+    | 1.000 | 13.972 | 30 ms | 1,21 s | 12.972 | 36 ms | 1,29 s |
+    | 2.000 | 13.960 | 67 ms | 6,06 s | 12.804 | 98 ms | 5,04 s |
+    | 3.000 | — | — | — | **14.256** | 1,70 s | 6,57 s |
+    | 4.000 | **15.692** | 319 ms | 4,06 s | — | — | — |
+
+    **POST 1KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 12.992 | 159 ms | 5,79 s | 11.984 | 45 ms | 1,68 s |
+    | 500 | 12.974 | 35 ms | 3,45 s | 11.825 | 2,20 s | 8,69 s |
+    | 1.000 | 12.972 | 46 ms | 2,44 s | 11.978 | 246 ms | 4,09 s |
+    | 2.000 | 12.963 | 77 ms | 2,58 s | 11.948 | 513 ms | 5,45 s |
+    | 3.000 | — | — | — | **12.704** | 153 ms | 3,91 s |
+    | 4.000 | **12.988** | 742 ms | 19,1 s | — | — | — |
+
+    **POST 5KB**
+
+    | Bağlantı | ES-OFF RPS | ES-OFF P50 | ES-OFF P99 | ES-ON RPS | ES-ON P50 | ES-ON P99 |
+    |:--------:|-----------:|-----------:|-----------:|----------:|----------:|----------:|
+    | 250 | 6.431 | 1,39 s | 5,98 s | 5.793 | 2,22 s | 13,8 s |
+    | 500 | 6.420 | 74 ms | 4,65 s | 5.928 | 80 ms | 4,81 s |
+    | 1.000 | 6.377 | 3,10 s | 15,6 s | 5.985 | 55 ms | 4,07 s |
+    | 2.000 | 6.347 | 625 ms | 13,6 s | 5.985 | 178 ms | 1,60 s |
+    | 3.000 | — | — | — | **6.543** | 263 ms | 1,61 s |
+    | 4.000 | **6.423** | 4,04 s | 29,5 s | — | — | — |
+  </Tab>
+</Tabs>
+
+---
+
+### 5. JVM Diagnostics
+
+<Tabs>
+  <Tab title="ES Kapalı">
+    | Tier | Heap Kullanımı | Young GC | Old GC | Thread (Peak) | Blocked |
+    |------|---------------:|---------:|-------:|:-------------:|:-------:|
+    | W1 | 135 / 1.189 MB (%11) | 14.923 kez / 343 s | **0** | 351 | **0** |
+    | W2 | 201 / 1.230 MB (%16) | 7.245 kez / 156 s | **0** | 609 | **0** |
+    | W4 | 724 / 2.664 MB (%27) | 10.570 kez / 213 s | **0** | 1.129 | **0** |
+    | W8 | 933 / 5.328 MB (%18) | 14.308 kez / 192 s | **0** | 3.189 | **0** |
+  </Tab>
+  <Tab title="ES Açık">
+    | Tier | Heap Kullanımı | Young GC | Old GC | Thread (Peak) | Blocked |
+    |------|---------------:|---------:|-------:|:-------------:|:-------:|
+    | W1 | 455 / 1.189 MB (%38) | 15.364 kez / 311 s | 0 | 354 | **0** |
+    | W2 | 791 / 1.230 MB (%64) | 11.430 kez / 392 s | 40 kez / 10 s | 612 | **0** |
+    | W4 | 1.918 / 2.664 MB (%72) | 12.037 kez / 711 s | 23 kez / 9 s | 1.132 | **0** |
+    | W8 | 2.983 / 5.328 MB (%56) | 11.491 kez / 600 s | **0** | 3.120 | **0** |
+  </Tab>
+</Tabs>
+
+<Note>
+  Tüm tier ve modlarda **Blocked thread sayısı 0** kalmıştır. Deadlock veya kaynak çakışması yaşanmamıştır.
+</Note>
+
+---
+
+## Politika Performans Etkisi
+
+Benchmark sonuçları politika içermeyen saf yönlendirme senaryosunu ölçmektedir. Gerçek üretim senaryolarında her politika, kendi mekanizmasına bağlı olarak farklı bir maliyet kalemi ekler. Bu maliyetler iki temel kategoriye ayrılır: **CPU yükü** ve **harici gecikme (latency)**.
+
+### CPU-Yoğun Politikalar — Throughput Düşürür
+
+Bu politikalar her istek için gateway üzerinde hesaplama yapar. CPU doğrudan tüketilir; tier büyütülerek veya yatay ölçeklenerek telafi edilebilir.
+
+<AccordionGroup>
+  <Accordion title="XML / XSD Şema Doğrulama">
+    İstek veya yanıt gövdesi, yüklenen XSD şemasına göre her çağrıda parse edilip doğrulanır. Şema karmaşıklığı ve mesaj boyutu doğrusal biçimde CPU tüketimi artırır.
+
+    Örneğin 50KB XML gövdeli bir istekte karmaşık bir XSD şeması, ek politika olmaksızın bile throughput'u %30–60 oranında düşürebilir. Şema basit ve mesajlar küçükse etki sınırlı kalır.
+  </Accordion>
+  <Accordion title="XML Dönüştürme (XSLT)">
+    XSLT, gateway üzerinde her istek için tam bir XML ayrıştırma ve şablon dönüştürme döngüsü çalıştırır. Karmaşık bir XSLT şablonu, CPU kullanımını tek başına ikiye katlamak için yeterlidir.
+
+    XSLT 1.0 ile 2.0 arasında işlem maliyeti önemli ölçüde farklılaşır. Büyük mesajlarda ya da sıkça tetiklenen endpoint'lerde W4 veya üzeri tier tercih edilmelidir.
+  </Accordion>
+  <Accordion title="JSON Şema Doğrulama">
+    XSD doğrulamasının JSON eşdeğeridir. JSON body her istek için parse edilir ve tanımlı JSON Şema kurallarına göre gezilir. Şema derinliği (iç içe nesne sayısı) ile mesaj boyutu CPU tüketiminin başlıca belirleyicisidir.
+  </Accordion>
+  <Accordion title="Şifreleme / Şifre Çözme (WS-Security, JWE)">
+    XML şifreleme, WS-Security gövde şifreleme veya JWE token şifresi çözme işlemleri, kriptografik işlemler içerdiğinden CPU kullanımını önemli ölçüde artırır. Özellikle asimetrik şifreleme (RSA) simetrik (AES) seçeneklere göre çok daha yüksek maliyetlidir.
+  </Accordion>
+  <Accordion title="Dijital İmza ve İmza Doğrulama (WS-Security, JOSE)">
+    Her istek için imza hesaplanması ya da doğrulanması kriptografik işlem gerektirir. RSA-2048 veya RSA-4096 tabanlı imzalar, HMAC tabanlı alternatiflere kıyasla throughput üzerinde belirgin bir baskı oluşturur. Yüksek trafikli endpoint'lerde imza algoritması seçimi dikkatli yapılmalıdır.
+  </Accordion>
+  <Accordion title="İçerik Filtresi (Content Filtering)">
+    Gövde içeriğini regex veya özelleştirilebilir kurallara göre tararken tüm mesaj her istek için değerlendirilir. Kural sayısı arttıkça ve mesaj büyüdükçe CPU maliyeti katlanarak artar.
+  </Accordion>
+  <Accordion title="Script Politikası (Groovy)">
+    Groovy script'leri JVM üzerinde çalışır ancak başlangıç derleme maliyeti script cache ile azaltılmıştır. Bununla birlikte script içeriğinin karmaşıklığı doğrudan CPU kullanımını belirler. Döngü, parse ve hesaplama yoğun scriptler throughput'u ciddi ölçüde düşürebilir.
+  </Accordion>
+</AccordionGroup>
+
+### Harici Gecikme Ekleyen Politikalar — Yanıt Süresi Uzar
+
+Bu politikalar bir dış sisteme bağlanarak işlem yapar. Gateway CPU'su büyük ölçüde boşta beklerken, yanıt süresi harici sistemin gecikmesi kadar uzar. CPU büyütmek bu tür gecikmeyi azaltmaz; harici sistemin performansı ve ağ gecikmesi belirleyicidir.
+
+<AccordionGroup>
+  <Accordion title="LDAP Kimlik Doğrulama">
+    Her istek için LDAP sunucusuna bağlanarak kullanıcı adı ve parola doğrulaması yapılır. LDAP sunucusuna gidiş-dönüş ağ gecikmesi (tipik olarak 1–10 ms) her isteğe eklenir. LDAP havuzu olmayan yapılandırmalarda bağlantı kurulum maliyeti de istek başına düşer.
+
+    LDAP sunucusu gateway ile aynı veri merkezindeyse etki nispeten sınırlı kalır; farklı veri merkezlerinde veya bulut ortamlarında gecikme onlarca milisaniyeye çıkabilir ve throughput orantısız biçimde düşer.
+  </Accordion>
+  <Accordion title="OAuth2 Token İntrospeksiyonu / OIDC">
+    Token her istek için yetkilendirme sunucusuna (Authorization Server) gönderilerek doğrulatılır. Yanıt süresi tamamen AS'nin yanıt hızına bağlıdır. Token cache etkinleştirilmezse bu durum hem throughput hem latency üzerinde ciddi baskı oluşturur.
+
+    Token cache kullanıldığında cache miss oranına bağlı olarak maliyet önemli ölçüde azaltılabilir. Cache TTL'i iş gereksinimlerine göre dikkatli ayarlanmalıdır.
+  </Accordion>
+  <Accordion title="JWT (Uzak JWKS Doğrulaması)">
+    İmza anahtarının uzak JWKS endpoint'inden alınması gerekiyorsa, her anahtar getirme işlemi ağ çağrısı anlamına gelir. JWKS cache etkinleştirildiğinde bu maliyet büyük ölçüde ortadan kalkar; cache süresi dolmadıkça ek gecikme oluşmaz.
+  </Accordion>
+  <Accordion title="SAML Kimlik Doğrulama">
+    SAML assertion'larının IdP (Identity Provider) üzerinde doğrulanması gerekiyorsa harici bağlantı kaçınılmazdır. WS-Trust veya SOAP tabanlı IdP çağrıları hem ağ gecikmesi hem de işlem maliyeti ekler.
+  </Accordion>
+  <Accordion title="Backend Kimlik Doğrulama (Basic / API Key / Token)">
+    Backend servisine iletilen kimlik doğrulama bilgilerinin her istekte yenilenmesi ya da doğrulanması gerekiyorsa (örneğin dinamik token alma) ek bir harici çağrı gerçekleşir. Statik kimlik bilgileri kullanıldığında bu maliyet oluşmaz.
+  </Accordion>
+  <Accordion title="API Çağrısı Politikası">
+    Politika akışı içinde başka bir API'ye çağrı yapılması, o API'nin yanıt süresi kadar gecikme ekler. Seri birden fazla API çağrısı latency'yi katlar. Koşullu çalıştırma ve sonuç cache'leme ile bu maliyet minimize edilebilir.
+  </Accordion>
+</AccordionGroup>
+
+### Düşük Maliyetli Politikalar
+
+Aşağıdaki politikalar gateway üzerinde minimal CPU ve sıfır harici gecikme ekler. Yüksek trafikli ortamlarda bile performans üzerindeki etkileri genellikle ihmal edilebilir düzeydedir.
+
+<CardGroup cols={2}>
+  <Card title="IP İzin / Yasaklama Listesi" icon="shield-halved">
+    Gelen IP adresi in-memory liste ile karşılaştırılır. Mikrosaniye mertebesinde tamamlanır.
+  </Card>
+  <Card title="Hız Sınırlama / Kota" icon="gauge">
+    Lokal sayaçlara veya paylaşılan önbelleğe karşı sayım yapılır. Önbellek entegrasyonu yoksa saf in-memory işlemdir.
+  </Card>
+  <Card title="Header Manipülasyonu" icon="sliders">
+    Belirli header'ların eklenmesi, silinmesi veya değiştirilmesi string işlemleridir; CPU maliyeti ihmal edilebilir.
+  </Card>
+  <Card title="Basic Kimlik Doğrulama (Yerel)" icon="key">
+    Kimlik bilgileri gateway'de tanımlıysa ve harici LDAP/dizin servisi yoksa, doğrulama tamamen in-memory gerçekleşir.
+  </Card>
+</CardGroup>
+
+<Warning>
+  Harici gecikme ekleyen politikalar throughput'u da düşürür; beklemedeki thread'ler yeni isteklere hizmet edemez. Dış sistem bağlantısına dayanan politikalarda W8 gibi yüksek thread kapasiteli tier'lar bu etkiyi önemli ölçüde azaltır.
+</Warning>
+
+---
+
+## Değerlendirme
+
+<AccordionGroup>
+  <Accordion title="CPU Ölçekleme: Süper-Lineer Verimlilik" defaultOpen>
+    W1'den W8'e geçişte GET throughput'u **9,6×** artmıştır. Teorik ideal olan 8×'in üzerine çıkılması (%120 verimlilik), paylaşılan bağlantı havuzu ve Java sanal thread modelinin birlikte sağladığı süper-lineer ölçeklenme kapasitesini göstermektedir.
+  </Accordion>
+
+  <Accordion title="Elasticsearch Loglama Maliyeti" defaultOpen>
+    ES loglama maliyeti tier büyüdükçe orantısız biçimde azalmaktadır. W8'de GET için yalnızca %9, POST 1KB için %2 throughput kaybı gözlemlenmektedir. 8 CPU'nun sağladığı asenkron işleme kapasitesi ES yazma gecikmesini büyük ölçüde absorbe etmektedir.
+  </Accordion>
+
+  <Accordion title="Politika Tasarımı için Mimari Öneri" defaultOpen>
+    CPU-yoğun politikaları (XSLT, şifreleme, şema doğrulama) koşullu çalıştırma ile yalnızca gerekli endpoint'lere sınırlayın. Harici gecikme ekleyen politikaları (LDAP, OAuth2 introspeksiyon) token/sonuç önbelleği ile destekleyin. Bu iki önlem birlikte uygulandığında politika maliyetinin büyük bölümü ortadan kalkar.
+  </Accordion>
+
+  <Accordion title="Kapasite Planlama Rehberi" defaultOpen>
+    Aşağıdaki değerler yalnızca yönlendirme + ES loglama içeren saf senaryoyu temsil eder. Politika yükü eklendiğinde gerçek kapasite bu değerlerin altında olacaktır.
+
+    | Beklenen Yük | Önerilen Başlangıç Tier |
+    |:------------:|:-----------------------:|
+    | &lt; 1.000 RPS | W1 |
+    | 1.000–3.000 RPS | W2 |
+    | 3.000–7.000 RPS | W4 |
+    | 7.000–14.000 RPS | W8 |
+    | &gt; 14.000 RPS | W8 × N (yatay ölçek) |
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Cache Performansı
+
+Cache bileşeni, API yanıtlarını bellekte saklayarak tekrarlayan istekleri backend'e iletmeden doğrudan yanıtlar. Aşağıdaki sonuçlar, cache bileşeninin farklı kaynak konfigürasyonlarında GET (okuma) ve PUT (yazma) işlemlerindeki maksimum kapasitesini göstermektedir.
+
+<Note>
+  Cache bileşeni **Hazelcast** tabanlıdır ve **ZGC** çöp toplayıcı ile çalışır. JVM parametreleri her tier için entrypoint tarafından otomatik belirlenir. Test metodolojisi gateway benchmark ile aynıdır (R=999999 overload, wrk2).
+</Note>
+
+### Cache Kaynak Konfigürasyonları
+
+| Tier | CPU | Bellek | Hazelcast Op Threads | VT Parallelism |
+|------|:---:|:------:|:--------------------:|:--------------:|
+| **W1** | 1 | 2 GB | 2 | 1 |
+| **W2** | 2 | 2 GB | 4 | 2 |
+| **W4** | 4 | 4 GB | 8 | 4 |
+| **W8** | 8 | 8 GB | 16 | 8 |
+
+### Maksimum Throughput
+
+| Tier | CPU | GET (RPS) | PUT (RPS) |
+|------|:---:|----------:|----------:|
+| W1 | 1 | **2,169** | **1,974** |
+| W2 | 2 | **5,037** | **3,673** |
+| W4 | 4 | **7,896** | **6,632** |
+| W8 | 8 | **13,619** | **13,069** |
+
+### CPU Ölçeklenme Verimi
+
+| Tier | CPU | GET RPS | GET/CPU | PUT RPS | PUT/CPU | Ölçeklenme (GET) |
+|------|:---:|--------:|--------:|--------:|--------:|:----------------:|
+| W1 | 1 | 2,169 | 2,169 | 1,974 | 1,974 | 1.00× |
+| W2 | 2 | 5,037 | 2,519 | 3,673 | 1,837 | **1.16×** |
+| W4 | 4 | 7,896 | 1,974 | 6,632 | 1,658 | **0.91×** |
+| W8 | 8 | 13,619 | 1,702 | 13,069 | 1,634 | **0.79×** |
+
+<Info>
+  W1'den W8'e toplam artış GET için **6.3×**, PUT için **6.6×** olup CPU artışına (8×) yakın bir ölçeklenme göstermektedir. PUT işlemleri W8'de GET ile neredeyse eşit performansa ulaşarak yazma darboğazının yüksek CPU ile ortadan kalktığını göstermektedir.
+</Info>
+
+### Cache Kapasite Planlama
+
+| Beklenen Cache Yükü | Önerilen Başlangıç Tier |
+|:--------------------:|:-----------------------:|
+| &lt; 2.000 RPS | W1 |
+| 2.000–5.000 RPS | W2 |
+| 5.000–10.000 RPS | W4 |
+| &gt; 10.000 RPS | W8 |
+
+<Info>
+  **Benchmark Sürümü**: v1 · **Test Tarihi**: 27 Mart 2026 · **Metodoloji**: R=999999 overload, 300 s × 1 tekrar · **Ortam**: Kubernetes (isolated pod), Hazelcast 5.5 + Java 25 ZGC
+</Info>
+
+---
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Kapasite Planlama" icon="calculator" href="/tr/concepts/deployment/kapasite-planlama">
+    Donanım gereksinimlerini ve boyutlandırma rehberini inceleyin
+  </Card>
+  <Card title="Deployment Topolojileri" icon="network-wired" href="/tr/concepts/deployment/genel-bakis">
+    Deployment topolojilerini ve yüksek erişilebilirlik seçeneklerini inceleyin
+  </Card>
+  <Card title="Politika Nedir?" icon="shield" href="/tr/concepts/temel-kavramlar/politika-nedir">
+    Politika türleri ve uygulama mekanizması hakkında detaylı bilgi edinin
+  </Card>
+  <Card title="Mesaj İşleme ve Politika Uygulama" icon="arrows-spin" href="/tr/concepts/temel-kavramlar/mesaj-isleme-ve-politika-uygulama">
+    Gateway'in istek akışını ve politika sıralamasını öğrenin
+  </Card>
+</CardGroup>
+
+---
+
+<Info>
+  **Benchmark Sürümü**: v8 · **Test Tarihi**: 14 Mart 2026 · **Metodoloji**: R=999999 overload, 300 s × 3 tekrar · **Ortam**: Kubernetes (isolated pod), Undertow + Java 25 Virtual Threads
+</Info>

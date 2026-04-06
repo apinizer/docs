@@ -1,0 +1,238 @@
+---
+title: "Capacity Planning"
+description: "Comprehensive capacity planning guide for system, network and infrastructure administrators: traffic estimation, hardware requirements, network configuration and pre-installation decisions"
+---
+
+## Capacity Planning Process
+
+Capacity planning is the process of determining the resources required for successful installation and operation of the Apinizer platform. This page is a comprehensive guide prepared for **system administrators**, **network administrators**, and **infrastructure teams**.
+
+When performing capacity planning, the following factors should be considered:
+
+### Traffic Estimation
+
+Traffic estimation forms the basis of capacity planning. The following points should be evaluated:
+
+* **Expected API call count**: Expected API call volume on daily and hourly basis should be determined
+* **Peak traffic estimation**: Traffic volume during highest traffic periods (e.g., campaign periods, special days) should be estimated
+* **Traffic growth projection**: Projection should be made for future traffic increase
+* **Seasonal variations**: Seasonal traffic variations throughout the year should be considered
+
+### Deployment Model
+
+The deployment model where Apinizer will be installed directly affects resource requirements. Current options:
+
+* **Topology 1: Test and PoC**: Simple installation model where all components run on a single server
+* **Topology 2: Professional Installation**: Model where components are distributed across different servers
+* **Topology 3: High Availability**: Model where clustering is done for high availability
+* **Topology 4: Inter-Regional Distribution**: Global distribution, geographical backup
+
+For detailed information, you can refer to the [Deployment Models](/en/concepts/deployment/deployment-models) page.
+
+### High Availability
+
+High availability requirements should be planned for critical business applications:
+
+* **Uptime requirements**: How long the system needs to run without interruption should be determined (generally 99.9%+)
+* **Failover strategy**: How traffic will be routed when a component fails should be planned
+* **Disaster recovery plan**: How the system will be recovered in case of large-scale failures should be planned
+
+### Growth Plan
+
+Capacity planning should cover not only current requirements but also future growth:
+
+* **Short-term requirements**: Resources required for 6-month period
+* **Medium-term requirements**: Resources planned for 1-2 year period
+* **Long-term requirements**: Resource requirements projected for 3 years and above
+
+
+## Tier-Based Capacity and Hardware Requirements
+
+### Worker Nodes (API Gateway)
+
+Worker nodes are the main components that process API traffic. Apinizer ships with four standard resource tiers; each tier automatically configures both hardware limits and JVM/thread parameters.
+
+<Warning>
+  The Peak RPS column reflects **zero-policy laboratory** conditions — no authentication, no transformation, no validation. Use the **Daily Planning Capacity** column for production sizing. Load testing against your own traffic patterns and policy mix is always recommended.
+</Warning>
+
+<Info>
+  **Why these values?** Benchmarks were conducted under ideal conditions: GET requests, no policies, ~0.5 ms backend RTT. Real production environments typically combine **POST payloads**, **authentication**, **XSD/OpenAPI schema validation**, **XSLT transformation**, and **≥100 ms backend latency**. CPU-intensive policies — especially XSLT and schema validation — reduce throughput far more dramatically than the benchmark conditions suggest. The daily planning values below are conservative estimates based on observed throughput in typical enterprise workloads.
+</Info>
+
+| Tier | CPU | RAM | Zero-Policy Peak RPS¹ | Daily Planning Capacity² | Usage Purpose |
+|------|-----|-----|----------------------|--------------------------|---------------|
+| **W1** | 1 core | 2 GB | ~1,600 RPS | ~1M req/day | Test / PoC |
+| **W2** | 2 core | 2 GB | ~3,800 RPS | ~2.5M req/day | Small production |
+| **W4** | 4 core | 4 GB | ~9,100 RPS | ~5M req/day | Standard production |
+| **W8** | 8 core | 8 GB | ~15,700 RPS | ~10M req/day | High-volume production |
+
+¹ Measured via wrk2 overload method, GET requests, Elasticsearch logging disabled, no policies, upstream RTT ~0.5 ms — laboratory conditions.
+² Conservative estimate for typical enterprise workloads: POST payloads, authentication, schema validation, and ≥100 ms backend latency assumed. Adjust upward for low policy complexity, downward for CPU-intensive policy chains.
+
+<Info>
+  **CPU Efficiency**: The measured RPS increase from W1 to W8 is **9.6×** — exceeding the theoretical 8×. This super-linear scaling stems from the shared connection pool and Hybrid Platform Thread + Virtual Thread model. Moving to larger tiers provides more than proportional gains.
+</Info>
+
+#### Thread and JVM Parameters
+
+JVM memory and GC settings are automatically configured by the entrypoint based on container resource limits — no manual JVM heap parameters are required. Per-tier Undertow and Virtual Thread parameters are as follows:
+
+| Tier | IO Threads | Worker Max Threads | VT Parallelism | Backlog | Max Concurrent Req |
+|------|------------|-------------------|----------------|---------|-------------------|
+| **W1** | 2 | 256 | 1 | 2048 | 500 |
+| **W2** | 4 | 512 | 2 | 4096 | 750 |
+| **W4** | 8 | 1024 | 4 | 8192 | 3000 |
+| **W8** | 16 | 3072 | 8 | 16384 | 10000 |
+
+<Note>
+  All tiers use G1GC. Heap is allocated at 60% for W1/W2 and 65% for W4/W8. Virtual Threads are used for backend I/O and logging (Hybrid PT+VT model); Platform Threads are retained for Undertow dispatch.
+</Note>
+
+#### Connection Pool Settings
+
+Default routing connection pool values for each tier:
+
+| Tier | Max Conn/Host | Max Conn Total | ES Max Conn/Host |
+|------|--------------|----------------|-----------------|
+| **W1** | 250 | 500 | 8 |
+| **W2** | 500 | 1,000 | 16 |
+| **W4** | 1,000 | 2,000 | 32 |
+| **W8** | 2,000 | 4,000 | 128 |
+
+#### Capacity Calculation Example
+
+**Scenario**: 20 million requests per day, typical enterprise workload (POST payloads, authentication, schema validation), backend latency ~100 ms
+
+* W4 planning capacity: **~5M requests/day/node**
+* Nodes required: 20M ÷ 5M = **4 W4 nodes**
+* +1 reserve node recommended for growth → 5 W4 nodes
+* **Alternative**: 2 W8 nodes (2 × 10M = 20M/day) — fewer servers, higher unit cost
+
+### Manager Nodes
+
+Manager nodes provide the web interface where configurations are made. They do not depend on daily traffic load; they are used for configuration management and interface access. A single node is sufficient for standalone installation; HA installation with at least 2 nodes is recommended for production environments for high availability.
+
+### MongoDB Replica Set
+
+MongoDB is Apinizer's configuration database. It stores API proxy definitions, policy configurations, and metadata information. It does not depend on daily traffic load; requirements are determined based on API proxy count and configuration complexity.
+
+<Warning>
+  **Critical**: MongoDB must be configured as a **Replica Set**. Even for a single node, it must be installed as a replica set. Standalone instance should not be used.
+</Warning>
+
+### Elasticsearch Cluster
+
+Elasticsearch stores log and analytics data.
+
+| Feature | Small (S) | Medium (M) | Large (L) |
+|---------|-----------|------------|-----------|
+| **CPU** | 4 core | 8 core | 16 core |
+| **RAM** | 16 GB | 32 GB | 64 GB |
+| **Disk (Hot)** | 500 GB SSD | 2 TB SSD | 5+ TB SSD |
+| **Disk (Warm)** | 1 TB HDD | 3 TB HDD | 10+ TB HDD |
+| **Network** | 1 Gbps | 1-10 Gbps | 10+ Gbps |
+| **Node Count** | 1 | 1 (min) | 3 (min) |
+| **Shard/Index** | 1 | 1 (min) | 3 |
+| **Daily Log** | < 10 GB | 10-100 GB | > 100 GB |
+| **Monthly Log** | ~300 GB | ~1.5 TB | ~6 TB+ |
+| **Annual Log (Retention)** | ~3.6 TB | ~18 TB | ~72 TB+ |
+
+**Disk Requirement Calculation:**
+
+```
+Total Disk = (Primary Shard Data Size) × (1 + Replica Count) × Buffer Factor (1.2–1.5)
+```
+
+Example: 1 TB primary data, replica=1 → ~2.4 TB disk requirement.
+
+* **Production environments**: Minimum replica=1 is recommended for high availability.
+* **Test/PoC environments**: Replica=0 can be used.
+
+<Info>
+  **Disk Strategy**: Using SSD for Hot tier and HDD for Warm/Cold tier is recommended. This provides cost optimization.
+</Info>
+
+<Note>
+  With Elasticsearch logging enabled, gateway throughput decreases slightly (~3–5% for GET, ~8–12% for POST 5KB). This impact has been measured in benchmarks and is accounted for in capacity planning.
+</Note>
+
+### Cache Cluster (Hazelcast)
+
+Cache Cluster is Apinizer's distributed cache infrastructure and should be sized based on **data size to be stored** and **processing to be done**. Response cache, routing load balancer information, rate limit counters, and other performance-critical data are stored here.
+
+#### Factors Affecting Sizing
+
+**1. Data Type and Size to be Stored:**
+
+* **Response Cache**: Size and count of response data to be cached
+* **Routing/Load Balancer Information**: Backend endpoint information and load balancing data
+* **Rate Limit Counters**: Counter data used for rate limit (usually small data, but accessed very frequently)
+* **OAuth2 Tokens**: Data volume for token caching
+
+**2. Replication Factor:**
+
+RAM Calculation:
+```
+Total RAM = (Cache Data Size) × (1 + Replication Factor) × Buffer Factor (1.2–1.5)
+```
+
+| Feature | Small Cache | Medium Cache | Large Cache |
+|---------|-------------|--------------|-------------|
+| **Cache Size** | 32 GB | 64-128 GB | 256+ GB |
+| **CPU** | 4 core | 8 core | 16 core |
+| **RAM** | 32 GB | 64-128 GB | 256+ GB |
+| **Disk** | 100 GB SSD | 200 GB SSD | 500 GB SSD |
+| **Network** | 1 Gbps | 1-10 Gbps | 10 Gbps |
+| **Node Count** | 3 (min) | 3-5 | 5+ |
+
+## Total Resource Calculation Example
+
+<Info>
+The example below shows total resource requirements for a medium-scale production environment.
+</Info>
+
+### Scenario: Medium-Scale Production
+
+**Worker Nodes (W4 × 2):**
+* 2 nodes × (4 core + 4 GB RAM) = 8 core + 8 GB RAM
+* Planning capacity: ~10M requests/day (2 × 5M/day)
+
+**Manager Nodes:**
+* 1 node × (4 core + 8 GB RAM + 100 GB Disk) = 4 core + 8 GB RAM + 100 GB Disk
+
+**MongoDB Replica Set:**
+* 3 nodes × (4 core + 8 GB RAM + 200 GB Disk) = 12 core + 24 GB RAM + 600 GB Disk
+
+**Elasticsearch Cluster:**
+* 1 node × (8 core + 32 GB RAM + 2 TB Disk) = 8 core + 32 GB RAM + 2 TB Disk
+
+**Cache Cluster:**
+* 1 node × (4 core + 8 GB RAM + 100 GB Disk) = 4 core + 8 GB RAM + 100 GB Disk
+* **Note**: Cache requirements vary based on data size to be stored, access frequency, and replication factor.
+
+**TOTAL:**
+* **CPU**: ~36 core
+* **RAM**: ~80 GB
+* **Disk**: ~3 TB
+
+## Capacity Planning Checklist
+
+- [ ] Daily/hourly/peak traffic estimation is made
+- [ ] Policy types to be used identified and planning value revised accordingly
+- [ ] Worker tier selected (W1/W2/W4/W8) and conservative RPS calculated
+- [ ] Horizontal scaling (node count) planned
+- [ ] Traffic growth projection prepared for future periods
+- [ ] Manager node requirements determined (Standalone or HA)
+- [ ] MongoDB data size estimated (API Proxy count, Audit Log)
+- [ ] Elasticsearch log data estimated (daily/monthly/annual retention)
+- [ ] Cache cluster size determined (based on cacheable data volume)
+- [ ] Network bandwidth requirements calculated
+- [ ] Total resource calculation made (CPU, RAM, Disk)
+- [ ] Deployment model selected (Topology 1/2/3/4)
+- [ ] Load test planned in own environment
+
+
+<Note>
+  This guide is a starting point. Real requirements may vary depending on traffic patterns, API complexity, and policy count. Performance tests must be performed for production environments. For detailed benchmark methodology and measurement results, refer to the [Benchmark Results](/en/concepts/benchmark-results) page.
+</Note>
