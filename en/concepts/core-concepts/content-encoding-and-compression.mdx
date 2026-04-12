@@ -1,0 +1,211 @@
+---
+title: "Content Encoding and Compression"
+description: "Learn how the API Gateway automatically compresses and decompresses request and response messages, supported encoding types, download behavior, and no-transform compliance."
+---
+
+## Overview
+
+The API Gateway **automatically** manages content compression and decompression in the message flow between the client and the Backend API. This ensures:
+
+- Policies always operate on **plain (uncompressed) text**
+- Responses are automatically compressed based on the client's supported methods
+- Correct processing regardless of the Backend API's response format
+
+<Info>
+This page explains how compression/decompression works at the gateway level. For information about policy placement and execution order in the message flow, see [Message Processing and Policy Application](/en/concepts/core-concepts/message-processing-and-policy-application).
+</Info>
+
+## Supported Compression Methods
+
+| Method | Content-Encoding Value | Description |
+|--------|----------------------|-------------|
+| **gzip** | `gzip` | Most common method. Supported by all browsers and HTTP clients. |
+| **deflate** | `deflate` | zlib format compression. Less common than gzip. |
+| **Brotli** | `br` | Developed by Google, offers high compression ratios. |
+| **Zstandard** | `zstd` | Developed by Facebook, good balance of speed and compression ratio. |
+| **compress** | `compress` | Legacy LZW-based method. Only decompression is supported; compression is not available. |
+| **identity** | `identity` | No compression. Deprecated per RFC 9110. |
+
+## Request Flow
+
+A compressed request message from the client goes through the following stages:
+
+```
+CLIENT                            GATEWAY                              BACKEND API
+   │                                │                                      │
+   │  ── Request (CE: gzip) ─────>  │                                      │
+   │                                │  1. Detect compression (gzip)        ���
+   │                                │  2. Decompress message               │
+   │                                │  3. Apply policies (plain text)      │
+   │                                │  4. Re-compress (gzip)               │
+   │                                │  ── Request (CE: gzip) ──────────>   │
+   │                                │                                      │
+
+```
+
+### Stages
+
+<Steps>
+<Step title="Compression Detection">
+The `Content-Encoding` header in the request message is read and the compression method is identified. In addition to the header value, the first bytes of the message content are checked to verify that it is actually compressed.
+</Step>
+
+<Step title="Decompression">
+The message content is decompressed according to the identified method. If decompression fails, the message is left as-is.
+</Step>
+
+<Step title="Policy Application">
+Request policies operate on the decompressed plain text. This allows transformation, validation, and filtering policies to work independently of the compression method.
+</Step>
+
+<Step title="Re-compression">
+After policies are applied, the message is re-compressed using the original compression method and sent to the Backend API.
+</Step>
+</Steps>
+
+<Warning>
+**Exceptions:** Compression is not applied to `multipart/form-data` requests because decompression would break the multipart boundary structure.
+</Warning>
+
+### Stacked Compression
+
+A request message may contain multiple layers of compression (e.g., `Content-Encoding: gzip, br`). In this case, the gateway decompresses layers **from right to left**: first Brotli, then gzip. The message is sent to the Backend API as plain text.
+
+## Response Flow
+
+The response message from the Backend API is processed based on the client's `Accept-Encoding` header:
+
+```
+BACKEND API                       GATEWAY                              CLIENT
+   │                                │                                      │
+   │  ── Response (CE: deflate) ─>  │                                      │
+   │                                │  1. Detect compression (deflate)     │
+   │                                │  2. Decompress message               │
+   │                                │  3. Apply policies (plain text)      │
+   │                                │  4. Check client AE (accepts gzip)   │
+   │                                │  5. Compress with gzip               │
+   │                                │  ── Response (CE: gzip) ─────────>   │
+   │                                │                                      │
+```
+
+### Encoding Selection Order
+
+When the client's `Accept-Encoding` header includes multiple methods, the gateway selects using the following **fixed order**:
+
+1. gzip
+2. deflate
+3. br (Brotli)
+4. zstd (Zstandard)
+
+<Info>
+The q-value (quality) values in the `Accept-Encoding` header are currently not considered. This is consistent behavior with other gateways in the industry, including Nginx.
+</Info>
+
+### Accept-Encoding: * (Wildcard)
+
+When the client sends `Accept-Encoding: *`, the gateway interprets this as "I accept all methods" and selects the most appropriate method according to the order above (RFC 9110 §12.5.3 compliant).
+
+## Binary Content Behavior
+
+Binary content such as images, videos, and PDFs is processed differently from text content:
+
+<AccordionGroup>
+<Accordion title="Download Enabled">
+In proxies with download enabled, binary content is delivered to the client via **streaming**. In this mode:
+
+- Content is not held in memory; it is transferred in chunks
+- Memory consumption remains minimal for large files
+- If the client doesn't support the compression method, content is automatically decompressed
+- Policies **cannot modify** the response body (content has already started being sent)
+</Accordion>
+
+<Accordion title="Download Disabled">
+In proxies with download disabled, binary content is converted to Base64 format and enters the policy pipeline. Policies work on the Base64-encoded text. The original binary format is restored when sending to the client.
+</Accordion>
+</AccordionGroup>
+
+## Force Decompress Download
+
+The **Force Decompress** feature ensures that compressed binary content from the Backend API is unconditionally decompressed. This feature can be enabled in the proxy's connection settings.
+
+### When to Use
+
+- When the Backend API always sends compressed responses but **does not set** the `Content-Encoding` header
+- When clients cannot process compressed content
+- When uncompressed content is always required regardless of the compression method
+
+### Automatic Detection
+
+When Force Decompress is active and the Backend API has not sent a `Content-Encoding` header, the gateway inspects the first bytes of the message content to **automatically detect** the compression method:
+
+| Method | Detectable? |
+|--------|------------|
+| gzip | Yes |
+| zstd | Yes |
+| deflate | Partial (with zlib wrapper) |
+| compress | Yes |
+| Brotli | **No** (no distinguishing byte sequence) |
+
+<Warning>
+Brotli compression cannot be automatically detected because it lacks a distinguishing byte sequence (magic bytes). If the Backend API uses Brotli, it must send the `Content-Encoding: br` header, or a different method should be used.
+</Warning>
+
+## no-transform Behavior
+
+When the Backend API sends a `Cache-Control: no-transform` header in its response, the gateway performs **no compression or decompression transformation** on the content:
+
+- The Backend's compression method and content are forwarded to the client as-is
+- The `Content-Encoding` header is not modified
+- `Vary` and `Warning` headers are not added
+
+This behavior is important for maintaining consistency across CDN and caching layers.
+
+## Automatically Added Headers
+
+When the gateway applies a compression transformation, it automatically adds two headers to the response:
+
+| Header | Value | Description |
+|--------|-------|-------------|
+| `Vary` | `Accept-Encoding` | Informs caching layers that the response varies based on the client's encoding preference |
+| `Warning` | `214 - "Transformation Applied"` | Indicates that a transformation was applied to the content (RFC 9111 §5.5) |
+
+## Limitations and Known Behaviors
+
+<AccordionGroup>
+<Accordion title="Fixed Encoding Selection Order">
+The gateway does not consider q-value preferences in the client's `Accept-Encoding` header. For example, if the client sends `br;q=1.0, gzip;q=0.5`, the gateway selects gzip instead of Brotli. This is consistent behavior with Nginx and most gateways.
+</Accordion>
+
+<Accordion title="Brotli Cannot Be Auto-Detected">
+Brotli compression has no distinguishing byte sequence (magic bytes). Even when Force Decompress is active, Brotli content cannot be detected without a `Content-Encoding` header.
+</Accordion>
+
+<Accordion title="Stacked Compression (Binary)">
+Stacked compression is partially supported for binary content. While all layers are decompressed sequentially for text content, only the outer layer is processed in binary streaming mode.
+</Accordion>
+
+<Accordion title="identity;q=0 Behavior">
+If the client sends `Accept-Encoding: identity;q=0` (meaning "I don't want uncompressed content"), per RFC 9110 the gateway could return a 406 response. However, consistent with Nginx and other gateways, the gateway responds with plain text and does not return 406.
+</Accordion>
+
+<Accordion title="Policy Limitation in Streaming Mode">
+When download or Force Decompress is active, binary content is sent via streaming. In this mode, response policies **cannot modify** the message body because the content has already started being transmitted to the client. Request policies are not affected by this limitation.
+</Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Message Processing and Policy Application" icon="arrows-left-right" href="/en/concepts/core-concepts/message-processing-and-policy-application">
+    Learn about policy placement and execution order in the message flow
+  </Card>
+  <Card title="Routing and Upstream" icon="route" href="/en/concepts/core-concepts/routing-and-upstream">
+    Learn about Backend API routing and load balancing settings
+  </Card>
+  <Card title="What is a Policy?" icon="shield" href="/en/concepts/core-concepts/what-is-policy">
+    Learn about the policy concept and types
+  </Card>
+  <Card title="API Gateway" icon="server" href="/en/concepts/core-components/api-gateway">
+    Learn about the API Gateway component architecture
+  </Card>
+</CardGroup>
