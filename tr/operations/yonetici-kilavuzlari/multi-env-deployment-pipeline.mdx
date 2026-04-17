@@ -1,0 +1,1100 @@
+---
+title: "GitHub Actions ve Jenkins ile Çok Ortamlı CI/CD Pipeline"
+description: "GitHub Actions ile test ve Docker image üretimi, Jenkins ile çok aşamalı Kubernetes deployment ve Apinizer ile API proxy senkronizasyonunu tek pipeline'da birleştiren tam otomasyon kılavuzu"
+---
+
+## Genel Bakış
+
+Bu kılavuz, bir API projesinin `main` branch'e gönderilen her değişikliği otomatik olarak test ettiği, Docker image ürettiği ve dört Kubernetes ortamına (dev → test → UAT → prod) sıralı şekilde deploy ettiği bir CI/CD altyapısının nasıl kurulduğunu gösterir. Her deployment adımı Apinizer üzerindeki API proxy ile senkronize edilir.
+
+### Kullanılan Teknolojiler ve Versiyonlar
+
+| Teknoloji | Versiyon |
+|-----------|----------|
+| Jenkins | `jenkins/jenkins:lts` |
+| GitHub Actions | — |
+| Kubernetes + Kustomize | v1.32.9 - v5.5.0 |
+| Apinizer | v2026.01.5 |
+
+### Pipeline Akışı
+
+```
+GitHub Push (main)
+  └─► GitHub Actions
+        ├─ Test (pytest)
+        ├─ Semantic version tag (vX.Y.Z)
+        ├─ Docker build & push → Docker Hub
+        └─ Jenkins tetikleme (VERSION_TAG parametresi ile)
+              └─► Jenkins — CD Pipeline
+                    ├─ Deploy Dev → Apinizer Sync → Smoke Test
+                    ├─ [Manuel Onay] → Deploy Test → Apinizer Sync → Smoke Test
+                    ├─ [Manuel Onay] → Deploy UAT → Apinizer Sync → Smoke Test
+                    └─ [Manuel Onay] → Deploy Prod → Apinizer Promote → Smoke Test
+```
+
+Bu pipeline'a ek olarak, herhangi bir ortama belirli bir versiyonu doğrudan deploy eden bağımsız bir **Targeted Deploy** job'ı da mevcuttur. Bu job, tam pipeline çalıştırmadan tek ortam güncellemesi veya rollback senaryoları için kullanılır.
+
+---
+
+## Proje Yapısı
+
+```
+your-project/
+├── .github/
+│   └── workflows/
+│       └── ci.yaml                         # GitHub Actions CI pipeline
+├── app/                                    # Uygulama kaynak kodu
+├── jenkins/
+│   ├── Jenkinsfile                         # Ana CD pipeline
+│   ├── Jenkinsfile.targeted                # Hedefli deploy pipeline
+│   └── shared-library/
+│       └── vars/
+│           ├── apinizerProxySync.groovy    # Apinizer create/update/deploy
+│           ├── apinizerPromoteProd.groovy  # UAT → Prod promotion
+│           ├── smokeTest.groovy            # Health check
+│           └── retryWithDelay.groovy       # Retry wrapper
+├── k8s/
+│   ├── base/                               # Ortak Kubernetes manifests
+│   └── overlays/                           # Environment-specific Kustomize patch'leri
+│       ├── dev/
+│       ├── test/
+│       ├── uat/
+│       └── prod/
+└── Dockerfile
+```
+
+---
+
+## 1. GitHub Actions — CI Pipeline
+
+CI pipeline, `main` branch'e her push geldiğinde tetiklenir. İki iş (job) içerir: önce testler çalışır, testler geçmeden build başlamaz.
+
+### Workflow Dosyası
+
+Aşağıdaki içeriği `.github/workflows/ci.yaml` olarak oluşturun ve reponuza push edin.
+
+```yaml
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/YOUR_IMAGE_NAME
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pytest
+        run: pytest tests/ -v
+
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Bump version and push tag
+        id: tag_version
+        uses: anothrNick/github-tag-action@1.64.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WITH_V: true
+          DEFAULT_BUMP: patch
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          build-args: |
+            APP_VERSION=${{ steps.tag_version.outputs.new_tag }}
+            BUILD_SHA=${{ github.sha }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tag_version.outputs.new_tag }}
+            ${{ env.IMAGE_NAME }}:latest
+
+      - name: Trigger Jenkins Pipeline
+        env:
+          JENKINS_JOB_NAME_ENCODED: ${{ secrets.JENKINS_JOB_NAME }}
+        run: |
+          JOB=$(python3 -c "import urllib.parse, os; print(urllib.parse.quote(os.environ['JENKINS_JOB_NAME_ENCODED']))")
+          curl -X POST \
+            "${{ secrets.JENKINS_URL }}/job/${JOB}/buildWithParameters?VERSION_TAG=${{ steps.tag_version.outputs.new_tag }}" \
+            --user "${{ secrets.JENKINS_USER }}:${{ secrets.JENKINS_TOKEN }}" \
+            --fail
+```
+
+<Info>
+  Jenkins job adı boşluk içeriyorsa `urllib.parse.quote()` ile URL-encode edilmesi gerekir. Aksi hâlde `curl` isteği hatalı gönderilir.
+</Info>
+
+### GitHub Secrets Yapılandırması
+
+Repository **Settings > Secrets and Variables > Actions** ekranından aşağıdaki secret'ları tanımlayın:
+
+| Secret | Açıklama |
+|--------|----------|
+| `DOCKERHUB_USERNAME` | Docker Hub kullanıcı adınız |
+| `DOCKERHUB_TOKEN` | Docker Hub access token |
+| `JENKINS_URL` | Jenkins instance URL'iniz |
+| `JENKINS_JOB_NAME` | Jenkins'teki CD job adı |
+| `JENKINS_USER` | Jenkins kullanıcı adı |
+| `JENKINS_TOKEN` | Jenkins API token |
+
+---
+
+## 2. Kubernetes Altyapısı
+
+### Base Manifests
+
+`k8s/base/` dizini tüm ortamların ortak kullandığı Deployment ve Service manifest'lerini içerir. `ENVIRONMENT` değeri her ortamda ayrı bir ConfigMap üzerinden uygulamaya iletilir.
+
+```yaml
+# k8s/base/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: YOUR_DEPLOYMENT_NAME
+  labels:
+    app: YOUR_APP_LABEL
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: YOUR_APP_LABEL
+  template:
+    metadata:
+      labels:
+        app: YOUR_APP_LABEL
+    spec:
+      containers:
+        - name: YOUR_CONTAINER_NAME
+          image: YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: YOUR_CONFIGMAP_NAME
+                  key: ENVIRONMENT
+```
+
+```yaml
+# k8s/base/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: YOUR_SERVICE_NAME
+spec:
+  type: NodePort
+  selector:
+    app: YOUR_APP_LABEL
+  ports:
+    - port: 8000
+      targetPort: 8000
+```
+
+### Kustomize Overlay'leri
+
+Her ortam için `k8s/overlays/<env>/kustomization.yaml` dosyası bulunur. Bu dosya ortama özgü namespace, ConfigMap değerleri ve aktif image tag'ini tanımlar. Jenkins, her başarılı deployment sonrasında `newTag` değerini otomatik olarak günceller.
+
+```yaml
+# k8s/overlays/dev/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: YOUR_NAMESPACE_DEV
+
+resources:
+  - ../../base
+
+patches:
+  - path: service-patch.yaml
+
+configMapGenerator:
+  - name: YOUR_CONFIGMAP_NAME
+    literals:
+      - ENVIRONMENT=dev
+
+images:
+  - name: YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME
+    newName: YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME
+    newTag: latest  # Jenkins tarafından güncellenir
+```
+
+Her ortamın NodePort değeri bir service patch ile tanımlanır:
+
+```yaml
+# k8s/overlays/dev/service-patch.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: YOUR_SERVICE_NAME
+spec:
+  ports:
+    - port: 8000
+      targetPort: 8000
+      nodePort: YOUR_DEV_NODEPORT
+```
+
+Aynı yapıyı `test`, `uat` ve `prod` overlay'leri için tekrarlayın; her birinde farklı namespace ve NodePort değerleri kullanın.
+
+---
+
+## 3. Jenkins — Ana CD Pipeline
+
+**Tetiklenme:** GitHub Actions'tan `buildWithParameters` çağrısıyla, `VERSION_TAG` parametresi ile.
+
+### Jenkins Job Kurulumu
+
+<Steps>
+  <Step title="Yeni Pipeline job oluşturun">
+    Jenkins'te **New Item > Pipeline** seçin. Job adı olarak CD pipeline'ınızı temsil eden bir isim girin.
+  </Step>
+  <Step title="SCM yapılandırması">
+    **Pipeline** sekmesinde **Pipeline script from SCM** seçin. SCM olarak **Git** seçin, repository URL'inizi girin ve branch'i `*/main` olarak belirtin. Script Path alanına `jenkins/Jenkinsfile` yazın.
+  </Step>
+  <Step title="VERSION_TAG parametresini tanımlayın">
+    **This project is parameterized** kutusunu işaretleyin. **String Parameter** ekleyin: Name: `VERSION_TAG`, Default Value boş bırakın.
+  </Step>
+</Steps>
+
+### Shared Library Yapılandırması
+
+Bu pipeline shared library fonksiyonlarını kullanır (`retryWithDelay`, `apinizerProxySync`, `apinizerPromoteProd`, `smokeTest`). Library'nin Jenkins'e tanımlanması için:
+
+<Steps>
+  <Step title="Global Pipeline Libraries ekranını açın">
+    **Manage Jenkins > System** sayfasında **Global Pipeline Libraries** bölümüne gidin.
+  </Step>
+  <Step title="Kütüphaneyi ekleyin">
+    **Add** butonuna tıklayın. Name alanına kütüphane adını girin (örn. `shared-lib`). Default version olarak `main` yazın. Retrieval method olarak **Modern SCM** seçin ve proje reponuzu gösterin.
+  </Step>
+  <Step title="Implicit olarak işaretleyin">
+    Library tanımı ekranındaki **Load implicitly** seçeneğini etkinleştirin. Bu sayede Jenkinsfile içine `@Library(...)` direktifi eklenmesine gerek kalmaz; fonksiyonlar tüm pipeline job'larında doğrudan kullanılabilir hale gelir.
+  </Step>
+</Steps>
+
+### Jenkinsfile
+
+Her Deploy stage'i şu üç işlemi tek `sh` bloğu içinde sırayla yapar: kustomize ile image tag güncelleme → cluster'a apply → rollout tamamlandıktan sonra `[skip ci]` commit'i ile Git'e push. `withCredentials` bloğu hem `kubeconfig` hem de Git credential'larını aynı anda kapsar. `cd k8s/overlays/<env>` yapıldığından `git add` relative path kullanır.
+
+```groovy
+pipeline {
+    agent any
+
+    parameters {
+        string(
+            name: 'VERSION_TAG',
+            defaultValue: '',
+            description: 'Semantic version tag pushed by CI (e.g. v1.2.3). Must not be empty.'
+        )
+    }
+
+    environment {
+        IMAGE_BASE        = 'YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME'
+        NODE_IP           = 'YOUR_NODE_IP'
+        DEV_NODE_PORT     = 'YOUR_DEV_NODEPORT'
+        TEST_NODE_PORT    = 'YOUR_TEST_NODEPORT'
+        UAT_NODE_PORT     = 'YOUR_UAT_NODEPORT'
+        PROD_NODE_PORT    = 'YOUR_PROD_NODEPORT'
+
+        APINIZER_URL      = credentials('apinizer-management-url')
+        APINIZER_TOKEN    = credentials('YOUR_APINIZER_TOKEN_CREDENTIAL_ID')
+        PROXY_NAME        = 'YOUR_PROXY_NAME'
+
+        PROJECT_NAME_DEV  = 'YOUR_APINIZER_DEV_PROJECT'
+        PROJECT_NAME_TEST = 'YOUR_APINIZER_TEST_PROJECT'
+        PROJECT_NAME_UAT  = 'YOUR_APINIZER_UAT_PROJECT'
+        PROJECT_NAME_PROD = 'YOUR_APINIZER_PROD_PROJECT'
+
+        OPENAPI_URL_DEV   = "http://${NODE_IP}:${DEV_NODE_PORT}/openapi.json"
+        OPENAPI_URL_TEST  = "http://${NODE_IP}:${TEST_NODE_PORT}/openapi.json"
+        OPENAPI_URL_UAT   = "http://${NODE_IP}:${UAT_NODE_PORT}/openapi.json"
+        OPENAPI_URL_PROD  = "http://${NODE_IP}:${PROD_NODE_PORT}/openapi.json"
+
+        GIT_REPO_URL      = 'https://github.com/YOUR_ORG/YOUR_REPO.git'
+        GIT_CREDENTIALS   = 'github-credentials'
+
+        RETRY_COUNT       = '3'
+        RETRY_DELAY_SEC   = '15'
+    }
+
+    stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!params.VERSION_TAG?.trim()) {
+                        error('VERSION_TAG parameter is empty. Pipeline must be triggered with a valid semantic version tag (e.g. v1.2.3).')
+                    }
+                    echo "Starting deployment for version: ${params.VERSION_TAG}"
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        // ── DEV ──────────────────────────────────────────────────────────────
+
+        stage('Deploy Dev') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/dev
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME -n YOUR_NAMESPACE_DEV --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set dev image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy Dev failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Sync Dev') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Dev') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_DEV,
+                            openApiUrl:  env.OPENAPI_URL_DEV,
+                            environment: 'dev',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync Dev failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Dev') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Dev') {
+                            smokeTest('YOUR_NAMESPACE_DEV', env.DEV_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Dev failed — pipeline stopped. Investigate pod status in namespace YOUR_NAMESPACE_DEV." }
+            }
+        }
+
+        stage('Approve Test') {
+            steps {
+                input message: "Deploy to TEST environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
+            }
+        }
+
+        // ── TEST ─────────────────────────────────────────────────────────────
+
+        stage('Deploy Test') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/test
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME -n YOUR_NAMESPACE_TEST --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set test image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy Test failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Sync Test') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync Test') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_TEST,
+                            openApiUrl:  env.OPENAPI_URL_TEST,
+                            environment: 'test',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync Test failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Test') {
+                            smokeTest('YOUR_NAMESPACE_TEST', env.TEST_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Test failed — pipeline stopped. Investigate pod status in namespace YOUR_NAMESPACE_TEST." }
+            }
+        }
+
+        stage('Approve UAT') {
+            steps {
+                input message: "Deploy to UAT environment?\n\nVersion: ${params.VERSION_TAG}", ok: 'Proceed'
+            }
+        }
+
+        // ── UAT ──────────────────────────────────────────────────────────────
+
+        stage('Deploy UAT') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/uat
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME -n YOUR_NAMESPACE_UAT --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set uat image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy UAT failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Sync UAT') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync UAT') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: env.PROJECT_NAME_UAT,
+                            openApiUrl:  env.OPENAPI_URL_UAT,
+                            environment: 'uat',
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync UAT failed. Proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test UAT') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test UAT') {
+                            smokeTest('YOUR_NAMESPACE_UAT', env.UAT_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test UAT failed — pipeline stopped. Investigate pod status in namespace YOUR_NAMESPACE_UAT." }
+            }
+        }
+
+        stage('Approve Prod') {
+            steps {
+                input message: "Promote to PRODUCTION environment?\n\nVersion: ${params.VERSION_TAG}\n\nThis action will affect live traffic.", ok: 'Proceed'
+            }
+        }
+
+        // ── PROD ─────────────────────────────────────────────────────────────
+
+        stage('Deploy Prod') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG'),
+                    usernamePassword(credentialsId: env.GIT_CREDENTIALS, usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')
+                ]) {
+                    sh """
+                        export KUBECONFIG=\$KUBECONFIG
+                        cd k8s/overlays/prod
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                        kubectl apply -k .
+                        kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME -n YOUR_NAMESPACE_PROD --timeout=120s
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set prod image to ${params.VERSION_TAG} [skip ci]"
+                        git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main
+                    """
+                }
+            }
+            post {
+                failure { echo "Deploy Prod failed for version ${params.VERSION_TAG}. Check kubectl output above." }
+            }
+        }
+
+        stage('Apinizer Promote Prod') {
+            steps {
+                script {
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Promote Prod') {
+                        apinizerPromoteProd(
+                            mappingNames:         ['YOUR_MAPPING_NAME'],
+                            executionName:        "v-${params.VERSION_TAG}",
+                            executionDescription: "API Proxy promotion from UAT to Production - ${params.VERSION_TAG}"
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Promote Prod failed. Prod proxy may not be updated to version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test Prod') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test Prod') {
+                            smokeTest('YOUR_NAMESPACE_PROD', env.PROD_NODE_PORT)
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test Prod failed — production deployment may be unhealthy. Investigate immediately in namespace YOUR_NAMESPACE_PROD." }
+            }
+        }
+    }
+
+    post {
+        success { echo "Pipeline completed successfully. Version ${params.VERSION_TAG} is live in production." }
+        failure { echo "Pipeline failed. Review stage logs above to identify the failure point." }
+    }
+}
+```
+
+### Pipeline Aşamalarının Detayları
+
+**Validate Parameters:** `VERSION_TAG` parametresinin dolu olduğu kontrol edilir. GitHub Actions bypass edilerek Jenkins manuel tetiklendiğinde boş parametre gelme ihtimaline karşı bu koruma kritiktir.
+
+**Checkout:** Jenkinsfile'ın bulunduğu repo checkout edilir. Sonraki stage'lerde `k8s/overlays/` altındaki Kustomize dosyaları üzerinde işlem yapılabilmesi için bu adım zorunludur.
+
+**Deploy (her ortam için):** `withCredentials` bloğu hem `kubeconfig` hem de Git credential'larını aynı anda kapsar. Tek bir `sh` bloğu içinde sırasıyla: `kustomize edit set image` ile overlay'deki `newTag` güncellenir, `kubectl apply -k .` ile cluster'a uygulanır, rollout tamamlandıktan sonra `git add kustomization.yaml` → commit → push yapılır. `[skip ci]` etiketi sayesinde GitHub Actions yeniden tetiklenmez.
+
+**Apinizer Sync (dev / test / uat):** `apinizerProxySync` shared library fonksiyonu, Apinizer'daki proxy'yi oluşturur veya günceller ve ilgili ortama deploy eder. Geçici hatalar için `retryWithDelay` wrapper'ı 3 deneme × 15 saniye bekleme uygular.
+
+**Apinizer Promote Prod:** Production için proxy sıfırdan deploy edilmez. `apinizerPromoteProd` fonksiyonu, UAT'ta onaylanan konfigürasyonu Apinizer'ın promotion API'si üzerinden production'a taşır.
+
+**Approve (Test / UAT / Prod öncesi):** Her ortam geçişinde Jenkins pipeline bekler; yetkili kullanıcı Jenkins UI'dan onaylayarak devam ettirir.
+
+**Smoke Test:** Deployment sonrasında `kubectl rollout status` ve `/health` endpoint kontrolü yapılır. Detaylar için [Shared Library — smokeTest](#smoketest) bölümüne bakınız.
+
+---
+
+## 4. Jenkins — Targeted Deploy Pipeline
+
+Belirli bir versiyonu tek bir ortama deploy etmek için kullanılır. CI/CD akışını çalıştırmadan hotfix veya rollback senaryolarında tercih edilir.
+
+### Jenkins Job Kurulumu
+
+<Steps>
+  <Step title="Gerekli plugin'i yükleyin">
+    Jenkins'te **Manage Jenkins > Plugins** ekranından **Active Choices** plugin'ini kurun. Bu plugin olmadan dinamik parametre dropdown'ları çalışmaz.
+  </Step>
+  <Step title="Yeni Pipeline job oluşturun">
+    **New Item > Pipeline** seçin. Job adını `targeted-deploy` veya tercih ettiğiniz bir isim olarak girin.
+  </Step>
+  <Step title="SCM yapılandırması">
+    **Pipeline script from SCM** seçin, aynı repo ve `*/main` branch'ini kullanın. Script Path: `jenkins/Jenkinsfile.targeted`.
+  </Step>
+  <Step title="Parametreleri tanımlayın">
+    Üç dinamik parametre eklenecektir: `ENVIRONMENT`, `VERSION_TAG` ve `CURRENT_VERSION`. Ayrıntılar aşağıdadır.
+  </Step>
+</Steps>
+
+### Dinamik Parametreler
+
+Targeted deploy job'ı üç dinamik parametre kullanır. Bu parametrelerin tanımlanabilmesi için **Active Choices** plugin kurulu olmalıdır.
+
+**ENVIRONMENT** (Active Choices Parameter): Kullanıcının hedef ortamı seçtiği dropdown.
+
+```groovy
+return ['dev', 'test', 'uat', 'prod']
+```
+
+**VERSION_TAG** (Reactive Choice Parameter — ENVIRONMENT referanslı): Docker Hub API'sinden son 25 tag çekilerek kullanıcıya liste olarak sunulur.
+
+```groovy
+import groovy.json.JsonSlurper
+def connection = new URL(
+    "https://hub.docker.com/v2/repositories/YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME/tags?page_size=25&ordering=last_updated"
+).openConnection()
+def json = new JsonSlurper().parseText(connection.inputStream.text)
+return json.results.collect { it.name }.findAll { it != 'latest' }
+```
+
+**CURRENT_VERSION** (Reactive Choice Parameter — ENVIRONMENT referanslı): Seçili ortamın `kustomization.yaml` dosyasından `newTag` değeri okunarak "şu an deploy edilmiş versiyon" bilgisi gösterilir. Cache bypass için timestamp query parametresi eklenir.
+
+```groovy
+def path = "k8s/overlays/${ENVIRONMENT}/kustomization.yaml"
+def url  = "https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/${path}?t=${System.currentTimeMillis()}"
+try {
+    def connection = new URL(url).openConnection()
+    connection.setRequestProperty("Cache-Control", "no-cache")
+    connection.setRequestProperty("Pragma", "no-cache")
+    if (connection.responseCode != 200) return ["Not deployed yet"]
+    def line = connection.inputStream.text.split('\n').find { it.trim().startsWith('newTag') }
+    if (!line) return ["Not deployed yet"]
+    return [line.split(':', 2)[1].trim()]
+} catch (Exception e) {
+    return ["err: ${e.message}"]
+}
+```
+
+<Warning>
+  `VERSION_TAG` ve `CURRENT_VERSION` parametrelerindeki Groovy script'ler sandbox dışında çalışır (`sandbox: false`). Jenkins'te **Manage Jenkins > In-process Script Approval** ekranından bu script'lerin onaylanması gerekir.
+</Warning>
+
+### Jenkinsfile.targeted
+
+Ana pipeline'dan farklı olarak bu pipeline'da git işlemleri ayrı bir **`Update Git`** stage'inde yapılır ve cluster'dan **önce** çalışır. `kustomize edit` ve `git add/commit` ayrı `sh` bloklarındadır; `git push` ise credential scope'unu daraltmak için ayrı bir `withCredentials` bloğuna alınmıştır. `git add` workspace root'unda çalıştığından full path kullanır. `Deploy` stage'inde git işlemi yoktur; yalnızca `kubectl apply` ve başarısızlık durumunda otomatik rollback çalışır.
+
+```groovy
+pipeline {
+    agent any
+
+    environment {
+        IMAGE_BASE        = 'YOUR_DOCKERHUB_USERNAME/YOUR_IMAGE_NAME'
+        NODE_IP           = 'YOUR_NODE_IP'
+        DEV_NODE_PORT     = 'YOUR_DEV_NODEPORT'
+        TEST_NODE_PORT    = 'YOUR_TEST_NODEPORT'
+        UAT_NODE_PORT     = 'YOUR_UAT_NODEPORT'
+        PROD_NODE_PORT    = 'YOUR_PROD_NODEPORT'
+
+        APINIZER_URL      = credentials('apinizer-management-url')
+        APINIZER_TOKEN    = credentials('YOUR_APINIZER_TOKEN_CREDENTIAL_ID')
+        PROXY_NAME        = 'YOUR_PROXY_NAME'
+
+        PROJECT_NAME_DEV  = 'YOUR_APINIZER_DEV_PROJECT'
+        PROJECT_NAME_TEST = 'YOUR_APINIZER_TEST_PROJECT'
+        PROJECT_NAME_UAT  = 'YOUR_APINIZER_UAT_PROJECT'
+        PROJECT_NAME_PROD = 'YOUR_APINIZER_PROD_PROJECT'
+
+        GIT_REPO_URL      = 'https://github.com/YOUR_ORG/YOUR_REPO.git'
+        GIT_CREDENTIALS   = 'github-credentials'
+
+        RETRY_COUNT       = '3'
+        RETRY_DELAY_SEC   = '15'
+    }
+
+    stages {
+
+        stage('Validate') {
+            steps {
+                script {
+                    if (!params.VERSION_TAG?.trim()) error('VERSION_TAG parameter is empty.')
+                    if (!params.ENVIRONMENT?.trim()) error('ENVIRONMENT parameter is empty.')
+
+                    echo "Target environment : ${params.ENVIRONMENT}"
+                    echo "Target version     : ${params.VERSION_TAG}"
+
+                    def checkUrl = "https://hub.docker.com/v2/repositories/${IMAGE_BASE}/tags/${params.VERSION_TAG}/"
+                    def status = sh(
+                        script: "curl -s -o /dev/null -w '%{http_code}' '${checkUrl}'",
+                        returnStdout: true
+                    ).trim()
+                    if (status != '200') {
+                        error("VERSION_TAG '${params.VERSION_TAG}' not found on Docker Hub (HTTP ${status}).")
+                    }
+                    echo "Tag verified on Docker Hub: ${params.VERSION_TAG}"
+                }
+            }
+            post {
+                failure { echo "Validation failed — pipeline stopped before any changes were made." }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Update Git') {
+            steps {
+                script {
+                    sh """
+                        cd k8s/overlays/${params.ENVIRONMENT}
+                        kustomize edit set image ${IMAGE_BASE}=${IMAGE_BASE}:${params.VERSION_TAG}
+                    """
+                    sh """
+                        git config user.email "jenkins@ci"
+                        git config user.name "Jenkins"
+                        git add k8s/overlays/${params.ENVIRONMENT}/kustomization.yaml
+                        git diff --cached --quiet || git commit -m "chore: set ${params.ENVIRONMENT} image to ${params.VERSION_TAG} [skip ci]"
+                    """
+                    withCredentials([usernamePassword(
+                        credentialsId: env.GIT_CREDENTIALS,
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_TOKEN'
+                    )]) {
+                        sh "git push https://\${GIT_USER}:\${GIT_TOKEN}@${GIT_REPO_URL.replace('https://', '')} HEAD:main"
+                    }
+                }
+            }
+            post {
+                failure { echo "Git update failed — deploy cancelled before any cluster changes were made." }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        def namespace = "YOUR_NAMESPACE_PREFIX-${params.ENVIRONMENT}"
+                        try {
+                            sh """
+                                export KUBECONFIG=\$KUBECONFIG
+                                cd k8s/overlays/${params.ENVIRONMENT}
+                                kubectl apply -k .
+                                kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME \
+                                    -n ${namespace} \
+                                    --timeout=120s
+                            """
+                        } catch (Exception e) {
+                            echo "Rollout failed — initiating automatic rollback..."
+                            sh """
+                                export KUBECONFIG=\$KUBECONFIG
+                                kubectl rollout undo deployment/YOUR_DEPLOYMENT_NAME -n ${namespace}
+                            """
+                            error("Deploy failed for version ${params.VERSION_TAG} in ${params.ENVIRONMENT}. Kubernetes rolled back to previous version. Apinizer was not updated.")
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Deploy failed — Kubernetes rollback was applied, Apinizer was not touched." }
+            }
+        }
+
+        stage('Apinizer Sync') {
+            steps {
+                script {
+                    def portMap = [
+                        dev : env.DEV_NODE_PORT,
+                        test: env.TEST_NODE_PORT,
+                        uat : env.UAT_NODE_PORT,
+                        prod: env.PROD_NODE_PORT
+                    ]
+                    def projectMap = [
+                        dev : env.PROJECT_NAME_DEV,
+                        test: env.PROJECT_NAME_TEST,
+                        uat : env.PROJECT_NAME_UAT,
+                        prod: env.PROJECT_NAME_PROD
+                    ]
+                    def port       = portMap[params.ENVIRONMENT]
+                    def project    = projectMap[params.ENVIRONMENT]
+                    def openApiUrl = "http://${NODE_IP}:${port}/openapi.json"
+
+                    retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Apinizer Sync') {
+                        apinizerProxySync(
+                            proxyName:   env.PROXY_NAME,
+                            projectName: project,
+                            openApiUrl:  openApiUrl,
+                            environment: params.ENVIRONMENT,
+                            versionTag:  params.VERSION_TAG
+                        )
+                    }
+                }
+            }
+            post {
+                failure { echo "Apinizer Sync failed — proxy may be out of sync with deployed version ${params.VERSION_TAG}." }
+            }
+        }
+
+        stage('Smoke Test') {
+            steps {
+                withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG')]) {
+                    script {
+                        def portMap = [
+                            dev : env.DEV_NODE_PORT,
+                            test: env.TEST_NODE_PORT,
+                            uat : env.UAT_NODE_PORT,
+                            prod: env.PROD_NODE_PORT
+                        ]
+                        retryWithDelay(env.RETRY_COUNT.toInteger(), env.RETRY_DELAY_SEC.toInteger(), 'Smoke Test') {
+                            smokeTest("YOUR_NAMESPACE_PREFIX-${params.ENVIRONMENT}", portMap[params.ENVIRONMENT])
+                        }
+                    }
+                }
+            }
+            post {
+                failure { echo "Smoke Test failed — YOUR_NAMESPACE_PREFIX-${params.ENVIRONMENT} may be unhealthy. Investigate pod status." }
+            }
+        }
+    }
+
+    post {
+        success { echo "Version ${params.VERSION_TAG} successfully deployed to ${params.ENVIRONMENT}." }
+        failure { echo "Targeted deploy failed. Environment: ${params.ENVIRONMENT}, Version: ${params.VERSION_TAG}." }
+    }
+}
+```
+
+### Pipeline Aşamalarının Detayları
+
+**Validate:** Parametre kontrolünün yanı sıra Docker Hub API'sine istek atarak seçilen tag'ın gerçekten mevcut olduğunu doğrular. Var olmayan bir tag'ın deploy edilmesi bu aşamada önlenir.
+
+**Update Git:** İki ayrı `sh` bloğu çalışır: ilki `kustomize edit set image` ile overlay'i günceller; ikincisi `git add` → commit yapar. `git add` full path kullanır (`k8s/overlays/${ENVIRONMENT}/kustomization.yaml`) çünkü workspace root'unda çalışılır. `git push` ise credential scope'unu daraltmak için ayrı bir `withCredentials` bloğuna alınmıştır. Git değişikliği cluster'dan önce yapılır; bu sayede pipeline başarısız olsa bile Git, deployment girişimini yansıtır.
+
+**Deploy:** Yalnızca `kubectl apply -k .` ve `kubectl rollout status` çalışır; bu stage'de git işlemi yoktur. Rollout başarısız olursa `kubectl rollout undo` ile önceki Kubernetes deployment'ına otomatik olarak geri dönülür. Rollback gerçekleştiğinde Apinizer senkronizasyonu çalışmaz; proxy önceki sürümü göstermeye devam eder.
+
+**Apinizer Sync:** Hedef ortama göre doğru port ve Apinizer proje adı dinamik olarak seçilir, ardından `apinizerProxySync` çağrılır.
+
+---
+
+## 5. Shared Library Fonksiyonları
+
+Jenkins shared library `jenkins/shared-library/vars/` altında dört fonksiyon içerir. Library, Jenkins'te **Global Pipeline Libraries** altında implicit olarak yapılandırıldığından Jenkinsfile içine `@Library(...)` direktifi eklenmesine gerek yoktur; fonksiyonlar tüm pipeline job'larında doğrudan kullanılabilir.
+
+### apinizerProxySync
+
+Apinizer'da proxy oluşturur veya günceller, ardından ilgili ortama deploy eder.
+
+**Akış:**
+
+```
+GET /apiops/projects/{project}/apiProxies/{proxyName}/
+  ├─ 200 → proxy mevcut
+  │     ├─ Rollback snapshot al (export → ZIP → Jenkins artifact)
+  │     └─ PUT /apiops/projects/{project}/apiProxies/url/  (reParse: true)
+  └─ diğer → proxy yok
+        └─ POST /apiops/projects/{project}/apiProxies/url/
+
+POST /apiops/projects/{project}/apiProxies/{proxyName}/environments/{env}/
+```
+
+Proxy mevcutsa güncellemeden önce `export/` endpoint'inden ZIP alınır ve Jenkins artifact olarak arşivlenir. Bu sayede başarısız bir güncelleme sonrasında Apinizer UI'dan elle geri yükleme yapılabilir. Güncelleme sırasında mevcut `relativePathList` değeri API'den okunarak korunur; elle yazılmaz.
+
+**Proxy oluşturma payload'u:**
+
+```json
+{
+  "apiProxyName": "YOUR_PROXY_NAME",
+  "backendApiVersion": "vX.Y.Z",
+  "apiProxyCreationType": "OPEN_API",
+  "specUrl": "http://YOUR_NODE_IP:YOUR_NODEPORT/openapi.json",
+  "clientRoute": {
+    "relativePathList": ["/YOUR_PROXY_NAME"],
+    "hostList": []
+  },
+  "routingInfo": {
+    "routingAddressList": [
+      { "address": "http://YOUR_NODE_IP:YOUR_NODEPORT", "weight": 100, "healthCheckEnabled": false }
+    ],
+    "routingEnabled": true
+  },
+  "reParse": false,
+  "deploy": false
+}
+```
+
+**Proxy güncelleme payload'u:**
+
+```json
+{
+  "apiProxyName": "YOUR_PROXY_NAME",
+  "backendApiVersion": "vX.Y.Z",
+  "apiProxyCreationType": "OPEN_API",
+  "specUrl": "http://YOUR_NODE_IP:YOUR_NODEPORT/openapi.json",
+  "clientRoute": {
+    "relativePathList": ["<mevcut proxy'den okunur>"],
+    "hostList": []
+  },
+  "reParse": true,
+  "deploy": false
+}
+```
+
+<Warning>
+  `deploy: false` ile proxy ortama otomatik deploy edilmez. Akış sonundaki ayrı `POST .../environments/{env}/` isteği ile kontrollü deployment yapılır.
+</Warning>
+
+<Info>
+  Detaylı bilgi için [Create API Proxy from URL](/api-reference/api-proxies/crud/create-api-proxy-from-url) ve [Update API Proxy](/api-reference/api-proxies/crud/update-api-proxy) referanslarını inceleyebilirsiniz.
+</Info>
+
+### apinizerPromoteProd
+
+UAT ortamındaki proxy konfigürasyonunu Apinizer'ın promotion mekanizması ile production'a taşır. Proxy sıfırdan deploy edilmez; önceden tanımlanmış mapping üzerinden kopyalanır.
+
+```json
+POST /apiops/promotion/executions
+{
+  "mappingNames": ["YOUR_MAPPING_NAME"],
+  "executionName": "v-vX.Y.Z",
+  "executionDescription": "API Proxy promotion from UAT to Production - vX.Y.Z"
+}
+```
+
+<Info>
+  Promotion mapping'lerinin Apinizer UI'da önceden tanımlanmış olması gerekir. `mappingNames` parametresi bu mapping'lere referans verir. Detaylı bilgi için [API Mapping Oluşturma](/tr/admin/api-promotion/api-mapping-olusturma) referansını inceleyebilirsiniz.
+</Info>
+
+### smokeTest
+
+İki adımlı doğrulama yapar: önce `kubectl rollout status` ile deployment tamamlandığını kontrol eder, 5 saniye bekler, ardından `/health` endpoint'ine en fazla 3 kez istek atar. Denemeler arasında 5 saniye beklenir. HTTP 200 dönerse başarılı kabul edilir.
+
+```bash
+kubectl rollout status deployment/YOUR_DEPLOYMENT_NAME \
+    -n YOUR_NAMESPACE --timeout=120s
+
+sleep 5
+
+for i in 1 2 3; do
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+        --connect-timeout 10 \
+        "http://YOUR_NODE_IP:YOUR_NODEPORT/health")
+    if [ "$HTTP_STATUS" = "200" ]; then exit 0; fi
+    sleep 5
+done
+exit 1
+```
+
+### retryWithDelay
+
+Herhangi bir closure'ı belirtilen sayıda ve bekleme süresiyle yeniden dener. Tüm denemeler başarısız olursa son hata fırlatılır ve stage failure olarak işaretlenir.
+
+```groovy
+retryWithDelay(3, 15, 'Stage Adı') {
+    // yeniden denenmesini istediğiniz kod
+}
+```
+
+---
+
+## 6. Jenkins Credentials Yapılandırması
+
+**Manage Jenkins > Credentials > System > Global credentials** ekranından aşağıdaki credential'ları tanımlayın:
+
+| Credential ID | Tip | Açıklama |
+|---------------|-----|----------|
+| `apinizer-management-url` | Secret text | Apinizer Management API base URL |
+| `YOUR_APINIZER_TOKEN_CREDENTIAL_ID` | Secret text | Apinizer API Bearer token |
+| `kubeconfig` | Secret file | Kubernetes cluster kubeconfig dosyası |
+| `github-credentials` | Username with password | GitHub kullanıcı adı ve Personal Access Token (repo write yetkisi gerekli) |
+
+<Info>
+  Apinizer API token oluşturma hakkında detaylı bilgi için [Token Alma Yöntemleri](/tr/develop/politikalar/token-service/token-alma-yontemleri) dokümanını inceleyebilirsiniz.
+</Info>
+
+<Warning>
+  `kubeconfig` dosyası cluster'a tam erişim sağlar. Jenkins'e Secret File olarak yükleyin; dosyayı workspace'e kopyalamaktan kaçının.
+</Warning>
+
+---
+
+## 7. Apinizer API Endpoint Referansı
+
+Bu pipeline'da kullanılan Apinizer Management API endpoint'leri:
+
+| İşlem | Method | Endpoint |
+|-------|--------|----------|
+| Proxy varlık kontrolü | `GET` | `/apiops/projects/{project}/apiProxies/{proxyName}/` |
+| Proxy export (snapshot) | `GET` | `/apiops/projects/{project}/apiProxies/{proxyName}/export/` |
+| Proxy oluşturma | `POST` | `/apiops/projects/{project}/apiProxies/url/` |
+| Proxy güncelleme | `PUT` | `/apiops/projects/{project}/apiProxies/url/` |
+| Environment'a deploy | `POST` | `/apiops/projects/{project}/apiProxies/{proxyName}/environments/{env}/` |
+| Production promotion | `POST` | `/apiops/promotion/executions` |
+
+<Info>
+  Apinizer Management API hakkında detaylı bilgi için [API Genel Bakış](/api-reference/getting-started/overview) dokümanını inceleyebilirsiniz.
+</Info>
+
+---
+
+## Kendi Pipeline'ınızı Uyarlamak
+
+<Steps>
+  <Step title="Docker Hub ve image adı">
+    `IMAGE_BASE` değişkenini kendi Docker Hub kullanıcı adınız ve image adınızla güncelleyin. CI workflow'undaki `IMAGE_NAME` değerini de aynı şekilde düzenleyin.
+  </Step>
+  <Step title="Kubernetes yapılandırması">
+    `NODE_IP` değerini cluster node IP'nizle, NodePort değerlerini her ortam için kullandığınız portlarla değiştirin. Deployment ve namespace adlarını kendi naming convention'ınıza göre düzenleyin.
+  </Step>
+  <Step title="Apinizer projeleri">
+    `PROJECT_NAME_*` değişkenlerini Apinizer'da oluşturduğunuz proje adlarıyla güncelleyin. `PROXY_NAME` değerini API proxy adınızla değiştirin.
+  </Step>
+  <Step title="Apinizer promotion mapping">
+    Production promotion için `apinizerPromoteProd` çağrısındaki `mappingNames` listesini Apinizer UI'da tanımladığınız mapping adlarıyla güncelleyin.
+  </Step>
+  <Step title="Git ve credentials">
+    `GIT_REPO_URL` değerini reponuzla güncelleyin. Jenkins credentials ekranında `apinizer-management-url`, Apinizer token credential'ı, `kubeconfig` ve `github-credentials` ID'lerini tanımlayın.
+  </Step>
+</Steps>
+
+## Sonuç
+
+Bu kılavuz, GitHub Actions, Jenkins ve Kubernetes'i birleştiren çok ortamlı bir CI/CD pipeline'ının nasıl kurulacağını göstermiştir. Her kod değişikliği otomatik olarak test edilir, versiyonlanır ve onay kapıları korunarak sıralı ortamlara deploy edilirken Apinizer'daki API proxy senkronize tutulur.
