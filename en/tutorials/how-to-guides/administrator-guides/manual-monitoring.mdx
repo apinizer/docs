@@ -1,0 +1,449 @@
+---
+title: "Apinizer Worker JVM Monitoring and Reporting"
+description: "Periodically collect metrics from Apinizer Worker's Diagnostics API and generate an interactive HTML report from a single environment's data."
+---
+
+## 1-) How It Works
+
+This guide describes a simple monitoring solution that periodically collects the JVM metrics of an Apinizer Worker pod and, at the end of the day, produces a single-file interactive HTML report from that data.
+
+The solution consists of three parts:
+
+- **A collector shell script (`monitor.sh`)** — periodically reads the Worker Diagnostics API for the given environment and appends one JSON record per line to a JSONL file. The same script can be run in parallel for multiple environments using different environment name + Worker URL + Env ID arguments.
+- **A Python report generator (`generate_report.py`)** — reads the JSONL file for the specified environment; normalizes memory, thread, GC, connection, and health metrics; and produces a single HTML file enriched with statistics, anomaly detection, and Chart.js-based interactive charts.
+- **An orchestrator script (`make-report.sh`)** — locates the JSONL file based on the given environment name and date, checks the minimum record count, and invokes the report generator.
+
+<Note>
+  The flow is as follows: Apinizer Worker (`/apinizer/diagnostics/all`) → `monitor.sh <environment>` (every 2 minutes) → `<environment>-worker-jvm-YYYYMMDD.jsonl` → `make-report.sh <environment>` → `generate_report.py` → `apinizer-worker-report-<environment>-YYYYMMDD.html`
+</Note>
+
+## 2-) Prerequisites
+
+The following requirements must be met on the machine where you will run the solution:
+
+- `bash`, `curl`, `sed`, `wc` (available in a typical Linux environment)
+- `python3` (3.9 or higher; required for type hints such as `list[dict]`)
+- The report generator uses **only the standard library**; no `pip install` is required. Chart.js, which is needed to draw the charts, is embedded into the generated HTML file via a CDN — an internet connection is sufficient when viewing the report.
+- Network access to the Diagnostics API of the Worker pods (e.g., from outside the cluster via NodePort or Ingress).
+
+You will also need an **ENV_ID** value for each environment. This value can be copied from the detail page of the relevant environment under the **Environments** menu in the Apinizer API Manager UI, and is used as the `Authorization` header in Diagnostics API calls.
+
+## 3-) Diagnostics API
+
+The collector script calls the following endpoint on the Worker:
+
+```
+GET {WORKER_URL}/apinizer/diagnostics/all?internal=true
+Authorization: {ENV_ID}
+```
+
+The endpoint returns a large JSON document containing JVM, thread, GC, connection pool, and health information for that pod. The top-level fields of a sample response are as follows:
+
+```json
+{
+  "podName": "apinizer-worker-xxxx",
+  "podIp": "10.244.1.23",
+  "envName": "prod",
+  "version": "...",
+  "responseTime": 12,
+  "jvm": {
+    "memory":  { "heap": { "used": 0, "max": 0 }, "nonHeap": { "used": 0 } },
+    "gc":      [ { "name": "G1 Young Generation", "collectionCount": 0, "collectionTime": 0 } ],
+    "uptime":  0
+  },
+  "threads": {
+    "summary":       { "threadCount": 0, "peakThreadCount": 0, "daemonThreadCount": 0, "totalStartedThreadCount": 0 },
+    "states":        { "RUNNABLE": 0, "WAITING": 0, "TIMED_WAITING": 0 },
+    "executorPools": { "apinizer-async": { "poolSize": 0, "activeCount": 0, "queueSize": 0, "rejectedTaskCount": 0 },
+                       "apinizer-maintenance": { "queueSize": 0, "rejectedTaskCount": 0 } }
+  },
+  "connections": { "pools": [ { "leased": 0, "available": 0, "pending": 0, "maxTotal": 0 } ] },
+  "health":      { "status": "UP",
+                   "checks": { "memory": { "status": "UP" },
+                               "threads": { "deadlocks": 0 },
+                               "connections": { "activeConnections": 0 } } }
+}
+```
+
+<Warning>
+  If the `ENV_ID` value is entered incorrectly, the Worker returns `401 Unauthorized`. The collector script detects this condition and writes the corresponding line to the file as an error record; however, subsequent samples will continue to fail. It is recommended to check the first output as soon as you start the script.
+</Warning>
+
+## 4-) Setting Up the Collector Script
+
+A single `monitor.sh` file takes the environment you want to monitor as an argument. This way, there is no need for separate script files to monitor different environments (e.g., `dev`, `prod`, `staging`); the same script file can be run in parallel in multiple terminals with different arguments.
+
+<Note>
+  Ready-to-use copies of the three scripts described in this guide (`monitor.sh`, `generate_report.py`, `make-report.sh`) are available at the link below:
+
+  [Download script files](https://fss.apinizer.com/index.php/s/2IXjAag11gXiimZ)
+
+  It is sufficient to download the files into the same directory and make them executable with `chmod +x monitor.sh make-report.sh`.
+</Note>
+
+### monitor.sh — Dynamic Collector Script
+
+Save the script below as `monitor.sh`. When running it, pass the environment name, Worker URL, and Env ID values as command-line arguments.
+
+```bash
+#!/usr/bin/env bash
+# Apinizer Worker — Dynamic environment monitor
+# Reads the Diagnostics API every 2 minutes and writes to a JSONL file.
+#
+# Usage:
+#   1) With arguments:
+#        ./monitor.sh <ENV_NAME> <WORKER_URL> <ENV_ID> [INTERVAL_SEC]
+#        ./monitor.sh dev  http://worker-dev.company.local:8091  69db6b2268bd1a7a04552ad6
+#        ./monitor.sh prod http://worker-prod.company.local:8091 63ca7ed05c8e155862d99e88 60
+#
+#   2) By filling in the defaults below and running without arguments:
+#        ./monitor.sh
+#
+# Output: <ENV_NAME>-worker-jvm-YYYYMMDD.jsonl
+
+# ── Default Configuration (used if no argument is provided) ──────────────────
+DEFAULT_ENV_NAME=""                              # E.g.: dev | prod | staging
+DEFAULT_WORKER_URL=""                            # E.g.: http://worker.company.local:8091
+DEFAULT_ENV_ID=""                                # API Manager → Environments → <env> → ID
+DEFAULT_INTERVAL=120
+
+ENDPOINT="all"                                   # IMPORTANT: must be "all", not "jvm"
+
+# ── Argument Handling ────────────────────────────────────────────────────────
+ENV_NAME="${1:-$DEFAULT_ENV_NAME}"
+WORKER_URL="${2:-$DEFAULT_WORKER_URL}"
+ENV_ID="${3:-$DEFAULT_ENV_ID}"
+INTERVAL="${4:-$DEFAULT_INTERVAL}"
+
+# ── Code (do not modify) ─────────────────────────────────────────────────────
+set -uo pipefail
+
+usage() {
+    cat <<EOF
+Usage: $0 <ENV_NAME> <WORKER_URL> <ENV_ID> [INTERVAL_SEC]
+
+Example:
+    $0 dev  http://worker-dev.company.local:8091  69db6b2268bd1a7a04552ad6
+    $0 prod http://worker-prod.company.local:8091 63ca7ed05c8e155862d99e88 60
+
+Note: If you fill in the DEFAULT_* values at the top of the script, you can
+      also run it without arguments.
+EOF
+    exit 1
+}
+
+if [[ -z "$ENV_NAME" || -z "$WORKER_URL" || -z "$ENV_ID" ]]; then
+    echo "ERROR: ENV_NAME, WORKER_URL, and ENV_ID are required."
+    echo
+    usage
+fi
+
+# Keep the environment name file-safe (no spaces, slashes, etc.)
+if [[ ! "$ENV_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "ERROR: ENV_NAME may only contain letters, digits, '.', '_', '-'."
+    exit 1
+fi
+
+OUTPUT_FILE="${ENV_NAME}-worker-jvm-$(date +%Y%m%d).jsonl"
+TMP_BODY="/tmp/_wjvm_${ENV_NAME}_body.tmp"
+
+collect() {
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    local response http_code body
+    response=$(curl -s --max-time 30 \
+        -o "$TMP_BODY" \
+        -w "%{http_code}" \
+        -H "Authorization: ${ENV_ID}" \
+        "${WORKER_URL}/apinizer/diagnostics/${ENDPOINT}?internal=true" 2>/dev/null)
+    http_code="$response"
+    body=$(cat "$TMP_BODY" 2>/dev/null)
+
+    if [[ -z "$body" ]]; then
+        echo "{\"collectedAt\":\"${ts}\",\"error\":\"connection error\"}" >> "$OUTPUT_FILE"
+        echo "  ERROR: Could not reach Worker (${WORKER_URL})"
+        return 1
+    fi
+
+    if [[ "$http_code" == "401" ]]; then
+        echo "{\"collectedAt\":\"${ts}\",\"error\":\"unauthorized - invalid ENV_ID\"}" >> "$OUTPUT_FILE"
+        echo "  ERROR: 401 Unauthorized — check the ENV_ID value."
+        return 1
+    fi
+
+    local line
+    line=$(echo "$body" | sed "s/^{/{\"collectedAt\":\"${ts}\",/")
+    echo "$line" >> "$OUTPUT_FILE"
+}
+
+echo "[${ENV_NAME}] Worker JVM monitoring started"
+echo "  Env      : $ENV_NAME"
+echo "  Worker   : $WORKER_URL"
+echo "  Metric   : $ENDPOINT"
+echo "  Interval : ${INTERVAL}s"
+echo "  Output   : $OUTPUT_FILE"
+echo "  Press Ctrl+C to stop"
+echo "──────────────────────────────────────────"
+
+while true; do
+    printf "[%s] Reading... " "$(date '+%H:%M:%S')"
+    if collect; then
+        echo "OK → $OUTPUT_FILE"
+    fi
+    sleep "$INTERVAL"
+done
+```
+
+### Making the Script Executable and Starting It
+
+```bash
+chmod +x monitor.sh
+
+# For a single environment:
+./monitor.sh prod http://worker-prod.company.local:8091 63ca7ed05c8e155862d99e88
+
+# To monitor multiple environments in parallel — in different terminals (or tmux panes):
+./monitor.sh dev  http://worker-dev.company.local:8091  69db6b2268bd1a7a04552ad6
+./monitor.sh prod http://worker-prod.company.local:8091 63ca7ed05c8e155862d99e88
+```
+
+Each invocation produces its own JSONL file using the environment name from the argument (such as `dev-worker-jvm-20260422.jsonl`, `prod-worker-jvm-20260422.jsonl`); the files do not get mixed up.
+
+<Note>
+  By default, the script takes a sample every **120 seconds**. For more or less frequent sampling, you can pass a value in seconds as the fourth argument (e.g., `./monitor.sh prod <url> <id> 60`). Going below 60 seconds may place unnecessary load on the Worker; going above 300 seconds may miss short-lived spikes.
+</Note>
+
+### Keeping the Script Running in the Background
+
+Because the monitoring scripts run in a `while true` loop, they stop when the terminal session is closed. To keep them running continuously, one of the following methods can be chosen depending on your use case:
+
+- **`tmux` or `screen` for test/development environments** — If you start the script in a separate tmux session, it will continue running even if you close your SSH connection. You can later reattach to the session to monitor the output live. It is a quick and simple solution; however, the script does not automatically start back up when the server is rebooted.
+- **`systemd` service for production environments** — This is the standard method for managing background services on Linux. A `.service` unit file is written for each environment, with arguments supplied via the command line, such as `ExecStart=/path/to/monitor.sh prod <url> <id>`. This way, the service starts automatically when the server is rebooted, is restarted automatically if it exits unexpectedly (`Restart=always`), and its output is captured in the system logs (`journalctl`). For production use, this is the preferred method in terms of continuity and observability.
+
+If a container-based approach is preferred, the collector script can be placed inside a small Docker image that takes environment information as environment variables, and then run on Kubernetes as a long-lived `Deployment` or a scheduled `CronJob`.
+
+## 5-) JSONL Output Format
+
+On each sample, the collector injects a `collectedAt` field at the beginning of the JSON response returned by the Worker and appends it to the output file as a **single line**. This format is known as **JSONL (JSON Lines)** — each line is an independent and valid JSON object.
+
+```json
+{"collectedAt":"2026-04-22T09:02:00Z","podName":"apinizer-worker-xxxx","podIp":"...","envName":"prod","version":"...","responseTime":12,"jvm":{...},"threads":{...},"connections":{...},"health":{...}}
+```
+
+If a sample fails, the line only contains an error record; the report generator automatically skips these lines while reading:
+
+```json
+{"collectedAt":"2026-04-22T09:04:00Z","error":"connection error"}
+```
+
+File name pattern: `<ENV_NAME>-worker-jvm-YYYYMMDD.jsonl`
+
+For example:
+
+- `dev-worker-jvm-20260422.jsonl`
+- `prod-worker-jvm-20260422.jsonl`
+- `staging-worker-jvm-20260422.jsonl`
+
+<Warning>
+  The **date suffix** in the file name is computed not at the moment the script is started, but **as each sample line is written**. In practice, if the collector is running at local midnight, records begin flowing into the next day's file. To obtain daily reports, it is appropriate to either restart the collectors at the start of the day (e.g., 00:05) or run report generation against the previous day's files.
+</Warning>
+
+## 6-) Report Generator
+
+The report generator reads the JSONL file for the specified environment and produces a **single HTML file**. The output file is self-contained; it does not require any additional assets, can be sent as an email attachment, or opened from a shared drive.
+
+### generate_report.py — Report Generator Script
+
+Save `generate_report.py` in the same directory where the collector script produces its output (alongside the JSONL files). The script is written entirely in the Python standard library and requires no additional dependencies. The full source code is included in the appendix at the end of the document; the main functions and working logic are summarized below.
+
+The script operates in four main stages:
+
+```python
+def load_jsonl(path: str) -> list[dict]:
+    """Reads the JSONL file and skips missing/malformed lines."""
+    # ...
+
+def extract_metrics(record: dict) -> dict | None:
+    """Returns a normalized metrics dict from a raw diagnostic record."""
+    # heap, nonHeap, gc, threads, executorPools, connections, health...
+
+def env_stats(records: list[dict]) -> dict:
+    """Computes statistics for all metrics of an environment."""
+    # min / max / avg / median / p95 / stddev — both overall and per pod
+
+def detect_anomalies(records: list[dict]) -> list[dict]:
+    """Performs threshold-based anomaly detection."""
+    # ...
+```
+
+The default threshold values used for anomaly detection are as follows. You can adjust the `THRESHOLDS` dictionary according to your own SLAs.
+
+```python
+THRESHOLDS = {
+    "heapPct":        {"warn": 50,  "crit": 75,   "label": "Heap Usage %"},
+    "responseTime":   {"warn": 50,  "crit": 200,  "label": "Diagnostic Response ms"},
+    "connLeased":     {"warn": 500, "crit": 2000, "label": "Active HTTP Connections"},
+    "asyncQueueSize": {"warn": 10,  "crit": 50,   "label": "Async Pool Queue"},
+    "maintQueueSize": {"warn": 10,  "crit": 50,   "label": "Maintenance Queue"},
+    "gcOldCount":     {"warn": 1,   "crit": 5,    "label": "GC Old Count"},
+    "deadlocks":      {"warn": 1,   "crit": 1,    "label": "Deadlock"},
+    "asyncRejected":  {"warn": 1,   "crit": 10,   "label": "Async Rejected Tasks"},
+}
+```
+
+### make-report.sh — Orchestrator Script
+
+The script below locates the JSONL file based on the given environment name and date, and invokes the report generator. Save it as `make-report.sh` in the same directory as `generate_report.py`.
+
+```bash
+#!/usr/bin/env bash
+# Generates an HTML report using the given environment's JSONL file for today.
+#
+# Usage:
+#   ./make-report.sh <ENV_NAME> [DATE_YYYYMMDD]
+#
+# Example:
+#   ./make-report.sh dev
+#   ./make-report.sh prod 20260421
+
+set -e
+
+if [ -z "${1:-}" ]; then
+    echo "Usage: $0 <ENV_NAME> [DATE_YYYYMMDD]"
+    echo "Example: $0 dev"
+    echo "Example: $0 prod 20260421"
+    exit 1
+fi
+
+ENV_NAME="$1"
+DATE="${2:-$(date +%Y%m%d)}"
+
+JSONL_FILE="${ENV_NAME}-worker-jvm-${DATE}.jsonl"
+
+if [ ! -f "$JSONL_FILE" ]; then
+    echo "ERROR: $JSONL_FILE does not exist. Is monitor.sh $ENV_NAME ... running?"
+    exit 1
+fi
+
+count=$(wc -l < "$JSONL_FILE")
+echo "[$ENV_NAME] record count: $count"
+
+if [ "$count" -lt 3 ]; then
+    echo "WARNING: There should be at least 3 records for the charts to be meaningful. Wait a bit longer."
+fi
+
+python3 generate_report.py --env "$ENV_NAME" --date "$DATE"
+```
+
+To run it:
+
+```bash
+chmod +x make-report.sh
+
+# Today's report:
+./make-report.sh prod
+
+# Report for a previous day:
+./make-report.sh prod 20260421
+```
+
+### CLI Usage
+
+`generate_report.py` can also be run directly. The supported options are:
+
+```bash
+# Generate a report from today's file (required argument: --env)
+python3 generate_report.py --env prod
+
+# Use a file for a specific date
+python3 generate_report.py --env prod --date 20260421
+
+# Specify the file and output manually
+python3 generate_report.py \
+    --env prod \
+    --input prod-worker-jvm-20260421.jsonl \
+    --out report.html
+```
+
+By default, the output file is written to the same directory as the JSONL file with the name `apinizer-worker-report-<ENV>-YYYYMMDD.html`.
+
+## 7-) Report Contents
+
+The generated HTML file is a single-page interactive dashboard. The top section displays the environment label, report summary, and anomaly badges; the content is split into six tabs.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/01-genel-bakis.png"
+  alt="Apinizer Worker JVM Report — Overview Tab"
+  style={{ width: "600px" }}
+/>
+
+### Tabs
+
+- **Overview** — Summary cards for key metrics such as Heap %, Heap Max, thread count, response time, active connections, GC Young rate, GC Old, and deadlocks; below them, time series charts (Heap %, response time, thread count, active connections) comparing all pods on the same graph. This is the tab selected when the page first opens.
+- **Memory** — Charts for heap usage (MB and %) along with non-heap / metaspace charts. Ideal for seeing how heap usage changes over time; in a stable environment, the heap forms a sawtooth pattern, whereas a pod experiencing a memory leak shows a continuously upward-sloping curve.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/02-memory.png"
+  alt="Memory Tab — Heap Usage (MB), Heap %, and Non-Heap/Metaspace charts"
+  style={{ width: "600px" }}
+/>
+
+- **Threads** — Thread state distribution (RUNNABLE / WAITING / TIMED_WAITING), `apinizer-async` executor pool status (pool size, active, queue), and total started thread count per pod.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/03-threads.png"
+  alt="Threads Tab — Thread state distribution, async executor pool, and total started thread charts"
+  style={{ width: "600px" }}
+/>
+
+- **GC** — G1 Young and Concurrent GC counters, along with cumulative GC time charts.
+- **Connections** — Leased and available metrics of the HTTP connection pool, along with maintenance pool queue charts.
+- **Anomalies** — List of metrics where threshold violations were detected; shows which metric, in how many samples, and at what peak value the warning or critical level was reached. A per-pod summary table is located at the bottom of the page.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/04-anomaliler.png"
+  alt="Anomalies Tab — Threshold violations and per-pod summary table"
+  style={{ width: "600px" }}
+/>
+
+<Note>
+  Tab contents work on a "lazy build" principle: charts are only rendered when a tab is clicked. This keeps the initial load fast even if the report contains thousands of data points.
+</Note>
+
+### Comparing Multiple Environments
+
+Since the report is now generated for a single environment, when you want to compare two environments, it is sufficient to generate a separate report for each environment and open the HTML files side by side:
+
+```bash
+./make-report.sh dev
+./make-report.sh prod
+# apinizer-worker-report-dev-20260422.html
+# apinizer-worker-report-prod-20260422.html
+```
+
+This approach makes each environment's own detailed report independently shareable/archivable; it is also more practical to send only its own report to a given environment's team.
+
+## 8-) Troubleshooting
+
+<Warning>
+  The errors below are the most commonly encountered ones. For initial diagnosis, always check the collector script's console output and the last few lines of the generated JSONL file.
+</Warning>
+
+**`ERROR: 401 Unauthorized — check the ENV_ID value.`**
+The `ENV_ID` is incorrect, or the ID of a different environment has been entered. Retrieve the correct environment's ID again from the API Manager → Environments menu.
+
+**`ERROR: Could not reach Worker ({WORKER_URL})`**
+There is no TCP-level access to the Worker address. Network rules, the Ingress/NodePort definition, or proxy settings should be checked. A quick verification can be made by manually sending a request with `curl -v "${WORKER_URL}/apinizer/diagnostics/all?internal=true"`.
+
+**`ERROR: ENV_NAME, WORKER_URL, and ENV_ID are required.`**
+`monitor.sh` was run with no arguments or with missing arguments. If you have not filled in the `DEFAULT_*` values at the top of the script, you must pass all three arguments on the command line.
+
+**`ERROR: <env>-worker-jvm-YYYYMMDD.jsonl does not exist. Is monitor.sh <env> ... running?`**
+`make-report.sh` looks for the JSONL file belonging to the environment you specified. The collector may not have been started yet, may have been run with a different environment name, or may be running in a different directory. The collector script and the report generator must run in the same directory.
+
+**`WARNING: There should be at least 3 records for the charts to be meaningful.`**
+If the collector has just been started, enough samples may not yet have accumulated. At the default 120-second interval, waiting at least 6 minutes is sufficient for a meaningful report.
+
+**Some pods do not appear in the report at all.**
+If the Worker Deployment is running with multiple replicas, requests coming in through a Service or Ingress are distributed across different pods. The collector may land on a random pod for each request; in short-term monitoring, some pods will have a low chance of being sampled. To monitor per pod, you can run additional collectors that target each pod individually (e.g., via a headless service or pod DNS).
