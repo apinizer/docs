@@ -408,63 +408,79 @@ CREATE TABLE log_PolicyCapture (
 Başlık ve parametre alanları (`from_client_ro_header`, `from_client_ro_param`) JSON formatında saklanır. Her kayıt, anahtar-değer çiftlerinden oluşan bir dizi içerir.
 </Info>
 
-### MongoDB
+### Önerilen İndeksler
 
-MongoDB konnektörü kullanıldığında tablo oluşturma gerekmez. Veriler `log_policycapture` koleksiyonuna otomatik olarak yazılır.
+Log kayıtları zamanla büyük hacimlere ulaşabileceğinden, sorgu performansını artırmak için aşağıdaki indeksleri oluşturmanız önerilir.
 
-### Gönderilemeyen Mesaj Tablosu
-
-DB Connector konnektörüne bağlantı kurulamadığında, iletilemeyen log kayıtları `log_UnsentMessage` tablosunda geçici olarak saklanır. Bağlantı yeniden kurulduğunda bu kayıtlar otomatik olarak gönderilir.
+`correlation_id` kolonu üzerindeki indeks özellikle önemlidir. Loglama politikası pipeline'ın farklı noktalarına (örneğin `FROM_CLIENT` ve `TO_CLIENT`) yerleştirildiğinde, aynı isteğe ait istek ve yanıt kayıtları aynı `correlation_id` değerini paylaşır. Bu sayede istek ve yanıt kayıtları `correlation_id` üzerinden birleştirilerek bir işlemin uçtan uca izlenmesi sağlanır.
 
 <Tabs>
   <Tab title="Oracle">
 ```sql
-CREATE TABLE log_UnsentMessage (
-  id VARCHAR2(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP,
-  connector_id VARCHAR2(50),
-  content CLOB
-);
+CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
+CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
+CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
+CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
 ```
   </Tab>
   <Tab title="MySQL/MariaDB">
 ```sql
-CREATE TABLE log_UnsentMessage (
-  id VARCHAR(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP NULL,
-  connector_id VARCHAR(50),
-  content LONGTEXT
-);
+CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
+CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
+CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
+CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
 ```
   </Tab>
   <Tab title="PostgreSQL">
 ```sql
-CREATE TABLE log_UnsentMessage (
-  id VARCHAR(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP,
-  connector_id VARCHAR(50),
-  content TEXT
-);
+CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
+CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
+CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
+CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
 ```
   </Tab>
   <Tab title="SQL Server">
 ```sql
-CREATE TABLE log_UnsentMessage (
-  id NVARCHAR(255) PRIMARY KEY,
-  log_timestamp DATETIME2,
-  connector_id NVARCHAR(50),
-  content NVARCHAR(MAX)
-);
+CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
+CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
+CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
+CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
 ```
   </Tab>
 </Tabs>
 
-| Kolon | Açıklama |
-|-------|----------|
-| id | Kayıt kimliği |
-| log_timestamp | Kaydın oluşturulma zamanı |
-| connector_id | Verinin gönderilmeye çalışıldığı konnektör kimliği |
-| content | Gönderilemeyen log kaydının içeriği (JSON) |
+| İndeks | Kullanım Amacı |
+|--------|----------------|
+| `idx_logpolicy_correlation` | Aynı isteğe ait istek ve yanıt kayıtlarını `correlation_id` üzerinden birleştirme |
+| `idx_logpolicy_timestamp` | Zaman aralığına göre filtreleme ve tarih bazlı raporlama |
+| `idx_logpolicy_proxy` | Belirli bir API Proxy'ye ait kayıtları listeleme |
+| `idx_logpolicy_region` | Pipeline aşamasına göre (`FROM_CLIENT`, `TO_CLIENT` vb.) filtreleme |
+
+<Tip>
+İstek ve yanıtı aynı satırda görüntülemek için `correlation_id` üzerinden self-join yapabilir, `capture_region` alanını ayrım kriteri olarak kullanabilirsiniz. Örneğin:
+
+```sql
+SELECT req.correlation_id, req.from_client_ro_body AS request_body, res.from_client_ro_body AS response_body
+FROM log_PolicyCapture req
+JOIN log_PolicyCapture res ON req.correlation_id = res.correlation_id
+WHERE req.capture_region = 'FROM_CLIENT' AND res.capture_region = 'TO_CLIENT';
+```
+</Tip>
+
+<Tip>
+Log tabloları zaman sıralı ve büyük hacimli veri biriktirdiğinden, `log_timestamp` kolonuna göre **günlük partition (bölümleme)** uygulanması önerilir. Günlük partition sayesinde eski kayıtların silinmesi `DROP PARTITION` ile neredeyse anlık gerçekleşir ve tarih aralığı sorguları yalnızca ilgili partition'ları tarar.
+
+Partition tanımı veritabanına göre farklılık gösterir:
+
+- **Oracle**: `PARTITION BY RANGE (log_timestamp) INTERVAL (NUMTODSINTERVAL(1, 'DAY'))` ile otomatik günlük partition oluşturulur.
+- **PostgreSQL**: `PARTITION BY RANGE (log_timestamp)` tanımlanır; her gün için alt tablo oluşturulur (örn. `log_PolicyCapture_20260421`).
+- **MySQL/MariaDB**: `PARTITION BY RANGE (TO_DAYS(log_timestamp))` kullanılır. Partition anahtarı birincil anahtarın (PRIMARY KEY) parçası olmalıdır.
+- **SQL Server**: Partition function ve partition scheme ile günlük aralık tanımlanır; yeni partition'lar genellikle zamanlanmış bir iş ile eklenir.
+</Tip>
+
+### MongoDB
+
+MongoDB konnektörü kullanıldığında tablo oluşturma gerekmez. Veriler `log_policycapture` koleksiyonuna otomatik olarak yazılır.
 
 ## Gizlilik Ayarları
 
