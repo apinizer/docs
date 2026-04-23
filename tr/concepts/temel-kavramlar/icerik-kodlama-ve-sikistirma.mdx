@@ -1,0 +1,209 @@
+---
+title: "İçerik Kodlama ve Sıkıştırma"
+description: "API Gateway'in istek ve yanıt mesajlarını otomatik olarak nasıl sıkıştırdığını ve açtığını, desteklenen encoding türlerini, indirme davranışını ve no-transform uyumluluğunu öğrenebilirsiniz."
+---
+
+## Genel Bakış
+
+API Gateway, istemci ile Backend API arasındaki mesaj akışında içerik sıkıştırma ve açma işlemlerini **otomatik olarak** yönetir. Bu sayede:
+
+- Politikalar her zaman **açık (sıkıştırılmamış) metin** üzerinde çalışır
+- İstemcinin desteklediği sıkıştırma yöntemine göre yanıt otomatik olarak sıkıştırılır
+- Backend API'nin hangi formatta yanıt verdiğinden bağımsız olarak doğru işlem yapılır
+
+<Info>
+Bu sayfa, sıkıştırma/açma işleminin gateway düzeyinde nasıl çalıştığını açıklar. Politikaların mesaj akışındaki yeri ve çalışma sırası için [Mesaj İşleme ve Politika Uygulama](/tr/concepts/temel-kavramlar/mesaj-isleme-ve-politika-uygulama) sayfasına bakabilirsiniz.
+</Info>
+
+## Desteklenen Sıkıştırma Yöntemleri
+
+| Yöntem | Content-Encoding Değeri | Açıklama |
+|--------|------------------------|----------|
+| **gzip** | `gzip` | En yaygın yöntem. Tüm tarayıcılar ve HTTP istemcileri destekler. |
+| **deflate** | `deflate` | zlib formatında sıkıştırma. gzip'e göre daha az yaygın. |
+| **Brotli** | `br` | Google tarafından geliştirilen, yüksek sıkıştırma oranına sahip yöntem. |
+| **Zstandard** | `zstd` | Facebook tarafından geliştirilen, hız ve oran dengesi iyi olan yöntem. |
+| **compress** | `compress` | Eski LZW tabanlı yöntem. Sadece açma (decompress) desteklenir, sıkıştırma yapılamaz. |
+| **identity** | `identity` | Sıkıştırma yok. RFC 9110'a göre kullanımdan kaldırılmış (deprecated) bir değerdir. |
+
+## İstek Akışı
+
+İstemciden gelen sıkıştırılmış bir istek mesajı şu aşamalardan geçer:
+
+```
+İSTEMCİ                          GATEWAY                              BACKEND API
+   │                                │                                      │
+   │  ── İstek (CE: gzip) ──────>  │                                      │
+   │                                │  1. Sıkıştırma algıla (gzip)        │
+   │                                │  2. Mesajı aç                        │
+   │                                │  3. Politikaları uygula (açık metin) │
+   │                                │  4. Tekrar sıkıştır (gzip)          │
+   │                                │  ── İstek (CE: gzip) ────────────>   │
+   │                                │                                      │
+```
+
+### Aşamalar
+
+<Steps>
+<Step title="Sıkıştırma Algılama">
+İstek mesajındaki `Content-Encoding` başlığı okunur ve sıkıştırma yöntemi belirlenir. Başlık değerine ek olarak, mesaj içeriğinin ilk baytları kontrol edilerek gerçekten sıkıştırılmış olduğu doğrulanır.
+</Step>
+
+<Step title="Mesajı Açma">
+Belirlenen yönteme göre mesaj içeriği açılır (decompress). Açma işlemi başarısız olursa mesaj olduğu gibi bırakılır.
+</Step>
+
+<Step title="Politika Uygulama">
+İstek politikaları, açılmış düz metin üzerinde çalışır. Bu sayede dönüştürme, doğrulama ve filtreleme politikaları sıkıştırma yönteminden bağımsız olarak işlem yapabilir.
+</Step>
+
+<Step title="Tekrar Sıkıştırma">
+Politikalar uygulandıktan sonra mesaj, orijinal sıkıştırma yöntemiyle tekrar sıkıştırılarak Backend API'ye gönderilir.
+</Step>
+</Steps>
+
+<Warning>
+**İstisnalar:** `multipart/form-data` türündeki isteklerde sıkıştırma açılmaz. Çünkü açma işlemi multipart sınır (boundary) yapısını bozar.
+</Warning>
+
+### İç İçe (Stacked) Sıkıştırma
+
+Bir istek mesajı birden fazla katmanlı sıkıştırma içerebilir (örneğin `Content-Encoding: gzip, br`). Bu durumda gateway, katmanları **sağdan sola** sırayla açar: önce Brotli, sonra gzip. Backend API'ye mesaj açık metin olarak gönderilir.
+
+## Yanıt Akışı
+
+Backend API'den gelen yanıt mesajı, istemcinin `Accept-Encoding` başlığına göre işlenir:
+
+```
+BACKEND API                       GATEWAY                              İSTEMCİ
+   │                                │                                      │
+   │  ── Yanıt (CE: deflate) ───>   │                                      │
+   │                                │  1. Sıkıştırma algıla (deflate)      │
+   │                                │  2. Mesajı aç                        │
+   │                                │  3. Politikaları uygula (açık metin) │
+   │                                │  4. İstemci AE kontrol (gzip kabul)  │
+   │                                │  5. gzip ile sıkıştır                │
+   │                                │  ── Yanıt (CE: gzip) ────────────>   │
+   │                                │                                      │
+```
+
+### Encoding Seçim Sırası
+
+İstemcinin `Accept-Encoding` başlığında birden fazla yöntem varsa, gateway şu **sabit sırayla** seçim yapar:
+
+1. gzip
+2. deflate
+3. br (Brotli)
+4. zstd (Zstandard)
+
+<Info>
+`Accept-Encoding` başlığındaki q-value (kalite) değerleri şu an için dikkate alınmaz. Bu, sektördeki diğer gateway'lerle (Nginx dahil) tutarlı bir davranıştır.
+</Info>
+
+### Accept-Encoding: * (Wildcard)
+
+İstemci `Accept-Encoding: *` gönderdiğinde, gateway bunu "tüm yöntemleri kabul ediyorum" olarak yorumlar ve yukarıdaki sıraya göre en uygun yöntemi seçer (RFC 9110 §12.5.3 uyumlu).
+
+## İkili (Binary) İçerik Davranışı
+
+Resim, video, PDF gibi ikili içerikler metin içeriklerden farklı işlenir:
+
+<AccordionGroup>
+<Accordion title="İndirme Aktif (Download Enabled)">
+İndirme özelliği açık olan proxy'lerde ikili içerik **doğrudan akış (streaming)** ile istemciye iletilir. Bu yöntemde:
+
+- İçerik bellekte tutulmaz, parça parça aktarılır
+- Büyük dosyalarda bellek tüketimi minimum kalır
+- İstemcinin desteklemediği bir sıkıştırma varsa otomatik olarak açılır
+- Politikalar yanıt gövdesini **değiştiremez** (içerik zaten gönderilmeye başlamıştır)
+</Accordion>
+
+<Accordion title="İndirme Kapalı">
+İndirme özelliği kapalı olan proxy'lerde ikili içerik Base64 formatına dönüştürülerek politika hattına girer. Politikalar Base64 kodlanmış metin üzerinde çalışır. İstemciye gönderimde orijinal ikili format geri oluşturulur.
+</Accordion>
+</AccordionGroup>
+
+## Karakter Seti ve Kodlama Geçersiz Kılma
+
+Yukarıda açıklanan otomatik sıkıştırma davranışı, Yönlendirme yapılandırmasındaki **Karakter Seti ve Kodlama Geçersiz Kılma** ayarları ile rota bazında geçersiz kılınabilir. Bir geçersiz kılma yapılandırıldığında, gateway `Content-Encoding` ve `Content-Type` başlığındaki charset değerlerini dikkate almaz; bunun yerine yapılandırılan değeri uygular.
+
+Bu özellik şu durumlarda kullanışlıdır:
+
+- Backend API `Content-Encoding` başlığı göndermeden sıkıştırılmış içerik döndürüyorsa
+- `Content-Type` başlığında belirtilen charset, içeriğin gerçek kodlamasıyla eşleşmiyorsa
+- Giden istek veya yanıta, içerik başlıklarından bağımsız olarak belirli bir sıkıştırma yönteminin uygulanması gerekiyorsa
+
+Geçersiz kılma iki yön için ayrı ayrı yapılandırılır:
+
+| Yön | Yapılandırılabilir Alanlar |
+|-----|---------------------------|
+| **İstek Hattı** (İstemci → Backend) | Charset Geçersiz Kılma, Sıkıştırma Açma Geçersiz Kılma, Sıkıştırma Geçersiz Kılma |
+| **Yanıt Hattı** (Backend → İstemci) | Charset Geçersiz Kılma, Sıkıştırma Açma Geçersiz Kılma, Sıkıştırma Geçersiz Kılma |
+
+Sıkıştırma açma veya sıkıştırmayı o yön için açıkça atlamak istiyorsanız **Uygulanmasın (atla)** seçeneğini kullanın.
+
+Desteklenen encoding seçenekleri: **GZIP**, **DEFLATE**, **BR (Brotli)**, **ZSTD**, **Uygulanmasın (atla)**.
+
+<Info>
+Tam yapılandırma detayları için bkz. [HTTP Yönlendirme — Karakter Seti ve Kodlama Geçersiz Kılma](/tr/develop/yonlendirme/http-yonlendirme).
+</Info>
+
+## no-transform Davranışı
+
+Backend API, yanıtında `Cache-Control: no-transform` başlığı gönderdiğinde, gateway içerik üzerinde **hiçbir sıkıştırma veya açma dönüşümü yapmaz**:
+
+- Backend'in sıkıştırma yöntemi ve içeriği olduğu gibi istemciye iletilir
+- `Content-Encoding` başlığı değiştirilmez
+- `Vary` ve `Warning` başlıkları eklenmez
+
+Bu davranış, CDN ve önbellek katmanlarının tutarlılığını korumak için önemlidir.
+
+## Otomatik Eklenen Başlıklar
+
+Gateway, sıkıştırma dönüşümü uyguladığında yanıta otomatik olarak iki başlık ekler:
+
+| Başlık | Değer | Açıklama |
+|--------|-------|----------|
+| `Vary` | `Accept-Encoding` | Önbellek katmanlarına, yanıtın istemcinin encoding tercihine göre değiştiğini bildirir |
+| `Warning` | `214 - "Transformation Applied"` | İçerik üzerinde dönüşüm yapıldığını belirtir (RFC 9111 §5.5) |
+
+## Kısıtlar ve Bilinen Davranışlar
+
+<AccordionGroup>
+<Accordion title="Sabit Encoding Seçim Sırası">
+Gateway, istemcinin `Accept-Encoding` başlığındaki q-value tercihlerini dikkate almaz. Örneğin istemci `br;q=1.0, gzip;q=0.5` gönderirse, gateway Brotli yerine gzip'i seçer. Bu, Nginx ve çoğu gateway ile tutarlı bir davranıştır.
+</Accordion>
+
+<Accordion title="Brotli Otomatik Algılama Yapılamaz">
+Brotli sıkıştırmasının ayırt edici bayt dizisi (magic bytes) yoktur. `Content-Encoding` başlığı olmadan Brotli içerik algılanamaz.
+</Accordion>
+
+<Accordion title="İç İçe Sıkıştırma (Binary)">
+İkili içeriklerde iç içe (stacked) sıkıştırma kısmen desteklenir. Metin içeriklerde tüm katmanlar sırayla açılırken, ikili streaming modunda yalnızca dış katman işlenir.
+</Accordion>
+
+<Accordion title="identity;q=0 Durumu">
+İstemci `Accept-Encoding: identity;q=0` gönderirse (sıkıştırılmamış içerik istemiyorum), RFC 9110'a göre gateway 406 yanıtı verebilir. Ancak Nginx ve diğer gateway'lerle tutarlı olarak, gateway düz metin olarak yanıt verir ve 406 döndürmez.
+</Accordion>
+
+<Accordion title="Streaming Modunda Politika Kısıtı">
+İndirme aktifken ikili içerik streaming ile gönderilir. Bu modda yanıt politikaları mesaj gövdesini **değiştiremez** çünkü içerik zaten istemciye aktarılmaya başlamıştır. İstek politikaları bu durumdan etkilenmez.
+</Accordion>
+</AccordionGroup>
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Mesaj İşleme ve Politika Uygulama" icon="arrows-left-right" href="/tr/concepts/temel-kavramlar/mesaj-isleme-ve-politika-uygulama">
+    Politikaların mesaj akışındaki yerini ve çalışma sırasını öğrenin
+  </Card>
+  <Card title="Routing ve Upstream" icon="route" href="/tr/concepts/temel-kavramlar/routing-ve-upstream">
+    Backend API'ye yönlendirme ve yük dengeleme ayarlarını öğrenin
+  </Card>
+  <Card title="Politika Nedir?" icon="shield" href="/tr/concepts/temel-kavramlar/politika-nedir">
+    Politika kavramını ve türlerini öğrenin
+  </Card>
+  <Card title="API Gateway" icon="server" href="/tr/concepts/temel-bilesenler/api-gateway">
+    API Gateway bileşeninin mimarisini öğrenin
+  </Card>
+</CardGroup>

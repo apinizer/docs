@@ -1,0 +1,95 @@
+---
+title: "Apinizer Reverse Proxy Üzerinden Kubectl Bağlantısı (Windows)"
+description: "Windows ortamında kubectl aracını Apinizer reverse proxy üzerinden Kubernetes cluster'a bağlamak için gerekli adımları açıklar. Cluster bilgilerinin alınması, Apinizer yapılandırması, token oluşturulması ve kubeconfig hazırlanması konularını kapsar."
+---
+
+## 1. Cluster Bilgilerinin Alınması
+
+Kubernetes API server adresini ve port bilgisini almak için aşağıdaki komutu çalıştırın:
+
+```cmd
+kubectl cluster-info
+```
+
+Çıktıdaki `Kubernetes control plane` adresini ve portunu not alın. Bu bilgi Apinizer'da reverse proxy tanımlanırken kullanılacaktır.
+
+## 2. Apinizer'a Reverse Proxy Eklenmesi
+
+Apinizer'da ilgili cluster için bir reverse proxy tanımı oluşturun. Backend adresi olarak `kubectl cluster-info` çıktısındaki adresi girin.
+
+### Request Policy Yapılandırması
+
+Kubernetes API'sinin kubectl ile uyumlu çalışabilmesi için aşağıdaki header dönüşümlerini **Request Policy → Business Rule** bölümünden ekleyin:
+
+| Action Type | Source Variable  | Variable Data Type | Target Value Source Type |   Value    |
+|-------------|------------------|--------------------|--------------------------|------------|
+|  `Modify`   |`accept-encoding` |     `String`       |    `Specify the Value`   | `identity` |
+|  `Delete `  |`accept-encoding` |        -           |            -             |     -      |
+
+<Info>
+  Bu header dönüşümleri yapılmadığında kubectl, Kubernetes'ten gzip sıkıştırılmış ve özel formatlı yanıtlar talep eder. Apinizer bu yanıtları işlerken JSON kesilmesine neden olur ve `unexpected end of JSON input` hatası alınır.
+</Info>
+
+## 3. Token Oluşturulması
+
+Kubernetes cluster'a erişimi olan bir makinede aşağıdaki komutları sırasıyla çalıştırın:
+
+**Service account oluşturma:**
+
+```cmd
+kubectl create serviceaccount kube-user -n kube-system
+```
+
+**Cluster admin yetkisi tanımlama:**
+
+```cmd
+kubectl create clusterrolebinding kube-user-admin --clusterrole=cluster-admin --serviceaccount=kube-system:kube-user
+```
+
+**Token oluşturma (1 yıl geçerli):**
+
+```cmd
+kubectl create token kube-user -n kube-system --duration=8760h
+```
+
+<Info>
+  Son komutun çıktısı olan token değerini kopyalayın ve güvenli bir yerde saklayın. Bu token bir sonraki adımda kubeconfig dosyasında kullanılacaktır. Token süresi dolduğunda bu adımı tekrarlayarak yeni token oluşturmanız gerekir.
+</Info>
+
+## 4. Kubeconfig Dosyasının Hazırlanması
+
+Windows'ta kubectl, cluster bağlantı bilgilerini `%USERPROFILE%\.kube\config` dosyasından okur. Bu dosya genellikle `C:\Users\KULLANICI_ADINIZ\.kube\config` konumunda bulunur.
+
+Dosyayı oluşturmak için CMD'de aşağıdaki komutu çalıştırın:
+
+```cmd
+mkdir %USERPROFILE%\.kube
+notepad %USERPROFILE%\.kube\config
+```
+
+Notepad açıldığında aşağıdaki şablonu yapıştırın, ilgili alanları doldurun ve kaydedin:
+
+```yaml
+apiVersion: v1
+clusters:
+- cluster:
+    server: <Apinizer reverse proxy URL'si>
+    insecure-skip-tls-verify: true
+  name: kubernetes
+contexts:
+- context:
+    cluster: kubernetes
+    user: kube-user
+  name: kube-user@kubernetes
+current-context: kube-user@kubernetes
+kind: Config
+preferences: {}
+users:
+- name: kube-user
+  user:
+    token: <BURAYA_3_ADIMDA_ALINAN_TOKEN>
+```
+
+<Info>
+  `insecure-skip-tls-verify: true` ayarı, Apinizer'ın TLS sertifikasının Kubernetes sertifikasından farklı olması nedeniyle gereklidir.
+</Info>
