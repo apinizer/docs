@@ -1,0 +1,449 @@
+---
+title: "Apinizer Worker JVM İzleme ve Raporlama"
+description: "Apinizer Worker'ın Diagnostics API'sinden periyodik olarak metrik toplayıp, bir ortamın verilerinden interaktif HTML rapor üretebilirsiniz."
+---
+
+## 1-) Nasıl Çalışır?
+
+Bu kılavuzda, bir Apinizer Worker pod'unun JVM metriklerini periyodik olarak toplayan ve gün sonunda bu verilerden tek dosyalık interaktif bir HTML rapor üreten basit bir izleme çözümü anlatılmaktadır.
+
+Çözüm üç parçadan oluşur:
+
+- **Bir toplayıcı shell script (`monitor.sh`)** — verilen ortamın Worker Diagnostics API'sini periyodik olarak okur, satır başına bir JSON kaydı olacak şekilde JSONL dosyasına ekler. Aynı script, ortam adı + Worker URL + Env ID argümanları ile birden fazla ortam için paralel olarak çalıştırılabilir.
+- **Bir Python rapor üretici (`generate_report.py`)** — belirtilen ortamın JSONL dosyasını okur; memory, thread, GC, connection, health metriklerini normalize eder; istatistikler, anomali tespiti ve Chart.js tabanlı interaktif grafiklerle zenginleştirilmiş tek bir HTML dosyası üretir.
+- **Bir orkestratör script (`make-report.sh`)** — verilen ortam adına ve tarihe göre JSONL dosyasını bulur, asgari kayıt sayısını kontrol eder ve rapor üreticiyi çağırır.
+
+<Note>
+  Akış şu şekildedir: Apinizer Worker (`/apinizer/diagnostics/all`) → `monitor.sh <ortam>` (her 2 dakikada bir) → `<ortam>-worker-jvm-YYYYMMDD.jsonl` → `make-report.sh <ortam>` → `generate_report.py` → `apinizer-worker-rapor-<ortam>-YYYYMMDD.html`
+</Note>
+
+## 2-) Ön Koşullar
+
+Çözümü çalıştıracağınız makinede aşağıdaki gereksinimler karşılanmalıdır:
+
+- `bash`, `curl`, `sed`, `wc` (tipik bir Linux ortamında mevcut)
+- `python3` (3.9 veya üzeri; `list[dict]` gibi type hint'ler için gerekli)
+- Rapor üretici **yalnızca standart kütüphaneyi** kullanır; `pip install` gerekmez. Grafiklerin çizimi için gereken Chart.js, üretilen HTML dosyasına CDN üzerinden gömülüdür — raporu görüntülerken internet bağlantısı yeterlidir.
+- Worker pod'larının Diagnostics API'sine ağ erişimi (ör. cluster dışından NodePort veya Ingress üzerinden).
+
+Ayrıca her ortam için **ENV_ID** değerine ihtiyacınız olacak. Bu değer, Apinizer API Manager arayüzünde **Ortamlar** menüsü altında ilgili ortamın detayından kopyalanabilir ve Diagnostics API çağrılarında `Authorization` header'ı olarak kullanılır.
+
+## 3-) Diagnostics API
+
+Toplayıcı script, Worker üzerindeki aşağıdaki endpoint'i çağırır:
+
+```
+GET {WORKER_URL}/apinizer/diagnostics/all?internal=true
+Authorization: {ENV_ID}
+```
+
+Endpoint, o pod'a ait JVM, thread, GC, connection pool ve health bilgilerini içeren geniş bir JSON döner. Örnek yanıtın üst düzey alanları şu şekildedir:
+
+```json
+{
+  "podName": "apinizer-worker-xxxx",
+  "podIp": "10.244.1.23",
+  "envName": "prod",
+  "version": "...",
+  "responseTime": 12,
+  "jvm": {
+    "memory":  { "heap": { "used": 0, "max": 0 }, "nonHeap": { "used": 0 } },
+    "gc":      [ { "name": "G1 Young Generation", "collectionCount": 0, "collectionTime": 0 } ],
+    "uptime":  0
+  },
+  "threads": {
+    "summary":       { "threadCount": 0, "peakThreadCount": 0, "daemonThreadCount": 0, "totalStartedThreadCount": 0 },
+    "states":        { "RUNNABLE": 0, "WAITING": 0, "TIMED_WAITING": 0 },
+    "executorPools": { "apinizer-async": { "poolSize": 0, "activeCount": 0, "queueSize": 0, "rejectedTaskCount": 0 },
+                       "apinizer-maintenance": { "queueSize": 0, "rejectedTaskCount": 0 } }
+  },
+  "connections": { "pools": [ { "leased": 0, "available": 0, "pending": 0, "maxTotal": 0 } ] },
+  "health":      { "status": "UP",
+                   "checks": { "memory": { "status": "UP" },
+                               "threads": { "deadlocks": 0 },
+                               "connections": { "activeConnections": 0 } } }
+}
+```
+
+<Warning>
+  `ENV_ID` değeri yanlış girildiğinde Worker `401 Unauthorized` döner. Toplayıcı script bu durumu algılar ve ilgili satırı dosyaya hata kaydı olarak yazar; ancak sonraki örneklemeler de başarısız olmaya devam eder. Script'i başlatır başlatmaz ilk çıktıyı kontrol etmeniz önerilir.
+</Warning>
+
+## 4-) Toplayıcı Script'in Kurulumu
+
+Tek bir `monitor.sh` dosyası, hangi ortamı izleyeceğiniz bilgisini argüman olarak alır. Bu sayede farklı ortamları (ör. `dev`, `prod`, `staging`) izlemek için ayrı script dosyalarına gerek kalmaz; aynı script dosyası birden fazla terminalde farklı argümanlarla çalıştırılarak paralel izleme yapılabilir.
+
+<Note>
+  Bu kılavuzda anlatılan üç script'in (`monitor.sh`, `generate_report.py`, `make-report.sh`) hazır kopyalarına aşağıdaki bağlantıdan erişebilirsiniz:
+
+  [Script dosyalarını indir](https://fss.apinizer.com/index.php/s/2IXjAag11gXiimZ)
+
+  Dosyaları aynı dizine indirip `chmod +x monitor.sh make-report.sh` komutuyla çalıştırılabilir yapmanız yeterlidir.
+</Note>
+
+### monitor.sh — Dinamik Toplayıcı Script
+
+Aşağıdaki script'i `monitor.sh` adıyla kaydedin. Kullanım sırasında ortam adı, Worker URL ve Env ID değerlerini komut satırında argüman olarak geçirin.
+
+```bash
+#!/usr/bin/env bash
+# Apinizer Worker — Dinamik ortam izleyici
+# Her 2 dakikada bir Diagnostics API'sini okur, JSONL dosyasına yazar.
+#
+# Kullanım:
+#   1) Argümanlarla:
+#        ./monitor.sh <ORTAM_ADI> <WORKER_URL> <ENV_ID> [INTERVAL_SN]
+#        ./monitor.sh dev  http://worker-dev.kurum.local:8091  69db6b2268bd1a7a04552ad6
+#        ./monitor.sh prod http://worker-prod.kurum.local:8091 63ca7ed05c8e155862d99e88 60
+#
+#   2) Aşağıdaki varsayılanları doldurup argümansız çalıştırarak:
+#        ./monitor.sh
+#
+# Çıktı: <ORTAM_ADI>-worker-jvm-YYYYMMDD.jsonl
+
+# ── Varsayılan Yapılandırma (argüman verilmezse kullanılır) ──────────────────
+DEFAULT_ENV_NAME=""                              # Örn: dev | prod | staging
+DEFAULT_WORKER_URL=""                            # Örn: http://worker.kurum.local:8091
+DEFAULT_ENV_ID=""                                # API Manager → Ortamlar → <ortam> → ID
+DEFAULT_INTERVAL=120
+
+ENDPOINT="all"                                   # ÖNEMLİ: jvm değil all olmalı
+
+# ── Argüman İşleme ───────────────────────────────────────────────────────────
+ENV_NAME="${1:-$DEFAULT_ENV_NAME}"
+WORKER_URL="${2:-$DEFAULT_WORKER_URL}"
+ENV_ID="${3:-$DEFAULT_ENV_ID}"
+INTERVAL="${4:-$DEFAULT_INTERVAL}"
+
+# ── Kod (değiştirmeyin) ──────────────────────────────────────────────────────
+set -uo pipefail
+
+usage() {
+    cat <<EOF
+Kullanım: $0 <ORTAM_ADI> <WORKER_URL> <ENV_ID> [INTERVAL_SN]
+
+Örnek:
+    $0 dev  http://worker-dev.kurum.local:8091  69db6b2268bd1a7a04552ad6
+    $0 prod http://worker-prod.kurum.local:8091 63ca7ed05c8e155862d99e88 60
+
+Not: Scriptin başındaki DEFAULT_* değerlerini doldurursanız argümansız da
+     çalıştırabilirsiniz.
+EOF
+    exit 1
+}
+
+if [[ -z "$ENV_NAME" || -z "$WORKER_URL" || -z "$ENV_ID" ]]; then
+    echo "HATA: ORTAM_ADI, WORKER_URL ve ENV_ID zorunlu."
+    echo
+    usage
+fi
+
+# Ortam adı dosya güvenli olsun (boşluk, slash vs. kabul etmiyoruz)
+if [[ ! "$ENV_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "HATA: ORTAM_ADI sadece harf, rakam, '.', '_', '-' içerebilir."
+    exit 1
+fi
+
+OUTPUT_FILE="${ENV_NAME}-worker-jvm-$(date +%Y%m%d).jsonl"
+TMP_BODY="/tmp/_wjvm_${ENV_NAME}_body.tmp"
+
+collect() {
+    local ts
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    local response http_code body
+    response=$(curl -s --max-time 30 \
+        -o "$TMP_BODY" \
+        -w "%{http_code}" \
+        -H "Authorization: ${ENV_ID}" \
+        "${WORKER_URL}/apinizer/diagnostics/${ENDPOINT}?internal=true" 2>/dev/null)
+    http_code="$response"
+    body=$(cat "$TMP_BODY" 2>/dev/null)
+
+    if [[ -z "$body" ]]; then
+        echo "{\"collectedAt\":\"${ts}\",\"error\":\"bağlantı hatası\"}" >> "$OUTPUT_FILE"
+        echo "  HATA: Worker'a ulaşılamadı (${WORKER_URL})"
+        return 1
+    fi
+
+    if [[ "$http_code" == "401" ]]; then
+        echo "{\"collectedAt\":\"${ts}\",\"error\":\"yetkisiz - ENV_ID hatalı\"}" >> "$OUTPUT_FILE"
+        echo "  HATA: 401 Unauthorized — ENV_ID değerini kontrol edin."
+        return 1
+    fi
+
+    local line
+    line=$(echo "$body" | sed "s/^{/{\"collectedAt\":\"${ts}\",/")
+    echo "$line" >> "$OUTPUT_FILE"
+}
+
+echo "[${ENV_NAME}] Worker JVM izleme başladı"
+echo "  Ortam   : $ENV_NAME"
+echo "  Worker  : $WORKER_URL"
+echo "  Metrik  : $ENDPOINT"
+echo "  Aralık  : ${INTERVAL}s"
+echo "  Çıktı   : $OUTPUT_FILE"
+echo "  Durdurmak için Ctrl+C"
+echo "──────────────────────────────────────────"
+
+while true; do
+    printf "[%s] Okunuyor... " "$(date '+%H:%M:%S')"
+    if collect; then
+        echo "OK → $OUTPUT_FILE"
+    fi
+    sleep "$INTERVAL"
+done
+```
+
+### Script'i Çalıştırılabilir Yapma ve Başlatma
+
+```bash
+chmod +x monitor.sh
+
+# Tek bir ortam için:
+./monitor.sh prod http://worker-prod.kurum.local:8091 63ca7ed05c8e155862d99e88
+
+# Birden fazla ortamı paralel izlemek için — farklı terminallerde (veya tmux pane'lerinde):
+./monitor.sh dev  http://worker-dev.kurum.local:8091  69db6b2268bd1a7a04552ad6
+./monitor.sh prod http://worker-prod.kurum.local:8091 63ca7ed05c8e155862d99e88
+```
+
+Her çalıştırma, argümandaki ortam adını kullanarak kendi JSONL dosyasını üretir (`dev-worker-jvm-20260422.jsonl`, `prod-worker-jvm-20260422.jsonl` gibi); dosyalar birbirine karışmaz.
+
+<Note>
+  Script varsayılan olarak her **120 saniyede** bir örnekleme alır. Daha sık veya daha seyrek örnekleme için dördüncü argüman olarak saniye cinsinden bir değer geçirebilirsiniz (ör. `./monitor.sh prod <url> <id> 60`). 60 saniyenin altına inmek Worker üzerinde gereksiz yük oluşturabilir; 300 saniyenin üzeri ise kısa süreli spike'ları kaçırabilir.
+</Note>
+
+### Arka Planda Sürekli Çalıştırma
+
+İzleme script'leri `while true` döngüsüyle çalıştığı için, terminal oturumu kapandığında durur. Sürekli çalışır halde tutmak için kullanım senaryonuza göre aşağıdaki yöntemlerden biri tercih edilebilir:
+
+- **Test / geliştirme ortamı için `tmux` veya `screen`** — Script'i ayrı bir tmux oturumunda başlatırsanız, SSH bağlantınızı kapatsanız bile çalışmaya devam eder. Daha sonra oturuma yeniden bağlanıp çıktıyı canlı izleyebilirsiniz. Hızlı ve basit bir çözümdür; ancak sunucu yeniden başlatıldığında script otomatik olarak ayağa kalkmaz.
+- **Üretim ortamı için `systemd` servisi** — Linux'ta arka plan servislerini yöneten standart yöntemdir. Her ortam için bir `.service` unit dosyası yazılır; komut satırı olarak `ExecStart=/path/to/monitor.sh prod <url> <id>` gibi argümanlar verilir. Bu sayede sunucu yeniden başlatıldığında servis otomatik başlar, beklenmedik şekilde çıkarsa otomatik olarak yeniden denenir (`Restart=always`), ve çıktısı sistem log'larına (`journalctl`) düşer. Üretim kullanımında süreklilik ve gözlemlenebilirlik açısından tercih edilen yöntem budur.
+
+Konteyner tabanlı bir yaklaşım tercih ediliyorsa, toplayıcı script ortam bilgilerini environment variable olarak alan küçük bir Docker image içine yerleştirilip Kubernetes üzerinde kalıcı bir `Deployment` veya zamanlanmış bir `CronJob` olarak da koşturulabilir.
+
+## 5-) JSONL Çıktı Formatı
+
+Toplayıcı her örneklemede, Worker'dan dönen JSON yanıtının en başına `collectedAt` alanını enjekte eder ve **tek satır** halinde çıktı dosyasına ekler. Bu format, **JSONL (JSON Lines)** olarak bilinir — her satır bağımsız ve geçerli bir JSON nesnesidir.
+
+```json
+{"collectedAt":"2026-04-22T09:02:00Z","podName":"apinizer-worker-xxxx","podIp":"...","envName":"prod","version":"...","responseTime":12,"jvm":{...},"threads":{...},"connections":{...},"health":{...}}
+```
+
+Bir örnekleme başarısız olursa, satır yalnızca bir hata kaydı içerir; rapor üretici bu satırları okurken otomatik olarak atlar:
+
+```json
+{"collectedAt":"2026-04-22T09:04:00Z","error":"bağlantı hatası"}
+```
+
+Dosya adı deseni: `<ORTAM_ADI>-worker-jvm-YYYYMMDD.jsonl`
+
+Örneğin:
+
+- `dev-worker-jvm-20260422.jsonl`
+- `prod-worker-jvm-20260422.jsonl`
+- `staging-worker-jvm-20260422.jsonl`
+
+<Warning>
+  Dosya adındaki **tarih eki**, script başlatıldığı anda değil, **her örnekleme satırı yazılırken** hesaplanır. Pratikte yerel gece yarısında toplayıcı çalışıyorsa, kayıtlar bir sonraki günün dosyasına akmaya başlar. Günlük rapor almak için, toplayıcıları günün başında (ör. 00:05) yeniden başlatmak ya da rapor üretimini önceki güne ait dosyalar üzerinden çalıştırmak uygun olur.
+</Warning>
+
+## 6-) Rapor Üretici
+
+Rapor üretici, belirtilen ortama ait JSONL dosyasını okuyup **tek bir HTML dosyası** çıkarır. Çıktı dosyası self-contained'dır; başka bir asset gerektirmez, e-posta eki olarak gönderilebilir veya paylaşılan bir disk üzerinden açılabilir.
+
+### generate_report.py — Rapor Üretici Script
+
+`generate_report.py` dosyasını, toplayıcı script'in çıktı ürettiği dizine (JSONL dosyalarının yanı) kaydedin. Script tamamen Python standart kütüphanesi ile yazılmıştır ve ek bir bağımlılık gerektirmez. Tam kaynak kodu dokümanın sonundaki eke dahil edilmiştir; aşağıda ana fonksiyonları ve çalışma mantığı özetlenmiştir.
+
+Script dört ana aşamada çalışır:
+
+```python
+def load_jsonl(path: str) -> list[dict]:
+    """JSONL dosyasını okur, eksik/hatalı satırları atlar."""
+    # ...
+
+def extract_metrics(record: dict) -> dict | None:
+    """Ham diagnostic kaydından normalize metrik dict döndürür."""
+    # heap, nonHeap, gc, threads, executorPools, connections, health...
+
+def env_stats(records: list[dict]) -> dict:
+    """Bir environment için tüm metriklerin istatistiklerini hesaplar."""
+    # min / max / avg / median / p95 / stddev — hem toplam hem pod bazında
+
+def detect_anomalies(records: list[dict]) -> list[dict]:
+    """Eşik tabanlı anomali tespiti yapar."""
+    # ...
+```
+
+Anomali tespiti için kullanılan varsayılan eşik değerleri aşağıdaki gibidir. Kendi SLA'larınıza göre `THRESHOLDS` sözlüğünü düzenleyebilirsiniz.
+
+```python
+THRESHOLDS = {
+    "heapPct":        {"warn": 50,  "crit": 75,   "label": "Heap Kullanımı %"},
+    "responseTime":   {"warn": 50,  "crit": 200,  "label": "Diagnostic Yanıt ms"},
+    "connLeased":     {"warn": 500, "crit": 2000, "label": "Aktif HTTP Bağlantı"},
+    "asyncQueueSize": {"warn": 10,  "crit": 50,   "label": "Async Pool Queue"},
+    "maintQueueSize": {"warn": 10,  "crit": 50,   "label": "Maintenance Queue"},
+    "gcOldCount":     {"warn": 1,   "crit": 5,    "label": "GC Old Count"},
+    "deadlocks":      {"warn": 1,   "crit": 1,    "label": "Deadlock"},
+    "asyncRejected":  {"warn": 1,   "crit": 10,   "label": "Async Rejected Tasks"},
+}
+```
+
+### make-report.sh — Orkestratör Script
+
+Aşağıdaki script, verilen ortam adına ve tarihe göre JSONL dosyasını bulup rapor üreticiyi çağırır. `generate_report.py` ile aynı dizine `make-report.sh` adıyla kaydedin.
+
+```bash
+#!/usr/bin/env bash
+# Belirtilen ortamın bugünkü JSONL dosyasını kullanarak HTML rapor üretir.
+#
+# Kullanım:
+#   ./make-report.sh <ORTAM_ADI> [TARIH_YYYYMMDD]
+#
+# Örnek:
+#   ./make-report.sh dev
+#   ./make-report.sh prod 20260421
+
+set -e
+
+if [ -z "${1:-}" ]; then
+    echo "Kullanım: $0 <ORTAM_ADI> [TARIH_YYYYMMDD]"
+    echo "Örnek   : $0 dev"
+    echo "Örnek   : $0 prod 20260421"
+    exit 1
+fi
+
+ENV_NAME="$1"
+DATE="${2:-$(date +%Y%m%d)}"
+
+JSONL_FILE="${ENV_NAME}-worker-jvm-${DATE}.jsonl"
+
+if [ ! -f "$JSONL_FILE" ]; then
+    echo "HATA: $JSONL_FILE yok. monitor.sh $ENV_NAME ... çalışıyor mu?"
+    exit 1
+fi
+
+count=$(wc -l < "$JSONL_FILE")
+echo "[$ENV_NAME] kayıt sayısı: $count"
+
+if [ "$count" -lt 3 ]; then
+    echo "UYARI: En az 3 kayıt olsun, grafikler anlamlı çıksın. Biraz daha bekle."
+fi
+
+python3 generate_report.py --env "$ENV_NAME" --date "$DATE"
+```
+
+Çalıştırmak için:
+
+```bash
+chmod +x make-report.sh
+
+# Bugünün raporu:
+./make-report.sh prod
+
+# Önceki bir günün raporu:
+./make-report.sh prod 20260421
+```
+
+### CLI Kullanımı
+
+`generate_report.py` doğrudan da çalıştırılabilir. Desteklenen seçenekler:
+
+```bash
+# Bugünün dosyasından rapor üret (zorunlu argüman: --env)
+python3 generate_report.py --env prod
+
+# Belirli bir tarihe ait dosyayı kullan
+python3 generate_report.py --env prod --date 20260421
+
+# Dosya ve çıktıyı manuel olarak belirt
+python3 generate_report.py \
+    --env prod \
+    --input prod-worker-jvm-20260421.jsonl \
+    --out rapor.html
+```
+
+Çıktı dosyası varsayılan olarak `apinizer-worker-rapor-<ORTAM>-YYYYMMDD.html` adıyla JSONL dosyasıyla aynı dizine yazılır.
+
+## 7-) Rapor İçeriği
+
+Üretilen HTML dosyası tek sayfalık interaktif bir dashboard'tur. Üst kısımda ortam etiketi, rapor özeti ve anomali badge'leri yer alır; içerik altı sekmeye bölünmüştür.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/01-genel-bakis.png"
+  alt="Apinizer Worker JVM Raporu — Genel Bakış Sekmesi"
+  style={{ width: "600px" }}
+/>
+
+### Sekmeler
+
+- **Genel Bakış** — Heap %, Heap Max, thread sayısı, yanıt süresi, aktif bağlantı, GC Young hızı, GC Old ve deadlock gibi anahtar metriklerin özet kartları; altında tüm podların aynı grafik üzerinde karşılaştırıldığı zaman serisi grafikleri (Heap %, yanıt süresi, thread sayısı, aktif bağlantı). Sayfa açılışında seçili olan sekmedir.
+- **Memory** — Heap kullanımı (MB ve %) ile non-heap / metaspace grafikleri. Heap kullanımının zaman içinde nasıl değiştiğini görmek için idealdir; stabil bir ortamda heap testere dişi deseni oluştururken, bellek sızıntısı yaşayan bir pod'da sürekli yukarı yönlü bir eğim görülür.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/02-memory.png"
+  alt="Memory Sekmesi — Heap Kullanımı (MB), Heap % ve Non-Heap/Metaspace grafikleri"
+  style={{ width: "600px" }}
+/>
+
+- **Threads** — Thread state dağılımı (RUNNABLE / WAITING / TIMED_WAITING), `apinizer-async` executor pool durumu (pool size, aktif, queue) ve pod bazında toplam başlatılan thread sayısı.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/03-threads.png"
+  alt="Threads Sekmesi — Thread state dağılımı, async executor pool ve toplam başlatılan thread grafikleri"
+  style={{ width: "600px" }}
+/>
+
+- **GC** — G1 Young ve Concurrent GC sayaçları ile kümülatif GC süresi grafikleri.
+- **Connections** — HTTP connection pool'un leased ve available metrikleri ile maintenance pool queue grafikleri.
+- **Anomaliler** — Eşik aşımı tespit edilen metriklerin listesi; hangi metrikte, kaç örnekte, hangi tepe değerde uyarı veya kritik seviyeye ulaşıldığını gösterir. Sayfanın altında pod bazlı özet tablo yer alır.
+
+<img
+  src="/images/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-monitoring/04-anomaliler.png"
+  alt="Anomaliler Sekmesi — Eşik aşımları ve pod bazlı özet tablo"
+  style={{ width: "600px" }}
+/>
+
+<Note>
+  Sekme içerikleri "lazy build" mantığıyla çalışır: sadece tıklandıklarında grafikler oluşturulur. Bu sayede rapor binlerce veri noktası barındırsa bile ilk açılış hızlı kalır.
+</Note>
+
+### Birden Fazla Ortamı Karşılaştırma
+
+Rapor artık tek bir ortam için üretildiğinden, iki ortamı karşılaştırmak istediğinizde her bir ortam için ayrı bir rapor üretip HTML dosyalarını yan yana açmanız yeterlidir:
+
+```bash
+./make-report.sh dev
+./make-report.sh prod
+# apinizer-worker-rapor-dev-20260422.html
+# apinizer-worker-rapor-prod-20260422.html
+```
+
+Bu yaklaşım, her ortamın kendi ayrıntılı raporunu bağımsız olarak paylaşılabilir/arşivlenebilir kılar; aynı zamanda bir ortamın ekibine sadece kendi raporunu iletmek daha pratiktir.
+
+## 8-) Sorun Giderme
+
+<Warning>
+  Aşağıdaki hatalar en sık karşılaşılan durumlardır. İlk tanı için her zaman toplayıcı script'in konsol çıktısına ve üretilen JSONL dosyasının son birkaç satırına bakın.
+</Warning>
+
+**`HATA: 401 Unauthorized — ENV_ID değerini kontrol edin.`**
+`ENV_ID` yanlış veya başka bir ortamın ID'si girilmiş. API Manager → Ortamlar menüsünden doğru ortama ait ID'yi yeniden alın.
+
+**`HATA: Worker'a ulaşılamadı ({WORKER_URL})`**
+Worker adresine TCP düzeyinde erişim yok. Ağ kuralları, Ingress/NodePort tanımı veya proxy ayarları kontrol edilmelidir. `curl -v "${WORKER_URL}/apinizer/diagnostics/all?internal=true"` ile manuel bir istek atarak hızlıca doğrulama yapılabilir.
+
+**`HATA: ORTAM_ADI, WORKER_URL ve ENV_ID zorunlu.`**
+`monitor.sh` argümansız veya eksik argümanla çalıştırılmış. Script başındaki `DEFAULT_*` değerlerini doldurmadıysanız üç argümanı da komut satırında geçirmeniz gerekir.
+
+**`HATA: <ortam>-worker-jvm-YYYYMMDD.jsonl yok. monitor.sh <ortam> ... çalışıyor mu?`**
+`make-report.sh` belirttiğiniz ortama ait JSONL dosyası arar. Toplayıcı henüz başlatılmamış, başka bir ortam adıyla çalıştırılmış ya da başka bir dizinde çalışıyor olabilir. Toplayıcı script ile rapor üretici aynı dizinde çalışmalıdır.
+
+**`UYARI: En az 3 kayıt olsun, grafikler anlamlı çıksın.`**
+Toplayıcı yeni başlatılmışsa, henüz yeterli örnekleme birikmemiş olabilir. Varsayılan 120 saniyelik aralıkta en az 6 dakika beklemek anlamlı bir rapor için yeterlidir.
+
+**Raporda bazı pod'lar hiç görünmüyor.**
+Worker Deployment'ı birden fazla replica ile çalışıyorsa, bir Service veya Ingress üzerinden gelen istekler farklı pod'lara dağıtılır. Toplayıcı her istek için rastgele bir pod'a düşebilir; kısa süreli izlemelerde bazı pod'ların örneklenme şansı düşük olur. Pod başına izleme yapmak için her pod'u ayrı ayrı hedefleyen (ör. headless service veya pod DNS ile) ek toplayıcılar çalıştırılabilir.
