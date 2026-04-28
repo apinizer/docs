@@ -1,6 +1,6 @@
 ---
 title: "Log Policy"
-description: "Capture the message state at any point in the API Gateway pipeline and send it to selected connectors. Perform synchronous or asynchronous logging to Elasticsearch, databases, Graylog, Webhook, and Syslog targets."
+description: "Capture the message state at any point in the API Gateway pipeline and send it to selected connectors. Perform synchronous or asynchronous logging to Elasticsearch, databases, Graylog, Webhook, Kafka, RabbitMQ, and Syslog targets."
 ---
 
 <Tip>
@@ -9,7 +9,19 @@ This document explains the detailed usage of a specific policy. If you are using
 
 ## Overview
 
-The Log policy captures the current message state (headers, parameters, body, user info, error status, etc.) at any desired point in the API Gateway pipeline and sends it to configured connectors. Unlike standard API traffic logging, it can be placed at any stage of the pipeline and uses a lightweight data structure containing only the relevant fields.
+### Purpose
+
+- The Log policy captures a **snapshot of the current message state** at any point in the message processing pipeline and sends it to the configured connectors.
+- Unlike standard traffic logging, it can be placed at intermediate points in the pipeline (for example, before and after a transformation policy) to observe message changes.
+- It works with HTTP, WebSocket, and gRPC protocols.
+- It can send data to multiple connectors simultaneously.
+
+### How It Works
+
+1. **Policy Trigger**: Runs when the log policy's turn comes in the message processing pipeline.
+2. **Snapshot Creation**: The current message state is captured per protocol (headers, parameters, body information).
+3. **Send to Connectors**: The snapshot is sent to each defined connector individually.
+4. **Privacy Application**: If privacy settings are enabled, sensitive data is processed before delivery (mask, delete, hash, encrypt).
 
 ### Use Cases
 
@@ -23,38 +35,89 @@ The Log policy captures the current message state (headers, parameters, body, us
 | Target | Protocol |
 |--------|----------|
 | Elasticsearch | REST/HTTP |
-| Database (MySQL, MariaDB, Oracle, MongoDB) | JDBC / MongoDB Driver |
+| Database (Oracle, MySQL/MariaDB, PostgreSQL, SQL Server, MongoDB) | JDBC / MongoDB Driver |
 | Graylog | GELF |
 | Webhook | HTTP POST |
 | Syslog | Syslog Protocol |
 | Kafka | Kafka Producer |
 | RabbitMQ | AMQP |
 
-### Execution Modes
+### Protocol Support
 
-| Mode | Behavior |
-|------|----------|
-| **Synchronous** | Pipeline waits until log delivery completes. Delivery errors break the pipeline. |
-| **Asynchronous** | Log delivery happens in the background. Pipeline continues without interruption. Errors are only logged. |
+| Protocol | Header | Parameter | Body |
+|----------|:------:|:---------:|:----:|
+| **HTTP** | &#10003; | &#10003; | &#10003; |
+| **WebSocket** | &#10003; | — | &#10003; |
+| **gRPC** | — | — | &#10003; |
+
+<Info>
+In the WebSocket and gRPC protocols, header and parameter information may be limited due to the nature of the protocol.
+</Info>
 
 ## Configuration Fields
 
-| Field | Required | Default | Description |
-|-------|----------|---------|-------------|
-| Connector Selection | Yes | - | One or more connectors to send log data to |
-| Execution Mode | No | Synchronous | Synchronous or Asynchronous delivery |
-| Correlation ID | No | Enabled | Include request tracking ID |
-| Environment Info | No | Enabled | Include gateway environment info |
-| API Proxy Info | No | Enabled | Include API Proxy and method info |
-| User Info | No | Enabled | Include username or API key |
-| HTTP Context | No | Enabled | Include HTTP status code |
-| Result Info | No | Enabled | Include operation result and error type |
-| Headers | No | Enabled | Include request headers |
-| Parameters | No | Enabled | Include query parameters |
-| Body | No | Enabled | Include request body |
-| Body Mode | No | Full | Full body or partial body (with byte limit) |
-| Body Byte Limit | No | - | Maximum bytes in partial mode |
-| Privacy | No | Disabled | Mask sensitive data |
+<img src="/images/develop/politikalar/log-1.png" alt="Log policy Definition tab" width="1000" />
+
+### General Settings
+
+| Field | Description |
+|-------|-------------|
+| Name | Identifier name of the policy |
+| Description | Description explaining the purpose of the policy |
+| Active | Whether the policy is active or passive |
+| Execution Mode | **Synchronous** or **Asynchronous** execution mode (detailed below) |
+| Condition | Condition that determines when the policy runs (optional) |
+
+### Connector Selection
+
+You can select the connectors the policy will send logs to. Connectors are selected through their connection definition and work environment-independent — the same connection definition may correspond to different connector instances across environments.
+
+<img src="/images/develop/politikalar/log-2.png" alt="Log policy connector selection" width="1000" />
+
+<Info>
+Definitions marked as global policies can be used in multiple environments; the connector corresponding to the same connection definition must be configured in each environment.
+</Info>
+
+### Logged Fields
+
+You can choose which of the following field groups are included in the log record:
+
+| Field Group | Description |
+|-------------|-------------|
+| From-Client Request Headers | Request header information from the client to the API Proxy |
+| From-Client Request Parameters | Request parameters from the client to the API Proxy |
+| From-Client Request Body | Request body from the client to the API Proxy |
+| To-Backend Request Headers | Request header information from the API Proxy to the Backend API |
+| To-Backend Request Parameters | Request parameters from the API Proxy to the Backend API |
+| To-Backend Request Body | Request body from the API Proxy to the Backend API |
+| From-Backend Response Headers | Response header information from the Backend API |
+| From-Backend Response Body | Response body from the Backend API |
+| To-Client Response Headers | Response header information sent to the client |
+| To-Client Response Body | Response body sent to the client |
+| Metadata | Request metadata such as IP address, HTTP method, URI, port |
+| Metrics | Performance metrics such as duration, size, cache state |
+
+### Body Logging Mode
+
+| Mode | Description |
+|------|-------------|
+| Full | The body data is logged in full |
+| Partial | The body data is logged up to the specified maximum size. Data is truncated when the size is exceeded |
+
+## Execution Modes
+
+| Mode | Delivery | Error Behavior | Pipeline Effect |
+|------|----------|----------------|------------------|
+| **Synchronous** (default) | Sequential, waits until completion | Error is raised | Pipeline **is interrupted** |
+| **Asynchronous** | In the background, does not wait | Error is logged and swallowed | Pipeline **continues** |
+
+<Warning>
+In synchronous mode, a connector error interrupts the pipeline and returns an error to the client. If uninterrupted operation is required in production, prefer the **asynchronous** mode.
+</Warning>
+
+<Tip>
+In asynchronous mode, when a connector error occurs, the error information is written to the application logs, but the client request is not affected.
+</Tip>
 
 ## Data Structure
 
@@ -283,219 +346,75 @@ If you want to use a different index name, update the `index_patterns` field in 
 
 ## Database Integration
 
-To send log policy data to a relational database (MySQL/MariaDB or Oracle), you need to create the following table structure.
+The Database connector writes each log policy capture as a single row into the `log_PolicyCapture` table on the target relational database. Supported database types are Oracle, MySQL/MariaDB, PostgreSQL, and SQL Server. For MongoDB, the collection is created automatically on first write — no manual setup is required.
 
 <Warning>
-You must create this table in the target database before using the database connector. The table is not created automatically.
+For relational databases, the `log_PolicyCapture` table is **not created automatically** — you must create it manually before enabling the connector. See [Apinizer Log Table Creation Commands](/en/operations/administrator-guides/apinizer-log-table-creation-commands#policy-capture-log) for the CREATE TABLE statement, recommended indexes, and partitioning guidance for each supported database type.
 </Warning>
 
-<Tabs>
-  <Tab title="Oracle">
-```sql
-CREATE TABLE log_PolicyCapture (
-  id VARCHAR2(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP,
-  correlation_id VARCHAR2(255),
-  environment_id VARCHAR2(255),
-  api_proxy_id VARCHAR2(255),
-  api_proxy_name VARCHAR2(255),
-  proxy_method_id VARCHAR2(255),
-  proxy_method_name VARCHAR2(255),
-  username_or_key VARCHAR2(255),
-  status_code NUMBER(10),
-  result_type VARCHAR2(255),
-  error_type VARCHAR2(255),
-  from_client_ro_header CLOB,
-  from_client_ro_param CLOB,
-  from_client_ro_body CLOB,
-  capture_region VARCHAR2(50),
-  capture_location VARCHAR2(50)
-);
-```
-  </Tab>
-  <Tab title="MySQL/MariaDB">
-```sql
-CREATE TABLE log_PolicyCapture (
-  id VARCHAR(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP NULL,
-  correlation_id VARCHAR(255),
-  environment_id VARCHAR(255),
-  api_proxy_id VARCHAR(255),
-  api_proxy_name VARCHAR(255),
-  proxy_method_id VARCHAR(255),
-  proxy_method_name VARCHAR(255),
-  username_or_key VARCHAR(255),
-  status_code INT,
-  result_type VARCHAR(255),
-  error_type VARCHAR(255),
-  from_client_ro_header TEXT,
-  from_client_ro_param TEXT,
-  from_client_ro_body LONGTEXT,
-  capture_region VARCHAR(50),
-  capture_location VARCHAR(50)
-);
-```
-  </Tab>
-  <Tab title="PostgreSQL">
-```sql
-CREATE TABLE log_PolicyCapture (
-  id VARCHAR(255) PRIMARY KEY,
-  log_timestamp TIMESTAMP,
-  correlation_id VARCHAR(255),
-  environment_id VARCHAR(255),
-  api_proxy_id VARCHAR(255),
-  api_proxy_name VARCHAR(255),
-  proxy_method_id VARCHAR(255),
-  proxy_method_name VARCHAR(255),
-  username_or_key VARCHAR(255),
-  status_code INTEGER,
-  result_type VARCHAR(255),
-  error_type VARCHAR(255),
-  from_client_ro_header TEXT,
-  from_client_ro_param TEXT,
-  from_client_ro_body TEXT,
-  capture_region VARCHAR(50),
-  capture_location VARCHAR(50)
-);
-```
-  </Tab>
-  <Tab title="SQL Server">
-```sql
-CREATE TABLE log_PolicyCapture (
-  id NVARCHAR(255) PRIMARY KEY,
-  log_timestamp DATETIME2,
-  correlation_id NVARCHAR(255),
-  environment_id NVARCHAR(255),
-  api_proxy_id NVARCHAR(255),
-  api_proxy_name NVARCHAR(255),
-  proxy_method_id NVARCHAR(255),
-  proxy_method_name NVARCHAR(255),
-  username_or_key NVARCHAR(255),
-  status_code INT,
-  result_type NVARCHAR(255),
-  error_type NVARCHAR(255),
-  from_client_ro_header NVARCHAR(MAX),
-  from_client_ro_param NVARCHAR(MAX),
-  from_client_ro_body NVARCHAR(MAX),
-  capture_region NVARCHAR(50),
-  capture_location NVARCHAR(50)
-);
-```
-  </Tab>
-</Tabs>
-
-| Column | Description |
-|--------|-------------|
-| id | Record identifier |
-| log_timestamp | Time the log record was created |
-| correlation_id | Correlation identifier |
-| environment_id | Environment identifier |
-| api_proxy_id | API Proxy identifier |
-| api_proxy_name | API Proxy name |
-| proxy_method_id | Method identifier |
-| proxy_method_name | Method name |
-| username_or_key | Username or API key |
-| status_code | HTTP response status code |
-| result_type | Processing result |
-| error_type | Error type |
-| from_client_ro_header | Headers from the client (JSON) |
-| from_client_ro_param | Query parameters from the client (JSON) |
-| from_client_ro_body | Request body from the client |
-| capture_region | Pipeline stage where the policy ran: `FROM_CLIENT`, `TO_BACKEND`, `FROM_BACKEND`, `TO_CLIENT` |
-| capture_location | Level at which the policy was defined: `API_PROXY_GROUP` (Group), `API_PROXY` (Proxy), `API_PROXY_METHOD` (Method) |
-
 <Info>
-Header and parameter fields (`from_client_ro_header`, `from_client_ro_param`) are stored in JSON format. Each record contains an array of key-value pairs.
+The `correlation_id` column links request and response rows of the same call. When the log policy is placed at multiple pipeline stages (for example, `FROM_CLIENT` and `TO_CLIENT`), records can be joined on `correlation_id` to trace a transaction end to end. The index on this column is therefore strongly recommended.
 </Info>
 
-### Recommended Indexes
-
-Since log records can grow to large volumes over time, creating the following indexes is recommended to improve query performance.
-
-The index on the `correlation_id` column is particularly important. When the log policy is placed at different points in the pipeline (for example, `FROM_CLIENT` and `TO_CLIENT`), the request and response records of the same call share the same `correlation_id` value. This allows request and response records to be joined on `correlation_id` to trace a transaction end to end.
-
-<Tabs>
-  <Tab title="Oracle">
-```sql
-CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
-CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
-CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
-CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
-```
-  </Tab>
-  <Tab title="MySQL/MariaDB">
-```sql
-CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
-CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
-CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
-CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
-```
-  </Tab>
-  <Tab title="PostgreSQL">
-```sql
-CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
-CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
-CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
-CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
-```
-  </Tab>
-  <Tab title="SQL Server">
-```sql
-CREATE INDEX idx_logpolicy_correlation ON log_PolicyCapture(correlation_id);
-CREATE INDEX idx_logpolicy_timestamp ON log_PolicyCapture(log_timestamp);
-CREATE INDEX idx_logpolicy_proxy ON log_PolicyCapture(api_proxy_id);
-CREATE INDEX idx_logpolicy_region ON log_PolicyCapture(capture_region);
-```
-  </Tab>
-</Tabs>
-
-| Index | Purpose |
-|-------|---------|
-| `idx_logpolicy_correlation` | Join request and response records of the same call on `correlation_id` |
-| `idx_logpolicy_timestamp` | Filter by time range and produce time-based reports |
-| `idx_logpolicy_proxy` | List records belonging to a specific API Proxy |
-| `idx_logpolicy_region` | Filter by pipeline stage (`FROM_CLIENT`, `TO_CLIENT`, etc.) |
-
 <Tip>
-To display the request and response side by side, you can self-join the table on `correlation_id` and use `capture_region` as the discriminator. For example:
-
-```sql
-SELECT req.correlation_id, req.from_client_ro_body AS request_body, res.from_client_ro_body AS response_body
-FROM log_PolicyCapture req
-JOIN log_PolicyCapture res ON req.correlation_id = res.correlation_id
-WHERE req.capture_region = 'FROM_CLIENT' AND res.capture_region = 'TO_CLIENT';
-```
+For high-traffic APIs, we recommend configuring the log policy in **Asynchronous** mode so that database write latency does not block the request pipeline.
 </Tip>
-
-<Tip>
-Since log tables accumulate time-series data at high volumes, applying **daily partitioning** on the `log_timestamp` column is recommended. With daily partitioning, deleting old records via `DROP PARTITION` becomes nearly instantaneous and time-range queries scan only the relevant partitions.
-
-Partition syntax varies by database:
-
-- **Oracle**: Use `PARTITION BY RANGE (log_timestamp) INTERVAL (NUMTODSINTERVAL(1, 'DAY'))` for automatic daily partition creation.
-- **PostgreSQL**: Define `PARTITION BY RANGE (log_timestamp)` and create a child table for each day (e.g., `log_PolicyCapture_20260421`).
-- **MySQL/MariaDB**: Use `PARTITION BY RANGE (TO_DAYS(log_timestamp))`. The partition key must be part of the PRIMARY KEY.
-- **SQL Server**: Define a partition function and partition scheme for daily ranges; new partitions are typically added via a scheduled job.
-</Tip>
-
-### MongoDB
-
-When using the MongoDB connector, no table creation is needed. Data is automatically written to the `log_policycapture` collection.
 
 ## Privacy Settings
 
-When privacy is enabled in the log policy, header, parameter, and body data matching the specified field names are masked. This feature can be used to meet data protection requirements such as GDPR.
+<img src="/images/develop/politikalar/log-3.png" alt="Log policy privacy settings" width="1000" />
 
-Masking is applied **before** data is sent to connectors. Connector-level privacy settings are applied separately and independently.
+You can configure privacy settings at the policy level so that sensitive data is processed before being written to the log record.
+
+| Operation | Description |
+|-----------|-------------|
+| Mask | Partially hides the sensitive data (e.g. `****1234`) |
+| Delete | Completely removes the sensitive data |
+| Hash | Converts the sensitive data to a one-way hash value |
+| Encrypt | Encrypts the sensitive data |
+
+<Info>
+Privacy settings are applied at two levels: first the policy-level settings, then the connector-level settings. If both levels are enabled, each is applied in sequence.
+</Info>
+
+Masking is applied **before** data is sent to connectors. Connector-level privacy settings are applied separately and independently. This feature can be used to meet data protection requirements such as GDPR.
+
+## Usage Scenarios
+
+| Scenario | Description | Recommended Mode |
+|----------|-------------|------------------|
+| Before/after transformation comparison | Add a log policy before and after a transformation policy to observe message changes | Asynchronous |
+| Debugging | Add a temporary log point to the pipeline to inspect the input and output of a specific policy | Synchronous |
+| Audit trail | Keep a full record of each request on sensitive APIs | Asynchronous |
+| Multi-target logging | Send the same message to Elasticsearch and Kafka simultaneously | Asynchronous |
+| Conditional logging | Log only requests matching a specific header value or path | Asynchronous |
+
+## Related Pages
+
+- [Message Flow and Policy Management](/en/develop/policies/message-flow-and-policy-management)
+- [API Proxy Traffic Log Settings](/en/develop/api-proxy-configuration/api-traffic-log-settings)
+- [Connectors](/en/integrations/connectors/overview)
+- [Adding Connectors to Gateway Environments](/en/admin/server-management/adding-connectors-to-gateway-environments)
 
 ## Deleting the Policy
 
-For the steps to delete this policy and the actions to be taken when it is in use, see the [Deleting a Policy](/en/concepts/core-concepts/what-is-policy#deleting-a-policy) section on the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
+For the steps to delete this policy and the actions to be taken when it is in use, see the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
 
 ## Exporting/Importing the Policy
 
-For the export steps and available options for this policy, see the [Exporting/Importing a Policy](/en/concepts/core-concepts/what-is-policy#exportingimporting-a-policy) section on the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
+For the export steps and available options for this policy, see the [What is a Policy?](/en/concepts/core-concepts/what-is-policy) page.
 
 ## Attaching the Policy to an API
 
-For the process of attaching this policy to APIs, see the [Attaching a Policy to an API](/en/develop/api-proxy-configuration/policy-management#adding-a-policy-to-the-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
+For the process of attaching this policy to APIs, see the [Adding Policy to Flow](/en/develop/api-proxy-configuration/policy-management#adding-policy-to-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Script Policy" icon="code" href="/en/develop/policies/script">
+    Transform data with custom scripts
+  </Card>
+  <Card title="API Call Policy" icon="arrow-right-arrow-left" href="/en/develop/policies/api-call">
+    Make external API calls inside the pipeline
+  </Card>
+</CardGroup>
