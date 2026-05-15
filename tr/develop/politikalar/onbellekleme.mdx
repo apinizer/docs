@@ -1,0 +1,174 @@
+---
+title: "Önbellekleme (Cache)"
+description: "Politika zinciri içinde sık erişilen verileri cache'le, cache'ten oku ve gerektiğinde temizle. Distributed veya yerel cache desteği ile performansı artırın ve backend yükünü azaltın"
+---
+
+<Tip>
+Bu doküman spesifik bir politikanın detaylı kullanımını anlatır. Eğer Apinizer politika yapısını ilk kez kullanıyorsanız veya politikaların genel çalışma prensiplerini öğrenmek istiyorsanız, öncelikle [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasını okumanızı öneririz.
+</Tip>
+
+## Genel Bakış
+
+Cache politikası, politika zinciri içinde bağımsız cache okuma, yazma ve silme işlemlerini gerçekleştirir. Bu politika, API Çağrısı politikasının kendi içindeki cache mekanizmasından (response cache) farklı olarak, geliştiriciye açık şekilde ne zaman cache'e erişileceğini, ne yazılacağını ve ne silineceğini kontrol etme yetkisi verir. Böylece sık değişmeyen veriler (currency rates, user profiles, configuration settings gibi) politika akışında dinamik olarak yönetilebilir.
+
+### Amacı Nedir?
+
+- Backend servis yükünü azaltarak sistem performansını artırmak.
+- API yanıt sürelerini kısaltmak: Cache hit'te arka uçta sorgu yapılmaz.
+- Expensive (pahalı) computation veya API çağrılarının sonuçlarını saklayarak tekrar yapılmasını önlemek (örneğin, kolay değişmeyen ürün kataloğu, döviz kurları).
+- Politika zinciri içinde veri dönüşümleri sırasında geçici verileri cache'lemek.
+- Dinamik cache invalidation (geçersizleştirme) ile cache kontrolünü esnek tutmak.
+
+## Çalışma Prensibi
+
+Cache politikası üç ana operasyonu destekler:
+
+### 1. LOOKUP (Oku)
+
+Cache'teki bir entry'i arar. Hit ise hedef Variable'a yazılır ve kalan politika akışına normalde devam edilir (veya Optional exit yapılabilir). Miss ise akış devam eder, Variable'a yazılmaz.
+
+- **Cache Key**: Aranacak entry'nin anahtarı (variable interpolation destekli: `user:#{request.userId}`, `currency:${ENV_CURRENCY}`)
+- **Target Variable**: Hit durumunda cache değerinin yazılacağı Variable
+- **Hash Key** (İsteğe bağlı): Anahtarı MD5/SHA256 ile hash'le (uzun anahtarlar için)
+- **TTL Kaynağı**: Dinamik (runtime Variable'dan) veya sabit
+
+### 2. POPULATE (Yaz)
+
+Cache'e bir entry yazılır. Değer bir Variable kaynağından alınır.
+
+- **Source Variable**: Cache'e yazılacak değerin kaynağı (bir Variable)
+- **Cache Key**: Entry'nin kaynağında kaydedileceği anahtar
+- **Hash Key** (İsteğe bağlı): Anahtarı hash'le
+- **TTL Seçenekleri**:
+  - **Sabit TTL**: Belirli saniye (örn: `300` = 5 dakika)
+  - **Dinamik TTL**: Bir Variable'dan okunur (örn: `#{response.cacheExpiry}`)
+
+### 3. INVALIDATE (Sil)
+
+Cache'ten bir entry'i siler. Örneğin, veri güncellemesi sonrasında eski cache'i temizlemek.
+
+- **Cache Key**: Silinecek entry'nin anahtarı
+- **Hash Key** (İsteğe bağlı): Anahtarı hash'le
+
+## Özellikler ve Yetenekler
+
+### Temel Özellikler
+
+- **Üç İşlem Tipi**: LOOKUP, POPULATE, INVALIDATE'i ayrı ayrı veya ihtiyaca göre kombinleyen senaryolar destekle.
+- **Variable Interpolation**: Cache key'de `${}` (Environment Variable) ve `#{}` (Context/Runtime Variable) kullanımı.
+  - Örnek: `user:#{request.userId}` → runtime'da `user:123` olur
+  - Örnek: `currency:${ENV_REGION}` → `currency:EUR` olur
+- **Hash Key Seçeneği**: Anahtarı MD5 veya SHA256 ile hash'le (uzun anahtarları normalize etmek için).
+- **Distributed vs Local Cache**: Platform yöneticisi tarafından tanımlanan cache seçimi. Distributed (Hazelcast, Redis benzeri) veya Local (JVM in-memory) desteği.
+- **Dinamik TTL**: Yazılan entry'nin TTL'si, response body'deki bir alan veya Variable'dan okunabilir.
+
+### İleri Düzey Özellikler
+
+- **Cache Bağlantısı Timeout'u** (`cacheConnectionTimeoutInSeconds`): Cache servisine bağlantı süresi limit'i. Ayar bulunamazsa varsayılan kullanılır.
+- **Hata İşleme** (`errorAction`):
+  - **CONTINUE**: Cache erişim hatası → hata yok sayılır, akış devam eder (Variable yazılmaz veya boş kalır)
+  - **FAULT**: Cache erişim hatası → politika fail'ler, hata yanıtı üretilir
+- **Condition Desteği**: Koşul kuralları ile bu politika sadece belirli durumlarda çalışabilir.
+- **Export/Import**: Politika yapılandırması ZIP dosyası olarak dışa aktarılabilir.
+- **Deploy ve Versiyonlama**: Değişiklikleri canlı ortama deploy etme, kullanım raporları.
+
+## Kullanım Senaryoları
+
+| **Senaryo** | **Durum** | **Çözüm (Politika Uygulaması)** | **Beklenen Davranış** |
+|:------------|:----------|:---------------------------------|:-------------------------------|
+| **Sık Sorgulan Kur Bilgisi** | Döviz kurları 5 dakikada bir güncellenir ancak her istek'te sorgulanmaktadır | LOOKUP: `cache_key=currency:#{request.currencyPair}` → Target: `fetched.rate` (cache variable'ı). Hit ise yanıt 100ms. Miss ise Backend API çağrısı, POPULATE ile 5 dakika cache'le | İlk istek backend'e gider, sonraki 5 dakika cache'ten yanıt verilir. 5 dakika sonra otomatik expire, yeniden backend'e gider. |
+| **Kullanıcı Profili Caching** | Profil API'si slow, aynı userId için art arda 10 istek | LOOKUP: `cache_key=user:#{request.userId}` → Target: `userProfile`. Hit: hemen yanıt. Miss: Backend çağrısı → response body'sini Variable'a yazma → POPULATE: `cache_key=user:#{request.userId}`, `source=userProfile`, TTL=600 | İlk userId=5 için backend çağrısı, 10 dakika cache'lenir. userId=6 yeni cache entry. |
+| **Veri Güncelleme Sonrası Cache Temizliği** | Ürün güncelleme API'sine POST yapıldı, eski cache geçersiz hale geldi | Routing sonrasında hata handler'da INVALIDATE: `cache_key=product:#{request.productId}` | Update başarılı olursa cache silinir, sonraki istek'te yeni veri çekilir. |
+| **Async İşlem Sonucu Caching** | Ticket oluşturma API'si yanıt 2 saniye. Ticket ID'si 1 saat statik kalıyor | POPULATE: `source=createdTicket`, `cache_key=ticket:#{createdTicket.id}`, `TTL=3600` | Sonraki identical ticket sorgusunda cache'ten yanıt, API yapılmaz. |
+| **Koşullu Caching** | Premium user'lar için hızlı yanıt, normal user'lar cache'siz | Condition: `Header=X-User-Tier, Equals=PREMIUM` ile LOOKUP/POPULATE. Normal user: Condition fail → politika skip | Premium user cache'den 50ms, normal user backend'den 500ms |
+| **Multi-Level Cache** | Kurumsal ayarlar nadiren değişir, global cache + user-specific override | LOOKUP 1: `cache_key=config:#{request.tenantId}` (organization config). Hit ise continue. LOOKUP 2: `cache_key=config-override:#{request.userId}` (user override). Hit ise latter wins | Global config cache + per-user override mekanizması, ikinci LOOKUP'da override varsa onu kullanır. |
+
+## Politika Parametrelerini Yapılandırma
+
+Bu adımda, kullanıcı **yeni bir Cache politikası oluşturabilir** ya da **mevcut politika parametrelerini yapılandırarak** cache işlemlerini tanımlayabilir.
+
+### Yeni Cache Politikası Oluşturma
+
+{/* TODO_SCREENSHOT: Cache politikası oluşturma ekranı — Operation dropdown (LOOKUP/POPULATE/INVALIDATE), Cache Set Name, Cache Key, Target/Source Variable, TTL, Error Action alanlarının görüldüğü tam form. Dosya adı: cache-politika-1.png */}
+<Frame>
+  <img src="/images/develop/politikalar/cache-politika-1.png" alt="Cache Politikası Yapılandırma" width="1000" />
+</Frame>
+
+### Yapılandırma Adımları
+
+| **Adım** | **Açıklama / İşlem** |
+|:---------|:---------------------|
+| **Adım 1: Oluşturma Sayfasına Gitme** | - Sol menüden **Development → Global Settings → Global Policies → Cache** bölümüne gidin.<br />- Sağ üstteki **[+ Create]** butonuna tıklayın. |
+| **Adım 2: Temel Bilgileri Girme** | **Policy Status (Politika Durumu):** Aktif/Pasif durumu gösterir. Yeni politikalar varsayılan olarak aktiftir.<br /><br />**Name (İsim) Zorunlu:**<br />Örnek: `User_Profile_Cache`<br />- Benzersiz isim girin, boşlukla başlamaz.<br />- Sistem otomatik kontrol eder. Yeşil tik: kullanılabilir. Kırmızı çarpı: mevcut isim.<br /><br />**Description (Açıklama):**<br />Örnek: "Kullanıcı profil bilgilerini 10 dakika cache'ler"<br />- Maks. 1000 karakter.<br />- Politikanın amacını açıklayın. |
+| **Adım 3: Operation Seçimi ve Temel Ayarları** | **Operation (İşlem) Zorunlu:**<br />Dropdown'dan seçin:<br />- **LOOKUP:** Cache'ten oku<br />- **POPULATE:** Cache'e yaz<br />- **INVALIDATE:** Cache'ten sil<br /><br />**Cache Set Name (Cache Seti) Zorunlu:**<br />Platform yöneticisinin tanımladığı cache seçimi. Örnek: `Distributed Cache` veya `Local Cache`<br />- Dropdown'dan seçin. Tanımlı cache yoksa sistem uyarı gösterir.<br /><br />**Cache Key Zorunlu:**<br />Anahtar expression. Variable interpolation destekli.<br />Örnek: `user:#{request.userId}`<br />Örnek: `currency:${ENV_REGION}:${current.date}`<br />- Runtime'da her iki söz dizimi de çözülür. |
+| **Adım 4: Operation-Spesifik Ayarlar** | **LOOKUP Seçiliyse:**<br /><br />**Target Variable (Hedef Değişken) Zorunlu:**<br />Cache'ten okunan değer bu Variable'a yazılır.<br />Örnek: `fetched.userProfile`<br />- Variable listesinden seçin veya adını yazın.<br /><br />**Dynamic TTL (İsteğe bağlı):**<br />Toggle ile etkinleştirin. Etkin olduğunda, response body'deki bir alanın TTL olarak kullanılabileceğini belirtir.<br />- **TTL Source Variable:** JSONPath/XPath ile okunan TTL değeri. Örnek: `$.cacheExpiry`<br />- **TTL Format:** `ISO_8601`, `UNIX_EPOCH_SECONDS`, `UNIX_EPOCH_MILLIS`, `DURATION_STRING` (örn: `1h`, `300s`)<br />- **Offset (saniye):** TTL'den güvenlik payı çıkarma. Örnek: `30` (30 saniye erken expire)<br />- **Fallback TTL:** Parse hatası durumunda kullanılacak sabit TTL (saniye)<br /><br />**---**<br /><br />**POPULATE Seçiliyse:**<br /><br />**Source Variable (Kaynak Değişken) Zorunlu:**<br />Cache'e yazılacak değerin kaynağı.<br />Örnek: `fetched.userProfile` (backend'den gelen response'u cache'le)<br />- Variable listesinden seçin.<br /><br />**TTL Configuration Zorunlu:**<br /><br />**TTL Type:**<br />- **Fixed TTL:** Sabit saniye. Örnek: `300` (5 dakika)<br />- **Dynamic TTL:** Bir Variable'dan oku. Örnek: `#{response.ttl}`<br />- **Dynamic TTL with Source:** response body'deki alan. Örnek: JSONPath `$.expireAt` (ISO tarih döner), format: `ISO_8601`<br /><br />**---**<br /><br />**INVALIDATE Seçiliyse:**<br /><br />Herhangi bir ek alan yok. Cache Key otomatik silinir. |
+| **Adım 5: Hash Key (İsteğe Bağlı)** | **Use Hash Key:**<br />Toggle ile etkinleştirin.<br />- Aktif: Anahtar MD5/SHA256 ile hash'lenir (uzun anahtarları normalize etmek için)<br />- Pasif: Anahtar olduğu gibi kullanılır<br /><br />**Hash Algorithm:**<br />- MD5 (daha hızlı, çakışma riski düşük)<br />- SHA256 (daha güvenli, daha ağır) |
+| **Adım 6: Hata İşleme (Cache Settings)** | **Cache Connection Timeout (saniye):**<br />Cache servisine bağlanma timeout'u. Varsayılan: 5 saniye.<br />- Örnek: `10` (10 saniye)<br /><br />**Error Action (Hata İşleme):**<br />Cache erişim hatası durumunda davranış:<br />- **CONTINUE:** Hata yok sayılır, akış devam eder. Target Variable yazılmaz veya boş kalabilir.<br />- **FAULT:** Hata üretilir, politika fail'ler. Hata yanıtı istemciye döner.<br /><br />Seçim: Backend cache yoksa CONTINUE, kritik data ise FAULT. |
+| **Adım 7: Condition (İsteğe Bağlı)** | - **Condition** sekmesine geçin.<br />- Politikanın sadece koşul sağlandığında çalışması isteniyor ise tanımlayın.<br /><br />**Örnek:**<br />- Header = `X-Cache-Enabled`, Operator = `Equals`, Value = `true` → cache sadece bu header varsa çalışır<br />- Path = `/api/products/*` → ürün endpoint'leri için cache active |
+| **Adım 8: Hata Mesajı Özelleştirme (İsteğe Bağlı)** | - **Error Message Customization** sekmesine gidin.<br />- Cache politikası başarısız olduğunda (Error Action=FAULT) dönecek özel mesajı ayarlayın.<br /><br />**Varsayılan:**<br />`{ "statusCode": 500, "message": "Cache operation failed" }`<br /><br />**Özel:**<br />`{ "statusCode": 503, "errorCode": "CACHE_UNAVAILABLE", "message": "Cache hizmet şu anda erişilemez" }` |
+| **Adım 9: Kaydetme** | - Sağ üstteki **[Save]** butonuna tıklayın.<br /><br />**Kontrol Listesi:**<br />- Benzersiz isim<br />- Operation seçili<br />- Cache Set Name seçili<br />- Cache Key dolu<br />- LOOKUP'ta Target Variable dolu<br />- POPULATE'te Source Variable ve TTL dolu<br /><br />**Sonuç:**<br />- Politika listeye eklenir.<br />- API'lere bağlanabilir.<br />- Global politikaysa otomatik uygulanır. |
+
+## Politikayı Silme
+
+Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Politikayı Silme](/tr/concepts/temel-kavramlar/politika-nedir#politikayı-silme) bölümüne bakabilirsiniz.
+
+## Politikayı Dışa/İçe Aktarma
+
+Bu politikanın dışa aktarma (Export) adımları ve kullanılabilecek seçenekler için [Politika Nedir?](/tr/concepts/temel-kavramlar/politika-nedir) sayfasındaki [Politikayı Dışa/İçe Aktarma](/tr/concepts/temel-kavramlar/politika-nedir#politikayı-dışa-içe-aktarma) bölümüne bakabilirsiniz.
+
+## Politikayı API'ye Bağlama
+
+Bu politikanın API'lere nasıl bağlanacağına ilişkin süreç için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Politikayı API'ye Bağlama](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akisa-politika-ekleme) bölümüne bakabilirsiniz.
+
+## İleri Düzey Özellikler
+
+| **Özellik** | **Açıklama ve Adımlar** |
+|:------------|:------------------------|
+| **Cache Key Interpolation** | Cache key'de environment ve context variable'lar kullanarak dinamik anahtar oluşturun.<br />- Environment: `cache_key=user:data:${env.region}` (region'a göre farklı cache)<br />- Context: `cache_key=quote:#{request.quoteId}:#{current.date}` (quote ID + tarih kombinasyonu)<br />- Runtime'da otomatik çözümlenir. |
+| **Multi-Operation Chain (Zincir)** | Aynı API Proxy'de birden fazla Cache politikası ile veri akışı oluşturun.<br />- LOOKUP 1: Global config cache<br />- LOOKUP 2: User-specific override<br />- Backend call (miss ise)<br />- POPULATE: Sonucu cache'le |
+| **TTL Management** | Sabit ve dinamik TTL kombinasyonu:<br />- **Sabit:** `300` saniye (all entries same TTL)<br />- **Dinamik:** Response'daki `$.expiresAt` alanından TTL hesapla<br />- **Offset:** Saat farkı / ağ gecikmesi telafi et (örn: `offset=30`) |
+| **Conditional Caching** | Sadece belirli durumlarda cache aktif:<br />- Condition: `Header=X-Cache-Control, Equals=enable`<br />- Error Action: `CONTINUE` → cache erişim hatası yok say, flow devam et<br />- Cost optimization: Production'da all, staging'de none |
+
+## İpuçları ve En İyi Uygulamalar
+
+### Yapılması Gerekenler ve En İyi Uygulamalar
+
+| **Kategori** | **Açıklama / Öneriler** |
+|:-------------|:-------------------------|
+| **Cache Key Tasarımı** | **Kötü:** Generic key: `data`, `cache` (çakışma riski)<br />**İyi:** Spesifik key: `user:123:profile`<br />**En İyi:** Namespace + ID + qualifier: `user:#{request.userId}:profile:v2` (versioning) |
+| **TTL Ayarı** | **Kötü:** Çok uzun TTL (24 saat) - Stale data<br />**İyi:** Veri güncellenme sıklığına göre (saat → 3600s, dakika → 300s)<br />**En İyi:** Dinamik TTL + offset. Response'daki TTL okuyarak, offset=30s ile erken expire. |
+| **Hata İşleme** | **Kötü:** Cache fail → API fail (ERROR_ACTION=FAULT her durumda)<br />**İyi:** Non-critical data: CONTINUE, kritik data: FAULT<br />**En İyi:** Cache unavailable ama API çalışıyor: CONTINUE, user feedback yapılmaz. |
+| **Cache vs Load** | **Kötü:** Tüm endpoint'ler cache (unnecessary memory)<br />**İyi:** Sık sorgulan, sık değişmeyen veriler (products, config)<br />**En İyi:** Analytics + usage patterns → cache Only high-volume + low-change data |
+| **Cache Distribution** | **Kötü:** Local cache (single node, cluster'da sync sorun)<br />**İyi:** Distributed cache (Hazelcast, Redis)<br />**En İyi:** Admin'in seçtiği cache strategy'yi politika level'de override etme, global config'e uy. |
+
+## Güvenlik En İyi Uygulamaları
+
+| **Güvenlik Alanı** | **Açıklama / Uyarılar** |
+|:-------------------|:------------------------|
+| **Hassas Veri Caching** | **Uyarı:** Password, API key, token gibi hassas veri cache'lenmemelidir.<br />**Öneri:** Sensitive data için NEVER cache. Variable'ı öncelikle verify et: `source=userProfile` → body'de password yok mu?<br />**Kritik:** Eğer source'da hassas field varsa INVALIDATE politikasıyla cache sonrası temizle. |
+| **Cache Key Injection** | **Uyarı:** İstemci-supplied input'u doğrudan cache key'ye yazma.<br />**Öneri:** Cache key'yi normalize et. Örn: `user:#{sanitize(request.param)}`<br />**Kritik:** Cache key collision riskini düşür → hash key enable et. |
+| **TTL Risk** | **Uyarı:** Çok uzun TTL, stale authorized data serve edilmesi riski.<br />**Öneri:** Authentication-related data: kısa TTL (60-300 saniye)<br />**Kritik:** Logout sonrasında credential cache'i INVALIDATE et. |
+| **Cache Exhaustion / DoS** | **Uyarı:** Attacker çok sayıda unique key produce ederse cache dolar (memory exhaustion).<br />**Öneri:** Cache capacity limit set et (platform admin). Politika level'de CONTINUE error action kullan.<br />**Kritik:** Rate limiting + cache key validation ile DoS koruması. |
+
+## Sık Sorulan Sorular (SSS)
+
+| **Kategori** | **Soru** | **Cevap** |
+|:-------------|:----------|:--------------|
+| **Genel** | Cache politikası ile API Call politikasının cache'i arasındaki fark nedir? | **API Call cache:** Response cache, politika içinde otomatik. **Cache politikası:** Bağımsız LOOKUP/POPULATE/INVALIDATE, geliştiriciye kontrol verir. İki mekanizma birbirinden bağımsız çalışabilir. |
+| **Genel** | Aynı API'de birden fazla Cache politikası kullanabilir miyim? | Evet. Örn: LOOKUP user profile → miss ise backend → POPULATE. Sonra LOOKUP user permissions → miss ise backend → POPULATE. Aynı veya farklı cache set'ler kullanılabilir. |
+| **Teknik** | Hash Key neleri çözer? | Çok uzun cache key'leri (URL'ler, JSON expression'lar) normalize eder. MD5/SHA256 hash ile anahtar sabit boyuta getirilir, cache storage'ı optimize eder. Cache hit/miss oranında fark yoktur, sadece memory efficiency. |
+| **Teknik** | Dynamic TTL'de parse hatası olursa ne olur? | Variable'dan okuma başarısız veya format yanlış ise Fallback TTL kullanılır. Fallback tanımlanmazsa, politika tasarımında tanımlanan sabit TTL (varsa) kullanılır. Hiçbiri yoksa cache'e yazılır ama default system TTL ile. |
+| **Kullanım** | LOOKUP'ta hit varsa akışın sonrasında ne olur? | Hit varsa Target Variable'a yazılır, akış normal devam eder (politika skip değil). Eğer immediate exit isteniyor ise Condition + Set Variable ile kuruş kontrol yapılabilir. |
+| **Kullanım** | INVALIDATE işlemi sırasında key bulunamazsa hata mı? | Hayır. Cache'te key yoksa INVALIDATE silinmiş sayılır, hata dönmez. Error Action bu durumda geçerli değildir (success tarafında). |
+| **Hata** | Cache bağlantı timeout hatası alıyorum. Nedir? | Cache servisine TCP bağlantı bağlanalamıyor. Kontrol: Cache sunucusu ayakta mı? Network firewall? Timeout değeri çok düşük mü (artırın)? Error Action=CONTINUE ile hata yok sayılabilir. |
+| **Hata** | Cache'e yazma başarılı ama okuma miss dönüyor. Nedir? | Cache key farklı olabilir. POPULATE'deki key vs LOOKUP'taki key eşit mi? Variable interpolation'ın runtime'da aynı değer dönüp dönmediğini kontrol et. Örn: `user:#{request.userId}` — userId değişiyor mu? |
+| **Performans** | Cache politikası overhead'i ne kadardır? | Minimal. Typical: 2-5ms (LOOKUP/POPULATE/INVALIDATE). Distributed cache: +3-10ms network latency. Distributed cache hit: 5-20ms. Backend call: 100-5000ms (hit savings önemli). |
+
+## Performans İpuçları
+
+| **Kriter** | **Öneri / Etki** |
+|:-----------|:-----------------|
+| **Cache Hit Ratio** | **Öneri:** Cache key tasarımını optimize et. Aynı logical entity için aynı key kullan. hit ratio %80+ hedefi.<br />**Etki:** Hit %80 → backend call %80 azalır. Response time 10-100x hızlanır. |
+| **TTL Tuning** | **Öneri:** Data update frequency'ye göre TTL ayarla. Örn: Currency rates 5 min, User profile 10 min, Config 1 hour.<br />**Etki:** Çok kısa TTL: miss artış. Çok uzun TTL: stale data. Optimal TTL: hit + freshness balance. |
+| **Distributed vs Local** | **Öneri:** Single node: local cache. Multi-node cluster: distributed cache (consistency).<br />**Etki:** Local: hızlı (in-process), Distributed: yavaş (RPC) ama cluster-wide consistency. |
+| **Error Action Tuning** | **Öneri:** Critical path: ERROR_ACTION=FAULT. Non-critical: CONTINUE.<br />**Etki:** FAULT: safe fail, user feedback. CONTINUE: graceful degrade, backend fallback. |
