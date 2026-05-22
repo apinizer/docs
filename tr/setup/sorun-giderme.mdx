@@ -1,0 +1,210 @@
+---
+title: "Sorun Giderme"
+description: "Apinizer kurulumlarında karşılaşılan yaygın sorunlar ve çözümleri. Kubernetes, Docker ve Sanal Sunucu kurulumları için ayrı bölümler."
+---
+
+Apinizer'ın Kubernetes, Docker ve Sanal Sunucu kurulumlarında karşılaşılabilecek sorunların tanı ve çözüm rehberidir. Kurulum tipinize göre uygun sekmeyi seçerek sorununuzu bulabilirsiniz.
+
+<Tabs>
+  <Tab title="Docker">
+    ## API Manager Sorun Giderme
+
+    ### Konteyner `URI is not set` veya `DATABASE is not set` ile exit oluyor
+
+    Zorunlu env var boş. Değerleri verip yeniden oluşturun. `?replicaSet=…&authSource=…` shell quoting'ine dikkat — `-e SPRING_DATA_MONGODB_URI="…"` çift tırnaklı veya env-file ile geçirin.
+
+    ### Health endpoint `503 OUT_OF_SERVICE` dönüyor
+
+    MongoDB erişilemez durumda. Konteyner içinden test:
+
+    ```bash
+    docker exec -it apinizer-apimanager sh -lc \
+      "wget -qO- $SPRING_DATA_MONGODB_URI" 2>&1 | head
+    ```
+
+    ### Host 32 GB olduğu hâlde log'da `Memory tier: 1GB (heap 50%…)` görünüyor
+
+    `--memory` / `mem_limit` vermediniz. Cgroup default'u `max` ve auto-tuner host belleğine düşer. `mem_limit`'i konteynerin gerçekten kullanmasını istediğiniz değere set edin.
+
+    ### MongoDB bağlantısı timeout
+
+    - Ağ erişimini doğrulayın: `docker exec apinizer-apimanager sh -lc 'nc -zv mongo 25080'`.
+    - URI'da `replicaSet=` ve `authSource=` doğru mu?
+    - MongoDB'ye TLS gerekiyorsa `&tls=true` ekleyin ve CA dosyasını mount edin.
+
+    ## Worker Sorun Giderme
+
+    ### `APINIZER_ENVIRONMENT_NAME` uyuşmazlığı → konteyner başlıyor ama proxy yüklenmiyor
+
+    İsim Manager UI'daki bir Environment ile case-sensitive eşleşmiyorsa proxy snapshot çekilmez ve her istek 404 döner. Çözüm: env var'ı düzeltin veya Environment oluşturun.
+
+    ### `UnsatisfiedLinkError: brotli`
+
+    Alpine üzerinde custom build çalıştırıyorsunuz. Resmi `apinizercloud/worker` (Ubuntu noble) imajına geri dönün.
+
+    ### `EMFILE: too many open files`
+
+    `docker run`'a `--ulimit nofile=1048576:1048576` ekleyin. Host tarafında `/etc/security/limits.conf` / daemon'un `LimitNOFILE` değerinin de izin verdiğinden emin olun.
+
+    ## Cache Sorun Giderme
+
+    ### Peer listesi doğru ama her node `Members {size:1}` görüyor
+
+    - `HAZELCAST_CLUSTER_NAME` her node'da case-sensitive eşleşiyor mu?
+    - `5701/tcp` her iki yönde erişilebilir mi: konteyner içinden `nc -zv <peer-ip> 5701`.
+    - NAT arkasında çoklu host kurulumu (cloud) için TCP/IP discovery routable, simetrik adres ister.
+
+    ### Quota'lar beklenmedik sıfırlanıyor
+
+    `CACHE_QUOTA_TIMEZONE` değeri Worker / Manager timezone'undan farklı. Hepsi aynı olmalı.
+
+    ## Integration Sorun Giderme
+
+    ### Quartz job beklenen zamanda fire olmadı
+
+    - `INTEGRATION_TIMEZONE`'ı Manager'daki cron expression'a göre kontrol edin.
+    - Çoklu Integration node'ları farklı timezone'larla tutarsız fire oluşturur.
+
+    ### Hard kill sonrası `Locked by another scheduler` ile exit
+
+    Önceki konteyner trigger ortasında SIGKILL aldı. Yeni konteynerin lock-recovery sweep'i başlangıçta stale row'u temizler; gerekiyorsa bir `clusterCheckin` cycle bekleyin (default 7.5 s).
+
+    ### Manager UI Integration'ı **offline** gösteriyor
+
+    Manager `http://<integration-host>:8092/`'a erişemiyor. Manager UI'daki host/port, firewall ve Integration konteynerinin boot sequence'ini bitirip bitirmediğini doğrulayın.
+
+    ## API Portal Sorun Giderme
+
+    ### Konteyner sürekli restart, log'da `API_PORTAL_ID is not set`
+
+    Zorunlu env var boş. Üçünü de verin: `API_PORTAL_ID`, `API_PORTAL_MANAGEMENT_API_BASE_URL`, `API_PORTAL_MANAGEMENT_API_KEY`.
+
+    ### Ana sayfa `502 Bad Gateway` dönüyor
+
+    Portal Manager REST API'ye erişemiyor. Konteyner içinden kontrol:
+
+    ```bash
+    docker exec apinizer-apiportal sh -lc \
+      "wget --header='X-Apinizer-Api-Key: $API_PORTAL_MANAGEMENT_API_KEY' \
+            -qO- $API_PORTAL_MANAGEMENT_API_BASE_URL/api/portal/v1/ping"
+    ```
+
+  </Tab>
+
+  <Tab title="Sanal Sunucu">
+    ## API Manager Sorun Giderme
+
+    ### Servis "is not set" hatasıyla anında çıkıyor
+
+    `conf/application.env`'deki `SPRING_DATA_MONGODB_URI` veya `SPRING_DATA_MONGODB_DATABASE` boş. Dosyayı edit edin ve şifrelemeyi tekrar çalıştırın.
+
+    ### `/tmp` üzerinde "Read-only file system" hatası
+
+    systemd unit hardening (`ProtectSystem=strict`) servise izole `/tmp` sağlar (`PrivateTmp=true`). Unit'i değiştirip `PrivateTmp`'i kaldırdıysanız Undertow `/tmp/undertow-docbase.*` dizini oluşturamaz. `PrivateTmp=true`'yu geri ekleyin, sonra `daemon-reload` ve `restart` çalıştırın.
+
+    ### Encryption "Master key file not found" hatası veriyor
+
+    `apimanager-install.sh` hiç çalıştırılmadı veya çalıştırıldı ama key oluşmadı. Tekrar çalıştırın:
+
+    ```bash
+    sudo /opt/apinizer-manager/bin/apimanager-install.sh
+    ```
+
+    ### MongoDB bağlantısı timeout oluyor
+
+    - MongoDB ana bilgisayarlarının erişilebilir olduğunu doğrulayın: `nc -zv host 25080`
+    - Replica set adı ve `authSource` doğru mu?
+    - TLS gerekiyorsa URI'a `&tls=true` (ve gerekli CA seçenekleri) ekleyin.
+
+    ## Gateway Sorun Giderme
+
+    ### Servis "is not set" hatasıyla anında çıkıyor
+
+    `conf/apinizer-worker.env`'deki `SPRING_DATA_MONGODB_URI` veya `SPRING_DATA_MONGODB_DATABASE` boş. Dosyayı edit edin ve şifrelemeyi tekrar çalıştırın.
+
+    ### `/tmp` üzerinde "Read-only file system" hatası
+
+    systemd hardening (`ProtectSystem=strict`) servise izole `/tmp` sağlar. Unit'i değiştirip `PrivateTmp`'i kaldırdıysanız Undertow temporary scratch dosyaları oluşturamaz. `PrivateTmp=true`'yu geri ekleyin, sonra `daemon-reload` ve `restart` çalıştırın.
+
+    ### Encryption "Master key file not found" hatası
+
+    `apiworker-install.sh` hiç çalıştırılmadı. Tekrar çalıştırın:
+
+    ```bash
+    sudo /opt/apinizer-worker/bin/apiworker-install.sh
+    ```
+
+    ### `EMFILE: too many open files` hatası
+
+    Gateway yüksek sayıda eş zamanlı soket'e bağlıdır. systemd unit zaten `LimitNOFILE=1048576` içerir. systemd dışında çalışıyorsanız `/etc/security/limits.d/` ayarlayın.
+
+    ### MongoDB bağlantısı timeout oluyor
+
+    - MongoDB ana bilgisayarlarının erişilebilir olduğunu doğrulayın: `nc -zv host 25080`
+    - Replica set adı ve `authSource` doğru mu?
+    - TLS gerekiyorsa URI'a `&tls=true` (ve gerekli CA seçenekleri) ekleyin.
+
+    ### Gateway portu dinlemiyor
+
+    Gateway **yalnızca Manager'da deploy edilen Gateway Runtime'ları için** listener port'ları açar. Manager UI'da hiçbir Gateway Runtime bu Worker'a deploy edilmişse port açılmaz. Manager'dan en az bir Gateway Runtime deploy edin.
+
+    ## Ortak Sorunlar (Tüm Kurulum Tipleri)
+
+    ### MongoDB Bağlantısı Problemi
+
+    Tüm modüller MongoDB'ye bağlı; bağlantı sorunu başlatmak engeller:
+
+    ```bash
+    # Bağlantı kontrolü
+    nc -zv <mongodb-host> 25080
+
+    # Replica set kontrolü
+    mongosh "mongodb://<host>:25080" --eval "rs.status()"
+
+    # AuthSource doğrulaması
+    mongosh "mongodb://user:pass@<host>:25080/?authSource=admin" --eval "db.version()"
+    ```
+
+    ### Master Key Sorunu
+
+    ```
+    [ERROR] ENC(...) values found but master.key is missing
+    ```
+
+    Install komutunu tekrar çalıştırın. Eski ENC(...) değerleri yeni key ile çözülemeyeceğini unutmayın; plaintext olarak geri girin ve yeniden şifreleyin.
+
+    ### Port Çatışması
+
+    Bir port zaten kullanımda ise `conf/*.env`'de `SERVER_PORT` veya Gateway için `WORKER_PORTS` değiştirin:
+
+    ```bash
+    SERVER_PORT=8081  # Manager için alternatif port
+    ```
+
+    ### Disk Alanı Yetmezliği
+
+    Log'lar `/opt/<modül>/logs/` altında birikirken `/opt` bölümü dolabilir:
+
+    ```bash
+    # Log dizin boyutunu kontrol edin
+    du -sh /opt/apinizer-*/logs/
+
+    # Eski log'ları temizleyin (opsiyonel, logrotate bunu otomatik yapar)
+    find /opt/apinizer-*/logs/ -name "*.log" -mtime +30 -delete
+    ```
+
+    ### Firewall Kuralları
+
+    Modüller arası iletişim için firewall port'larını açın:
+
+    - **Manager → MongoDB**: `25080/tcp`
+    - **Gateway → MongoDB**: `25080/tcp`
+    - **Gateway → Cache**: `5701/tcp` (Hazelcast), `8090/tcp` (REST)
+    - **Manager → Integration**: `8092/tcp`
+    - **Manager → Cache** (opsiyonel): `8090/tcp`
+    - **Client → Manager**: `8080/tcp` (HTTP) veya `8443/tcp` (HTTPS)
+    - **Client → Gateway**: `8091/tcp` (HTTP), `8443/tcp` (HTTPS), `50051/tcp` (gRPC)
+    - **Client → Portal**: `8080/tcp` (HTTP)
+
+  </Tab>
+</Tabs>

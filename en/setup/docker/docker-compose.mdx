@@ -1,0 +1,249 @@
+---
+title: "Docker Compose — All-in-One"
+description: "Single docker-compose.yml that brings up all 5 Apinizer modules (Manager, Portal, Worker, Cache, Integration) and a MongoDB sidecar for evaluation."
+---
+
+This page shows a single `docker-compose.yml` that brings up the **full Apinizer stack** in one host. It is intended for:
+
+- Evaluation / PoC
+- Developer machines
+- Internal demos
+
+<Warning>
+This compose is **not** production-ready as-is. For production you would split MongoDB onto a dedicated replica set, replace plaintext secrets with Docker Secrets / a secret manager, terminate TLS at a reverse proxy, and size resources for your traffic. Use the per-module guides for production deployments.
+</Warning>
+
+## Layout
+
+```
+apinizer-stack/
+├── docker-compose.yml
+├── .env                       # version + mongo creds (gitignore)
+└── secrets/
+    ├── apimanager.env         # SPRING_DATA_MONGODB_URI=…
+    ├── apiportal.env          # API_PORTAL_MANAGEMENT_API_KEY=…
+    ├── apiworker.env
+    ├── apicache.env
+    └── apiintegration.env
+```
+
+## `.env`
+
+```dotenv
+VERSION=2026.04.5
+MONGO_ROOT_USER=apinizer
+MONGO_ROOT_PASSWORD=changeme-please
+TIMEZONE_OFFSET=+03:00
+TIMEZONE_IANA=Europe/Istanbul
+```
+
+## `docker-compose.yml`
+
+```yaml
+name: apinizer
+
+services:
+  # ---------------------------------------------------------------
+  # MongoDB (single-node for evaluation; use a replica set in prod)
+  # ---------------------------------------------------------------
+  mongo:
+    image: mongo:7
+    container_name: apinizer-mongo
+    restart: unless-stopped
+    command: ["mongod", "--port", "25080"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "25080:25080"
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "25080", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ---------------------------------------------------------------
+  # API Manager
+  # ---------------------------------------------------------------
+  apimanager:
+    image: apinizercloud/apimanager:${VERSION}
+    container_name: apinizer-apimanager
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    mem_limit: 4g
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+    env_file:
+      - ./secrets/apimanager.env
+    volumes:
+      - apimanager-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  # ---------------------------------------------------------------
+  # Cache (Hazelcast)
+  # ---------------------------------------------------------------
+  cache:
+    image: apinizercloud/cache:${VERSION}
+    container_name: apinizer-cache
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    mem_limit: 4g
+    ports:
+      - "5701:5701"
+      - "8090:8090"
+    environment:
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      CACHE_QUOTA_TIMEZONE: "${TIMEZONE_OFFSET}"
+      HAZELCAST_CLUSTER_NAME: apnz-hz-cluster
+    env_file:
+      - ./secrets/apicache.env
+    volumes:
+      - cache-logs:/app/logs
+
+  # ---------------------------------------------------------------
+  # Worker (Gateway)
+  # ---------------------------------------------------------------
+  worker:
+    image: apinizercloud/worker:${VERSION}
+    container_name: apinizer-worker
+    restart: unless-stopped
+    depends_on:
+      apimanager:
+        condition: service_healthy
+      cache:
+        condition: service_started
+    mem_limit: 8g
+    cpus: 4
+    ports:
+      - "8091:8091"
+      - "8443:8443"
+    environment:
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      APINIZER_ENVIRONMENT_NAME: prod-dc1
+      WORKER_TIMEZONE: "${TIMEZONE_OFFSET}"
+      JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+    env_file:
+      - ./secrets/apiworker.env
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - worker-logs:/app/logs
+
+  # ---------------------------------------------------------------
+  # Integration (Quartz)
+  # ---------------------------------------------------------------
+  integration:
+    image: apinizercloud/integration:${VERSION}
+    container_name: apinizer-integration
+    restart: unless-stopped
+    depends_on:
+      apimanager:
+        condition: service_healthy
+    mem_limit: 2g
+    stop_grace_period: 120s
+    ports:
+      - "8092:8092"
+    environment:
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      INTEGRATION_TIMEZONE: "${TIMEZONE_IANA}"
+      SPRING_PROFILES_ACTIVE: prod
+    env_file:
+      - ./secrets/apiintegration.env
+    volumes:
+      - integration-logs:/app/logs
+
+  # ---------------------------------------------------------------
+  # API Portal
+  # ---------------------------------------------------------------
+  apiportal:
+    image: apinizercloud/apiportal:${VERSION}
+    container_name: apinizer-apiportal
+    restart: unless-stopped
+    depends_on:
+      apimanager:
+        condition: service_healthy
+    mem_limit: 2g
+    ports:
+      - "8081:8080"
+    environment:
+      API_PORTAL_ID: portal-prod-01
+      API_PORTAL_MANAGEMENT_API_BASE_URL: http://apimanager:8080
+      SPRING_PROFILES_ACTIVE: prod
+    env_file:
+      - ./secrets/apiportal.env
+    volumes:
+      - apiportal-logs:/app/logs
+
+volumes:
+  mongo-data:
+  apimanager-logs:
+  cache-logs:
+  worker-logs:
+  integration-logs:
+  apiportal-logs:
+```
+
+## Bring-up order
+
+```bash
+# 1. Start MongoDB and wait for it to be healthy
+docker compose up -d mongo
+
+# 2. Start the Manager — it runs the Mongock migrations
+docker compose up -d apimanager
+docker compose logs -f apimanager   # wait for "Started ApinizerManagerApp"
+
+# 3. Create the Portal record + API key in the Manager UI
+#    (http://localhost:8080 — default admin password is set on first start;
+#    see Manager logs for the prompt). Put the API key into secrets/apiportal.env:
+#    API_PORTAL_MANAGEMENT_API_KEY=<copied-key>
+
+# 4. Create an Environment named "prod-dc1" in the Manager UI
+#    (Server Management → Environments) so the Worker can bind to it.
+
+# 5. Bring up the rest
+docker compose up -d cache worker integration apiportal
+```
+
+<Tip>
+The Portal and Worker depend on the Manager being **bootstrapped** (Portal ID issued, Environment created). The compose's `depends_on` only waits for healthcheck — manual steps in the Manager UI must happen between step 2 and step 5.
+</Tip>
+
+## Operations
+
+```bash
+docker compose ps                # status
+docker compose logs -f apimanager
+docker compose restart worker
+docker compose down              # stop everything (keeps volumes)
+docker compose down -v           # stop and DELETE volumes (full reset)
+```
+
+## Where to go next
+
+For production:
+
+- [API Manager](/en/setup/docker/apimanager) — sizing, networking, TLS, upgrades
+- [Worker](/en/setup/docker/apiworker) — load-test sizing, multi-replica setup
+- [Cache](/en/setup/docker/apicache) — multi-node cluster
+- [Integration](/en/setup/docker/apiintegration) — HA with clustered Quartz
+- [API Portal](/en/setup/docker/apiportal) — TLS termination, horizontal scale
+
+For the upgrade workflow: [Upgrading on Docker](/en/upgrade/upgrading-on-docker).

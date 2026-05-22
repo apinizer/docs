@@ -1,0 +1,116 @@
+---
+title: "Cache (Hazelcast) — Linux / VM"
+description: "Apinizer Cache (Hazelcast data grid) modülünü, gömülü OpenJDK 25 runtime, sudo tabanlı installer ve Jasypt ile şifrelenmiş MongoDB credential'ları içeren standalone bir Linux servisi olarak kurun."
+---
+
+Bu rehber Apinizer Cache (quota, OIDC session, circuit-breaker state ve client-flow banner'ları besleyen Hazelcast data grid) standalone paketinin Linux sunucuya kurulumunu anlatır.
+
+<Info>
+Standalone mod otomatik tespit edilir — Kubernetes service-account namespace dosyası yoksa Cache Hazelcast discovery'sini TCP/IP'ye çevirir.
+</Info>
+
+## Gereksinimler
+
+- Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+
+- sudo yetkisi
+- Erişilebilir Manager-managed MongoDB
+- Açık portlar:
+  - `5701/tcp` — Hazelcast wire (member-to-member, Worker → Cache)
+  - `8090/tcp` — Spring Boot HTTP (Worker → Cache REST)
+
+## 1. İndir + Aç
+
+```bash
+VERSION=2026.04.5
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/apinizer-cache-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-cache-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-cache-${VERSION} /opt/apinizer-cache
+```
+
+## 2. Yapılandır
+
+`conf/apinizer-cache.env`'i edit edin:
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı |
+| `CACHE_QUOTA_TIMEZONE` | Quota window timezone (örn. `+03:00`). Worker ve Manager ile **eşleşmeli** |
+
+<Info>
+`HAZELCAST_CLUSTER_NAME` varsayılan değeri `apnz-hz-cluster`. Aynı LAN'da birden fazla bağımsız Apinizer kurulumu yoksa olduğu gibi bırakın. Worker ile uyumsuzluk **sessiz split-brain**'e yol açar.
+</Info>
+
+### Tek node vs çoklu node
+
+Tek node için ek ayar gerekmez. Çoklu node için her node'da aynı peer listesini set edin:
+
+```bash
+APINIZER_CACHE_CLUSTER_MEMBERS=10.0.0.11,10.0.0.12,10.0.0.13
+```
+
+<Tip>
+TCP/IP discovery **simetriktir** — her node aynı IP listesini listelemeli, yoksa cluster oluşmaz.
+</Tip>
+
+## 3. Installer + Şifreleme
+
+```bash
+sudo /opt/apinizer-cache/bin/apicache-install.sh
+sudo -u apinizer /opt/apinizer-cache/bin/apicache-encrypt.sh
+```
+
+## 4. Servisi başlat
+
+```bash
+sudo systemctl start apinizer-apicache
+sudo systemctl status apinizer-apicache
+sudo journalctl -u apinizer-apicache -f
+```
+
+Beklenen log:
+
+```
+Cache running in STANDALONE mode (cluster: apnz-hz-cluster)
+Standalone Hazelcast cluster members: 10.0.0.11,10.0.0.12,10.0.0.13
+Members {size:3, ver:3} [
+    Member [10.0.0.11]:5701 - ...
+    Member [10.0.0.12]:5701 - ...
+    Member [10.0.0.13]:5701 - ...
+]
+```
+
+Tek member görünüyorsa `5701/tcp` firewall ve peer listesi tutarlılığını kontrol edin.
+
+## 5. Worker'ları Cache'e bağla
+
+Her Worker:
+
+- **Aynı** Hazelcast cluster adını kullanmalı
+- Her Cache node'una `5701/tcp` ile erişebilmeli
+
+Worker tarafında ek ayar gerekmez — sadece cluster adlarını senkron tutun.
+
+## Manuel kontrol
+
+```bash
+sudo -u apinizer /opt/apinizer-cache/bin/apicache-start.sh           # background
+sudo -u apinizer /opt/apinizer-cache/bin/apicache-start.sh -f        # foreground
+sudo -u apinizer /opt/apinizer-cache/bin/apicache-stop.sh
+```
+
+## Sorun Giderme
+
+### Her node `Members {size:1}` görüyor
+
+- `HAZELCAST_CLUSTER_NAME` her node'da case-sensitive eşleşiyor mu?
+- `5701/tcp` her iki yönde erişilebilir mi: `nc -zv <peer-ip> 5701` her node'dan.
+- Cloud / NAT arkasında: routable, simetrik adres ister.
+
+### Quota'lar tutarsız sıfırlanıyor
+
+`CACHE_QUOTA_TIMEZONE` Worker / Manager ile farklı. Hepsi aynı olmalı.

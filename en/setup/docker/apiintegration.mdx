@@ -1,0 +1,167 @@
+---
+title: "Integration (Quartz) — Docker"
+description: "Run the Apinizer Integration (Quartz-based task-flow scheduler) as a Docker container."
+---
+
+This guide walks through running the Apinizer **Integration** tier — the Quartz scheduler that runs task flows registered by the Manager — as a Docker container. The Integration container reads task-flow / connector definitions from MongoDB and stores its Quartz job state in `schedule_integration_*` collections.
+
+<Info>
+The Integration is **stateless beyond MongoDB**: every Quartz lock, trigger, calendar and job-status row lives in MongoDB. Restart the container as often as you like — running jobs may be interrupted, but no scheduling state is lost.
+</Info>
+
+## Requirements
+
+- A Linux x86-64 host with Docker Engine 24+
+- The **same** MongoDB instance used by the Manager
+- A free TCP port on the host (default `8092`) — restricted to the Manager's IP/CIDR
+
+## 1. Pull the image
+
+```bash
+VERSION=2026.04.5
+docker pull apinizercloud/integration:${VERSION}
+```
+
+## 2. Configure
+
+Required:
+
+| Variable | Description |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string — same instance the Manager uses |
+| `SPRING_DATA_MONGODB_DATABASE` | MongoDB database name — must match the Manager database |
+| `INTEGRATION_TIMEZONE` | IANA zone id (e.g. `Europe/Istanbul`). Must match Manager and Worker timezone. |
+
+Optional:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SERVER_PORT` | `8092` | Spring Boot HTTP port |
+| `SPRING_PROFILES_ACTIVE` | `prod` | Keep on production hosts |
+| `JAVA_OPTS` | empty | Extra JVM flags |
+| `LOG_LEVEL` | `INFO` | Application log level |
+
+## 3. Run the container
+
+```bash
+docker run -d \
+  --name apinizer-integration \
+  -p 8092:8092 \
+  --memory=2g \
+  --stop-timeout=120 \
+  -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+  -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+  -e INTEGRATION_TIMEZONE='Europe/Istanbul' \
+  -e SPRING_PROFILES_ACTIVE=prod \
+  -v apinizer-integration-logs:/app/logs \
+  --restart unless-stopped \
+  apinizercloud/integration:${VERSION}
+```
+
+<Warning>
+Use `--stop-timeout=120` (or `stop_grace_period: 120s` in compose). Quartz is configured with `waitForJobsToCompleteOnShutdown=true`, so a SIGTERM triggers a clean drain. Without the extended grace, Docker kills with SIGKILL after 10 s and in-flight task flows are cut mid-step.
+</Warning>
+
+Expected boot log:
+
+```
+Integration timezone set to: Europe/Istanbul
+Initializing Custom MongoDB Job Store
+Quartz Scheduler Prod Environment Setup started
+MongoDB connection established for Quartz Job Store
+Tomcat started on port 8092 (http)
+```
+
+## 4. docker-compose
+
+```yaml
+services:
+  integration:
+    image: apinizercloud/integration:2026.04.5
+    container_name: apinizer-integration
+    restart: unless-stopped
+    mem_limit: 2g
+    stop_grace_period: 120s
+    ports:
+      - "8092:8092"
+    environment:
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      INTEGRATION_TIMEZONE: Europe/Istanbul
+      SPRING_PROFILES_ACTIVE: prod
+    env_file:
+      - ./secrets/integration.env
+    volumes:
+      - integration-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8092/management/health | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  integration-logs:
+```
+
+## 5. Multi-node / HA
+
+Multiple Integration containers can share the **same MongoDB database** — they form a clustered Quartz scheduler automatically. Each instance:
+
+- Auto-generates its `org.quartz.scheduler.instanceId`
+- Locks triggers via `schedule_integration_locks` so the same job never fires on two nodes at once
+- Recovers misfired jobs on startup
+
+<Tip>
+Run at least two Integration containers when you have time-critical scheduled flows.
+</Tip>
+
+## 6. Wire the Manager to the Integration
+
+In the Manager UI (`Admin → Integration Servers`) add each Integration container's hostname/IP and the HTTP port (`8092`). The Manager pushes job register/unregister and cache-refresh events via REST.
+
+## 7. Verify
+
+```bash
+curl -fsS http://127.0.0.1:8092/management/health
+```
+
+Check the cluster picture from MongoDB:
+
+```javascript
+use apinizer
+db.schedule_integration_scheduler_state.find().pretty()
+```
+
+Each Integration node should have an entry with a recent `last_checkin_time`.
+
+## 8. Operations
+
+| Action | Command |
+| --- | --- |
+| Status | `docker ps --filter name=apinizer-integration` |
+| Logs | `docker logs -f apinizer-integration` |
+| Restart (drain Quartz) | `docker restart -t 120 apinizer-integration` |
+| Stop (drain Quartz) | `docker stop -t 120 apinizer-integration` |
+
+## 9. Resources
+
+| Workload | `mem_limit` |
+| --- | --- |
+| Few flows, light cadence | 1 GB |
+| Production (typical install) | 2 GB |
+| Heavy / many concurrent flows | 4 GB |
+
+## Troubleshooting
+
+### Quartz job didn't fire at the expected time
+
+- Check `INTEGRATION_TIMEZONE` against the cron expression in the Manager.
+- Multiple Integration nodes with mismatched timezones cause inconsistent fires.
+
+### Container exits with `Locked by another scheduler` after a hard kill
+
+The previous container was SIGKILLed mid-trigger. The new container's lock-recovery sweep clears the stale row on startup; wait one `clusterCheckin` cycle (default 7.5 s) if needed.
+
+### Manager UI shows Integration as **offline**
+
+The Manager cannot reach `http://<integration-host>:8092/`. Verify the host/port in Manager UI, firewall, and that the Integration container has finished its boot sequence.

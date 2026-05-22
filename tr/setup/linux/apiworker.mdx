@@ -1,0 +1,121 @@
+---
+title: "Worker (Gateway) — Linux / VM"
+description: "Apinizer Worker (Gateway) modülünü, gömülü OpenJDK 25 runtime, sudo tabanlı installer ve Jasypt ile şifrelenmiş MongoDB credential'ları içeren standalone bir Linux servisi olarak kurun."
+---
+
+Bu rehber Apinizer Worker (API Gateway runtime) standalone paketinin Linux sunucuya kurulumunu anlatır. Worker HTTP / HTTPS / gRPC / WebSocket trafiğini sonlandırır, deploy edilmiş proxy policy pipeline'larını çalıştırır.
+
+<Info>
+Installer sudo yetkisi gerektirir; interaktif root login gerekmez.
+</Info>
+
+## Gereksinimler
+
+- Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+
+- sudo yetkisi
+- Erişilebilir Manager-managed MongoDB
+- Manager UI'da kayıtlı bir **Environment**
+
+## 1. İndir + Aç
+
+```bash
+VERSION=2026.04.5
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/apinizer-worker-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-worker-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-worker-${VERSION} /opt/apinizer-worker
+```
+
+## 2. Yapılandır
+
+`conf/apinizer-worker.env`'i edit edin:
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı |
+| `APINIZER_ENVIRONMENT_NAME` | Manager UI'daki Environment ile **birebir** (case-sensitive) eşleşmeli |
+| `WORKER_TIMEZONE` | Timezone offset (örn. `+03:00`) |
+
+Üretim için önerilen JVM ayarları:
+
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+```
+
+Undertow tuning (opsiyonel): `tuneWorkerThreads`, `tuneIoThreads`, `tuneBufferSize`, `tuneDirectBuffers`, `tuneBacklog`.
+
+## 3. Installer + Şifreleme
+
+```bash
+sudo /opt/apinizer-worker/bin/apiworker-install.sh
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-encrypt.sh
+```
+
+## 4. Sistem limitleri
+
+Worker yüksek throughput için host limitlerini gerektirir:
+
+```bash
+# /etc/security/limits.d/apinizer-worker.conf
+apinizer soft nofile 1048576
+apinizer hard nofile 1048576
+```
+
+systemd unit'i de `LimitNOFILE=1048576` taşır.
+
+## 5. Servisi başlat
+
+```bash
+sudo systemctl start apinizer-apiworker
+sudo systemctl status apinizer-apiworker
+sudo journalctl -u apinizer-apiworker -f
+```
+
+Beklenen boot log:
+
+```
+ApiGateway standalone=true (env: prod-dc1)
+HTTP listener bound: 0.0.0.0:8091
+HTTPS listener bound: 0.0.0.0:8443    (Environment HTTPS açıksa)
+Loaded N proxies for environment prod-dc1
+```
+
+## 6. Doğrula
+
+```bash
+curl -fsS http://127.0.0.1:8091/server-status
+```
+
+## Çoklu Worker (yatay ölçeklendirme)
+
+Aynı paketi **aynı** `APINIZER_ENVIRONMENT_NAME` ile her node'a kurun. Quota / OIDC session / circuit-breaker state **Apinizer Cache** üzerinden paylaşılır — Cache cluster'a tüm Worker'lar bağlanmalı.
+
+## Manuel kontrol
+
+```bash
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh           # background
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh -f        # foreground
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-stop.sh
+```
+
+<Warning>
+Drain için `systemctl stop` kullanın — script SIGTERM gönderir, 60 saniyeye kadar drain bekler. Aksi takdirde in-flight HTTP / gRPC / WebSocket istekleri kesilebilir.
+</Warning>
+
+## Sorun Giderme
+
+### Worker başlıyor ama proxy yüklenmiyor
+
+`APINIZER_ENVIRONMENT_NAME` Manager UI'daki Environment ile **birebir** eşleşmiyor. İsmi düzeltin veya Environment'ı oluşturun.
+
+### `EMFILE: too many open files`
+
+Sistem limit'leri yetersiz. `/etc/security/limits.d/` altında `nofile=1048576` ayarladıktan sonra Worker'ı yeniden başlatın.
+
+### Yüksek latency, GC pressure
+
+JVM ayarlarına bakın. Üretimde load test yapmadan `JAVA_OPTS`, `tuneWorkerThreads` değişikliği önerilmez.

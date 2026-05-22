@@ -1,0 +1,159 @@
+---
+title: "API Portal — Docker"
+description: "Run Apinizer API Portal as a Docker container that talks to the Apinizer Manager REST API. Image is built on Eclipse Temurin 25 with cgroup-aware JVM tuning."
+---
+
+This guide walks through running the Apinizer **API Portal** as a Docker container. The Portal is the developer-facing UI: it lists APIs, manages subscriptions, and renders documentation. It connects to the Apinizer **Manager** REST API for data — there is **no direct MongoDB connection** from the Portal.
+
+<Info>
+The Portal is stateless: every container restart is safe and you can run multiple replicas behind a load balancer for horizontal scale.
+</Info>
+
+## Requirements
+
+- A Linux x86-64 host with Docker Engine 24+
+- A reachable Apinizer Manager instance and a valid Manager API key
+- A free TCP port on the host (default `8080`; remap to `8081` on the host if you co-locate with the Manager)
+
+## 1. Pull the image
+
+```bash
+VERSION=2026.04.5
+docker pull apinizercloud/apiportal:${VERSION}
+```
+
+## 2. Register the Portal in the Manager
+
+Before the container can boot, register the Portal once in the Manager UI:
+
+1. **Portal → Portals → Create** in the Manager UI. Note the generated **Portal ID**.
+2. **Portal → API Keys → Generate** and copy the API key value (it is shown only once).
+
+## 3. Configure
+
+Required:
+
+| Variable | Description |
+| --- | --- |
+| `API_PORTAL_ID` | Portal identifier from step 2 |
+| `API_PORTAL_MANAGEMENT_API_BASE_URL` | Manager REST API base URL (e.g. `https://manager.example.com`) |
+| `API_PORTAL_MANAGEMENT_API_KEY` | Manager API key from step 2 |
+
+Optional:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SERVER_PORT` | `8080` | HTTP port inside the container |
+| `SPRING_PROFILES_ACTIVE` | `prod` | Keep on production hosts |
+| `SSL_ENABLED` | `false` | Set `true` to terminate TLS inside the container |
+| `JAVA_OPTS` | empty | Extra JVM flags |
+
+## 4. Run the container
+
+```bash
+docker run -d \
+  --name apinizer-apiportal \
+  -p 8081:8080 \
+  --memory=2g \
+  -e API_PORTAL_ID='portal-prod-01' \
+  -e API_PORTAL_MANAGEMENT_API_BASE_URL='https://manager.example.com' \
+  -e API_PORTAL_MANAGEMENT_API_KEY='<api-key>' \
+  -e SPRING_PROFILES_ACTIVE=prod \
+  -v apinizer-apiportal-logs:/app/logs \
+  --restart unless-stopped \
+  apinizercloud/apiportal:${VERSION}
+```
+
+<Tip>
+Map the container's `8080` to host `8081` if the API Manager already binds host `8080`.
+</Tip>
+
+## 5. docker-compose
+
+```yaml
+services:
+  apiportal:
+    image: apinizercloud/apiportal:2026.04.5
+    container_name: apinizer-apiportal
+    restart: unless-stopped
+    mem_limit: 2g
+    ports:
+      - "8081:8080"
+    environment:
+      API_PORTAL_ID: portal-prod-01
+      API_PORTAL_MANAGEMENT_API_BASE_URL: https://manager.example.com
+      SPRING_PROFILES_ACTIVE: prod
+    env_file:
+      - ./secrets/apiportal.env       # contains API_PORTAL_MANAGEMENT_API_KEY=…
+    volumes:
+      - apiportal-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  apiportal-logs:
+```
+
+## 6. Verify
+
+```bash
+curl -fsS http://127.0.0.1:8081/management/health
+```
+
+Open `http://<host>:8081/` in a browser. The first page load fetches the catalog from the Manager — if the Manager URL or API key are wrong you will see a 502/timeout banner.
+
+## 7. Operations
+
+| Action | Command |
+| --- | --- |
+| Status | `docker ps --filter name=apinizer-apiportal` |
+| Logs | `docker logs -f apinizer-apiportal` |
+| Restart | `docker restart apinizer-apiportal` |
+| Stop | `docker stop apinizer-apiportal` |
+
+## 8. TLS termination
+
+Two common patterns:
+
+1. **Reverse proxy in front (recommended)**: terminate TLS at nginx, Traefik, or a load balancer; keep `SSL_ENABLED=false`.
+2. **In-container TLS**: mount a PKCS#12 keystore and set:
+
+   ```yaml
+   environment:
+     SSL_ENABLED: "true"
+     SSL_KEY_STORE: /run/keystore/portal.p12
+     SSL_KEY_STORE_TYPE: PKCS12
+     SSL_KEY_STORE_PASSWORD: <password>
+     SSL_KEY_ALIAS: apinizer
+     SSL_PROTOCOLS: TLSv1.2,TLSv1.3
+   volumes:
+     - ./secrets/portal.p12:/run/keystore/portal.p12:ro
+   ```
+
+## 9. Multiple replicas
+
+The Portal is stateless. To run multiple replicas:
+
+- Give each replica the **same** `API_PORTAL_ID`.
+- Front them with a load balancer.
+- Sticky sessions are **not** required.
+
+## Troubleshooting
+
+### Container restarts in a loop with `API_PORTAL_ID is not set`
+
+A required env var is empty. Pass all three of `API_PORTAL_ID`, `API_PORTAL_MANAGEMENT_API_BASE_URL`, `API_PORTAL_MANAGEMENT_API_KEY`.
+
+### Home page returns `502 Bad Gateway`
+
+The Portal cannot reach the Manager REST API. Check from inside the container:
+
+```bash
+docker exec apinizer-apiportal sh -lc \
+  "wget --header='X-Apinizer-Api-Key: $API_PORTAL_MANAGEMENT_API_KEY' \
+        -qO- $API_PORTAL_MANAGEMENT_API_BASE_URL/api/portal/v1/ping"
+```

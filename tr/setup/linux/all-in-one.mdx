@@ -1,0 +1,610 @@
+---
+title: "All-in-One Linux / VM Kurulumu"
+description: "Apinizer çekirdek modüllerini (Manager + Cache + Worker + opsiyonel Integration) tek sayfada Linux / VM üzerinde gömülü OpenJDK 25 + Jasypt master key ile kurun. API Portal kurulumu ayrı sayfada."
+---
+
+Bu sayfa Apinizer'ın çekirdek modüllerinin Linux / VM üzerinde standalone paket olarak kurulumunu tek yerde gösterir. Her modül kendi gömülü **OpenJDK 25** ile gelir — host'ta Java gerekmez. Hassas değerler (MongoDB connection URI vb.) **Jasypt master key** ile yerinde şifrelenir. **Sıra önemli**: önce Manager (kayıt + Environment), sonra Cache, sonra Worker. Integration sadece task-flow scheduler kullanılacaksa kurulur. **API Portal ayrı bir sayfada** kurulur — Manager kurulumundan sonra yapılır.
+
+<Tabs>
+  <Tab title="Genel Bakış">
+    Apinizer, gömülü OpenJDK 25 (Eclipse Temurin) ile birlikte gelen kendine yeten Linux paketleri olarak yayınlanır. Host'a Java kurmaya gerek yoktur. Paketler regüle ortamlara (banka, kamu, savunma) ve container runtime'ı kısıtlanmış sistemlere uygundur.
+
+    <Info>
+    Kurulum sudo erişimi ile yapılır — **interaktif root login gerekmez**. Bu, root SSH'in kapalı olduğu sıkılaştırılmış ortamlarla uyumludur (finans ve regüle sektörlerde yaygın).
+    </Info>
+
+    ## Önerilen Kurulum Sırası
+
+    1. **MongoDB** (önceden kurulu olmalı — bkz. [MongoDB Kurulumu](/tr/setup/mongodb/ubuntu-mongodb))
+    2. **API Manager** → MongoDB bağlantısı, Mongock migration'ları
+    3. **Worker** → Manager'dan Environment alır
+    4. **Cache** → Hazelcast cluster (Worker quota/OIDC/CB kullanacaksa)
+    5. **Integration** *(opsiyonel)* → Quartz scheduler, Manager'a register edilir
+    6. **API Portal** → Manager REST API'sine bağlanır
+
+    ## Ortak Paket Yapısı
+
+    Her modülün paketi aynı yapıdadır:
+
+    ```
+    apinizer-<modul>-<version>/
+    ├── bin/
+    │   ├── <modul>-start.sh       # Tier-aware JVM tuning + env load
+    │   ├── <modul>-stop.sh
+    │   ├── <modul>-install.sh     # sudo-friendly installer
+    │   ├── <modul>-encrypt.sh     # Jasypt batch + tek-değer
+    │   └── apinizer-<modul>.service  # systemd unit
+    ├── conf/
+    │   ├── application.env        # Plaintext veya ENC(...) değerler
+    │   └── master.key             # Install scripti üretir (chmod 400)
+    ├── lib/
+    │   ├── apinizer-<modul>-<version>.jar   # Spring Boot fat jar
+    │   └── jasypt/jasypt-*.jar              # Encrypt CLI için
+    ├── runtime/                   # Gömülü Temurin JDK 25
+    └── logs/                      # Runtime'da yazılır
+    ```
+
+    ## Jasypt Master Key — Şifreli Yapılandırma
+
+    Linux paketinin Docker'dan en büyük farkı: **encryption-at-rest desteği**.
+
+    - `<modul>-install.sh` rastgele bir master key üretir: `conf/master.key` (chmod 400, apinizer kullanıcısına ait)
+    - `<modul>-encrypt.sh` zorunlu alanları yerinde `ENC(...)` ile şifreler
+    - `<modul>-start.sh` boot anında `ENC(...)` değerleri decrypt edip JVM'e plain olarak verir
+    - JVM hiçbir zaman ciphertext görmez; master key host filesystem'inden çıkmaz
+
+    Algoritma: `PBEWITHHMACSHA512ANDAES_256` (her değer için random IV/salt).
+
+    <Warning>
+    `conf/master.key` dosyasını secret vault'unuza yedekleyin. **Master key kaybolursa tüm `ENC(...)` değerleri kurtarılamaz**.
+    </Warning>
+
+    ## systemd Hardening
+
+    Tüm modüllerin service unit'leri aşağıdaki hardening flag'lerini kullanır:
+
+    ```ini
+    NoNewPrivileges=true
+    PrivateTmp=true              # ZORUNLU — Undertow /tmp kullanır
+    ProtectSystem=strict         # Tüm fs read-only
+    ProtectHome=true
+    ReadWritePaths=/opt/apinizer-<modul>/logs   # Sadece logs/ yazılabilir
+    ```
+
+    <Warning>
+    `PrivateTmp=true` `ProtectSystem=strict`'in olmazsa olmazıdır — kaldırılırsa Undertow `/tmp/undertow-docbase.*` yazamaz ve servis çöker.
+    </Warning>
+
+    ## sudo Delegasyonu
+
+    Müşteri sysadmin'i root login olmadan kurulum yapabilsin diye sudoers entry örneği:
+
+    ```
+    apinizer-admin ALL=(root) NOPASSWD: /opt/apinizer-<modul>/bin/<modul>-install.sh
+    ```
+
+    ## Ortak Gereksinimler
+
+    <CardGroup cols={2}>
+      <Card title="MongoDB Kurulumu" icon="database" href="/tr/setup/mongodb/ubuntu-mongodb">
+        Tüm modüller aynı MongoDB veritabanına bağlanır
+      </Card>
+      <Card title="Port Gereksinimleri" icon="network-wired" href="/tr/setup/kurulum-icin-erisim-ve-port-gereksinimleri">
+        Hangi modülün hangi portu kullandığı
+      </Card>
+      <Card title="Çevrimdışı Kurulum" icon="ban" href="/tr/setup/offline/ubuntu">
+        Air-gapped ortamlarda paket dağıtımı
+      </Card>
+    </CardGroup>
+
+    ## Güncelleme
+
+    Linux/VM üzerinde güncelleme için: [Linux Üzerinde Güncelleme](/tr/upgrade/linux-uzerinde-guncelleme)
+  </Tab>
+  <Tab title="1. API Manager">
+    API Manager standalone paketinin Linux sunucuya kurulumu. Paket tamamen kendine yeterli — host üzerinde Java **gerekmez**. Hassas değerler (MongoDB connection URI ve database adı) rastgele üretilmiş bir Jasypt master key ile yerinde şifrelenir.
+
+    <Info>
+    Installer sudo yetkisi gerektirir. **İnteraktif root login gerekmez** — root SSH'ın kapalı olduğu sıkılaştırılmış ortamlarla uyumludur (finans ve regüle sektörlerde yaygın).
+    </Info>
+
+    ## Gereksinimler
+
+    - Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+, Debian 11+, Oracle Linux 8+
+    - sudo yetkisine sahip bir operatör (root login gerekmez)
+    - `openssl`, `systemd`, `tar`, `curl` (genellikle önceden kurulu)
+    - Erişilebilir bir MongoDB instance (üretim için replica set önerilir)
+
+    ## 1. İndir
+
+    Son tarball'ı `packages.apinizer.com`'dan indirin:
+
+    ```bash
+    VERSION=2026.04.5
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/apimanager/${VERSION}/apinizer-apimanager-${VERSION}-linux-x64.tar.gz"
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/apimanager/${VERSION}/checksums.sha256"
+    sha256sum -c checksums.sha256
+    ```
+
+    ## 2. Aç
+
+    ```bash
+    sudo mkdir -p /opt
+    sudo tar -xzf apinizer-apimanager-${VERSION}-linux-x64.tar.gz -C /opt
+    sudo mv /opt/apinizer-apimanager-${VERSION} /opt/apinizer-manager
+    ```
+
+    Paket yapısı:
+
+    ```
+    /opt/apinizer-manager/
+    ├── bin/        # start / stop / install / encrypt + systemd unit
+    ├── conf/       # application.env (master.key installer üretir)
+    ├── lib/        # Spring Boot fat jar + lib/jasypt/ helper jar
+    ├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+    └── logs/       # Runtime log'ları (ilk başlangıçta oluşur)
+    ```
+
+    ## 3. Yapılandır
+
+    `conf/application.env` dosyasını edit edin ve **zorunlu** parametreleri verin:
+
+    ```bash
+    sudo vi /opt/apinizer-manager/conf/application.env
+    ```
+
+    | Anahtar | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string (örn. `mongodb://user:pass@host:25080/?replicaSet=rs0&authSource=admin`) |
+    | `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (örn. `apinizer`) |
+
+    Opsiyonel bölümler: SSL, server port, JVM tuning, log path.
+
+    <Warning>
+    Plaintext değerler bu noktada kabul edilir — henüz servisi başlatmayın. Bir sonraki adım değerleri yerinde şifreler.
+    </Warning>
+
+    ## 4. Installer'ı çalıştır
+
+    Installer; `apinizer` sistem kullanıcısı oluşturur, dosya izinlerini ayarlar, `conf/master.key` içinde rastgele Jasypt master key üretir ve systemd servisini kaydeder.
+
+    ```bash
+    sudo /opt/apinizer-manager/bin/apimanager-install.sh
+    ```
+
+    Root vermeden non-root operatöre delege etmek için sudoers entry:
+
+    ```
+    apinizer-admin ALL=(root) NOPASSWD: /opt/apinizer-manager/bin/apimanager-install.sh
+    ```
+
+    Install sonrası master key `apinizer:apinizer` sahipli, mod `400` — sadece servis kullanıcısı okuyabilir.
+
+    ## 5. Hassas değerleri şifrele
+
+    Encrypt helper'ı argümansız çalıştırarak standart alanları yerinde şifreleyin. Zaten şifrelenmiş (veya boş) değerler atlanır ve env dosyasının yanına timestamp'li bir backup yazılır.
+
+    ```bash
+    sudo -u apinizer /opt/apinizer-manager/bin/apimanager-encrypt.sh
+    ```
+
+    Şifrelenen alanlar:
+
+    - `SPRING_DATA_MONGODB_URI`
+    - `SPRING_DATA_MONGODB_DATABASE`
+
+    Sonuç (bash `source` parantezlere takılmasın diye değerler çift tırnaklı):
+
+    ```
+    SPRING_DATA_MONGODB_URI="ENC(eXq1J9z...kTu4=)"
+    SPRING_DATA_MONGODB_DATABASE="ENC(zMv3K7p...lQw9=)"
+    ```
+
+    ## 6. Servisi başlat
+
+    ```bash
+    sudo systemctl start apinizer-apimanager
+    sudo systemctl status apinizer-apimanager
+    sudo journalctl -u apinizer-apimanager -f
+    ```
+
+    Servis install anında enable edildiği için reboot sonrası da otomatik başlar.
+
+    ## 7. Doğrula
+
+    ```bash
+    curl -fsS http://127.0.0.1:8080/management/health
+    ```
+
+    Beklenen: `200 OK`.
+
+    ## Operasyon
+
+    <CardGroup cols={2}>
+      <Card title="Durum" icon="play">
+        `sudo systemctl status apinizer-apimanager`
+      </Card>
+      <Card title="Yeniden başlat" icon="rotate-right">
+        `sudo systemctl restart apinizer-apimanager`
+      </Card>
+      <Card title="Durdur" icon="stop">
+        `sudo systemctl stop apinizer-apimanager`
+      </Card>
+      <Card title="Loglar" icon="file-lines">
+        `sudo journalctl -u apinizer-apimanager -f`
+      </Card>
+    </CardGroup>
+
+    Manuel kontrol (systemd olmadan):
+
+    ```bash
+    sudo -u apinizer /opt/apinizer-manager/bin/apimanager-start.sh           # background
+    sudo -u apinizer /opt/apinizer-manager/bin/apimanager-start.sh -f        # foreground
+    sudo -u apinizer /opt/apinizer-manager/bin/apimanager-stop.sh
+    ```
+
+    ## Güvenlik Modeli
+
+    - `apinizer` `/sbin/nologin` ile sistem hesabı — interaktif shell yok.
+    - `conf/master.key` mod `400`, `apinizer` sahipli. Sadece o kullanıcı (ve root) okuyabilir.
+    - `conf/application.env` mod `600`. ENC(...) değerleri `bin/apimanager-start.sh` boot anında decrypt edip JVM'e plain export eder. JVM ciphertext görmez; master key host filesystem'inden çıkmaz.
+    - systemd unit hardening: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths=…/logs`. Uygulama sadece `logs/` altına yazabilir.
+
+    <Warning>
+    `conf/master.key`'i secret vault'unuza yedekleyin. **Master key kaybolursa tüm ENC(...) değerleri kurtarılamaz**.
+    </Warning>
+
+    ## Sorun Giderme
+
+    ### Servis "is not set" hatasıyla anında çıkıyor
+
+    `conf/application.env`'deki `SPRING_DATA_MONGODB_URI` veya `SPRING_DATA_MONGODB_DATABASE` boş. Dosyayı edit edin ve şifrelemeyi tekrar çalıştırın.
+
+    ### `/tmp` üzerinde "Read-only file system"
+
+    systemd unit hardening (`ProtectSystem=strict`) servise izole `/tmp` verir (`PrivateTmp=true`). Unit'i değiştirip `PrivateTmp`'i kaldırdıysanız Undertow `/tmp/undertow-docbase.*` oluşturamaz. `PrivateTmp=true`'yu geri ekleyin, sonra `daemon-reload && restart`.
+
+    ### Encryption "Master key file not found" diyor
+
+    `apimanager-install.sh` hiç çalıştırılmadı ya da çalıştı ama key üretmedi. Tekrar çalıştırın:
+
+    ```bash
+    sudo /opt/apinizer-manager/bin/apimanager-install.sh
+    ```
+
+    ### MongoDB bağlantısı timeout
+
+    - MongoDB host'larının erişilebilir olduğunu doğrulayın: `nc -zv host 25080`.
+    - Replica set adı ve `authSource` doğru mu?
+    - TLS gerekiyorsa URI'a `&tls=true` (ve gerekli CA opsiyonları) ekleyin.
+  </Tab>
+  <Tab title="2. API Worker">
+    Apinizer Worker (API Gateway runtime) standalone paketinin Linux sunucuya kurulumu. Worker HTTP / HTTPS / gRPC / WebSocket trafiğini sonlandırır, deploy edilmiş proxy policy pipeline'larını çalıştırır.
+
+    <Info>
+    Installer sudo yetkisi gerektirir; interaktif root login gerekmez.
+    </Info>
+
+    ## Gereksinimler
+
+    - Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+
+    - sudo yetkisi
+    - Erişilebilir Manager-managed MongoDB
+    - Manager UI'da kayıtlı bir **Environment**
+
+    ## 1. İndir + Aç
+
+    ```bash
+    VERSION=2026.04.5
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/apinizer-worker-${VERSION}-linux-x64.tar.gz"
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/checksums.sha256"
+    sha256sum -c checksums.sha256
+
+    sudo mkdir -p /opt
+    sudo tar -xzf apinizer-worker-${VERSION}-linux-x64.tar.gz -C /opt
+    sudo mv /opt/apinizer-worker-${VERSION} /opt/apinizer-worker
+    ```
+
+    ## 2. Yapılandır
+
+    `conf/apinizer-worker.env`'i edit edin:
+
+    | Anahtar | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+    | `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı |
+    | `APINIZER_ENVIRONMENT_NAME` | Manager UI'daki Environment ile **birebir** (case-sensitive) eşleşmeli |
+    | `WORKER_TIMEZONE` | Timezone offset (örn. `+03:00`) |
+
+    Üretim için önerilen JVM ayarları:
+
+    ```bash
+    JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+    ```
+
+    Undertow tuning (opsiyonel): `tuneWorkerThreads`, `tuneIoThreads`, `tuneBufferSize`, `tuneDirectBuffers`, `tuneBacklog`.
+
+    ## 3. Installer + Şifreleme
+
+    ```bash
+    sudo /opt/apinizer-worker/bin/apiworker-install.sh
+    sudo -u apinizer /opt/apinizer-worker/bin/apiworker-encrypt.sh
+    ```
+
+    ## 4. Sistem limitleri
+
+    Worker yüksek throughput için host limitlerini gerektirir:
+
+    ```bash
+    # /etc/security/limits.d/apinizer-worker.conf
+    apinizer soft nofile 1048576
+    apinizer hard nofile 1048576
+    ```
+
+    systemd unit'i de `LimitNOFILE=1048576` taşır.
+
+    ## 5. Servisi başlat
+
+    ```bash
+    sudo systemctl start apinizer-apiworker
+    sudo systemctl status apinizer-apiworker
+    sudo journalctl -u apinizer-apiworker -f
+    ```
+
+    Beklenen boot log:
+
+    ```
+    ApiGateway standalone=true (env: prod-dc1)
+    HTTP listener bound: 0.0.0.0:8091
+    HTTPS listener bound: 0.0.0.0:8443    (Environment HTTPS açıksa)
+    Loaded N proxies for environment prod-dc1
+    ```
+
+    ## 6. Doğrula
+
+    ```bash
+    curl -fsS http://127.0.0.1:8091/server-status
+    ```
+
+    ## Çoklu Worker (yatay ölçeklendirme)
+
+    Aynı paketi **aynı** `APINIZER_ENVIRONMENT_NAME` ile her node'a kurun. Quota / OIDC session / circuit-breaker state **Apinizer Cache** üzerinden paylaşılır — Cache cluster'a tüm Worker'lar bağlanmalı.
+
+    ## Manuel kontrol
+
+    ```bash
+    sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh           # background
+    sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh -f        # foreground
+    sudo -u apinizer /opt/apinizer-worker/bin/apiworker-stop.sh
+    ```
+
+    <Warning>
+    Drain için `systemctl stop` kullanın — script SIGTERM gönderir, 60 saniyeye kadar drain bekler. Aksi takdirde in-flight HTTP / gRPC / WebSocket istekleri kesilebilir.
+    </Warning>
+
+    ## Sorun Giderme
+
+    ### Worker başlıyor ama proxy yüklenmiyor
+
+    `APINIZER_ENVIRONMENT_NAME` Manager UI'daki Environment ile **birebir** eşleşmiyor. İsmi düzeltin veya Environment'ı oluşturun.
+
+    ### `EMFILE: too many open files`
+
+    Sistem limit'leri yetersiz. `/etc/security/limits.d/` altında `nofile=1048576` ayarladıktan sonra Worker'ı yeniden başlatın.
+
+    ### Yüksek latency, GC pressure
+
+    JVM ayarlarına bakın. Üretimde load test yapmadan `JAVA_OPTS`, `tuneWorkerThreads` değişikliği önerilmez.
+  </Tab>
+  <Tab title="3. API Cache">
+    Apinizer Cache (quota, OIDC session, circuit-breaker state ve client-flow banner'ları besleyen Hazelcast data grid) standalone paketinin Linux sunucuya kurulumu.
+
+    <Info>
+    Standalone mod otomatik tespit edilir — Kubernetes service-account namespace dosyası yoksa Cache Hazelcast discovery'sini TCP/IP'ye çevirir.
+    </Info>
+
+    ## Gereksinimler
+
+    - Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+
+    - sudo yetkisi
+    - Erişilebilir Manager-managed MongoDB
+    - Açık portlar:
+      - `5701/tcp` — Hazelcast wire (member-to-member, Worker → Cache)
+      - `8090/tcp` — Spring Boot HTTP (Worker → Cache REST)
+
+    ## 1. İndir + Aç
+
+    ```bash
+    VERSION=2026.04.5
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/apinizer-cache-${VERSION}-linux-x64.tar.gz"
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/checksums.sha256"
+    sha256sum -c checksums.sha256
+
+    sudo mkdir -p /opt
+    sudo tar -xzf apinizer-cache-${VERSION}-linux-x64.tar.gz -C /opt
+    sudo mv /opt/apinizer-cache-${VERSION} /opt/apinizer-cache
+    ```
+
+    ## 2. Yapılandır
+
+    `conf/apinizer-cache.env`'i edit edin:
+
+    | Anahtar | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+    | `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı |
+    | `CACHE_QUOTA_TIMEZONE` | Quota window timezone (örn. `+03:00`). Worker ve Manager ile **eşleşmeli** |
+
+    <Info>
+    `HAZELCAST_CLUSTER_NAME` varsayılan değeri `apnz-hz-cluster`. Aynı LAN'da birden fazla bağımsız Apinizer kurulumu yoksa olduğu gibi bırakın. Worker ile uyumsuzluk **sessiz split-brain**'e yol açar.
+    </Info>
+
+    ### Tek node vs çoklu node
+
+    Tek node için ek ayar gerekmez. Çoklu node için her node'da aynı peer listesini set edin:
+
+    ```bash
+    APINIZER_CACHE_CLUSTER_MEMBERS=10.0.0.11,10.0.0.12,10.0.0.13
+    ```
+
+    <Tip>
+    TCP/IP discovery **simetriktir** — her node aynı IP listesini listelemeli, yoksa cluster oluşmaz.
+    </Tip>
+
+    ## 3. Installer + Şifreleme
+
+    ```bash
+    sudo /opt/apinizer-cache/bin/apicache-install.sh
+    sudo -u apinizer /opt/apinizer-cache/bin/apicache-encrypt.sh
+    ```
+
+    ## 4. Servisi başlat
+
+    ```bash
+    sudo systemctl start apinizer-apicache
+    sudo systemctl status apinizer-apicache
+    sudo journalctl -u apinizer-apicache -f
+    ```
+
+    Beklenen log:
+
+    ```
+    Cache running in STANDALONE mode (cluster: apnz-hz-cluster)
+    Standalone Hazelcast cluster members: 10.0.0.11,10.0.0.12,10.0.0.13
+    Members {size:3, ver:3} [
+        Member [10.0.0.11]:5701 - ...
+        Member [10.0.0.12]:5701 - ...
+        Member [10.0.0.13]:5701 - ...
+    ]
+    ```
+
+    Tek member görünüyorsa `5701/tcp` firewall ve peer listesi tutarlılığını kontrol edin.
+
+    ## 5. Worker'ları Cache'e bağla
+
+    Her Worker:
+
+    - **Aynı** Hazelcast cluster adını kullanmalı
+    - Her Cache node'una `5701/tcp` ile erişebilmeli
+
+    Worker tarafında ek ayar gerekmez — sadece cluster adlarını senkron tutun.
+
+    ## Manuel kontrol
+
+    ```bash
+    sudo -u apinizer /opt/apinizer-cache/bin/apicache-start.sh           # background
+    sudo -u apinizer /opt/apinizer-cache/bin/apicache-start.sh -f        # foreground
+    sudo -u apinizer /opt/apinizer-cache/bin/apicache-stop.sh
+    ```
+
+    ## Sorun Giderme
+
+    ### Her node `Members {size:1}` görüyor
+
+    - `HAZELCAST_CLUSTER_NAME` her node'da case-sensitive eşleşiyor mu?
+    - `5701/tcp` her iki yönde erişilebilir mi: `nc -zv <peer-ip> 5701` her node'dan.
+    - Cloud / NAT arkasında: routable, simetrik adres ister.
+
+    ### Quota'lar tutarsız sıfırlanıyor
+
+    `CACHE_QUOTA_TIMEZONE` Worker / Manager ile farklı. Hepsi aynı olmalı.
+  </Tab>
+  <Tab title="4. API Integration (Opsiyonel)">
+    **(Opsiyonel)** — Bu modül sadece **task-flow scheduler** ihtiyacı olan kurulumlar için gereklidir. Task flow / zamanlanmış iş kullanmıyorsanız bu adımı atlayabilirsiniz.
+
+    Apinizer Integration katmanı — Manager tarafından kaydedilen task flow'ları çalıştıran Quartz scheduler'ı — standalone Linux paketinin kurulumu.
+
+    <Info>
+    Installer sudo yetkisi gerektirir; interaktif root login gerekmez.
+    </Info>
+
+    ## Gereksinimler
+
+    - Linux x86-64 (glibc) — Ubuntu 20.04+, RHEL/Rocky/Alma 8+
+    - sudo yetkisi
+    - Manager'ın kullandığı **aynı** MongoDB
+    - Açık port: `8092/tcp` (Manager → Integration REST)
+
+    ## 1. İndir + Aç
+
+    ```bash
+    VERSION=2026.04.5
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/integration/${VERSION}/apinizer-integration-${VERSION}-linux-x64.tar.gz"
+    curl -fSLO "https://packages.apinizer.com/apinizer-packages/integration/${VERSION}/checksums.sha256"
+    sha256sum -c checksums.sha256
+
+    sudo mkdir -p /opt
+    sudo tar -xzf apinizer-integration-${VERSION}-linux-x64.tar.gz -C /opt
+    sudo mv /opt/apinizer-integration-${VERSION} /opt/apinizer-integration
+    ```
+
+    ## 2. Yapılandır
+
+    `conf/apinizer-integration.env`'i edit edin:
+
+    | Anahtar | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string (Manager ile aynı instance) |
+    | `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (Manager DB ile aynı olmalı) |
+    | `INTEGRATION_TIMEZONE` | IANA zone id (örn. `Europe/Istanbul`). Manager ve Worker ile eşleşmeli, aksi takdirde cron yanlış saatte fire eder. |
+
+    ## 3. Installer + Şifreleme
+
+    ```bash
+    sudo /opt/apinizer-integration/bin/apiintegration-install.sh
+    sudo -u apinizer /opt/apinizer-integration/bin/apiintegration-encrypt.sh
+    ```
+
+    ## 4. Servisi başlat
+
+    ```bash
+    sudo systemctl start apinizer-apiintegration
+    sudo systemctl status apinizer-apiintegration
+    sudo journalctl -u apinizer-apiintegration -f
+    ```
+
+    Beklenen log:
+
+    ```
+    Integration timezone set to: Europe/Istanbul
+    Initializing Custom MongoDB Job Store
+    Quartz Scheduler Prod Environment Setup started
+    MongoDB connection established for Quartz Job Store
+    Tomcat started on port 8092 (http)
+    ```
+
+    ## 5. Çoklu node / HA
+
+    Birden fazla Integration node'u aynı MongoDB veritabanını paylaşabilir — otomatik clustered Quartz scheduler oluştururlar. Ek standalone ayar gerekmez, sadece aynı `SPRING_DATA_MONGODB_URI` + `SPRING_DATA_MONGODB_DATABASE`'i set edin.
+
+    <Tip>
+    Zamana duyarlı flow'lar için en az iki node çalıştırın. Tek node ile bir restart scheduled run'ları bloklar.
+    </Tip>
+
+    ## 6. Manager'ı Integration'a bağla
+
+    Manager UI'da `Admin → Integration Servers` altına bu node'un hostname/IP + port'unu (`8092`) ekleyin. Manager job register/unregister ve cache-refresh event'lerini REST üzerinden push eder.
+
+    ## Manuel kontrol
+
+    ```bash
+    sudo -u apinizer /opt/apinizer-integration/bin/apiintegration-start.sh           # background
+    sudo -u apinizer /opt/apinizer-integration/bin/apiintegration-start.sh -f        # foreground
+    sudo -u apinizer /opt/apinizer-integration/bin/apiintegration-stop.sh
+    ```
+
+    <Info>
+    Task flow'lar dakikalar süren işler içeriyorsa systemd unit'teki `TimeoutStopSec=`'i artırın (varsayılan 120 s). Quartz `waitForJobsToCompleteOnShutdown=true` ile yapılandırılmıştır; SIGTERM temiz drain tetikler — timeout drain'in maksimum süresini belirler.
+    </Info>
+
+    ## Sorun Giderme
+
+    ### Quartz job beklenen zamanda fire olmadı
+
+    `INTEGRATION_TIMEZONE` Manager'daki cron expression timezone'una göre kontrol edin. Çoklu node'lar farklı timezone'larla tutarsız fire üretir.
+
+    ### `Locked by another scheduler` ile exit
+
+    Önceki süreç trigger ortasında SIGKILL aldı. Yeni süreç lock-recovery sweep'i bir `clusterCheckin` cycle (default 7.5 s) içinde temizler.
+  </Tab>
+</Tabs>

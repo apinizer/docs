@@ -1,0 +1,260 @@
+---
+title: "Kaldır"
+description: "Apinizer modüllerinin Container ortamından (Kubernetes / Docker) ve Sanal Sunucu kurulumundan tamamen kaldırılması. Master key yedeği, MongoDB temizliği ve Manager UI tarafındaki kayıt silme adımları dahil."
+---
+
+Apinizer modüllerini kaldırma yöntemi kurulum tipine göre değişir. Bu sayfa her iki kurulum tipi için adım adım kaldırma talimatlarını içerir.
+
+<Warning>
+Master key dosyaları (`conf/master.key` ve `application.env`) kaldırma işlemi öncesi mutlaka yedeklenmelidir. Master key yeniden üretilemez ve onsuz `ENC(...)` şeklinde şifrelenmiş tüm değerler kalıcı olarak decrypt edilemez. MongoDB veritabanı bu adımlarda SİLİNMEZ — sıfır durum istenirse ayrı bir adımda manuel olarak drop edilmelidir.
+</Warning>
+
+## Kaldırma Sırası
+
+Modüllerin kaldırılma sırası (tersinden başlatılmalı):
+
+1. **API Portal** — Kaldırma ilk yapılan (son kullanıcı erişimi durur)
+2. **Integration** — Quartz job'ları durdurulur
+3. **Cache** — Hazelcast cluster üyeliği kapatılır
+4. **Worker** — Gateway gelen trafik işlemeyi durdurur
+5. **API Manager** — En son kaldırılır (tüm yönetim metadata burada depolanır)
+
+Kaldırma adımı başlatılmadan önce, tüm modüllerde konfigürasyon dosyalarının yedeklerini almalısınız. API Manager kaldırılmadan önce diğer modülleri kaldırın, aksi takdirde Manager UI'da kayıtları silemezsiniz.
+
+<Tabs>
+  <Tab title="Container Ortamında (Kubernetes / Docker)">
+
+## Kubernetes ile Kaldırma
+
+Tüm Apinizer namespace'lerini silerek tek seferde tüm modülleri kaldırabilirsiniz:
+
+```bash
+# Tüm deployment, service, configmap, secret, RBAC silinir
+kubectl delete namespace apinizer
+kubectl delete namespace <gateway-namespace>
+kubectl delete namespace <integration-namespace>
+kubectl delete namespace <portal-namespace>
+
+# Cluster-level RBAC'i de temizle:
+kubectl delete clusterrole apinizer-role apinizer-gateway-role
+kubectl delete clusterrolebinding apinizer-role-binding apinizer-gateway-role-binding
+```
+
+Modül bazlı kontrollü silme için ayrı ayrı komutlar çalıştırabilirsiniz. Her namespace için:
+
+```bash
+# Tüm Apinizer kaynakları sil
+kubectl delete all -n <namespace> --all
+kubectl delete configmap,secret,pvc -n <namespace> --all
+```
+
+## Docker / docker-compose ile Kaldırma
+
+### Tüm Servisleri Kaldırma
+
+`docker-compose.yml` dosyasını kullanıyorsanız:
+
+```bash
+# Konteyner ve volumeleri durdur ve sil (ağlar hariç)
+docker compose down
+
+# Volume'ları da sil (veri sıfırlanır)
+docker compose down -v
+```
+
+### Modül Bazlı Kaldırma (Vanilla Docker)
+
+Tek tek modülleri kaldırmak için:
+
+```bash
+# Konteyner durdur ve sil
+docker stop -t 60 apinizer-<modul> && docker rm apinizer-<modul>
+
+# Log volume'unu sil (opsiyonel)
+docker volume rm apinizer-<modul>-logs
+
+# İmajı sil
+docker rmi apinizercloud/<modul>:${VERSION}
+```
+
+### Modül Bazlı Stop Timeout'ları
+
+In-flight isteklerin graceful drain olması için cömert stop timeout'lar kullanın:
+
+| Modül | Komut |
+| --- | --- |
+| API Manager | `docker stop -t 30 apinizer-apimanager` |
+| API Portal | `docker stop -t 30 apinizer-apiportal` |
+| Worker | `docker stop -t 60 apinizer-worker` |
+| Cache | `docker stop -t 30 apinizer-cache` |
+| Integration | `docker stop -t 120 apinizer-integration` |
+
+## Manager UI Tarafındaki Kayıt Temizliği
+
+Container'lar ve pod'lar silindikten sonra Manager UI'da kalan kayıtları temizlemelisiniz:
+
+1. **Server Management → Environments** — ilgili Environment kaydını Delete yapın
+2. **Server Management → Cache Servers** — kayıtlı Cache'leri Delete yapın
+3. **Server Management → Integration Servers** — kayıtlı Integration'ları Delete yapın
+4. **Portal → Portals** — kayıtlı Portal'ları Delete yapın
+
+Bu adımı atlayırsanız, Manager UI'da başarısız environment'lar gösterilmeye devam edecektir.
+
+## MongoDB Verisi (Opsiyonel — Sıfır Durum İçin)
+
+Apinizer Manager veritabanı tamamen silinmek istenirse:
+
+```bash
+mongosh --host <MONGODB_HOST> --port 25080 -u apinizer -p <PASSWORD>
+use apinizer
+db.dropDatabase()
+```
+
+<Warning>
+Bu işlem tüm proxy tanımlarını, environment kayıtlarını, kullanıcı verilerini ve audit log'larını kalıcı olarak siler. **Geri alınamaz.**
+</Warning>
+
+## Yan Etkiler ve Kontrol Noktaları
+
+- **MongoDB**: Kaldırma komutlarıyla **silinmez**. Veri sıfırlanmak istenirse Elle drop edilmelidir.
+- **API Portal kaydı**: Manager UI'da Portal kaydı ayrı bir adım — **Portal → Portals → Delete** yapılmalıdır.
+- **Worker Environment kaydı**: Manager UI'da Environment kaydı kalır. Gateway'i tamamen emekli ediyorsanız Manager UI'dan manuel silin.
+- **Cache MapStore verisi**: MongoDB'deki Hazelcast MapStore document'leri kalır. Counter geçmişini sıfırlamak istiyorsanız ilgili collection'ları MongoDB'den elle drop edin.
+- **Integration Quartz state'i**: `schedule_integration_*` collection'ları MongoDB'de kalır. Yeni kuruluma clean state ile başlamak istiyorsanız, tüm Integration node'ları durdurulduktan **sonra** bu collection'ları elle drop edin.
+
+</Tab>
+
+<Tab title="Sanal Sunucu'da (Standalone Linux)">
+
+## Modül Bazlı Kaldırma (Her Modül İçin Aynı Pattern)
+
+Sanal sunucudaki her modül `/opt/apinizer-<modul>/` altına kuruludur ve systemd servisi tarafından yönetilir. Aşağıdaki adımlar her modül için aynı pattern'i takip eder.
+
+```bash
+MODUL=manager   # Diğer modüller: portal, apiworker, apicache, apiintegration
+
+# 1) Yedek al (ZORUNLU - master.key onsuz ENC değerler decode edilemez)
+sudo cp /opt/apinizer-${MODUL}/conf/application.env ~/apinizer-${MODUL}-env.bak
+sudo cp /opt/apinizer-${MODUL}/conf/master.key      ~/apinizer-${MODUL}-key.bak
+
+# 2) Servisi durdur ve disable et
+sudo systemctl stop apinizer-${MODUL}
+sudo systemctl disable apinizer-${MODUL}
+
+# 3) systemd unit'i kaldır
+sudo rm -f /etc/systemd/system/apinizer-${MODUL}.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+# 4) Kurulum dizinini sil
+sudo rm -rf /opt/apinizer-${MODUL}
+
+# 5) sudoers entry varsa temizle
+sudo rm -f /etc/sudoers.d/apinizer-${MODUL}
+```
+
+## Worker / Cache / Integration İçin Stop Timeout'ları
+
+`systemctl stop` SIGTERM gönderir ve graceful shutdown beklenir. Drain sürelerine göre:
+
+| Modül | Drain davranışı |
+| --- | --- |
+| API Manager | Standart 90 s |
+| API Portal | Standart 90 s |
+| Worker | 60 s in-flight HTTP/gRPC/WebSocket drain |
+| Cache | 30 s Hazelcast graceful leave |
+| Integration | 120 s `waitForJobsToCompleteOnShutdown` |
+
+Daha uzun drain süresi gerekliyse `systemd` unit dosyasındaki `TimeoutStopSec=` değerini artırabilirsiniz:
+
+```bash
+sudo systemctl edit apinizer-${MODUL}
+# [Service] altına ekleyin:
+# TimeoutStopSec=180
+```
+
+## `apinizer` Sistem Kullanıcısını Sil
+
+Aynı host'ta başka bir Apinizer modülü kalmamışsa:
+
+```bash
+sudo userdel apinizer
+```
+
+<Info>
+Birden fazla modül `apinizer` sistem kullanıcısını paylaşır. Sondaki modülü kaldırırken bu komutu çalıştırın.
+</Info>
+
+## Manager UI Tarafındaki Kayıt Temizliği
+
+Container ortamında olduğu gibi, Manager UI'da kalan kayıtları temizleyin:
+
+1. **Server Management → Environments** — ilgili Environment kaydını Delete yapın
+2. **Server Management → Cache Servers** — kayıtlı Cache'leri Delete yapın
+3. **Server Management → Integration Servers** — kayıtlı Integration'ları Delete yapın
+4. **Portal → Portals** — kayıtlı Portal'ları Delete yapın
+
+## Yan Etkiler ve Kontrol Noktaları
+
+- **MongoDB**: Kaldırma komutlarıyla **silinmez**. Sıfır durum istiyorsanız veritabanını elle drop edin.
+- **API Portal kaydı**: Manager UI'da Portal kaydı ayrı bir adım — **Portal → Portals → Delete** yapılmalıdır.
+- **Worker Environment kaydı**: Manager UI'da kalır. Gateway'i tamamen emekli ediyorsanız manuel silin.
+- **Cache MapStore + Integration Quartz state'i**: MongoDB'de kalır. Counter geçmişini veya job geçmişini sıfırlamak istiyorsanız ilgili collection'ları (`*_quota_counter*`, `schedule_integration_*`) elle drop edin.
+
+## Master Key Kurtarma
+
+Eğer kaldırma sonrası master.key kaybedildiyse ve yedek de yoksa, `ENC(...)` ile şifrelenmiş tüm değerler kalıcı olarak decrypt edilemez. Bu durumda:
+
+1. Yeni bir kurulum yapıldığında yeni master key üretilir
+2. `application.env`'deki tüm `ENC(...)` değerleri plaintext'e dönülmesi gerekir (yeniden girilmelidir)
+3. Yeni değerler `apimanager-encrypt.sh` scripti ile yeniden şifrelenir
+
+Bu sebeple master key yedeğinin güvenli bir konumda saklanması kritik önem taşır.
+
+  </Tab>
+</Tabs>
+
+## Kaldırma Sonrası Doğrulama
+
+Kaldırma işleminin başarılı olduğunu kontrol edin:
+
+```bash
+# Container ortamı — Kubernetes:
+kubectl get all -n apinizer        # No resources found
+kubectl get namespaces | grep apinizer  # boş
+
+# Container ortamı — Docker:
+docker ps -a | grep apinizer       # boş listesi
+docker volume ls | grep apinizer   # boş listesi
+
+# Sanal sunucu:
+systemctl status apinizer-apimanager   # Unit not found
+ls /opt/apinizer-manager               # No such file or directory
+id apinizer                            # no such user (eğer kullanıcı da silindiyse)
+```
+
+## Sorun Giderme
+
+### "Unit not found" hatası alıyorum, ama systemctl disable yapamadım
+
+Unit dosyası zaten silinmiş olabilir. `daemon-reload` çalıştıktan sonra:
+
+```bash
+sudo systemctl reset-failed
+```
+
+### Master key kaybedildiyse ve yedek yok
+
+`ENC(...)` değerlerini decrypt etmek mümkün değildir. Yeni kurulumda:
+
+1. Tüm şifrelenmiş konfigürasyon değerleri plaintext olarak girmelidir
+2. `apimanager-encrypt.sh` ile yeniden şifrelemeleri yapılmalıdır
+3. Master key yedeği güvenli bir konumda saklanmalıdır
+
+### MongoDB'yi yanlışlıkla sildim
+
+`db.dropDatabase()` komutu bir kez çalıştırıldığında geri alınamaz. MongoDB backup'ınız varsa restore edebilirsiniz. Backup yoksa veri kalıcı olarak silinmiştir.
+
+### Kaldırma sonrası Manager UI'da kayıtlar hâlâ görünüyor
+
+Manager UI'da "Server Management", "Portal" vs. bölümlerinde kalan kayıtları elle silmeniz gerekir. Modüllerin kaldırılması bu kayıtları otomatik olarak temizlemez.

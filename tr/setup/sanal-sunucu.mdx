@@ -1,0 +1,919 @@
+---
+title: "Sanal Sunucu'ya Kurulum"
+description: "Apinizer modüllerini Sanal Sunucu (Linux/VM) üzerinde gömülü OpenJDK 25 ile standalone paketler olarak kurun. API Manager ve Gateway zorunlu; Cache, Integration ve API Portal opsiyonel."
+---
+
+Apinizer sanal sunucuda (Linux VM) standalone paketler olarak kurulur. Her paket gömülü OpenJDK 25 çalıştırma ortamını içerir — host'ta Java yüklü olması gerekmez. Hassas yapılandırmalar (MongoDB bağlantı URI'si, şifreler vb.) Jasypt master key ile yerinde şifrelenir. JVM ciphertext'i hiçbir zaman görmez, master key host dosya sisteminden çıkmaz. Bu yöntem finans ve regüle edilen ortamlar için ideal bir security posture sunar.
+
+<Info>
+Installer'lar `sudo` yetkisi gerektirir ancak interaktif root login'e ihtiyaç yoktur. Bu özellik, root SSH'nin kapalı olduğu sıkılaştırılmış ortamlarla (finans ve regüle sektörlerde yaygın) uyumludur.
+</Info>
+
+## Kurulum Akışı
+
+Apinizer standalone kurulumu şu sıra izlenir:
+
+1. MongoDB bağlantı hazırlığı (henüz kuruluma başlamadan önce)
+2. **API Manager kurulumu** (yönetim konsolu)
+3. **Gateway kurulumu** (API trafik işleme — zorunlu)
+4. Manager UI'da Gateway'i Environment olarak tanımlama
+5. Opsiyonel: Cache, Integration, API Portal kurulumları
+
+<CardGroup cols={2}>
+  <Card title="Temel Gereksinimler" icon="list-check">
+    Linux x86-64 (glibc), sudo yetkisi, openssl/systemd/tar, erişilebilir MongoDB
+  </Card>
+  <Card title="Opsiyonel Modüller" icon="package">
+    Cache (Hazelcast), Integration (Quartz), API Portal (son kullanıcı portalı)
+  </Card>
+</CardGroup>
+
+## Genel Gereksinimler
+
+Tüm Apinizer modülleri (API Manager, Gateway, Cache, Integration, API Portal) aşağıdaki ortam koşullarını gerektirir:
+
+- **Linux işletim sistemi** x86-64 mimarisi, glibc tabanlı: Ubuntu 20.04+, RHEL/Rocky/Alma 8+, Debian 11+, Oracle Linux 8+
+- **CPU**: En az 2 çekirdek (x86-64-v3 seviyesi)
+- **RAM**: En az 2 GB; üretim ortamında 4 GB ve üzeri önerilir
+- **Disk alanı**: `/opt` altında her modül için ~1 GB; log dizinleri için ek alan
+- **Ağ**: MongoDB'ye ve modüller arası bağlantı; portal varsa istemcilerden erişim
+- **Sudo yetkisi**: root login gerekmez, sudo hakkı yeterlidir
+- **Java**: Gerekmez (paketlerde OpenJDK 25 gömülü)
+- **Standart araçlar**: `openssl`, `systemd`, `tar`, `curl` (genellikle önceden kurulu)
+
+<Warning>
+MongoDB kurulumu ve Elasticsearch (opsiyonel, durumsal günlük depolama için) yapılandırması **bu belgede kapsam dışındadır**. Apinizer kurulumuna başlamadan önce MongoDB replica set'ini erişilebilir duruma getirin.
+</Warning>
+
+<Note>
+Elasticsearch trafik günlüklerinin uzun vadeli depolanması için opsiyoneldir. Elasticsearch kurulması Apinizer'ın temel işlevi için gerekli değildir ancak analitik ve audit sorgulamaları için son derece faydalıdır.
+</Note>
+
+## API Manager Kurulumu
+
+Apinizer Yönetim Konsolu (**API Manager**) Apinizer'ın kalbidir. Operatörler, API yöneticileri ve yöneticiler bu konsol aracılığıyla API'leri tanımlar, gateway'leri yönetir, politikaları uygular ve trafiği izler. Her sanal sunucu kurulumunun **tek bir API Manager örneği** olmalıdır.
+
+### 1. İndir
+
+Son Apinizer API Manager paketini `packages.apinizer.com` adresinden indirin:
+
+```bash
+VERSION=2026.04.2
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/apimanager/${VERSION}/apinizer-apimanager-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/apimanager/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+```
+
+### 2. Aç
+
+Arşivi `/opt` dizinine açın:
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-apimanager-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-apimanager-${VERSION} /opt/apinizer-manager
+```
+
+Paket yapısı aşağıdaki gibi olur:
+
+```
+/opt/apinizer-manager/
+├── bin/        # start, stop, install, encrypt betikleri ve systemd unit
+├── conf/       # application.env (master.key installer tarafından üretilir)
+├── lib/        # Spring Boot fat jar + lib/jasypt/ helper jar
+├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+└── logs/       # Runtime günlükleri (ilk başlangıçta oluşturulur)
+```
+
+### 3. Yapılandır
+
+`conf/application.env` dosyasını edit edin ve **zorunlu** parametreleri sağlayın:
+
+```bash
+sudo vi /opt/apinizer-manager/conf/application.env
+```
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB bağlantı dizesi (örn. `mongodb://user:pass@host:25080/?replicaSet=rs0&authSource=admin`) |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (örn. `apinizer`) |
+
+Dosya aynı zamanda opsiyonel bölümler içerir: SSL ayarları, server port, JVM tuning parametreleri, günlük yolu. Şu an plaintext değerlerle bırakabilirsiniz.
+
+<Warning>
+Bu aşamada plaintext değerler kabul edilir. Servisi henüz başlatmayın. Bir sonraki adım hassas değerleri şifreler.
+</Warning>
+
+### 4. Installer'ı Çalıştır
+
+Installer betiği `apinizer` sistem kullanıcısını oluşturur, dosya izinlerini ayarlar, `conf/master.key` içinde rastgele bir Jasypt master key üretir ve systemd servisini kaydeder:
+
+```bash
+sudo /opt/apinizer-manager/bin/apimanager-install.sh
+```
+
+Root erişimi olmayan bir operatöre yalnızca installer çalıştırma hakkı vermek için sudoers girişi ekleyin:
+
+```bash
+apinizer-admin ALL=(root) NOPASSWD: /opt/apinizer-manager/bin/apimanager-install.sh
+```
+
+Kurulumdan sonra master key `apinizer:apinizer` sahipliğinde, izni `400` (sadece okunur) ile mevcuttur — yalnızca servis kullanıcısı okuyabilir.
+
+### 5. Hassas Değerleri Şifrele
+
+Encrypt yardımcı betiğini argümansız çalıştırarak standart alanları yerinde şifreleyin. Zaten şifreli (veya boş) değerler atlanır; env dosyasının yanına timestamp'li bir backup yazılır:
+
+```bash
+sudo -u apinizer /opt/apinizer-manager/bin/apimanager-encrypt.sh
+```
+
+Şifrelenen alanlar:
+
+- `SPRING_DATA_MONGODB_URI`
+- `SPRING_DATA_MONGODB_DATABASE`
+
+Şifreleme sonrasında env dosyası şöyle görünür (bash `source` parantezlere takılmasın diye çift tırnak ile):
+
+```
+SPRING_DATA_MONGODB_URI="ENC(eXq1J9z...kTu4=)"
+SPRING_DATA_MONGODB_DATABASE="ENC(zMv3K7p...lQw9=)"
+```
+
+### 6. Servisi Başlat
+
+```bash
+sudo systemctl start apinizer-apimanager
+sudo systemctl status apinizer-apimanager
+sudo journalctl -u apinizer-apimanager -f
+```
+
+Servis kurulumda otomatik olarak enable edildiğinden sunucu yeniden başlatıldığında da otomatik başlar.
+
+### 7. Doğrula
+
+API Manager'ın yapılandırılmış portta yanıt verdiğini doğrulayın (varsayılan `8080`):
+
+```bash
+curl -fsS http://127.0.0.1:8080/management/health
+```
+
+Beklenen yanıt: `200 OK` (sağlık detaylarını içeren yanıt; anonimler için sadece durum görünür).
+
+### Operasyon
+
+<CardGroup cols={2}>
+  <Card title="Durum" icon="play">
+    `sudo systemctl status apinizer-apimanager`
+  </Card>
+  <Card title="Yeniden başlat" icon="rotate-right">
+    `sudo systemctl restart apinizer-apimanager`
+  </Card>
+  <Card title="Durdur" icon="stop">
+    `sudo systemctl stop apinizer-apimanager`
+  </Card>
+  <Card title="Günlükler" icon="file-lines">
+    `sudo journalctl -u apinizer-apimanager -f`
+  </Card>
+</CardGroup>
+
+systemd olmadan manuel kontrol:
+
+```bash
+sudo -u apinizer /opt/apinizer-manager/bin/apimanager-start.sh           # arka planda
+sudo -u apinizer /opt/apinizer-manager/bin/apimanager-start.sh -f        # ön planda (debug)
+sudo -u apinizer /opt/apinizer-manager/bin/apimanager-stop.sh
+```
+
+### Güvenlik Modeli
+
+- `apinizer`, `/sbin/nologin` ile sistem hesabı olup interaktif shell'i yoktur.
+- `conf/master.key` izni `400`, `apinizer` sahipli. Yalnızca o kullanıcı (ve root) okuyabilir.
+- `conf/application.env` izni `600`. ENC(...) değerleri boot anında `bin/apimanager-start.sh` tarafından decrypt edilir ve JVM'e açık metin olarak export edilir. JVM ciphertext'i asla görmez; master key host dosya sisteminden ayrılmaz.
+- systemd unit hardening uygulanır: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths=…/logs`. Uygulama yalnızca `logs/` altına yazabilir.
+
+<Warning>
+`conf/master.key`'i secret vault'unuza yedekleyin. Master key kaybedilirse tüm ENC(...) değerleri kalıcı olarak kurtarılamaz ve plaintext olarak yeniden girilmeli, sonra yeni bir key ile yeniden şifrelenmesi gerekir.
+</Warning>
+
+<Note>
+API Manager kurulumunda karşılaşılabilecek sorunlar için [Sorun Giderme](/tr/setup/sorun-giderme) sayfasının "Sanal Sunucu" sekmesine bakın.
+</Note>
+
+Bu modülün **yükseltme** ve **kaldırma** adımları için sırasıyla [Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme) ve [Kaldırma](/tr/setup/kaldirma) sayfalarına bakın.
+
+## Gateway Kurulumu ve Tanımlanması
+
+Gateway (Worker), Apinizer'ın **asıl API Gateway**'idir. HTTP, HTTPS, gRPC ve WebSocket trafiğini sonlandırır, Manager'da tanımlanan proxy'leri ve politikaları çalıştırır. Sanal sunucu ortamında Gateway **zorunlu**dur ve **ayrı bir host'ta** kurulur (veya Manager ile aynı host'ta çalışabilir ancak ayrı yapılandırma ile).
+
+### Gateway Sunucusunun Kurulumu
+
+#### 1. İndir
+
+Gateway paketini indirin:
+
+```bash
+VERSION=2026.04.2
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/apinizer-worker-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/worker/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+```
+
+#### 2. Aç
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-worker-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-worker-${VERSION} /opt/apinizer-worker
+```
+
+Paket yapısı:
+
+```
+/opt/apinizer-worker/
+├── bin/        # start, stop, install, encrypt betikleri ve systemd unit
+├── conf/       # apinizer-worker.env (master.key installer tarafından üretilir)
+├── lib/        # Worker shaded launcher jar + lib/jasypt/ helper jar
+├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+└── logs/       # Runtime günlükleri (ilk başlangıçta oluşturulur)
+```
+
+#### 3. Yapılandır
+
+`conf/apinizer-worker.env`'i edit edin ve aşağıdaki parametreleri sağlayın:
+
+```bash
+sudo vi /opt/apinizer-worker/conf/apinizer-worker.env
+```
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB bağlantı dizesi (Manager'ın kullandığı aynı örnek) |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (Manager ile aynı olmalı) |
+| `APINIZER_ENVIRONMENT_NAME` | Manager UI'daki bir Environment'ın adı ile **birebir eşleşmeli** (büyük/küçük harf duyarlı). Bu kritiktir — eşleşmezse Gateway proxy'ler yüklemeyecektir. |
+| `WORKER_TIMEZONE` | Saat dilimi offset'i (örn. `+03:00`). Manager ve Cache ile senkronize olmalıdır. |
+
+Üretim ortamı için önerilen JVM ayarları:
+
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+tuneWorkerThreads=1024
+tuneWorkerMaxThreads=4096
+tuneBufferSize=16384
+tuneIoThreads=4
+tuneBacklog=10000
+```
+
+<Tip>
+Gateway tipi **HTTP + WebSocket** trafiği hizmet edecekse `http2Enabled=false` ayarlayın. Pek çok WebSocket istemcisi HTTP/2'yi düzgün negotiate edemez, bu da handshake sorunlarından kaçınır.
+</Tip>
+
+#### 4. Installer + Şifreleme
+
+```bash
+sudo /opt/apinizer-worker/bin/apiworker-install.sh
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-encrypt.sh
+```
+
+#### 5. Sistem Limitleri
+
+Gateway yüksek eşzamanlılık için host limitlerini gerektirir. systemd unit zaten `LimitNOFILE=1048576` içerir, ancak systemd dışında çalışıyorsanız `/etc/security/limits.d/` ayarlayın:
+
+```
+apinizer  soft  nofile  1048576
+apinizer  hard  nofile  1048576
+```
+
+#### 6. Servisi Başlat
+
+```bash
+sudo systemctl start apinizer-apiworker
+sudo systemctl status apinizer-apiworker
+sudo journalctl -u apinizer-apiworker -f
+```
+
+Beklenen boot günlükleri:
+
+```
+ApiGateway standalone=true (environment: prod-dc1)
+HTTP listener bound: 0.0.0.0:8091
+Loaded 15 proxies for environment prod-dc1
+```
+
+#### 7. Doğrula
+
+Gateway'in başladığını doğrulayın (trafiği işleyip işlemediğini kontrol etmek için). Gateway, yalnızca Manager'dan deploy edilen Gateway Runtime'lar için portları dinler. Port binding'ını kontrol edin:
+
+```bash
+sudo netstat -tlnp | grep -E '809[1-3]|8443'
+```
+
+veya Gateway günlüklerinden başarılı startup mesajını izleyin.
+
+#### Operasyon
+
+<CardGroup cols={2}>
+  <Card title="Durum" icon="play">
+    `sudo systemctl status apinizer-apiworker`
+  </Card>
+  <Card title="Yeniden başlat" icon="rotate-right">
+    `sudo systemctl restart apinizer-apiworker`
+  </Card>
+  <Card title="Durdur" icon="stop">
+    `sudo systemctl stop apinizer-apiworker`
+  </Card>
+  <Card title="Günlükler" icon="file-lines">
+    `sudo journalctl -u apinizer-apiworker -f`
+  </Card>
+</CardGroup>
+
+systemd olmadan manuel kontrol:
+
+```bash
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh           # arka planda
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-start.sh -f        # ön planda (debug)
+sudo -u apinizer /opt/apinizer-worker/bin/apiworker-stop.sh
+```
+
+#### Güvenlik Modeli
+
+- `apinizer`, `/sbin/nologin` ile sistem hesabı olup interaktif shell'i yoktur.
+- `conf/master.key` izni `400`, `apinizer` sahipli. Yalnızca o kullanıcı (ve root) okuyabilir.
+- `conf/apinizer-worker.env` izni `600`. ENC(...) değerleri boot anında `bin/apiworker-start.sh` tarafından decrypt edilir.
+- systemd unit hardening: `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `ReadWritePaths=…/logs`.
+- Dosya tanımlayıcı ve process limitleri yükseltilmiş: `LimitNOFILE=1048576`, `LimitNPROC=65536`. Gateway eş zamanlı istemci soketleri sonlandırır ve cömert ulimit'lerden faydalanır.
+
+<Warning>
+`conf/master.key`'i secret vault'unuza yedekleyin. Master key kaybedilirse tüm ENC(...) değerleri kurtarılamaz.
+</Warning>
+
+<Note>
+Gateway kurulumunda karşılaşılabilecek sorunlar için [Sorun Giderme](/tr/setup/sorun-giderme) sayfasının "Sanal Sunucu" sekmesine bakın.
+</Note>
+
+Bu modülün **yükseltme** ve **kaldırma** adımları için sırasıyla [Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme) ve [Kaldırma](/tr/setup/kaldirma) sayfalarına bakın.
+
+### Manager Üzerinden Gateway'in Environment Olarak Tanımlanması
+
+Gateway sunucusu Linux'a kurulup `apinizer-apiworker.service` çalışır duruma geldikten sonra Manager UI'a giderek **Sunucu Yönetimi → Gateway Runtime'ları → Yeni** yolunu izleyin.
+
+<Frame>
+  <img
+    src="/images/yonetici/envVm.png"
+    alt="Remote Gateway Environment tanımlama formu"
+  />
+</Frame>
+
+#### Form Alanları
+
+| Alan | Değer |
+|------|-------|
+| **Platform** | Sanal Sunucu |
+| **Yönetim Tipi** | **Remote Gateway** |
+| **Ortam Tipi** | DEV / TEST / PROD |
+| **İletişim Protokolü Türü** | Gateway'in açtığınız servisine uygun (HTTP / HTTPS / gRPC / WebSocket) |
+| **Ortam Adı** | `APINIZER_ENVIRONMENT_NAME` env değişkeniyle birebir aynı (büyük/küçük harf duyarlı) |
+| **Ortam Anahtarı** | API URL prefix (örn: `prod`) |
+| **Erişim Adresi** | Gateway'in dış erişim URL'i (örn: `https://gateway.example.com`) |
+
+#### Gateway Node Listesi (Manuel URL Tablosu)
+
+Remote Gateway seçildiğinde form üzerinde **Gateway Node Listesi** tablosu görünür. Her node için:
+
+| Alan | Açıklama |
+|------|----------|
+| **Adı (Name)** | Tanımlayıcı isim (örn: `node-1`) |
+| **Gateway Yönetim API URL** | `http://<NODE_IP>:8091` (Gateway Management API endpoint'i) |
+| **Cache Yönetim API URL** | `http://<CACHE_IP>:8092` (varsa Cache Management API endpoint'i) |
+
+<Warning>
+  Bu URL'ler Manager'dan **erişilebilir** olmalı. Manager bu adresleri kullanarak Gateway'e proxy push, sağlık kontrolü ve diagnostics yapar. Firewall kuralları ve port forwarding'in Manager → Worker 8091 trafiğine izin verdiğinden emin olun.
+</Warning>
+
+#### Ortamı Yayınlama (Publish)
+
+**Oluştur** butonuna basın. Sanal sunucudaki Gateway için Apinizer herhangi bir kurulum YAPMAZ — Gateway zaten yukarıdaki adımlarla Linux'a kuruldu. Manager sadece bağlantı metadatasını kaydeder ve Gateway'e bağlanmayı dener. Başarılı olursa environment `published` olarak işaretlenir.
+
+<Info>
+  Yayım sonrası API Proxy'leri bu Remote Gateway'e deploy edebilirsiniz. Manager API Proxy YAML'larını Gateway'in Management API endpoint'ine push eder.
+</Info>
+
+<Note>
+Gateway'in ek değişkenleri (JVM tuning, gRPC, WebSocket, CORS, güvenlik, vb.) ve konfigürasyon ayarları (System Settings, Backup, vb.) için [Gateway Ayarları](/tr/setup/gateway-ayarlari) sayfasına bakın.
+</Note>
+
+## Opsiyonel Modüller
+
+API Manager ve Gateway kurulumu tamamlandıktan sonra, ihtiyacınıza göre aşağıdaki opsiyonel modülleri ekleyebilirsiniz.
+
+<Tabs>
+  <Tab title="Cache Kurulumu ve Tanımlanması">
+
+Cache (Hazelcast data grid), quota sayaçları, OIDC oturumları, circuit-breaker durumu ve istemci-flow bannerları gibi durum bilgisini tutar. **Çoklu Gateway'ler çalıştırıyorsanız Cache zorunludur** — aksi takdirde her Gateway'in quota sayaçları senkron olmaz.
+
+### Kurulum Adımları
+
+#### 1. İndir
+
+```bash
+VERSION=2026.04.2
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/apinizer-cache-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/cache/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+```
+
+#### 2. Aç
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-cache-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-cache-${VERSION} /opt/apinizer-cache
+```
+
+Paket yapısı:
+
+```
+/opt/apinizer-cache/
+├── bin/        # start, stop, install, encrypt betikleri ve systemd unit
+├── conf/       # apinizer-cache.env (master.key installer tarafından üretilir)
+├── lib/        # Cache Spring Boot fat jar + lib/jasypt/ helper jar
+├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+└── logs/       # Runtime günlükleri (ilk başlangıçta oluşturulur)
+```
+
+#### 3. Yapılandır
+
+`conf/apinizer-cache.env`'i edit edin:
+
+```bash
+sudo vi /opt/apinizer-cache/conf/apinizer-cache.env
+```
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB bağlantı dizesi (Manager ve Gateway ile aynı örnek) |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (Manager ile aynı olmalı) |
+| `CACHE_QUOTA_TIMEZONE` | Quota penceresi saat dilimi (örn. `+03:00`). Manager ve Gateway ile eşleşmeli; aksi takdirde quota rollover'ları kayacaktır. |
+
+**Standalone mod** otomatik olarak tespit edilir — Cache, sanal sunucuda çalıştığında Hazelcast discovery için TCP/IP yöntemine geçer ve `APINIZER_CACHE_CLUSTER_MEMBERS` ortam değişkenindeki IP listesini kullanır. Ek bayrak gerekmez.
+
+**Tek node kurulum**: Varsayılan `APINIZER_CACHE_CLUSTER_MEMBERS` (boş) `127.0.0.1` olarak işlenir ve tek node cluster oluşur.
+
+**Çoklu node kurulum**: Aynı virgülle ayrılmış eş listesini her node'da ayarlayın:
+
+```bash
+APINIZER_CACHE_CLUSTER_MEMBERS=10.0.0.11,10.0.0.12,10.0.0.13
+```
+
+<Tip>
+Cluster'ın tüm üyeleri **tam olarak aynı IP setini** listelemeli. Hazelcast TCP/IP discovery simetrik — B node A'yı listelemezse, A B'ye erişse bile B, A'yı member olarak kabul etmez.
+</Tip>
+
+<Warning>
+Plaintext değerler bu noktada kabul edilir. Henüz servisi başlatmayın.
+</Warning>
+
+#### 4. Installer + Şifreleme
+
+```bash
+sudo /opt/apinizer-cache/bin/apicache-install.sh
+sudo -u apinizer /opt/apinizer-cache/bin/apicache-encrypt.sh
+```
+
+#### 5. Servisi Başlat
+
+```bash
+sudo systemctl start apinizer-apicache
+sudo systemctl status apinizer-apicache
+sudo journalctl -u apinizer-apicache -f
+```
+
+Beklenen boot günlükleri:
+
+```
+Cache running in STANDALONE mode (cluster: apnz-hz-cluster)
+Standalone Hazelcast cluster members: 10.0.0.11,10.0.0.12,10.0.0.13
+Hazelcast thread pools configured successfully
+Members {size:3, ver:3} [
+    Member [10.0.0.11]:5701 - ...
+    Member [10.0.0.12]:5701 - ...
+    Member [10.0.0.13]:5701 - ...
+]
+```
+
+Çoklu node kurulumda sadece bir member listeleniyorsa `5701/tcp` firewall kurallarını ve tüm node'ların aynı eş listesini kontrol edin.
+
+#### 6. Gateway'leri Cache'e Bağlayın
+
+Her Gateway (`apinizer-worker`), aynı Hazelcast cluster adı ile Cache node'larına `5701/tcp` üzerinden erişebilmeli. Gateway, cluster adını kendi yapılandırmasından okur; ayrı Gateway yapılandırması değişikliği gerekmez, yalnızca adların senkron olması önemlidir.
+
+### Manager Üzerinden Cache Sunucusunun Tanımlanması
+
+Manager UI'da Cache sunucusunu kaydedin:
+
+1. Manager UI → **Admin** → **Cache Servers**
+2. **Yeni Cache Sunucusu**
+3. Sunucunun Hostname/IP'sini ve port'unu girin (`8090` varsayılan)
+4. **Kaydet**
+
+  </Tab>
+
+  <Tab title="Integration Kurulumu ve Tanımlanması">
+
+Integration (Quartz Scheduler), Manager'da tanımlanan task flow'ları çalıştırır. API'leri dönemli olarak test etmek, durumsal cleanup işlemleri yapmak veya harici sistemlerle senkronizasyon sağlamak için kullanılır.
+
+### Kurulum Adımları
+
+#### 1. İndir
+
+```bash
+VERSION=2026.04.2
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/integration/${VERSION}/apinizer-integration-${VERSION}-linux-x64.tar.gz"
+curl -fSLO "https://packages.apinizer.com/apinizer-packages/integration/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+```
+
+#### 2. Aç
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-integration-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-integration-${VERSION} /opt/apinizer-integration
+```
+
+Paket yapısı:
+
+```
+/opt/apinizer-integration/
+├── bin/        # start, stop, install, encrypt betikleri ve systemd unit
+├── conf/       # apinizer-integration.env (master.key installer tarafından üretilir)
+├── lib/        # Integration Spring Boot fat jar + lib/jasypt/ helper jar
+├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+└── logs/       # Runtime günlükleri (ilk başlangıçta oluşturulur)
+```
+
+#### 3. Yapılandır
+
+`conf/apinizer-integration.env`'i edit edin:
+
+```bash
+sudo vi /opt/apinizer-integration/conf/apinizer-integration.env
+```
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB bağlantı dizesi (Manager ile aynı örnek) |
+| `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (Manager ile aynı olmalı) |
+| `INTEGRATION_TIMEZONE` | IANA zone id (örn. `Europe/Istanbul`). Manager ve Gateway ile eşleşmeli; aksi takdirde cron job'ları yanlış wall-clock saatinde ateşlenecektir. |
+
+<Warning>
+Plaintext değerler bu noktada kabul edilir. Henüz servisi başlatmayın.
+</Warning>
+
+#### 4. Installer + Şifreleme
+
+```bash
+sudo /opt/apinizer-integration/bin/apiintegration-install.sh
+sudo -u apinizer /opt/apinizer-integration/bin/apiintegration-encrypt.sh
+```
+
+#### 5. Servisi Başlat
+
+```bash
+sudo systemctl start apinizer-apiintegration
+sudo systemctl status apinizer-apiintegration
+sudo journalctl -u apinizer-apiintegration -f
+```
+
+Beklenen boot günlükleri:
+
+```
+Integration timezone set to: Europe/Istanbul
+Initializing Custom MongoDB Job Store
+Quartz Scheduler Prod Environment Setup started
+MongoDB connection established for Quartz Job Store
+Quartz MongoDB Statistics - Jobs: ..., Triggers: ..., Calendars: ..., Locks: ...
+Tomcat started on port 8092 (http)
+```
+
+#### 6. Çoklu Node / HA
+
+Birden fazla Integration node'u **aynı MongoDB veritabanını** paylaşabilir — otomatik olarak kümelenmiş Quartz scheduler oluştururlar. Her örnek:
+
+- `org.quartz.scheduler.instanceId` otomatik üretir (manuel yapılandırma gerekmez)
+- `schedule_integration_locks` koleksiyonu aracılığıyla trigger'ları kilitler; aynı job hiçbir zaman iki node'da aynı anda ateşlenmez
+- Başlangıçta misfired job'ları kurtarır
+
+Ek standalone ayarı gerekmez — her node'u aynı MongoDB URI + veritabanına işaret edin.
+
+<Tip>
+Zaman-kritik scheduled flow'lar için failover gerekiyorsa Integration node'larını en az ikili kur. Tek node ile, host yeniden başlatması scheduled çalıştırmaları JVM'in yeniden başlaması kadar engeller.
+</Tip>
+
+#### 7. Manager'ı Integration'a Bağlayın
+
+Manager UI'da Integration sunucusunu kaydedin:
+
+1. Manager UI → **Admin** → **Integration Servers**
+2. **Yeni Integration Sunucusu**
+3. Hostname/IP ve HTTP port'unu (`8092`) girin
+4. **Kaydet**
+
+Manager, REST aracılığıyla job register/unregister ve cache-refresh olayları gönderer; başka yapılandırma gerekmez.
+
+#### 8. Tuning (opsiyonel)
+
+JVM heap yüzdesi, server port'u, log dizini ve log level'i tüm `apinizer-integration.env`'de belgelenmiştir. Varsayılanlar Kubernetes deploy'ı ile eşleşir; yalnızca hedef donanım üzerinde sustained load test'i sonrası re-tune edin.
+
+<Info>
+Yaygın olarak dakika alan task flow'ları çalıştırıyorsanız systemd unit'te `TimeoutStopSec=` arttırın (varsayılan 120 s). Quartz, `waitForJobsToCompleteOnShutdown=true` ile yapılandırılmıştır, bu nedenle SIGTERM temiz drain tetikler — timeout, systemd'nin SIGKILL'e yükseltmesine kadarki süreyi kapaklar.
+</Info>
+
+Bu modülün **yükseltme** ve **kaldırma** adımları için sırasıyla [Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme) ve [Kaldırma](/tr/setup/kaldirma) sayfalarına bakın.
+
+  </Tab>
+
+  <Tab title="API Portal Kurulumu">
+
+API Portal, son kullanıcıların API'leri keşfettiği, test ettiği ve API key'leri yönettiği web uygulamasıdır. İsteğe bağlı bir module; API trafiği için gerekli değildir.
+
+### Kurulum Adımları
+
+#### 1. İndir
+
+```bash
+VERSION=2026.04.2
+curl -fLO "https://packages.apinizer.com/apinizer-packages/apiportal/${VERSION}/apinizer-apiportal-${VERSION}-linux-x64.tar.gz"
+curl -fLO "https://packages.apinizer.com/apinizer-packages/apiportal/${VERSION}/checksums.sha256"
+sha256sum -c checksums.sha256
+```
+
+#### 2. Aç
+
+```bash
+sudo mkdir -p /opt
+sudo tar -xzf apinizer-apiportal-${VERSION}-linux-x64.tar.gz -C /opt
+sudo mv /opt/apinizer-apiportal-${VERSION} /opt/apinizer-portal
+```
+
+Paket yapısı:
+
+```
+/opt/apinizer-portal/
+├── bin/        # start, stop, install, encrypt betikleri ve systemd unit
+├── conf/       # application.env (master.key installer tarafından üretilir)
+├── lib/        # Application jar + lib/jasypt/ helper jar
+├── runtime/    # Gömülü OpenJDK 25 (Temurin)
+└── logs/       # Runtime günlükleri (ilk başlangıçta oluşturulur)
+```
+
+#### 3. Yapılandır
+
+`conf/application.env`'i edit edin:
+
+```bash
+sudo vi /opt/apinizer-portal/conf/application.env
+```
+
+**Zorunlu** alanlar:
+
+| Anahtar | Açıklama |
+| --- | --- |
+| `API_PORTAL_ID` | Manager UI → **Portal** → **API Keys** menüsünden alınan Portal ID'si |
+| `API_PORTAL_MANAGEMENT_API_BASE_URL` | Manager URL'si (örn. `https://manager.example.com`) |
+| `API_PORTAL_MANAGEMENT_API_KEY` | Manager'dan üretilmiş API Key |
+
+**Opsiyonel**:
+
+```bash
+SERVER_PORT=8080
+```
+
+<Info>
+Bu noktada secret'ları plaintext bırakabilirsiniz; şifreleme 5. adımda add-on olarak uygulanır.
+</Info>
+
+Manager UI'da Portal API Key'i oluşturmak için:
+
+1. Manager UI → **Portal** → **API Keys**
+2. **Yeni API Key**
+3. Portal türünü seç ve oluştur
+4. Key ve ID'yi kopyala, Portal yapılandırmasına yapıştır
+
+#### 4. Installer
+
+```bash
+sudo /opt/apinizer-portal/bin/apiportal-install.sh
+```
+
+Installer `apinizer` kullanıcısı oluşturur, izinleri ayarlar, master key üretir, yapılandırma doğrular ve systemd servisini kaydeder.
+
+#### 5. Şifreleme (Opsiyonel, Önerilir)
+
+```bash
+sudo -u apinizer /opt/apinizer-portal/bin/apiportal-encrypt.sh
+```
+
+Standart alanları şifreler: `API_PORTAL_ID`, `API_PORTAL_MANAGEMENT_API_BASE_URL`, `API_PORTAL_MANAGEMENT_API_KEY`.
+
+#### 6. Servisi Başlat
+
+```bash
+sudo systemctl start apinizer-apiportal
+sudo systemctl status apinizer-apiportal
+sudo journalctl -u apinizer-apiportal -f
+```
+
+Portal şu adresler üzerinden erişilebilir:
+
+```
+http://<sunucu-ip>:8080
+```
+
+#### 7. Doğrula
+
+```bash
+curl -fsS http://localhost:8080/apiportal/management/health
+# Beklenen: {"status":"UP"}
+```
+
+#### Operasyon
+
+<CardGroup cols={2}>
+  <Card title="Durum" icon="play">
+    `sudo systemctl status apinizer-apiportal`
+  </Card>
+  <Card title="Yeniden başlat" icon="rotate-right">
+    `sudo systemctl restart apinizer-apiportal`
+  </Card>
+  <Card title="Durdur" icon="stop">
+    `sudo systemctl stop apinizer-apiportal`
+  </Card>
+  <Card title="Günlükler" icon="file-lines">
+    `sudo journalctl -u apinizer-apiportal -f`
+  </Card>
+</CardGroup>
+
+#### Güvenlik Modeli
+
+- `apinizer`, `/sbin/nologin` ile sistem hesabı
+- `conf/master.key` izni `400`, `apinizer` sahipli
+- `conf/application.env` izni `600`
+- systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`
+
+<Warning>
+`conf/master.key`'i yedekleyin. Master key kaybedilirse tüm ENC(...) değerleri kalıcı olarak şifresi çözülemez.
+</Warning>
+
+Bu modülün **yükseltme** ve **kaldırma** adımları için sırasıyla [Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme) ve [Kaldırma](/tr/setup/kaldirma) sayfalarına bakın.
+
+  </Tab>
+
+  <Tab title="API Manager'i SSL ile Başlatma">
+
+API Manager'i HTTPS ile hizmet edebilmesi için SSL/TLS sertifikası ve key'i yapılandırın.
+
+### Sertifika Hazırlama
+
+JKS veya PKCS12 keystore oluşturun. PKCS12 ise:
+
+```bash
+# Mevcut sertifika + key'den PKCS12 oluştur
+openssl pkcs12 -export \
+  -in /path/to/cert.pem \
+  -inkey /path/to/key.pem \
+  -out /opt/apinizer-manager/conf/keystore.p12 \
+  -name apinizer-manager \
+  -passout pass:your-keystore-password
+```
+
+JKS ise keytool kullanın:
+
+```bash
+keytool -import -alias apinizer-manager \
+  -file /path/to/cert.pem \
+  -keystore /opt/apinizer-manager/conf/keystore.jks \
+  -storepass your-keystore-password
+```
+
+### application.env Ayarları
+
+```bash
+sudo vi /opt/apinizer-manager/conf/application.env
+```
+
+Aşağıdaki alanları ekleyin/güncelleyin:
+
+```bash
+SSL_ENABLED=true
+SSL_KEY_STORE=/opt/apinizer-manager/conf/keystore.p12
+SSL_KEY_STORE_PASSWORD="ENC(...)"  # plaintext olarak başlayın, sonra şifreleyin
+SSL_KEY_STORE_TYPE=PKCS12          # veya JKS
+SSL_KEY_ALIAS=apinizer-manager
+SERVER_PORT=8443
+```
+
+### Şifreleme
+
+```bash
+sudo -u apinizer /opt/apinizer-manager/bin/apimanager-encrypt.sh
+```
+
+Bu, `SSL_KEY_STORE_PASSWORD`'ı ENC(...) formatında sarıp sarmalayacaktır.
+
+### Systemd Unit Yeniden Yükleme ve Restart
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart apinizer-apimanager
+```
+
+### Doğrula
+
+```bash
+curl -fkS https://127.0.0.1:8443/management/health
+```
+
+(`-k` SSL sertifikası doğrulamasını atlar; üretimde silin)
+
+  </Tab>
+</Tabs>
+
+## Ortak Ayarlar
+
+Tüm Apinizer modülleri (API Manager, Gateway, Cache, Integration, API Portal) için geçerli olan yapılandırma yönlemleri bu bölümde açıklanır.
+
+### Saat Dilimi Senkronizasyonu
+
+Manager, Gateway, Cache ve Integration arasında tutarlı saat dili çok önemlidir. Quota rollovers, cron job'lar ve durumsal işlemler saat dili'ne bağlı olabilir. Her modülün yapılandırmasında:
+
+- **Manager**: İçinde JVM timezone tanımlanmaz; sistem timezone'ından miras alır. System timezone'unu kontrol edin: `timedatectl`
+- **Gateway** (`WORKER_TIMEZONE`): UTC offset (örn. `+03:00`)
+- **Cache** (`CACHE_QUOTA_TIMEZONE`): UTC offset (örn. `+03:00`)
+- **Integration** (`INTEGRATION_TIMEZONE`): IANA zone id (örn. `Europe/Istanbul`)
+
+Tüm değerler aynı saat dilimini temsil etmelidir. Aksi takdirde quota sayaçları, cron job'lar ve cached state'ler kayacaktır.
+
+### JVM Tuning
+
+Her modülün `conf/` dizinindeki env dosyasında JVM parametreleri tanımlanır. Varsayılanlar Kubernetes deploy'ı ile eşleşir:
+
+**Manager**:
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true"
+```
+
+**Gateway**:
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+tuneWorkerThreads=1024
+tuneWorkerMaxThreads=4096
+tuneBufferSize=16384
+tuneIoThreads=4
+```
+
+**Cache**:
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0"
+```
+
+**Integration**:
+```bash
+JAVA_OPTS="-server -XX:MaxRAMPercentage=75.0"
+```
+
+Tuning hedef donanım üzerinde sustained load test'i sonrası yapılmalıdır. Varsayılanlar üretim ortamı için genellikle yeterlidir.
+
+### Log Yönetimi
+
+- **Systemd journal**: `sudo journalctl -u apinizer-<modül> -f`
+- **Dosya günlükleri**: `/opt/<modül>/logs/`
+- **Log rotation**: Systemd/logrotate (kurulum sırasında otomatik) veya modül log configuration'ında tanımlanır
+- **Log level**: `conf/*.env` içinde `LOG_LEVEL=INFO|DEBUG|WARN|ERROR` ile ayarlayın
+
+### Master Key Yönetimi
+
+Her modülün `conf/master.key` dosyası:
+
+- Kurulumda **otomatik üretilir** — deterministic değildir, her kurulumda farklı
+- İzni `400`, `apinizer:apinizer` sahipli
+- **Yedeklenmeli**: Kaybedilirse tüm ENC(...) değerleri kurtarılamaz
+- Güvenli saklanmalı: Secrets vault, HSM, sealed envelope vb.
+- **Key rotation**: Master key değiştirilecekse yeni key oluştur, tüm plaintext değerleri gir, encrypt komutunu çalıştır, eski key'i git
+
+### Operatör Olmayan User Privilegesi
+
+Installer'ları çalıştırabilecek bir user group tanımlayın:
+
+```bash
+sudo groupadd apinizer-admins
+sudo usermod -a -G apinizer-admins <username>
+
+# sudoers
+/etc/sudoers.d/apinizer-installers:
+%apinizer-admins ALL=(root) NOPASSWD: /opt/apinizer-*/bin/*-install.sh
+```
+
+<Note>
+Kurulum sırasında karşılaşılabilecek ortak sorunlar ve çözümleri için [Sorun Giderme](/tr/setup/sorun-giderme) sayfasının "Sanal Sunucu" sekmesine bakın.
+</Note>

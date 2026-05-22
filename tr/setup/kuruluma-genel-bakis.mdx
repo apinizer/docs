@@ -1,0 +1,600 @@
+---
+title: "Kurulumlara Genel Bakış"
+description: "Apinizer kurulumu için gereken her şey: yöntem seçimi, kurulum öncesi kararlar, erişim/port gereksinimleri, topolojiler ve güncelleme — tek sayfada sekmeler halinde."
+---
+
+Apinizer üç farklı çalışma ortamında kurulabilir: **Kubernetes**, **Docker** ve **Linux / VM**. Her yöntemin farklı operasyonel maliyeti ve hedef kitlesi vardır. Detaylı karşılaştırma için aşağıdaki **Yöntem Seçimi** sekmesine bakın.
+
+<Warning>
+Apinizer üretim ortamı için tek sunucuya kurulum yapılmasını tavsiye etmez. Böyle bir kurulum konfigürasyonunu sadece PoC ortamları için değerlendirin.
+</Warning>
+
+<Tabs>
+  <Tab title="Yöntem Seçimi">
+    **Apinizer'ı çalıştırmanın iki yolu var: konteyner veya standalone.**
+
+    Tüm Apinizer bileşenlerini kendi Kubernetes cluster'ınızda ya da Docker host'unuzda resmi `apinizercloud` imajları ile, veya bare-metal Linux sunucuda imzalı tarball installer'lar ile çalıştırın. Aynı build'ler, aynı sürümler, sizin altyapınız.
+
+    Konteyner tarafında **Kubernetes** üretim, HA ve otomatik ölçekleme için; **Docker** orta ölçek ve hızlı PoC için tercih edilir. Standalone tarafında **Sanal Sunucu** kurulumu regüle ortamlar (banka, kamu), air-gapped ağlar ve gömülü JDK isteyen senaryolar için uygundur. Aşağıdaki karar matrisini inceleyerek size uygun yöntemi seçin.
+
+    ## Hızlı Karar Matrisi
+
+    | Senaryo | Önerilen Yöntem |
+    | --- | --- |
+    | Kubernetes cluster mevcut, üretim, HA + otomatik ölçeklendirme | **Kubernetes** |
+    | Tek/birkaç sunucu, konteyner deneyimi var, hızlı PoC | **Docker** |
+    | Regüle ortam (banka/kamu), K8s/Docker yasak veya kısıtlı | **Linux / VM** |
+    | Çevrimdışı (air-gapped) kurulum | **Linux / VM** (offline kurulum) |
+    | 5+ Worker, dağıtık quota / circuit breaker | Kubernetes veya Linux / VM çoklu node (Cache cluster) |
+    | Geliştirici makinesi, geçici test ortamı | **Docker** (docker-compose) |
+
+    ## Yöntem Karşılaştırması
+
+    | Kriter | Kubernetes | Docker | Linux / VM |
+    | --- | --- | --- | --- |
+    | Operasyonel kompleksite | Yüksek | Orta | Düşük |
+    | Öğrenme eğrisi | Dik | Orta | Düz |
+    | Yüksek erişilebilirlik (HA) | Yerleşik | Compose / Swarm ile | Çoklu node manuel |
+    | Otomatik ölçeklendirme | HPA / VPA | Yok | Yok |
+    | Sıfır kesintili güncelleme | Rolling update | Tek tek replika rotasyonu | Manuel + LB |
+    | Gömülü JDK | Hayır (image içinde JRE) | Hayır (image içinde JRE) | **Evet** (Temurin 25 paketle) |
+    | Air-gapped destek | Helm + private registry | Private registry | **Native (offline tarball)** |
+    | Resmî sertifika gereksinimi | TLS Ingress / cert-manager | Reverse proxy / self-terminate | Reverse proxy / self-terminate |
+    | Şifrelenmiş yapılandırma | K8s Secret | Docker Secret / env | **Jasypt master key + ENC(...)** |
+    | Donanım gereksinimi (üretim) | 3+ node cluster, 8+ vCPU/node | 1-3 host, 4+ vCPU/host | 1-3 host, 4+ vCPU/host |
+    | Bulut sağlayıcı entegrasyonu | EKS / AKS / GKE / OpenShift | Bulut VM üzerinde | Bulut VM üzerinde |
+
+    ## Ne Zaman Hangisini Seçmemeli?
+
+    ### Kubernetes seçme
+
+    - Tek sunucu PoC kuracaksanız — K8s overhead'i bu boyutta orantısız.
+    - Ekibinizde K8s deneyimi yoksa ve öğrenmek için zaman ayıramayacaksanız.
+    - Regüle ortam K8s'i yasaklamışsa (bazı banka/kamu ortamları).
+
+    ### Docker seçme
+
+    - 5+ Worker ölçeğinde üretim çalıştıracaksanız — Hazelcast cluster'ı yönetmek Compose'da ağırlaşır.
+    - Otomatik failover ihtiyacı varsa (Docker tek başına HA orchestration vermez).
+    - Container runtime kurumsal politikayla yasaksa.
+
+    ### Linux / VM seçme
+
+    - Çoklu node ile dinamik ölçeklendirme istiyorsanız — el ile node ekleme/çıkarma sürtünmeli.
+    - Konteyner ekosistemi (CI/CD imaj registry, scan pipeline) zaten oturmuşsa — VM ile entegrasyon ek iş.
+
+    ## Ortak Ön Hazırlık — MongoDB
+
+    <Warning>
+      **MongoDB kurulumu zorunludur** — Apinizer'ı çalıştırmadan önce ayağa kalkmış bir MongoDB instance'ınız olmalı. Manager metadata'sı, deploy edilmiş proxy snapshot'ları, Integration scheduler kuyruğu ve audit kayıtları tamamen MongoDB üzerinde tutulur. Hangi runtime'ı (Kubernetes, Docker veya Sanal Sunucu) seçerseniz seçin bu bağımlılık değişmez.
+
+      Üretim için **replica set** önerilir; tek node sadece PoC / geliştirme için uygundur. Kurulum adımları için → [MongoDB Kurulumu](/tr/setup/mongodb) sayfasından devam edin.
+    </Warning>
+  </Tab>
+
+  <Tab title="Kurulum Öncesi Kararlar">
+    Apinizer kurulumu öncesi karar verilmesi gereken konular aşağıda kategori bazlı toplanmıştır. Her kategori, ilgili konudaki kritik karar noktalarını ve önerileri gösterir.
+
+    ## Kurulum ve Altyapı
+
+    ### Apinizer'ın ihtiyaç duyduğu Kubernetes Cluster ve MongoDB gibi uygulamalar kurulacak mı hazırda var ve onlar kullanılacak mı?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kurumunuzda hazırda bu bileşenler varsa bunların kullanılması
+        * Kurulum yapılacaksa ekibiniz tarafından hazırlanması
+        * Kurulum yapılacaksa Apinizer ekibi tarafından yapılması
+        * Kurulum Apinizer ekibi tarafından yapılacaksa ilgili sunucular [Kurulum için Erişim ve Port Gereksinimleri](#erişim-ve-port) bölümündeki erişimlere sahip olmalıdır
+      </Card>
+    </CardGroup>
+
+    ### Kurulacaksa kurumunuz çalışanları mı kuracak Apinizer ekibine sunucu mu tahsis edilecek?
+
+    Bu karar, kurulum sürecinin kim tarafından yönetileceğini belirler.
+
+    ### Apinizer ekibi tarafından kurulacaksa sunucularda internet erişimi kısıtlı ya da tam şekilde olacak mı?
+
+    Internet erişimi durumu, kurulum yöntemini (online/offline) etkiler.
+
+    ## Ağ ve Güvenlik
+
+    ### Apinizer'ın kurulacağı ağı kontrol eden ve güvenlik sıkılaştırması yapan WAF ve firewall dışında bir ürün var mı?
+
+    <Info>
+      Apinizer'ın bulunduğu cluster'ın iç trafiğini de engelleyebildiği için bu tarz bir ürün varsa bunun bildirilmesi, olası sorunlarda çözüm arayışını hızlandıracağı için önemlidir. Bu bilgi kurumunuz Ağ ve Güvenlik Birimi çalışanlarından edinilebilir.
+    </Info>
+
+    ### Apinizer'ın kurulacağı ağda 10.244.x.x bloğunda bir kullanım mevcut mu?
+
+    <Warning>
+      Kullanılıyorsa Apinizer kurulumu başka bir blok üzerine kurulması gerekeceğinden kurumunuz network ekibinden bu bilgi alınmalıdır.
+    </Warning>
+
+    ## Port ve DNS
+
+    ### Apinizer bulunduğu sunucularda hangi portlardan yayın yapmalıdır?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * 30000-32767 aralığından Manager için 32080, worker için 30080 veya 30090 olacak şekilde
+        * Kurumunuz DevOps Ekibi yönetiminde ayarlanacak portlarda (yine aynı aralıktan ya da nginx ingress kullanarak)
+      </Card>
+    </CardGroup>
+
+    ### Apinizer'ın erişeceği DNS'ler Apinizer'ın bulunacağı sunucularda otomatik olarak çözülecek mi? Eğer hayır ise bu IP-host tanımları elde mevcut olarak hazır mı?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Bu adresler çok nadir de olsa değişebileceği için sunucuların otomatik çözeceği şekilde ayarlanması
+        * Hostname-IP ikililerinin liste olarak Apinizer'a eklenmek için hazırlanması
+      </Card>
+    </CardGroup>
+
+    ### Apinizer arayüzü ve worker'lar DNS üzerinden mi kullanılacak? Evet ise DNS'ler nasıl olacak?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * `apiyonetim.kurum.com` ve `api.kurum.com` gibi adresler
+      </Card>
+    </CardGroup>
+
+    ## SSL ve NAT
+
+    ### SSL sonlandırma nerede yapılacak?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kurumunuza ait güvenlik duvarında
+        * Kurumunuzun DNS yönlendirmesi ve load balans işlemlerini gerçekleştirdiği uygulamada
+        * Apinizer worker uygulamalarında
+      </Card>
+    </CardGroup>
+
+    ### Apinizer kurumunuz dışında da kullanılacaksa hangi IP'den dışarı çıkacaktır? Apinizer sunucularının bu adresten çıkabilmesi için gerekli (NAT) işlemler gerçekleştirildi mi?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kurumunuzun mevcut çıkışının değiştirilmemesi, Apinizer'ın da bu adresten çıkması
+      </Card>
+    </CardGroup>
+
+    ## Worker ve Yönetim
+
+    ### Apinizer'ın worker uygulaması (Core ve RAM kullanımı, JVM parametreleri) nasıl ayarlanacak?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Mevcut lisansınızı iki ya da üçe bölüp buna uygun JVM parametrelerini girip birden fazla konteynıra dağıtarak
+        * Kurumunuzun uyguladığı politikaya göre farklı ayarlarla
+      </Card>
+    </CardGroup>
+
+    ### Apinizer'ın üzerine kurulacağı Kubernetes sistemleri nasıl yönetilecek?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Apinizer arayüzünden
+        * Kurumunuza ait yöntemler ile
+      </Card>
+    </CardGroup>
+
+    ## Loglama ve Yedekleme
+
+    ### Trafik logları nereye yazılmalıdır?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Apinizer'ın kuracağı Elasticsearch ile tahsis edilen sunuculardan birine
+        * Kurumunuzun ayarladığı başka bir uygulamaya
+      </Card>
+    </CardGroup>
+
+    ### Trafik logları Apinizer'ın yönettiği Elasticsearch'te ise buradaki verilerin yedeği nasıl alınacaktır?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kurumunuz Sistem ekibi çalışanları logların yazıldığı diski olduğu gibi yedekleyecek
+        * Kurumunuz Sistem ekibi çalışanları logların bulunduğu sunucuyu olduğu gibi yedekleyecek
+        * Snapshot politikasıyla belirli bir sunucudaki belirli bir adrese gönderilmesi istenecek ve loglar burada yedeklenecek
+      </Card>
+    </CardGroup>
+
+    ### Trafik loglarında görünmemesi gereken hassas bilgiler var mı? Varsa bunlar nelerdir? Mesajın hangi kısımlarında görünmemelidir?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kurumunuza ait Bilgi Güvenliği Ekibinden kurum politikası istenebilir
+        * Tckn ve TcKimlikNo gibi kişisel veri tutan anahtar değerler
+      </Card>
+    </CardGroup>
+
+    ### Uygulama ve Token alma logları (ayarları aktif ise) nereye yazılmalıdır?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Apinizer'ın konfigürasyon veritabanına
+        * Kurumunuzun ayarladığı başka bir uygulamaya
+      </Card>
+    </CardGroup>
+
+    ### Veritabanında tutulacak olan loglar varsa bu büyüme nasıl kontrol altında tutulacaktır?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Bu loglar belirli sürelerde silinecek
+        * Disk doldukça genişletilecek
+      </Card>
+    </CardGroup>
+
+    ## Kullanıcı Yönetimi ve Destek
+
+    ### Apinizer arayüzüne ilk kurulumla oluşturulan admin kullanıcı hesabı kullanılacak mı? Evet ise kimin tarafından kullanılacak?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Apinizer'ı varsa Entegrasyon Biriminiz çalışanlarının kullanması, kullanacak kişilere kendilerine ait ve yetkili kullanıcı hesapları oluşturulması, admin hesabının devredışı bırakılması
+        * Admin kullanıcısının Apinizer'dan sorumlu tek bir kişi tarafından kullanılması, kullanacak diğer kişilere yeni kullanıcılar tanımlanması
+      </Card>
+    </CardGroup>
+
+    ### Apinizer arayüzüne erişecek kullanıcı yönetimi tamamen Apinizer'dan mı yönetilecek yoksa şifre doğrulaması LDAP/Active Directory ile mi yapılacak?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * Kullanıcılar her zaman Apinizer'a tanımlanmalıdır ancak şifre doğrulaması kurumunuza ait LDAP/AD uygulaması Apinizer'a tanımlanıp, bağlanacak kullanıcıları doğrulayabilecek yetkide bir kullanıcı ya da servis hesabı açılması
+        * Kullanıcıların tamamen Apinizer'dan yönetilmesi
+      </Card>
+    </CardGroup>
+
+    ### Apinizer destek ekibi, Apinizer'ı kullanan ekibinize, Apinizer uygulamasına ve istenirse Apinizer'ın kurulu olduğu sunuculara nasıl destek verecek?
+
+    <CardGroup cols={1}>
+      <Card title="Önerilerimiz">
+        * VPN tanımlanması ve sadece Apinizer sunucuları ile Apinizer arayüzüne yetki verilmesi
+        * Anydesk, Team Viewer gibi uzaktan erişim sağlayan uygulamalar ile
+        * Zoom, Cisco Webex, Microsoft Teams, Skype gibi uzaktan erişime izin veren toplantı uygulamaları ile
+        * Whereby, Turkcell Bip Meet gibi toplantı uygulamaları ile
+        * Mail, telefon ve gerektiğinde kuruma fiziksel olarak misafir olarak
+      </Card>
+    </CardGroup>
+  </Tab>
+
+  <Tab title="Erişim ve Port">
+    ## Apinizer Port Gereksinimleri
+
+    Kurulum yönteminize göre Apinizer modüllerinin varsayılan portları aşağıdadır. **Tüm varsayılan portlar değiştirilebilir** — ancak değişiklik sonrası ilgili network izinleri yeniden gözden geçirilmelidir.
+
+    <Tabs>
+      <Tab title="Kubernetes">
+        ### Internet Erişim Gereksinimleri (Kubernetes)
+
+        Kubernetes cluster'ın ilk kurulumu sırasında aşağıdaki adreslere internet erişimi gereklidir (paket repo'ları, container imaj registry'leri, CNI bileşenleri):
+
+        * `archive.ubuntu.com` / `cdn.redhat.com`
+        * `*.docker.com`
+        * `*.docker.io`
+        * `*.k8s.io`
+        * `*.amazonaws.com` (bu erişimin sebebi için lütfen Kubernetes dokümantasyonuna göz atınız)
+        * `*.mongodb.org`
+        * `artifacts.elastic.co`
+
+        <Info>
+        Docker ve Sanal Sunucu kurulumlarında bu liste **gerekli değildir**. Docker için yalnızca `hub.docker.com` (veya kurumsal private registry) erişimi, Sanal Sunucu için ise offline tarball desteği nedeniyle çoğunlukla **hiçbir** internet erişimi gerekmez.
+        </Info>
+
+        <Info>
+        **Not:** Bu port bilgileri Kubernetes 1.31.0 ve Flannel 0.27.4 versiyonu için doğrulanmıştır. Farklı Kubernetes/CNI sürümlerinde portlar değişebilir.
+        </Info>
+
+        ### Apinizer Servisleri (NodePort)
+
+        Kubernetes dış erişim için varsayılan olarak **30000-32767** NodePort aralığını kullanır.
+
+        | Servis | NodePort | Protokol | Açıklama |
+        |--------|----------|----------|----------|
+        | Manager | 32080 | HTTP | Apinizer Manager UI / REST API |
+        | Worker | 30080 veya 30090 | HTTP | Gateway HTTP listener |
+        | API Portal | 32081 | HTTP | Geliştirici portalı |
+        | MongoDB | 25080 | TCP | MongoDB erişimi (Replica Set node'lar arası) |
+        | Elasticsearch HTTP | 9200 | HTTP | Elasticsearch REST |
+        | Elasticsearch Transport | 9300 | TCP | Elasticsearch cluster iletişimi |
+
+        ### Kubernetes Cluster İç Portları
+
+        Aşağıdaki port gereksinimleri Kubernetes cluster bileşenlerinin birbiriyle iletişimi içindir. Bu portlar cluster'ın doğru çalışması için ilgili yönlerde açık olmalıdır.
+
+        #### Worker Node → Master Node
+
+        | Port | Protokol | Açıklama | Gerekli |
+        |------|----------|----------|---------|
+        | 6443 | HTTPS | Kubernetes API Server | Evet |
+        | 10250 | HTTPS | Kubelet API | Evet |
+        | 10259 | HTTPS | Kube-scheduler | Evet |
+        | 10257 | HTTPS | Kube-controller-manager | Evet |
+        | 2379-2380 | TCP | etcd client/server | Evet |
+        | 8472 | UDP | Flannel VXLAN | Evet |
+        | 51820/51821 | UDP | Flannel Wireguard | Opsiyonel |
+
+        #### Master Node → Worker Node
+
+        | Port | Protokol | Açıklama | Gerekli |
+        |------|----------|----------|---------|
+        | 10250 | HTTPS | Kubelet API | Evet |
+        | 30000-32767 | TCP/UDP | NodePort Services | Evet |
+        | 8472 | UDP | Flannel VXLAN | Evet |
+        | 51820/51821 | UDP | Flannel Wireguard | Opsiyonel |
+
+        #### Master Node ↔ Master Node
+
+        | Port | Protokol | Açıklama | Gerekli |
+        |------|----------|----------|---------|
+        | 6443 | HTTPS | Kubernetes API Server | Evet |
+        | 2379-2380 | TCP | etcd client/server | Evet |
+        | 10250 | HTTPS | Kubelet API | Evet |
+        | 10259 | HTTPS | Kube-scheduler | Evet |
+        | 10257 | HTTPS | Kube-controller-manager | Evet |
+        | 8472 | UDP | Flannel VXLAN | Evet |
+
+        ### High Availability (HA) — Load Balancer
+
+        HA Cluster kurulumunda Load Balancer VIP'sine 6443 portu üzerinden erişim sağlanacak şekilde izin tanımlanmalı:
+
+        - `VIP → Master Node 1:6443`
+        - `VIP → Master Node 2:6443`
+        - `VIP → Master Node 3:6443`
+
+        Load Balancer için HAProxy yapılandırma örnekleri mevcuttur.
+
+        <Warning>
+        Ingress Controller, Metric Server, Rancher, Lens vb. eklentiler veya bulut Kubernetes (EKS/AKS/GKE/OpenShift) ortamlarında ek portlar gerekebilir; bunlar harici olarak kontrol edilmelidir.
+        </Warning>
+      </Tab>
+
+      <Tab title="Docker">
+        <Info>
+        Container içindeki uygulama portları aşağıdaki tabloda. Host'a açmak için `docker run -p <host-port>:<container-port>` veya `docker-compose.yml` `ports:` bloğunu kullanın.
+        </Info>
+
+        ### Apinizer Servisleri
+
+        | Modül | Container Port | Protokol | Açıklama |
+        |-------|---------------|----------|----------|
+        | Manager | 8080 | HTTP | Manager UI / REST API |
+        | Worker (HTTP) | 8091 | HTTP | Gateway HTTP listener |
+        | Worker (HTTPS) | 8443 | HTTPS | Gateway HTTPS listener (Environment HTTPS açıksa) |
+        | Cache (Hazelcast) | 5701 | TCP | Hazelcast wire protocol (Worker'lar bağlanır) |
+        | Cache (REST) | 8090 | HTTP | Cache REST API |
+        | Integration | 8092 | HTTP | Quartz scheduler REST (Manager bağlanır) |
+        | API Portal | 8080 | HTTP | Geliştirici portalı (Manager'dan farklı host'ta çalışmalı) |
+
+        ### Veritabanı
+
+        | Servis | Port | Protokol | Açıklama |
+        |--------|------|----------|----------|
+        | MongoDB | 25080 | TCP | MongoDB connection |
+        | Elasticsearch HTTP | 9200 | HTTP | (Opsiyonel — trafik logları için) |
+        | Elasticsearch Transport | 9300 | TCP | (Opsiyonel — cluster iletişimi) |
+
+        <Warning>
+        Aynı host'ta birden fazla container Manager ve Portal'ı aynı 8080 ile çalıştıramaz; biri için farklı host port mapping (örn. `-p 8081:8080`) gerekir.
+        </Warning>
+      </Tab>
+
+      <Tab title="Linux / VM">
+        Linux/VM kurulumunda her modül kendi standalone paketi ile çalışır; portlar host üzerinde **doğrudan** dinlenir (NAT/proxy yok).
+
+        ### Apinizer Servisleri
+
+        | Modül | Varsayılan Port | Protokol | Yapılandırma anahtarı |
+        |-------|-----------------|----------|----------------------|
+        | Manager | 8080 | HTTP | `SERVER_PORT` |
+        | Worker (HTTP) | 8091 | HTTP | `WORKER_HTTP_PORT` |
+        | Worker (HTTPS) | 8443 | HTTPS | `WORKER_HTTPS_PORT` (Environment HTTPS açıksa) |
+        | Cache (Hazelcast) | 5701 | TCP | `hazelcast.network.port` |
+        | Cache (REST) | 8090 | HTTP | `SERVER_PORT` (cache modülü için) |
+        | Integration | 8092 | HTTP | `SERVER_PORT` (integration modülü için) |
+        | API Portal | 8080 | HTTP | `SERVER_PORT` (portal modülü için — Manager'dan farklı host'ta) |
+
+        ### Veritabanı
+
+        | Servis | Port | Protokol | Açıklama |
+        |--------|------|----------|----------|
+        | MongoDB | 25080 | TCP | MongoDB connection (Manager + Integration) |
+        | Elasticsearch HTTP | 9200 | HTTP | (Opsiyonel — trafik logları için) |
+        | Elasticsearch Transport | 9300 | TCP | (Opsiyonel — cluster iletişimi) |
+
+        ### Host limit'leri
+
+        Worker yüksek throughput için `/etc/security/limits.d/apinizer-worker.conf` içinde:
+        ```
+        apinizer soft nofile 1048576
+        apinizer hard nofile 1048576
+        ```
+
+        <Warning>
+        systemd hardening (`ProtectSystem=strict`, `PrivateTmp=true`) **mecburidir** — bunlar kaldırılırsa Undertow `/tmp/undertow-docbase.*` yazamaz ve servis çöker.
+        </Warning>
+      </Tab>
+    </Tabs>
+  </Tab>
+
+  <Tab title="Kurulum Topolojileri">
+    <Warning>
+      **Apinizer, üretim ortamı için tek sunucuya kurulum yapılmasını tavsiye etmez. Böyle bir kurulum konfigürasyonunu sadece PoC ortamları için değerlendiriniz.**
+    </Warning>
+
+    <Warning>
+      **Test/PoC kurulumlarını yük testi amacıyla kullanmayınız!** Yük testi yapmak için doğru konfigürasyonu değerlendirmek isterseniz lütfen [Benchmark Sonuçları](/tr/concepts/benchmark-sonuclari) sayfamıza bakınız veya bizimle iletişime geçiniz.
+    </Warning>
+
+    ## Kurulum Yöntemine Göre Topolojiler
+
+    Her runtime'ın kendine özgü toplam sunucu sayısı, ölçeklendirme modeli ve HA stratejisi var. Aşağıdaki sekmelerden runtime'ınızı seçin; her sekme **PoC / Professional / High Available** seviyeleri için detaylı sunucu listelerini gösterir.
+
+    <Tabs>
+      <Tab title="Kubernetes">
+        ### PoC / Test
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Kubernetes Control-Plane, Elasticsearch (Master+Data), MongoDB Single Instance |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 12 GB | 80 GB | Kubernetes Worker |
+
+        ### Professional
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 32 GB | 1 TB | Kubernetes Control-Plane, Elasticsearch (Master+Data), MongoDB Single Instance |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 10 Core | 12 GB | 80 GB | Kubernetes Worker |
+        | Sunucu 3 | Ubuntu 24.04 LTS / RHEL 9.x | 10 Core | 12 GB | 80 GB | Kubernetes Worker |
+
+        ### High Available
+
+        #### Kubernetes Control-Plane Nodes
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 4 GB | 80 GB | Kubernetes Control-Plane |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 4 GB | 80 GB | Kubernetes Control-Plane |
+        | Sunucu 3 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 4 GB | 80 GB | Kubernetes Control-Plane |
+
+        #### Kubernetes Worker Nodes
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 4 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Kubernetes Worker |
+        | Sunucu 5 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Kubernetes Worker |
+        | Sunucu 6 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Kubernetes Worker |
+
+        #### MongoDB Replica Set Nodes
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 7 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 200 GB | MongoDB Replica Set Node 1 |
+        | Sunucu 8 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 200 GB | MongoDB Replica Set Node 2 |
+        | Sunucu 9 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 200 GB | MongoDB Replica Set Node 3 |
+
+        #### Elasticsearch Cluster Nodes
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 10 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 64 GB | 2 TB | Elasticsearch Cluster Node 1 (Master+Data) |
+        | Sunucu 11 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 64 GB | 2 TB | Elasticsearch Cluster Node 2 (Master+Data) |
+        | Sunucu 12 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 64 GB | 2 TB | Elasticsearch Cluster Node 3 (Master+Data) |
+      </Tab>
+
+      <Tab title="Docker">
+        <Info>
+        Docker topolojilerinde tüm Apinizer modülleri `apinizercloud/<modul>` resmi imajları ile çalışır. Single-host kurulum için `docker-compose.yml`, çoklu-host için Docker Swarm veya manuel orchestration tercih edilir.
+        </Info>
+
+        ### PoC / Test
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Docker Compose: MongoDB + Manager + Worker + Cache + Integration + Portal |
+
+        ### Professional
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 500 GB | MongoDB + Manager + Cache + Integration + Portal (Docker container'ları) |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 12 GB | 80 GB | Worker container |
+        | Sunucu 3 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 12 GB | 80 GB | Worker container |
+
+        ### High Available
+
+        #### Manager + Portal Host'ları (Active-Passive veya LB arkasında)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Manager + Portal container'ları |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Manager + Portal container'ları (replika) |
+
+        #### Worker Host'ları (LB arkasında)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 3 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker container |
+        | Sunucu 4 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker container |
+        | Sunucu 5 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker container |
+
+        #### Cache Cluster Host'ları (Hazelcast — TCP/IP discovery)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 6 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache container |
+        | Sunucu 7 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache container |
+        | Sunucu 8 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache container |
+
+        #### MongoDB Replica Set Host'ları
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 9 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 1 |
+        | Sunucu 10 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 2 |
+        | Sunucu 11 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 3 |
+      </Tab>
+
+      <Tab title="Linux / VM">
+        <Info>
+        Linux/VM topolojilerinde her modül gömülü OpenJDK 25 ile gelen standalone paket olarak çalışır. Host'ta Java gerekmez. Hassas yapılandırma değerleri Jasypt master key ile yerinde şifrelenir.
+        </Info>
+
+        ### PoC / Test
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | MongoDB + Manager + Worker + Cache + Integration + Portal (hepsi tek host) |
+
+        ### Professional
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | Sunucu 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Manager + Cache + Integration + Portal standalone paketleri |
+        | Sunucu 2 | Ubuntu 24.04 LTS / RHEL 9.x | 10 Core | 12 GB | 80 GB | Worker standalone paketi |
+        | Sunucu 3 | Ubuntu 24.04 LTS / RHEL 9.x | 10 Core | 12 GB | 80 GB | Worker standalone paketi |
+        | Sunucu 4 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 16 GB | 500 GB | MongoDB Single Instance |
+
+        ### High Available
+
+        #### Manager + Portal VM'leri (Active-Passive veya LB arkasında)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | VM 1 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Manager + Portal standalone |
+        | VM 2 | Ubuntu 24.04 LTS / RHEL 9.x | 8 Core | 16 GB | 200 GB | Manager + Portal standalone (replika) |
+
+        #### Worker VM'leri (LB arkasında)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | VM 3 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker standalone |
+        | VM 4 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker standalone |
+        | VM 5 | Ubuntu 24.04 LTS / RHEL 9.x | 12 Core | 16 GB | 80 GB | Worker standalone |
+
+        #### Cache Cluster VM'leri (Hazelcast — TCP/IP discovery)
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | VM 6 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache standalone |
+        | VM 7 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache standalone |
+        | VM 8 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 8 GB | 80 GB | Cache standalone |
+
+        #### MongoDB Replica Set VM'leri
+        | Sunucu | İşletim Sistemi | CPU | RAM | Disk | Kurulumlar |
+        |--------|----------------|-----|-----|------|------------|
+        | VM 9 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 1 |
+        | VM 10 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 2 |
+        | VM 11 | Ubuntu 24.04 LTS / RHEL 9.x | 4 Core | 12 GB | 500 GB | MongoDB Replica Set Node 3 |
+      </Tab>
+    </Tabs>
+
+    ## Topoloji Seçim Kılavuzu
+
+    | Senaryo | PoC / Test | Professional | High Available |
+    |---------|------------|--------------|----------------|
+    | Proof of Concept projeleri | Evet | - | - |
+    | Geliştirme ve test ortamları | Evet | - | - |
+    | Düşük trafikli uygulamalar | Evet | - | - |
+    | Hızlı kurulum gereksinimleri | Evet | - | - |
+    | Sınırlı kaynaklar | Evet | - | - |
+    | Orta ölçekli production | - | Evet | - |
+    | Orta trafikli uygulamalar | - | Evet | - |
+    | Temel HA gereksinimleri | - | Evet | - |
+    | Bütçe optimizasyonu | - | Evet | - |
+    | Kritik production ortamları | - | - | Evet |
+    | Yüksek trafikli uygulamalar | - | - | Evet |
+    | %99.9+ HA gereksinimleri | - | - | Evet |
+    | Veri güvenliği ve replikasyon | - | - | Evet |
+    | Global dağılım | - | - | Evet |
+
+    ## Ölçeklendirme Önerileri
+
+    - **Dikey ölçeklendirme**: CPU/RAM artırımı, disk kapasitesi artırımı, tek sunucu performansı.
+    - **Yatay ölçeklendirme**: Worker node sayısını artırma, MongoDB replica set genişletme, Elasticsearch cluster genişletme.
+  </Tab>
+</Tabs>

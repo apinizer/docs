@@ -1,0 +1,224 @@
+---
+title: "Troubleshooting"
+description: "Common issues and solutions for Apinizer installations across Kubernetes, Docker, and Virtual Server deployments. Find the section matching your installation type."
+---
+
+This page is the diagnosis and solution guide for common issues encountered in Apinizer's installation environments. Pick the section matching your deployment method.
+
+<Tabs>
+  <Tab title="Docker">
+    ## API Manager
+
+    ### Container exits with `URI is not set` or `DATABASE is not set`
+
+    A required env var is empty. Recreate the container with the variables populated. Watch out for shell quoting around `?replicaSet=…&authSource=…` — pass via `-e SPRING_DATA_MONGODB_URI="…"` quoted or via an env-file.
+
+    ### Health endpoint returns `503 OUT_OF_SERVICE`
+
+    MongoDB is unreachable. Test from inside the container:
+
+    ```bash
+    docker exec -it apinizer-apimanager sh -lc \
+      "wget -qO- $SPRING_DATA_MONGODB_URI" 2>&1 | head
+    ```
+
+    ### `Memory tier: 1GB (heap 50%…)` even though the host has 32 GB
+
+    You did not pass `--memory` / `mem_limit`. The cgroup default is `max` and the auto-tuner falls back to total host memory. Set `mem_limit` to match what you want the container to use.
+
+    ### MongoDB connection times out
+
+    - Verify network reach: `docker exec apinizer-apimanager sh -lc 'nc -zv mongo 25080'`.
+    - Check that the URI carries the correct `replicaSet=` and `authSource=`.
+    - TLS to MongoDB: append `&tls=true` and mount the CA file.
+
+    ## Worker (Gateway)
+
+    ### `APINIZER_ENVIRONMENT_NAME` mismatch → container starts but proxies don't load
+
+    If the name does not match an Environment in the Manager UI exactly (case sensitive), no proxy snapshot is fetched and every request returns 404. Fix: correct the env var or create the Environment.
+
+    ### `UnsatisfiedLinkError: brotli`
+
+    You are running a custom build of the Worker on Alpine. Switch back to the official `apinizercloud/worker` image (Ubuntu noble base).
+
+    ### `EMFILE: too many open files`
+
+    Add `--ulimit nofile=1048576:1048576` to `docker run`. Also check that `/etc/security/limits.conf` / the host's `LimitNOFILE` allows it.
+
+    ## Cache
+
+    ### `Members {size:1}` on every node even though the peer list is correct
+
+    - Check `HAZELCAST_CLUSTER_NAME` matches on every node (case sensitive).
+    - Verify `5701/tcp` is reachable both ways: `nc -zv <peer-ip> 5701` from each container.
+    - On multi-host setups behind NAT (cloud), TCP/IP discovery requires routable, symmetric addresses.
+
+    ### Quotas reset unexpectedly
+
+    The `CACHE_QUOTA_TIMEZONE` value differs from the Worker / Manager timezone. They must all agree.
+
+    ## Integration (Quartz)
+
+    ### Quartz job didn't fire at the expected time
+
+    - Check `INTEGRATION_TIMEZONE` against the cron expression in the Manager.
+    - Multiple Integration nodes with mismatched timezones cause inconsistent fires.
+
+    ### Container exits with `Locked by another scheduler` after a hard kill
+
+    The previous container was SIGKILLed mid-trigger. The new container's lock-recovery sweep clears the stale row on startup; wait one `clusterCheckin` cycle (default 7.5 s) if needed.
+
+    ### Manager UI shows Integration as **offline**
+
+    The Manager cannot reach `http://<integration-host>:8092/`. Verify the host/port in Manager UI, firewall, and that the Integration container has finished its boot sequence.
+
+    ## API Portal
+
+    ### Container restarts in a loop with `API_PORTAL_ID is not set`
+
+    A required env var is empty. Pass all three of `API_PORTAL_ID`, `API_PORTAL_MANAGEMENT_API_BASE_URL`, `API_PORTAL_MANAGEMENT_API_KEY`.
+
+    ### Home page returns `502 Bad Gateway`
+
+    The Portal cannot reach the Manager REST API. Check from inside the container:
+
+    ```bash
+    docker exec apinizer-apiportal sh -lc \
+      "wget --header='X-Apinizer-Api-Key: $API_PORTAL_MANAGEMENT_API_KEY' \
+            -qO- $API_PORTAL_MANAGEMENT_API_BASE_URL/api/portal/v1/ping"
+    ```
+  </Tab>
+
+  <Tab title="Virtual Server">
+    ## API Manager
+
+    ### Service exits immediately with "is not set"
+
+    `SPRING_DATA_MONGODB_URI` or `SPRING_DATA_MONGODB_DATABASE` is empty in `conf/application.env`. Edit the file and re-run encryption.
+
+    ### `Read-only file system` on `/tmp`
+
+    The systemd unit hardening (`ProtectSystem=strict`) gives the service an isolated `/tmp` via `PrivateTmp=true`. If you replaced the unit and removed `PrivateTmp`, Undertow cannot create `/tmp/undertow-docbase.*`. Re-add `PrivateTmp=true`, then `daemon-reload` and `restart`.
+
+    ### Encryption fails with "Master key file not found"
+
+    `apimanager-install.sh` was never run, or the installer was run but did not generate a key. Re-run:
+
+    ```bash
+    sudo /opt/apinizer-manager/bin/apimanager-install.sh
+    ```
+
+    ### MongoDB connection times out
+
+    - Check that the MongoDB hosts in `SPRING_DATA_MONGODB_URI` are reachable from the server (`nc -zv host 25080`).
+    - Verify replica set name and `authSource` are correct.
+    - If TLS is required, append `&tls=true` (and any required CA file options) to the URI.
+
+    ## Gateway (Worker)
+
+    ### Service exits immediately with "is not set"
+
+    `SPRING_DATA_MONGODB_URI` or `SPRING_DATA_MONGODB_DATABASE` is empty in `conf/apinizer-worker.env`. Edit the file and re-run encryption.
+
+    ### `Read-only file system` on `/tmp`
+
+    The systemd unit hardening (`ProtectSystem=strict`) gives the service an isolated `/tmp` via `PrivateTmp=true`. If you replaced the unit and removed `PrivateTmp`, Undertow cannot create temporary scratch files. Re-add `PrivateTmp=true`, then `daemon-reload` and `restart`.
+
+    ### Encryption fails with "Master key file not found"
+
+    `apiworker-install.sh` was never run, or the installer was run but did not generate a key. Re-run:
+
+    ```bash
+    sudo /opt/apinizer-worker/bin/apiworker-install.sh
+    ```
+
+    ### `Too many open files`
+
+    Worker is bound to a high number of concurrent sockets. The packaged systemd unit already raises `LimitNOFILE` to `1048576`. If you are running outside systemd, raise it via `/etc/security/limits.d/` for the `apinizer` user:
+
+    ```
+    apinizer  soft  nofile  1048576
+    apinizer  hard  nofile  1048576
+    ```
+
+    ### MongoDB connection times out
+
+    - Check that the MongoDB hosts in `SPRING_DATA_MONGODB_URI` are reachable from the server (`nc -zv host 25080`).
+    - Verify replica set name and `authSource` are correct.
+    - If TLS is required, append `&tls=true` (and any required CA file options) to the URI.
+
+    ### Worker port not listening
+
+    The Worker only opens listener ports for **deployed Gateway Runtimes** configured from the Manager UI. If no runtime targets this Worker, no port is bound. Deploy at least one Gateway Runtime that selects this Worker's environment cluster.
+  </Tab>
+
+  <Tab title="Kubernetes">
+    Kubernetes-specific troubleshooting guidance is documented in the [Kubernetes Installation](/en/setup/kubernetes) page, organized by module. Refer to the relevant section (Manifest YAML or Helm chart) for your deployment method.
+  </Tab>
+</Tabs>
+
+## Common Issues (All Installation Types)
+
+### Master key lost or inaccessible
+
+If the master key file (`conf/master.key` in standalone packages) is lost or deleted, all encrypted values (`ENC(...)` format) become unrecoverable. You must:
+
+1. Delete or rename `conf/master.key`
+2. Re-run the installer (e.g., `apimanager-install.sh`) to generate a new key
+3. Re-enter all sensitive values in plaintext into the config file
+4. Run the encrypt script again to re-encrypt with the new key
+
+<Warning>
+Always maintain a secure backup of `conf/master.key` in your secrets vault. Treat it like a root password — loss means operational disruption.
+</Warning>
+
+### MongoDB connection failures across modules
+
+Symptoms: Services exit immediately or frequently reconnect to MongoDB.
+
+**Diagnosis:**
+- Test MongoDB reachability: `nc -zv <mongo-host> 25080`
+- Verify the connection string format: `mongodb://user:pass@host:25080/?replicaSet=rs0&authSource=admin`
+- Check that all modules use the **same** database name
+- Verify firewall rules permit traffic between service and MongoDB on `25080/tcp`
+
+### Timezone misalignment causes quota/scheduling issues
+
+When modules have different timezone settings, quota counters reset at unexpected times and scheduled task flows fire inconsistently.
+
+**Solution:** Ensure all modules use the **same timezone offset**:
+- **API Manager** — `SPRING_TIMEZONE` or OS default
+- **Gateway (Worker)** — `WORKER_TIMEZONE` environment variable (e.g., `+03:00`)
+- **Cache** — `CACHE_QUOTA_TIMEZONE` (e.g., `+03:00`)
+- **Integration** — `INTEGRATION_TIMEZONE` (IANA zone id, e.g., `Europe/Istanbul`)
+
+Verify all values match before starting services.
+
+### Services fail to reach each other (networking)
+
+Different symptoms depending on which module cannot reach another:
+
+**Manager ↔ Worker**: Worker proxy deployment fails, Manager UI shows environment as offline.
+- Test: From Manager host, `curl -v http://<worker-host>:8091/server-status`
+- Check firewall rules on `8091/tcp` (Management API)
+
+**Worker ↔ Cache**: Quotas and OIDC sessions do not sync across Worker instances.
+- Test: From Worker host, `nc -zv <cache-host> 5701` and `nc -zv <cache-host> 8090`
+- Check firewall rules on `5701/tcp` (Hazelcast wire) and `8090/tcp` (Spring Boot HTTP)
+
+**Any module ↔ MongoDB**: Service cannot fetch or persist configuration.
+- Test: `nc -zv <mongo-host> 25080` from the service host
+- Check replica set name and authentication credentials in the connection string
+
+### Out of memory (OOM) / pod eviction
+
+**Symptoms**: Service restarts unexpectedly; `exit code 137` (SIGKILL); heap dump written.
+
+**Actions**:
+- Increase memory limits: Docker `mem_limit`, Kubernetes `resources.requests.memory` / `resources.limits.memory`
+- Review JVM heap flags (`-Xms`, `-Xmx`) in service configuration
+- Check for memory leaks in logs: `OutOfMemoryError`, repeated GC warnings
+- Monitor traffic volume — OOM is often a sign of under-provisioning for actual load
+
+Always load-test on target hardware before changing JVM flags in production.
