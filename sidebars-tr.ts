@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Başlangıç",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "index",
@@ -20,7 +20,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Apinizer'ı Anlamak",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "concepts/apinizer-nedir",
@@ -123,7 +123,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Kurulum",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "setup/kuruluma-genel-bakis",
@@ -159,7 +159,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Güncelleme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "upgrade/apinizer-surum-yukseltme",
@@ -171,7 +171,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Altyapı Bileşenleri Kurulumu",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -235,7 +235,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Geliştirme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/quick-start",
@@ -293,7 +293,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Yönlendirme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/yonlendirme/http-yonlendirme",
@@ -307,7 +307,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Politikalar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -412,7 +412,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "İzleme ve Analiz",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/izleme-analiz/adim-adim-izleme",
@@ -425,7 +425,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Global Ayarlar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/global-configurations/global-policies",
@@ -437,7 +437,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Test ve Araçlar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/test-debug-araclari/test-console",
@@ -459,7 +459,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Yükleme ve Sürüm",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/yukleme-ve-surum-yonetimi"
@@ -470,7 +470,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Yönetim",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/genel-bakis"
@@ -479,7 +479,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Kullanıcı & Erişim",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/user-access-management/genel-bakis",
@@ -493,7 +493,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Projeler",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/project-management/genel-bakis",
@@ -505,7 +505,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Kimlik & Güvenlik",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/identity-management/genel-bakis",
@@ -542,7 +542,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Gizlilik",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/secrets-management/genel-bakis",
@@ -556,7 +556,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Sunucular ve Altyapılar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/server-management/gateway-runtime-lari",
@@ -570,7 +570,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Sistem Ayarları",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/system-settings/genel-bakis",
@@ -600,7 +600,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Denetim & Uyumluluk",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/audit-compliance/genel-bakis",
@@ -615,7 +615,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Promotion",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/api-promotion/genel-bakis",
@@ -628,7 +628,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Zamanlanmış İşler",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/zamanlanmis-isler"
@@ -637,7 +637,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Entegrasyonlar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "integrations/baglanti-yonetimi/genel-bakis",
@@ -674,7 +674,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Konnektörler",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "integrations/konnektorler/genel-bakis",
@@ -700,7 +700,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Analitik Raporları",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/analytics-reports/api-trafigi-(zaman-metrikleri)"
@@ -711,7 +711,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Analitik",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/analytics",
@@ -725,7 +725,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Trafiği Ayarları",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/api-traffic-log-ayarlari",
@@ -736,7 +736,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Raporlar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/analytics-reports/raporlar",
@@ -757,7 +757,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "İzleme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "monitor/izleme-genel-bakis",
@@ -771,7 +771,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Geliştirici Portal",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "api-portal/genel-bakis",
@@ -815,7 +815,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Operasyon",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/genel-bakis"
@@ -824,7 +824,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Yedekleme ve Geri Yükleme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/yedek-ve-geri-yukleme/yedekleme",
@@ -835,7 +835,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Bakım ve Optimizasyon",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/healthcheck-versiyon-adresleri",
@@ -898,7 +898,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Operasyon Kılavuzları",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -985,7 +985,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Sorun Giderme",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -1048,7 +1048,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Log Analizi Kılavuzu",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/log-analizi-kilavuzu/log-locations",
@@ -1063,7 +1063,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Kılavuzlar",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "tutorials/genel-bakis",
@@ -1165,7 +1165,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Nasıl Yapılır Kılavuzları",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -1365,7 +1365,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Makaleler",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "articles/apinizer-api-portal-mcp-entegrasyonu",

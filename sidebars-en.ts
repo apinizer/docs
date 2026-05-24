@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Getting Started",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "index"
@@ -19,7 +19,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Understanding Apinizer",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "concepts/what-is-apinizer",
@@ -122,7 +122,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Installation",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "setup/installations-overview",
@@ -162,7 +162,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Upgrade",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "upgrade/apinizer-version-upgrade",
@@ -174,7 +174,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Infrastructure Components Installation",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -238,7 +238,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Development",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/quick-start",
@@ -296,7 +296,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Routing",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/routing/http-routing",
@@ -310,7 +310,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Policies",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -414,7 +414,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Monitoring and Analytics",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/monitoring-analysis/step-by-step-tracing",
@@ -427,7 +427,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Global Settings",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/global-configurations/global-policies",
@@ -439,7 +439,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Test and Tools",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/test-debug-tools/test-console",
@@ -461,7 +461,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Deployment and Version",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "develop/deployment-and-version-management"
@@ -472,7 +472,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Management",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/overview"
@@ -481,7 +481,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "User & Access",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/user-access-management/overview",
@@ -495,7 +495,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Projects",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/project-management/overview",
@@ -507,7 +507,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Identity & Security",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/identity-management/overview",
@@ -544,7 +544,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Secrets",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/secrets-management/overview",
@@ -558,7 +558,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Servers and Infrastructures",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/server-management/gateway-runtimes",
@@ -572,7 +572,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "System Settings",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/system-settings/overview",
@@ -602,7 +602,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Audit & Compliance",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/audit-compliance/overview",
@@ -616,7 +616,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Promotion",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/api-promotion/overview",
@@ -629,7 +629,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Scheduled Jobs",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/scheduled-jobs"
@@ -638,7 +638,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Integrations",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "integrations/connection-management/overview",
@@ -675,7 +675,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Connectors",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "integrations/connectors/overview",
@@ -701,7 +701,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Analytics Reports",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "admin/analytics-reports/api-traffic-time-metrics"
@@ -712,7 +712,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Analytics",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/analytics",
@@ -726,7 +726,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Traffic Settings",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/api-traffic-log-settings",
@@ -737,7 +737,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Reports",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "analytic/analytics-reports/reports",
@@ -758,7 +758,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Monitoring",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "monitor/overview",
@@ -772,7 +772,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "API Developer Portal",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "api-portal/overview",
@@ -816,7 +816,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Operations",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/overview"
@@ -825,7 +825,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Backup and Restore",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/backup-and-restore/backup",
@@ -836,7 +836,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Maintenance and Optimization",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/healthcheck-version-addresses",
@@ -899,7 +899,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Operation Guides",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -986,7 +986,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Troubleshooting",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -1048,7 +1048,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Log Analysis Guide",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "operations/log-analysis-guide/log-locations",
@@ -1063,7 +1063,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Guides",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "tutorials/overview",
@@ -1164,7 +1164,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "How-To Guides",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         {
@@ -1365,7 +1365,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Articles",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "articles/apinizer-api-portal-mcp-integration",

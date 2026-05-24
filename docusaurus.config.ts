@@ -125,7 +125,7 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'genel-bakis', docsPluginId: 'tr', label: 'Genel Bakış', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'surumler', docsPluginId: 'tr', label: 'Sürümler', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'kurulum-ve-guncelleme', docsPluginId: 'tr', label: 'Kurulum', position: 'left', className: 'navbar__item--tr'},
-        {type: 'docSidebar', sidebarId: 'api-leri-yonetme', docsPluginId: 'tr', label: "API'leri Yönetme", position: 'left', className: 'navbar__item--tr'},
+        {type: 'docSidebar', sidebarId: 'api-leri-yonetme', docsPluginId: 'tr', label: 'Geliştirme', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'yonetim', docsPluginId: 'tr', label: 'Yönetim', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'analitik-ve-i-zleme', docsPluginId: 'tr', label: 'Analitik', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'tr', label: 'API Portal', position: 'left', className: 'navbar__item--tr'},
@@ -135,8 +135,8 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'overview', docsPluginId: 'en', label: 'Overview', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'versions', docsPluginId: 'en', label: 'Versions', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'installation-and-update', docsPluginId: 'en', label: 'Installation', position: 'left', className: 'navbar__item--en'},
-        {type: 'docSidebar', sidebarId: 'managing-apis', docsPluginId: 'en', label: 'Managing APIs', position: 'left', className: 'navbar__item--en'},
-        {type: 'docSidebar', sidebarId: 'management', docsPluginId: 'en', label: 'Management', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'managing-apis', docsPluginId: 'en', label: 'Develop', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'management', docsPluginId: 'en', label: 'Administration', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'analytics-and-monitoring', docsPluginId: 'en', label: 'Analytics', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'en', label: 'API Portal', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'operations', docsPluginId: 'en', label: 'Operations', position: 'left', className: 'navbar__item--en'},
@@ -144,14 +144,26 @@ const config: Config = {
         // API Reference — shared between TR and EN contexts.
         {type: 'docSidebar', sidebarId: 'api-reference', docsPluginId: 'apiReference', label: 'API Reference', position: 'left', className: 'navbar__item--apiref'},
 
+        // Two locale dropdowns — CSS shows the one matching the current
+        // path so the trigger label always reflects the active language.
         {
           type: 'dropdown',
-          label: 'TR',
+          label: 'Türkçe',
           position: 'right',
-          className: 'navbar__locale-dropdown',
+          className: 'navbar__locale-dropdown navbar__locale--tr',
+          items: [
+            {label: 'Türkçe', href: '/tr', className: 'locale-active'},
+            {label: 'English', href: '/en'},
+          ],
+        },
+        {
+          type: 'dropdown',
+          label: 'English',
+          position: 'right',
+          className: 'navbar__locale-dropdown navbar__locale--en',
           items: [
             {label: 'Türkçe', href: '/tr'},
-            {label: 'English', href: '/en'},
+            {label: 'English', href: '/en', className: 'locale-active'},
           ],
         },
         {

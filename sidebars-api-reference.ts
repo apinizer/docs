@@ -10,7 +10,7 @@ const sidebars: SidebarsConfig = {
     {
       "type": "category",
       "label": "Home",
-      "collapsed": true,
+      "collapsed": false,
       "collapsible": true,
       "items": [
         "getting-started/overview",
