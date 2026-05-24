@@ -1,0 +1,164 @@
+---
+title: "API Manager — Docker"
+description: "Run Apinizer API Manager as a single Docker container backed by MongoDB. Image is built on Eclipse Temurin 25 with cgroup-aware JVM tier auto-tuning."
+---
+
+This guide walks through running the Apinizer API Manager **Docker** image on a Linux host. The image contains the application, its dependencies and an OpenJDK 25 runtime — Java is **not** required on the host. The image's entrypoint inspects the container memory limit at boot and selects a tier-aware heap / direct-memory / metaspace profile automatically.
+
+:::info
+
+Sensitive values (MongoDB URI, secrets) are passed as **plaintext environment variables** in the Docker flow — the container does not run the boot-time `ENC(...)` decryption used by the Linux package. Use Docker secrets (Compose / Swarm) or Kubernetes Secrets to inject them safely.
+
+:::
+
+## Requirements
+
+- A Linux x86-64 host with Docker Engine 24+ or Docker Desktop
+- Outbound network to `docker.io` (or a mirror with `apinizercloud/apimanager`)
+- A reachable MongoDB instance (replica set recommended for production)
+- A free TCP port on the host to expose the Manager (default `8080`)
+
+## 1. Pull the image
+
+```bash
+VERSION=2026.04.5
+docker pull apinizercloud/apimanager:${VERSION}
+```
+
+See [Docker overview — tag convention](/en/setup/docker/overview#tag-convention).
+
+## 2. Configure
+
+Required environment variables (the container exits at startup if they are empty):
+
+| Variable | Description |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string (e.g. `mongodb://user:pass@host:25080/?replicaSet=rs0&authSource=admin`) |
+| `SPRING_DATA_MONGODB_DATABASE` | Database name (e.g. `apinizer`) |
+| `SPRING_PROFILES_ACTIVE` | `prod` (default — keep on production hosts) |
+
+Optional:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SERVER_PORT` | `8080` | HTTP port inside the container |
+| `JAVA_OPTS` | empty | Extra JVM flags (merged with tier defaults) |
+| `jvmOverride` | `false` | When `true`, `JAVA_OPTS` wins over the tier-aware defaults |
+| `JHIPSTER_SLEEP` | `0` | Pre-start delay in seconds (useful when MongoDB starts in the same compose) |
+
+## 3. Run the container
+
+```bash
+docker run -d \
+  --name apinizer-apimanager \
+  -p 8080:8080 \
+  --memory=4g \
+  -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+  -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+  -e SPRING_PROFILES_ACTIVE=prod \
+  -v apinizer-apimanager-logs:/app/logs \
+  --restart unless-stopped \
+  apinizercloud/apimanager:${VERSION}
+```
+
+:::tip
+
+The `--memory=4g` cap is also read by the JVM tier auto-tuner — without it the JVM sees the full host memory and may oversize the heap. Match this to the resources you actually want the Manager to consume.
+
+:::
+
+## 4. docker-compose (recommended)
+
+```yaml
+services:
+  apimanager:
+    image: apinizercloud/apimanager:2026.04.5
+    container_name: apinizer-apimanager
+    restart: unless-stopped
+    mem_limit: 4g
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      JAVA_OPTS: "-XX:+ExitOnOutOfMemoryError"
+    env_file:
+      - ./secrets/apimanager.env       # contains SPRING_DATA_MONGODB_URI=…
+    volumes:
+      - apimanager-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  apimanager-logs:
+```
+
+Start:
+
+```bash
+docker compose up -d
+docker compose logs -f apimanager
+```
+
+## 5. Verify
+
+```bash
+curl -fsS http://127.0.0.1:8080/management/health
+```
+
+Expected: a `200 OK` response with health details. The first start runs the embedded Mongock migrations and can take 30–90 s depending on database size.
+
+## 6. Operations
+
+| Action | Command |
+| --- | --- |
+| Status | `docker ps --filter name=apinizer-apimanager` |
+| Logs (follow) | `docker logs -f apinizer-apimanager` |
+| Restart | `docker restart apinizer-apimanager` |
+| Stop | `docker stop apinizer-apimanager` |
+| Shell | `docker exec -it apinizer-apimanager sh` |
+
+## 7. Networking
+
+- **Inbound**: only `8080/tcp` needs to be reachable by Worker/Portal nodes and admin users.
+- **Outbound**: the Manager connects to MongoDB and any configured backend services (LDAP, OIDC, SMTP). It does not need outbound internet in steady state.
+- For multi-container deployments, place all Apinizer services on the same user-defined Docker network and reference them by service name.
+
+## 8. Resources
+
+| Workload | `mem_limit` |
+| --- | --- |
+| Smoke test / single tenant | 2 GB |
+| Production (≤ 200 active proxies) | 4 GB |
+| Large install / many concurrent admins | 6–8 GB |
+
+CPU: 2 vCPU minimum, 4 vCPU recommended.
+
+## Troubleshooting
+
+### Container exits with `URI is not set` or `DATABASE is not set`
+
+A required env var is empty. Recreate the container with the variables populated. Watch out for shell quoting around `?replicaSet=…&authSource=…` — pass via `-e SPRING_DATA_MONGODB_URI="…"` quoted or via an env-file.
+
+### Health endpoint returns `503 OUT_OF_SERVICE`
+
+MongoDB is unreachable. Test from inside the container:
+
+```bash
+docker exec -it apinizer-apimanager sh -lc \
+  "wget -qO- $SPRING_DATA_MONGODB_URI" 2>&1 | head
+```
+
+### `Memory tier: 1GB (heap 50%…)` even though the host has 32 GB
+
+You did not pass `--memory` / `mem_limit`. The cgroup default is `max` and the auto-tuner falls back to total host memory. Set `mem_limit` to match what you want the container to use.
+
+### MongoDB connection times out
+
+- Verify network reach: `docker exec apinizer-apimanager sh -lc 'nc -zv mongo 25080'`.
+- Check that the URI carries the correct `replicaSet=` and `authSource=`.
+- TLS to MongoDB: append `&tls=true` and mount the CA file.

@@ -1,0 +1,240 @@
+---
+title: "Uninstall"
+description: "Fully uninstall Apinizer modules from a Container environment (Kubernetes / Docker) or a Virtual Server installation. Includes master key backup, MongoDB cleanup, and Manager UI record removal steps."
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+The method to uninstall Apinizer modules depends on your installation type. This page contains step-by-step uninstall instructions for both Container (Kubernetes / Docker) and Virtual Server (Linux / VM) deployments.
+
+:::warning
+
+Before uninstalling, back up the `conf/master.key` and `conf/application.env` files from each module installation directory. The master key cannot be regenerated and ENC(...) encrypted values cannot be decrypted without it. The MongoDB database is not deleted by these uninstall steps — if a clean state is desired, manual database drop is required.
+
+:::
+
+## Uninstall Order
+
+Remove modules in reverse order to minimize disruption and allow deletion of associated records from the Manager UI:
+
+1. **API Portal** (first — ends user access)
+2. **Integration**
+3. **Cache**
+4. **Worker** (Gateway)
+5. **API Manager** (last — all management metadata and audit logs live here)
+
+Remove other modules before API Manager so you can delete their records from the Manager UI.
+
+<Tabs>
+  <TabItem value="container-environment-kubernetes-docker" label="Container Environment (Kubernetes / Docker)">
+    
+## Kubernetes Namespace Deletion
+
+You can remove all Apinizer modules at once by deleting the Apinizer namespaces:
+
+```bash
+# Deletes all deployments, services, configmaps, secrets, and RBAC resources
+kubectl delete namespace apinizer
+kubectl delete namespace <gateway-namespace>
+kubectl delete namespace <integration-namespace>
+kubectl delete namespace <portal-namespace>
+
+# Also clean cluster-level RBAC
+kubectl delete clusterrole apinizer-role apinizer-gateway-role
+kubectl delete clusterrolebinding apinizer-role-binding apinizer-gateway-role-binding
+```
+
+For module-by-module controlled deletion, delete the relevant deployment, service, configmap, and secret resources for each module namespace separately.
+
+## Docker / docker-compose
+
+To remove a module completely:
+
+```bash
+# With docker compose:
+docker compose down                      # stop all services (keeps volumes)
+docker compose down -v                   # also DELETE volumes (full reset)
+
+# Vanilla docker (per module):
+docker stop -t 60 apinizer-<module> && docker rm apinizer-<module>
+docker volume rm apinizer-<module>-logs   # optional — drop the log volume
+docker rmi apinizercloud/<module>:${VERSION}
+```
+
+### Per-module stop timeouts
+
+Use a generous stop timeout to allow in-flight requests to drain gracefully:
+
+| Module | Command |
+| --- | --- |
+| API Manager | `docker stop -t 30 apinizer-apimanager` |
+| API Portal | `docker stop apinizer-apiportal` |
+| Worker | `docker stop -t 60 apinizer-worker` |
+| Cache | `docker stop -t 30 apinizer-cache` |
+| Integration | `docker stop -t 120 apinizer-integration` |
+
+## Manager UI Record Cleanup
+
+After pods and containers are deleted, clean up the remaining records in the Manager UI:
+
+- **Server Management → Environments** — Delete the relevant Environment
+- **Server Management → Cache Servers** — Delete registered Cache servers
+- **Server Management → Integration Servers** — Delete registered Integration servers
+- **Portal → Portals** — Delete registered Portals
+
+## MongoDB Data (Optional — for Clean State)
+
+If you want to completely delete the Apinizer Manager database:
+
+```bash
+mongosh --host <MONGODB_HOST> --port 25080 -u apinizer -p <PASSWORD>
+use apinizer
+db.dropDatabase()
+```
+
+:::warning
+
+This action deletes all proxy definitions, environment records, and audit logs. This action cannot be undone.
+
+:::
+
+### Side Effects
+
+- **MongoDB**: Not touched by `docker compose down` or `docker rm` commands. Drop the database manually for a clean slate.
+- **API Portal registration**: Deleting the Portal record in the Manager UI is a separate step — **Portal → Portals → Delete**.
+- **Worker Environment record**: Stays in the Manager UI; delete it from the Manager UI if you are decommissioning the gateway entirely.
+- **Cache MapStore data**: Hazelcast MapStore documents in MongoDB remain. To reset counter history, drop the relevant collections from MongoDB manually.
+- **Integration Quartz state**: `schedule_integration_*` collections remain in MongoDB. To start a clean install, drop them manually after every Integration node has stopped.
+
+</TabItem>
+
+<TabItem value="virtual-server-linux-vm" label="Virtual Server (Linux / VM)">
+
+On a virtual server, each module is installed under `/opt/apinizer-<module>/` and managed by a systemd unit. The steps below follow the same pattern for every module.
+
+:::warning
+
+Uninstalling removes `/opt/apinizer-<module>` along with the master key. Back up `conf/master.key` and `conf/application.env` first if you ever plan to reuse the encrypted values — the master key cannot be regenerated and ENC(...) values become permanently undecryptable without it.
+
+:::
+
+## Module-Based Uninstall (Same Pattern for Each Module)
+
+```bash
+MODULE=manager   # or: portal, apiworker, apicache, apiintegration
+
+# 1) Back up (critical)
+sudo cp /opt/apinizer-${MODULE}/conf/application.env ~/apinizer-${MODULE}-env.bak
+sudo cp /opt/apinizer-${MODULE}/conf/master.key      ~/apinizer-${MODULE}-key.bak
+
+# 2) Stop and disable
+sudo systemctl stop apinizer-${MODULE}
+sudo systemctl disable apinizer-${MODULE}
+
+# 3) Remove the systemd unit
+sudo rm -f /etc/systemd/system/apinizer-${MODULE}.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+
+# 4) Remove the installation directory
+sudo rm -rf /opt/apinizer-${MODULE}
+
+# 5) (optional) sudoers entry — remove if you added one
+sudo rm -f /etc/sudoers.d/apinizer-${MODULE}
+```
+
+## Stop Timeouts for Worker / Cache / Integration
+
+`systemctl stop` sends SIGTERM and waits for graceful drain — the systemd unit manages `TimeoutStopSec` itself:
+
+| Module | Drain Behavior |
+| --- | --- |
+| API Manager | Standard 90 s |
+| API Portal | Standard 90 s |
+| Worker | 60 s in-flight HTTP / gRPC / WebSocket drain |
+| Cache | 30 s Hazelcast graceful leave |
+| Integration | 120 s `waitForJobsToCompleteOnShutdown` |
+
+For longer drain times, increase `TimeoutStopSec=` in the systemd unit.
+
+## Remove the `apinizer` System User
+
+Only if no other Apinizer module remains on the same host:
+
+```bash
+sudo userdel apinizer
+```
+
+Multiple modules share the `apinizer` user — run this command only when removing the last module.
+
+## Manager UI Record Cleanup
+
+After modules are stopped and removed, clean up the remaining records in the Manager UI:
+
+- **Server Management → Environments** — Delete the relevant Environment
+- **Server Management → Cache Servers** — Delete registered Cache servers
+- **Server Management → Integration Servers** — Delete registered Integration servers
+- **Portal → Portals** — Delete registered Portals
+
+## Side Effects
+
+- **MongoDB**: Not touched by these commands. Drop the database manually for a clean slate.
+- **API Portal registration**: Deleting the Portal record in the Manager UI is a separate step — **Portal → Portals → Delete**.
+- **Worker Environment record**: Stays in the Manager UI; delete it manually if you are decommissioning the gateway entirely.
+- **Cache MapStore + Integration Quartz state**: Remains in MongoDB. To reset counter and job history, drop the relevant collections (`*_quota_counter*`, `schedule_integration_*`) manually.
+
+## Master Key Recovery
+
+If the `master.key` file is lost after uninstall and there is no backup, all ENC(...) encrypted values become permanently unrecoverable. On reinstall:
+
+1. A new master key is generated automatically
+2. All ENC(...) values in `application.env` must be reset to plaintext (re-entered)
+3. Run `apimanager-encrypt.sh` to re-encrypt the plaintext values
+
+  </TabItem>
+</Tabs>
+
+## Verification
+
+After uninstall, verify that all resources have been removed:
+
+```bash
+# Container environment:
+kubectl get all -n apinizer        # No resources found
+docker ps -a | grep apinizer       # Should be empty
+
+# Virtual server:
+systemctl status apinizer-apimanager   # Unit not found
+ls /opt/apinizer-manager               # No such file or directory
+id apinizer                            # no such user (if the apinizer user was also removed)
+```
+
+## Troubleshooting
+
+### "Cannot connect to MongoDB" after partial uninstall
+
+If only some modules are removed but the Manager remains, MongoDB continues to operate normally. If you accidentally drop the database, restore from backup — Apinizer does not have a built-in recovery mechanism.
+
+### Master Key Lost After Uninstall
+
+If you did not back up the master key and need to recover encrypted values:
+
+- **Recovery is not possible** — the master key cannot be regenerated
+- On reinstall, set all `ENC(...)` values back to plaintext
+- Run `apimanager-encrypt.sh` to re-encrypt with the new master key
+
+### systemd Unit Still Active After Delete
+
+After removing the unit file, ensure the daemon reloads:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl reset-failed
+```
+
+Then verify:
+
+```bash
+sudo systemctl list-unit-files | grep apinizer   # Should be empty
+```

@@ -1,0 +1,823 @@
+---
+title: "All-in-One Docker Kurulumu"
+description: "Apinizer çekirdek modüllerini (Manager + Cache + Worker + opsiyonel Integration) tek sayfada Docker ile kurun. API Portal kurulumu ayrı sayfada."
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import {Card, CardGroup} from '@site/src/components/Card';
+
+Bu sayfa Apinizer'ın çekirdek modüllerinin Docker üzerinde kurulumunu tek yerde gösterir. **Sıra önemli**: önce Manager (kayıt + Environment), sonra Cache, sonra Worker. Integration sadece task-flow scheduler kullanılacaksa kurulur. **API Portal ayrı bir sayfada** kurulur — Manager kurulumundan sonra yapılır.
+
+<Tabs>
+  <TabItem value="genel-bakis" label="Genel Bakış">
+    Apinizer Docker Hub üzerinde resmi imaj olarak yayınlanır. İmajlar Eclipse Temurin 25 üzerine kuruludur; entrypoint container memory limit'ini okuyup heap / direct memory / metaspace değerlerini otomatik ayarlar.
+
+    :::info
+
+Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext environment variable** olarak gönderilir — konteyner, Linux paketindeki boot-time `ENC(...)` decrypt sürecini çalıştırmaz. Güvenli aktarım için Docker Secret (Compose / Swarm) veya Kubernetes Secret kullanın.
+
+:::
+
+    Tüm modülleri tek `docker-compose.yml` ile birlikte ayağa kaldırmak istiyorsanız:
+
+    <Card title="Docker Compose (Hepsi Birlikte)" icon="layer-group" href="/tr/setup/docker/docker-compose">
+      5 modülün hep birlikte tek `docker-compose.yml` ile kurulduğu referans örnek
+    </Card>
+
+    ## Önerilen Kurulum Sırası
+
+    1. **MongoDB** (önceden kurulu olmalı — bkz. [MongoDB Kurulumu](/tr/setup/mongodb/ubuntu-mongodb))
+    2. **API Manager** → MongoDB ile bağlantı doğrulanır, Mongock migration'ları çalışır
+    3. **Worker** → Manager'dan Environment bilgisini alır
+    4. **Cache** → Hazelcast cluster (Worker quota/OIDC/CB kullanacaksa)
+    5. **Integration** *(opsiyonel)* → Quartz scheduler ayağa kalkar, Manager'a register edilir
+    6. **API Portal** → Manager REST API'sine bağlanır, dokümantasyonu sunar
+
+    ## İmaj Konvansiyonu
+
+    Tüm imajlar `apinizercloud/<modul>` altında yayınlanır:
+
+    | Modül | İmaj |
+    | --- | --- |
+    | API Manager | `apinizercloud/apimanager` |
+    | API Portal | `apinizercloud/apiportal` |
+    | Worker | `apinizercloud/worker` |
+    | Cache | `apinizercloud/cache` |
+    | Integration | `apinizercloud/integration` |
+
+    ### Tag konvansiyonu
+
+    | Tag | Kanal | Not |
+    | --- | --- | --- |
+    | `<MAJOR.MINOR.PATCH>` (örn. `2026.04.5`) | release | Production'a yükseltilebilir |
+    | `<MAJOR.MINOR.PATCH>.qa.<N>` (örn. `2026.04.5.qa.1`) | QA | Pre-release, değişebilir |
+    | `<MAJOR.MINOR.PATCH>-rc.<id>` | release candidate | Donmuş, immutable |
+    | `<MAJOR.MINOR.PATCH>-SNAPSHOT` | develop | Yuvarlanan, prod'da kullanmayın |
+
+    :::warning
+
+`latest` tag'i **yayınlanmaz** — daima açık bir versiyon tag'ine pin'leyin.
+
+:::
+
+    ## Apple Silicon (M1/M2/M3/M4) Üzerinde
+
+    İmajlar şu an yalnızca `linux/amd64` için yayınlanır. Apple Silicon Mac'lerde Docker Desktop uyarı verir ("Image may have poor performance, or fail, if run via emulation"). Çözüm:
+
+    - Docker Desktop → Settings → General → **"Use Rosetta for x86_64/amd64 emulation on Apple Silicon"** seçeneğini açın. QEMU yerine Apple Rosetta ile çalışır, performans büyük oranda artar.
+    - Üretim için x86_64 Linux host kullanın.
+
+    ## Ortak Gereksinimler
+
+    <CardGroup cols={2}>
+      <Card title="MongoDB Kurulumu" icon="database" href="/tr/setup/mongodb/ubuntu-mongodb">
+        Tüm modüller aynı MongoDB veritabanına bağlanır
+      </Card>
+      <Card title="Port Gereksinimleri" icon="network-wired" href="/tr/setup/kuruluma-genel-bakis">
+        Hangi modülün hangi portu kullandığını gösteren tablo
+      </Card>
+    </CardGroup>
+
+    ## Güncelleme
+
+    Docker üzerinde güncelleme için: [Docker Üzerinde Güncelleme](/tr/upgrade/apinizer-surum-yukseltme)
+  </TabItem>
+
+  <TabItem value="1-api-manager" label="1. API Manager">
+    API Manager, Apinizer'ın yönetim düzlemidir: REST API, iş mantığı, Angular UI ve MongoDB üzerinde proxy/policy/environment kayıtlarını barındırır. Bu modülün başarıyla ayağa kalkması ve UI'da en az bir **Environment** tanımlanması, sonraki adımların (Cache, Worker) ön koşuludur.
+
+    Bu rehber Apinizer API Manager **Docker** imajının bir Linux host üzerinde nasıl çalıştırılacağını anlatır. İmaj uygulamayı, bağımlılıklarını ve OpenJDK 25 runtime'ını içinde taşır — host üzerinde Java **gerekmez**. Entrypoint, başlangıçta konteyner memory limit'ini okur ve heap / direct memory / metaspace değerlerini otomatik olarak seçer.
+
+    :::info
+
+Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext environment variable** olarak gönderilir — konteyner Linux paketinde kullanılan boot-time `ENC(...)` decrypt sürecini çalıştırmaz. Güvenli aktarım için Docker Secret (Compose / Swarm) veya Kubernetes Secret kullanın.
+
+:::
+
+    ## Gereksinimler
+
+    - Docker Engine 24+ kurulu bir Linux x86-64 host (veya Docker Desktop)
+    - `docker.io` (veya `apinizercloud/apimanager` imajını barındıran bir mirror) erişimi
+    - Erişilebilir bir MongoDB (üretim için replica set önerilir)
+    - Manager'ı dışarı açacak boş bir TCP port (varsayılan `8080`)
+
+    ## 1. İmajı çekin
+
+    ```bash
+    VERSION=2026.04.5
+    docker pull apinizercloud/apimanager:${VERSION}
+    ```
+
+    Tag konvansiyonu için: [Docker — Genel Bakış](/tr/setup/docker/genel-bakis#tag-konvansiyonu).
+
+    ## 2. Yapılandırma
+
+    Zorunlu environment variable'lar (boş bırakılırsa konteyner başlangıçta exit eder):
+
+    | Değişken | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string (örn. `mongodb://user:pass@host:25080/?replicaSet=rs0&authSource=admin`) |
+    | `SPRING_DATA_MONGODB_DATABASE` | Veritabanı adı (örn. `apinizer`) |
+    | `SPRING_PROFILES_ACTIVE` | `prod` (varsayılan — üretimde böyle kalsın) |
+
+    Opsiyonel:
+
+    | Değişken | Varsayılan | Açıklama |
+    | --- | --- | --- |
+    | `SERVER_PORT` | `8080` | Konteyner içi HTTP portu |
+    | `JAVA_OPTS` | boş | Ek JVM bayrakları (tier varsayılanları ile birleşir) |
+    | `jvmOverride` | `false` | `true` yapıldığında `JAVA_OPTS` tier varsayılanlarını ezer |
+    | `JHIPSTER_SLEEP` | `0` | Başlangıç gecikme süresi (MongoDB aynı compose'da başlatılıyorsa kullanışlı) |
+
+    ## 3. Konteyneri çalıştır
+
+    ```bash
+    docker run -d \
+      --name apinizer-apimanager \
+      -p 8080:8080 \
+      --memory=4g \
+      -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+      -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+      -e SPRING_PROFILES_ACTIVE=prod \
+      -v apinizer-apimanager-logs:/app/logs \
+      --restart unless-stopped \
+      apinizercloud/apimanager:${VERSION}
+    ```
+
+    :::tip
+
+`--memory=4g` limit'i JVM tier auto-tuner tarafından okunur — vermezseniz JVM host'un tüm belleğini görür ve heap'i fazla büyütebilir. Manager'a gerçekten ayırmak istediğiniz değeri verin.
+
+:::
+
+    ## 4. docker-compose (önerilen)
+
+    ```yaml
+    services:
+      apimanager:
+        image: apinizercloud/apimanager:2026.04.5
+        container_name: apinizer-apimanager
+        restart: unless-stopped
+        mem_limit: 4g
+        ports:
+          - "8080:8080"
+        environment:
+          SPRING_PROFILES_ACTIVE: prod
+          SPRING_DATA_MONGODB_DATABASE: apinizer
+          JAVA_OPTS: "-XX:+ExitOnOutOfMemoryError"
+        env_file:
+          - ./secrets/apimanager.env       # SPRING_DATA_MONGODB_URI=… içerir
+        volumes:
+          - apimanager-logs:/app/logs
+        healthcheck:
+          test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
+          interval: 30s
+          timeout: 5s
+          retries: 5
+          start_period: 90s
+
+    volumes:
+      apimanager-logs:
+    ```
+
+    Başlatma:
+
+    ```bash
+    docker compose up -d
+    docker compose logs -f apimanager
+    ```
+
+    ## 5. Doğrulama
+
+    ```bash
+    curl -fsS http://127.0.0.1:8080/management/health
+    ```
+
+    Beklenen: `200 OK`. İlk başlangıçta Mongock migration'ları çalışır, veritabanı boyutuna göre 30–90 saniye sürebilir.
+
+    ## 6. Operasyon
+
+    | Eylem | Komut |
+    | --- | --- |
+    | Durum | `docker ps --filter name=apinizer-apimanager` |
+    | Log (follow) | `docker logs -f apinizer-apimanager` |
+    | Yeniden başlat | `docker restart apinizer-apimanager` |
+    | Durdur | `docker stop apinizer-apimanager` |
+    | Shell | `docker exec -it apinizer-apimanager sh` |
+
+    ## 7. Ağ
+
+    - **Inbound**: yalnızca `8080/tcp` Worker/Portal node'larından ve admin kullanıcılarından erişilebilir olmalı.
+    - **Outbound**: Manager MongoDB'ye ve yapılandırılmış backend servislere (LDAP, OIDC, SMTP) bağlanır. Steady state'te internet erişimi gerekmez.
+    - Çoklu konteyner kurulumlarda tüm Apinizer servislerini aynı user-defined Docker network'üne koyup service adıyla referans verin.
+
+    ## 8. Kaynak
+
+    | Yük | `mem_limit` |
+    | --- | --- |
+    | Smoke test / tek tenant | 2 GB |
+    | Üretim (≤ 200 aktif proxy) | 4 GB |
+    | Büyük kurulum / çok eşzamanlı admin | 6–8 GB |
+
+    CPU: minimum 2 vCPU, önerilen 4 vCPU.
+
+    ## Sorun Giderme
+
+    ### Konteyner `URI is not set` veya `DATABASE is not set` ile exit oluyor
+
+    Zorunlu env var boş. Değerleri verip yeniden oluşturun. `?replicaSet=…&authSource=…` shell quoting'ine dikkat — `-e SPRING_DATA_MONGODB_URI="…"` çift tırnaklı veya env-file ile geçirin.
+
+    ### Health endpoint `503 OUT_OF_SERVICE` dönüyor
+
+    MongoDB erişilemez durumda. Konteyner içinden test:
+
+    ```bash
+    docker exec -it apinizer-apimanager sh -lc \
+      "wget -qO- $SPRING_DATA_MONGODB_URI" 2>&1 | head
+    ```
+
+    ### Host 32 GB olduğu hâlde log'da `Memory tier: 1GB (heap 50%…)` görünüyor
+
+    `--memory` / `mem_limit` vermediniz. Cgroup default'u `max` ve auto-tuner host belleğine düşer. `mem_limit`'i konteynerin gerçekten kullanmasını istediğiniz değere set edin.
+
+    ### MongoDB bağlantısı timeout
+
+    - Ağ erişimini doğrulayın: `docker exec apinizer-apimanager sh -lc 'nc -zv mongo 25080'`.
+    - URI'da `replicaSet=` ve `authSource=` doğru mu?
+    - MongoDB'ye TLS gerekiyorsa `&tls=true` ekleyin ve CA dosyasını mount edin.
+  </TabItem>
+
+  <TabItem value="2-api-worker" label="2. API Worker">
+    API Worker, Apinizer'ın gateway runtime'ıdır: gelen HTTP/HTTPS/gRPC/WebSocket isteklerini sonlandırır, deploy edilmiş proxy policy pipeline'larını çalıştırır ve trafik log'unu yazar. Manager UI'da en az bir **Environment** kayıtlı olmalı ve quota/OIDC/CB kullanıyorsanız **Cache** önce ayakta olmalıdır.
+
+    Bu rehber Apinizer **Worker**'ın (API Gateway runtime) Docker konteyneri olarak nasıl çalıştırılacağını anlatır. Worker HTTP / HTTPS / gRPC / WebSocket isteklerini sonlandırır, deploy edilmiş proxy policy pipeline'larını çalıştırır ve trafik log'u yazar.
+
+    :::info
+
+Worker imajı **Ubuntu noble (glibc)** üzerine kuruludur, Alpine **değil** — çünkü `brotli4j` native compression library'sinin musl build'i yok. Alpine üzerinde custom build yapmayın.
+
+:::
+
+    ## Gereksinimler
+
+    - Docker Engine 24+ kurulu bir Linux x86-64 host
+    - Manager'ın kullandığı **aynı** MongoDB
+    - Manager UI'da kayıtlı bir **Environment** girdisi (Server Management → Environments)
+    - Quota, OIDC session, circuit breaker kullanılıyorsa erişilebilir bir Apinizer **Cache** cluster
+    - Boş TCP portları:
+      - `8091/tcp` — HTTP gateway listener
+      - `8443/tcp` — HTTPS gateway listener (Environment'ta HTTPS açıksa)
+
+    ## 1. İmajı çekin
+
+    ```bash
+    VERSION=2026.04.5
+    docker pull apinizercloud/worker:${VERSION}
+    ```
+
+    ## 2. Yapılandırma
+
+    Zorunlu:
+
+    | Değişken | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+    | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı adı |
+    | `APINIZER_ENVIRONMENT_NAME` | Environment adı. Manager UI'daki bir Environment ile **tam eşleşmeli** (case-sensitive). |
+    | `WORKER_TIMEZONE` | Log timestamp'leri için timezone offset (örn. `+03:00`) |
+
+    Önerilen:
+
+    | Değişken | Varsayılan | Açıklama |
+    | --- | --- | --- |
+    | `JAVA_OPTS` | boş | Üretim için: `"-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"` |
+
+    Opsiyonel (Undertow / gateway tuning):
+
+    | Değişken | Varsayılan | Açıklama |
+    | --- | --- | --- |
+    | `tuneWorkerThreads` | `1024` | XNIO worker pool |
+    | `tuneWorkerMaxThreads` | `4096` | Worker pool hard cap |
+    | `tuneIoThreads` | `4` | XNIO I/O selectors (vCPU sayısına eşitleyin) |
+    | `tuneBufferSize` | `16384` | Read/write buffer boyutu (bayt) |
+    | `tuneDirectBuffers` | `true` | Off-heap buffer (GC baskısını azaltır) |
+    | `tuneBacklog` | `10000` | Kernel TCP listen backlog |
+    | `APINIZER_WORKER_NODE_IP` | otomatik | Node IP override (çok NIC'li host'lar için) |
+
+    ## 3. Konteyneri çalıştır
+
+    ```bash
+    docker run -d \
+      --name apinizer-worker \
+      -p 8091:8091 \
+      -p 8443:8443 \
+      --memory=8g \
+      --cpus=4 \
+      -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+      -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+      -e APINIZER_ENVIRONMENT_NAME='prod-dc1' \
+      -e WORKER_TIMEZONE='+03:00' \
+      -e JAVA_OPTS='-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true' \
+      -v apinizer-worker-logs:/app/logs \
+      --restart unless-stopped \
+      --ulimit nofile=1048576:1048576 \
+      apinizercloud/worker:${VERSION}
+    ```
+
+    :::tip
+
+Worker throughput-sensitive: yüksek eşzamanlı bağlantı sayısı için `--ulimit nofile=1048576:1048576` kritik.
+
+:::
+
+    ## 4. docker-compose
+
+    ```yaml
+    services:
+      worker:
+        image: apinizercloud/worker:2026.04.5
+        container_name: apinizer-worker
+        restart: unless-stopped
+        mem_limit: 8g
+        cpus: 4
+        ports:
+          - "8091:8091"
+          - "8443:8443"
+        environment:
+          SPRING_DATA_MONGODB_DATABASE: apinizer
+          APINIZER_ENVIRONMENT_NAME: prod-dc1
+          WORKER_TIMEZONE: "+03:00"
+          JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+          tuneWorkerThreads: "1024"
+          tuneIoThreads: "4"
+        env_file:
+          - ./secrets/worker.env
+        ulimits:
+          nofile:
+            soft: 1048576
+            hard: 1048576
+        volumes:
+          - worker-logs:/app/logs
+        healthcheck:
+          test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8091/server-status | grep -q OK || exit 1"]
+          interval: 30s
+          timeout: 5s
+          retries: 5
+          start_period: 60s
+
+    volumes:
+      worker-logs:
+    ```
+
+    ## 5. Doğrulama
+
+    ```bash
+    curl -fsS http://127.0.0.1:8091/server-status
+    ```
+
+    Deploy edilmiş bir proxy üzerinden test isteği:
+
+    ```bash
+    curl -fsS http://127.0.0.1:8091/echo -H 'X-Trace: 1'
+    ```
+
+    Beklenen boot log'u:
+
+    ```
+    ApiGateway standalone=true (env: prod-dc1)
+    HTTP listener bound: 0.0.0.0:8091
+    HTTPS listener bound: 0.0.0.0:8443    (Environment HTTPS açıksa)
+    Loaded N proxies for environment prod-dc1
+    ```
+
+    ## 6. Operasyon
+
+    | Eylem | Komut |
+    | --- | --- |
+    | Durum | `docker ps --filter name=apinizer-worker` |
+    | Log | `docker logs -f apinizer-worker` |
+    | Yeniden başlat | `docker restart apinizer-worker` |
+    | Durdur (drain) | `docker stop -t 60 apinizer-worker` |
+
+    :::warning
+
+Cömert stop timeout kullanın (`docker stop -t 60`) — in-flight HTTP / gRPC / WebSocket istekleri drain olabilsin. `-t` vermezseniz Docker 10 saniye sonra SIGKILL atar.
+
+:::
+
+    ## 7. Ağ
+
+    **Inbound**
+
+    | Port | Amaç |
+    | --- | --- |
+    | `8091` | HTTP gateway |
+    | `8443` | HTTPS gateway |
+
+    **Outbound**
+
+    - MongoDB (proxy config + trafik log yazımı)
+    - Cache cluster `5701/tcp` (Hazelcast wire) ve `8090/tcp` (REST), quota/OIDC/CB kullanılıyorsa
+    - Deploy edilmiş her proxy'nin bağlandığı backend servisleri
+
+    ## 8. Çoklu Worker (yatay ölçeklendirme)
+
+    Aynı imajı **aynı** `APINIZER_ENVIRONMENT_NAME` ile her replikada çalıştırın. Quota sayaçları, OIDC session'ları ve circuit-breaker durumu **Apinizer Cache** (Hazelcast) üzerinden paylaşılır. Cache paylaşılmazsa her Worker'ın kendi sayaçları olur.
+
+    ## 9. Kaynak
+
+    | Yük | `mem_limit` | `cpus` |
+    | --- | --- | --- |
+    | Smoke / staging (&lt;200 rps) | 2 GB | 2 |
+    | Üretim (Worker başına 1–3 krps) | 4–6 GB | 4 |
+    | Yüksek throughput (5+ krps) | 8 GB | 4–8 |
+
+    JVM bayraklarını değiştirmeden önce hedef donanımda yük testi yapın.
+
+    ## Sorun Giderme
+
+    ### `APINIZER_ENVIRONMENT_NAME` uyuşmazlığı → konteyner başlıyor ama proxy yüklenmiyor
+
+    İsim Manager UI'daki bir Environment ile case-sensitive eşleşmiyorsa proxy snapshot çekilmez ve her istek 404 döner. Çözüm: env var'ı düzeltin veya Environment oluşturun.
+
+    ### `UnsatisfiedLinkError: brotli`
+
+    Alpine üzerinde custom build çalıştırıyorsunuz. Resmi `apinizercloud/worker` (Ubuntu noble) imajına geri dönün.
+
+    ### `EMFILE: too many open files`
+
+    `docker run`'a `--ulimit nofile=1048576:1048576` ekleyin. Host tarafında `/etc/security/limits.conf` / daemon'un `LimitNOFILE` değerinin de izin verdiğinden emin olun.
+  </TabItem>
+
+  <TabItem value="3-api-cache" label="3. API Cache">
+    API Cache, Hazelcast tabanlı dağıtık bir data grid'tir: quota sayaçları, OIDC session'ları, circuit-breaker durumu ve client-flow banner'larını Worker'lar arasında paylaşır. Çoklu Worker veya quota/OIDC kullanan tek-Worker kurulumlarda Worker'dan **önce** ayağa kaldırılır.
+
+    Bu rehber Apinizer **Cache**'in (quota, OIDC session, circuit-breaker durumu ve client-flow banner'ları besleyen Hazelcast data grid) Docker konteyneri olarak nasıl çalıştırılacağını anlatır. Cache, Hazelcast MapStore üzerinden MongoDB'ye dayanıklı counter snapshot yazar ve Worker'a Spring Boot HTTP portu üzerinden hizmet verir.
+
+    :::info
+
+Standalone modu **otomatik tespit edilir**: konteynerde Kubernetes service-account namespace dosyası yoksa Cache Hazelcast discovery'sini Kubernetes plug-in'den TCP/IP'ye çevirir.
+
+:::
+
+    ## Gereksinimler
+
+    - Docker Engine 24+ kurulu bir Linux x86-64 host
+    - Erişilebilir bir Apinizer Manager-managed MongoDB
+    - Boş TCP portları:
+      - `5701/tcp` — Hazelcast wire protocol (member-to-member ve Worker → Cache)
+      - `8090/tcp` — Spring Boot HTTP (Worker → Cache REST)
+    - Çoklu node cluster için: Cache node'ları arasında çift yönlü `5701/tcp` erişimi
+
+    ## 1. İmajı çekin
+
+    ```bash
+    VERSION=2026.04.5
+    docker pull apinizercloud/cache:${VERSION}
+    ```
+
+    ## 2. Yapılandırma
+
+    Zorunlu:
+
+    | Değişken | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+    | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı (Manager/Worker ile aynı) |
+    | `CACHE_QUOTA_TIMEZONE` | Quota window timezone offset (örn. `+03:00`). Worker ve Manager ile **birebir eşleşmeli**. |
+
+    Önerilen:
+
+    | Değişken | Varsayılan | Açıklama |
+    | --- | --- | --- |
+    | `HAZELCAST_CLUSTER_NAME` | `apnz-hz-cluster` | Logical cluster adı. Aynı LAN'da birden fazla bağımsız Apinizer kurulumu varsa override edin. **Worker ile uyumsuzluk → sessiz split-brain.** |
+    | `APINIZER_CACHE_CLUSTER_MEMBERS` | boş | Çoklu node TCP/IP discovery için comma-separated peer listesi |
+    | `SERVER_PORT` | `8090` | Spring Boot HTTP portu |
+
+    ## 3. Tek-node Cache
+
+    ```bash
+    docker run -d \
+      --name apinizer-cache \
+      -p 5701:5701 \
+      -p 8090:8090 \
+      --memory=4g \
+      -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+      -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+      -e CACHE_QUOTA_TIMEZONE='+03:00' \
+      -v apinizer-cache-logs:/app/logs \
+      --restart unless-stopped \
+      apinizercloud/cache:${VERSION}
+    ```
+
+    Beklenen boot log'u:
+
+    ```
+    Cache running in STANDALONE mode (cluster: apnz-hz-cluster)
+    Standalone Hazelcast cluster members: 127.0.0.1
+    Members {size:1, ver:1} [ Member [127.0.0.1]:5701 - ... ]
+    ```
+
+    ## 4. Çoklu-node Cache cluster
+
+    Her node'da **aynı** peer listesi ve **aynı** cluster adı olmalı.
+
+    ### Compose (tek host, üç replika — test amaçlı)
+
+    ```yaml
+    services:
+      cache-1:
+        image: apinizercloud/cache:2026.04.5
+        container_name: apinizer-cache-1
+        networks:
+          apinizer:
+            ipv4_address: 172.30.0.11
+        environment: &cache-env
+          SPRING_DATA_MONGODB_DATABASE: apinizer
+          CACHE_QUOTA_TIMEZONE: "+03:00"
+          HAZELCAST_CLUSTER_NAME: apnz-hz-cluster
+          APINIZER_CACHE_CLUSTER_MEMBERS: 172.30.0.11,172.30.0.12,172.30.0.13
+        env_file: [./secrets/cache.env]
+        mem_limit: 4g
+        restart: unless-stopped
+
+      cache-2:
+        image: apinizercloud/cache:2026.04.5
+        container_name: apinizer-cache-2
+        networks:
+          apinizer:
+            ipv4_address: 172.30.0.12
+        environment: *cache-env
+        env_file: [./secrets/cache.env]
+        mem_limit: 4g
+        restart: unless-stopped
+
+      cache-3:
+        image: apinizercloud/cache:2026.04.5
+        container_name: apinizer-cache-3
+        networks:
+          apinizer:
+            ipv4_address: 172.30.0.13
+        environment: *cache-env
+        env_file: [./secrets/cache.env]
+        mem_limit: 4g
+        restart: unless-stopped
+
+    networks:
+      apinizer:
+        driver: bridge
+        ipam:
+          config:
+            - subnet: 172.30.0.0/24
+    ```
+
+    ### Çoklu host
+
+    Her host'ta `APINIZER_CACHE_CLUSTER_MEMBERS`'ı host IP'lerinin **aynı** comma-separated listesine set edin.
+
+    :::tip
+
+TCP/IP discovery **simetriktir** — host B host A'yı listelemiyorsa, A B'ye erişse bile B A'yı member kabul etmez. Aynı peer listesini her node'a dağıtın.
+
+:::
+
+    ## 5. Doğrulama
+
+    REST health:
+
+    ```bash
+    curl -fsS http://127.0.0.1:8090/management/health
+    ```
+
+    Hazelcast member'lar:
+
+    ```bash
+    docker logs apinizer-cache | grep -E 'Members \{'
+    ```
+
+    3-node cluster için beklenen:
+
+    ```
+    Members {size:3, ver:3} [
+        Member [172.30.0.11]:5701 - ...
+        Member [172.30.0.12]:5701 - ...
+        Member [172.30.0.13]:5701 - ...
+    ]
+    ```
+
+    Tek member görünüyorsa `5701/tcp` firewall ve her node'un aynı peer listesini taşıdığını kontrol edin.
+
+    ## 6. Worker'ları Cache'e bağlama
+
+    Her Worker:
+
+    - **Aynı** Hazelcast cluster adını kullanmalı
+    - **Her** Cache node'una `5701/tcp` ile erişebilmeli
+    - Aynı MongoDB veritabanına bakmalı
+
+    ## 7. Operasyon
+
+    | Eylem | Komut |
+    | --- | --- |
+    | Durum | `docker ps --filter name=apinizer-cache` |
+    | Log | `docker logs -f apinizer-cache` |
+    | Yeniden başlat | `docker restart apinizer-cache` |
+    | Durdur (drain) | `docker stop -t 30 apinizer-cache` |
+
+    ## 8. Kaynak
+
+    | Yük | `mem_limit` |
+    | --- | --- |
+    | Tek tenant, düşük trafik | 2 GB |
+    | Üretim (1 Worker, ≤1 krps) | 4 GB |
+    | Üretim cluster (3+ Worker) | Node başına 4–6 GB |
+
+    Üretimde Cache'i 2 GB altı `mem_limit` ile çalıştırmayın.
+
+    ## Sorun Giderme
+
+    ### Peer listesi doğru ama her node `Members {size:1}` görüyor
+
+    - `HAZELCAST_CLUSTER_NAME` her node'da case-sensitive eşleşiyor mu?
+    - `5701/tcp` her iki yönde erişilebilir mi: konteyner içinden `nc -zv <peer-ip> 5701`.
+    - NAT arkasında çoklu host kurulumu (cloud) için TCP/IP discovery routable, simetrik adres ister.
+
+    ### Quota'lar beklenmedik sıfırlanıyor
+
+    `CACHE_QUOTA_TIMEZONE` değeri Worker / Manager timezone'undan farklı. Hepsi aynı olmalı.
+  </TabItem>
+
+  <TabItem value="4-api-integration-opsiyonel" label="4. API Integration (Opsiyonel)">
+    **(Opsiyonel)** API Integration, Quartz tabanlı task-flow scheduler'ıdır: Manager'da tanımlanan zamanlanmış akışları (scheduled task flow'lar) çalıştırır. **Yalnızca** task-flow / scheduled job ihtiyacı olan kurulumlar için gereklidir; saf API gateway senaryolarında atlanabilir.
+
+    Bu rehber Apinizer **Integration** katmanını — Manager tarafından kaydedilen task flow'ları çalıştıran Quartz scheduler'ı — Docker konteyneri olarak nasıl çalıştıracağınızı anlatır. Integration konteyneri MongoDB'den task flow / connector tanımlarını okur ve Quartz job state'ini `schedule_integration_*` collection'larında tutar.
+
+    :::info
+
+Integration **MongoDB dışında stateless'tır**: tüm Quartz lock'lar, trigger'lar, calendar'lar ve job status row'ları MongoDB'de yaşar. Konteyneri istediğiniz kadar restart edebilirsiniz — çalışan job'lar kesilebilir ama hiçbir scheduling state kaybolmaz.
+
+:::
+
+    ## Gereksinimler
+
+    - Docker Engine 24+ kurulu bir Linux x86-64 host
+    - Manager'ın kullandığı **aynı** MongoDB
+    - Boş bir TCP port (varsayılan `8092`) — Manager'ın IP/CIDR'ına kısıtlanmalı
+
+    ## 1. İmajı çekin
+
+    ```bash
+    VERSION=2026.04.5
+    docker pull apinizercloud/integration:${VERSION}
+    ```
+
+    ## 2. Yapılandırma
+
+    Zorunlu:
+
+    | Değişken | Açıklama |
+    | --- | --- |
+    | `SPRING_DATA_MONGODB_URI` | MongoDB connection string — Manager'ın kullandığı aynı instance |
+    | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı adı — Manager DB ile aynı olmalı |
+    | `INTEGRATION_TIMEZONE` | IANA zone id (örn. `Europe/Istanbul`). Manager ve Worker timezone ile eşleşmeli. |
+
+    Opsiyonel:
+
+    | Değişken | Varsayılan | Açıklama |
+    | --- | --- | --- |
+    | `SERVER_PORT` | `8092` | Spring Boot HTTP portu |
+    | `SPRING_PROFILES_ACTIVE` | `prod` | Üretimde böyle kalsın |
+    | `JAVA_OPTS` | boş | Ek JVM bayrakları |
+    | `LOG_LEVEL` | `INFO` | Uygulama log level |
+
+    ## 3. Konteyneri çalıştır
+
+    ```bash
+    docker run -d \
+      --name apinizer-integration \
+      -p 8092:8092 \
+      --memory=2g \
+      --stop-timeout=120 \
+      -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+      -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+      -e INTEGRATION_TIMEZONE='Europe/Istanbul' \
+      -e SPRING_PROFILES_ACTIVE=prod \
+      -v apinizer-integration-logs:/app/logs \
+      --restart unless-stopped \
+      apinizercloud/integration:${VERSION}
+    ```
+
+    :::warning
+
+`--stop-timeout=120` (veya compose'da `stop_grace_period: 120s`) kullanın. Quartz `waitForJobsToCompleteOnShutdown=true` ile yapılandırıldığı için SIGTERM temiz drain tetikler. Cömert grace olmadan Docker 10 saniye sonra SIGKILL atar ve in-flight task flow adımları kesilir.
+
+:::
+
+    Beklenen boot log'u:
+
+    ```
+    Integration timezone set to: Europe/Istanbul
+    Initializing Custom MongoDB Job Store
+    Quartz Scheduler Prod Environment Setup started
+    MongoDB connection established for Quartz Job Store
+    Tomcat started on port 8092 (http)
+    ```
+
+    ## 4. docker-compose
+
+    ```yaml
+    services:
+      integration:
+        image: apinizercloud/integration:2026.04.5
+        container_name: apinizer-integration
+        restart: unless-stopped
+        mem_limit: 2g
+        stop_grace_period: 120s
+        ports:
+          - "8092:8092"
+        environment:
+          SPRING_DATA_MONGODB_DATABASE: apinizer
+          INTEGRATION_TIMEZONE: Europe/Istanbul
+          SPRING_PROFILES_ACTIVE: prod
+        env_file:
+          - ./secrets/integration.env
+        volumes:
+          - integration-logs:/app/logs
+        healthcheck:
+          test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8092/management/health | grep -q '\"status\":\"UP\"'"]
+          interval: 30s
+          timeout: 5s
+          retries: 5
+          start_period: 60s
+
+    volumes:
+      integration-logs:
+    ```
+
+    ## 5. Çoklu node / HA
+
+    Birden fazla Integration konteyneri **aynı MongoDB veritabanını** paylaşabilir — otomatik olarak clustered Quartz scheduler oluştururlar. Her instance:
+
+    - `org.quartz.scheduler.instanceId`'sini otomatik üretir
+    - `schedule_integration_locks` üzerinden trigger'ları kilitler — aynı job iki node'da aynı anda fire olmaz
+    - Misfired job'ları başlangıçta kurtarır
+
+    :::tip
+
+Zamana duyarlı scheduled flow'larınız varsa en az iki Integration konteyneri çalıştırın.
+
+:::
+
+    ## 6. Manager'ı Integration'a bağlama
+
+    Manager UI'da (`Admin → Integration Servers`) her Integration konteynerinin hostname/IP ve HTTP portunu (`8092`) ekleyin. Manager job register/unregister ve cache-refresh event'lerini REST üzerinden push eder.
+
+    ## 7. Doğrulama
+
+    ```bash
+    curl -fsS http://127.0.0.1:8092/management/health
+    ```
+
+    MongoDB tarafından cluster resmi:
+
+    ```javascript
+    use apinizer
+    db.schedule_integration_scheduler_state.find().pretty()
+    ```
+
+    Her Integration node için yakın bir `last_checkin_time` ile entry görmelisiniz.
+
+    ## 8. Operasyon
+
+    | Eylem | Komut |
+    | --- | --- |
+    | Durum | `docker ps --filter name=apinizer-integration` |
+    | Log | `docker logs -f apinizer-integration` |
+    | Yeniden başlat (Quartz drain) | `docker restart -t 120 apinizer-integration` |
+    | Durdur (Quartz drain) | `docker stop -t 120 apinizer-integration` |
+
+    ## 9. Kaynak
+
+    | Yük | `mem_limit` |
+    | --- | --- |
+    | Az flow, hafif cadence | 1 GB |
+    | Üretim (tipik kurulum) | 2 GB |
+    | Ağır / çok eşzamanlı flow | 4 GB |
+
+    ## Sorun Giderme
+
+    ### Quartz job beklenen zamanda fire olmadı
+
+    - `INTEGRATION_TIMEZONE`'ı Manager'daki cron expression'a göre kontrol edin.
+    - Çoklu Integration node'ları farklı timezone'larla tutarsız fire oluşturur.
+
+    ### Hard kill sonrası `Locked by another scheduler` ile exit
+
+    Önceki konteyner trigger ortasında SIGKILL aldı. Yeni konteynerin lock-recovery sweep'i başlangıçta stale row'u temizler; gerekiyorsa bir `clusterCheckin` cycle bekleyin (default 7.5 s).
+
+    ### Manager UI Integration'ı **offline** gösteriyor
+
+    Manager `http://<integration-host>:8092/`'a erişemiyor. Manager UI'daki host/port, firewall ve Integration konteynerinin boot sequence'ini bitirip bitirmediğini doğrulayın.
+  </TabItem>
+</Tabs>
