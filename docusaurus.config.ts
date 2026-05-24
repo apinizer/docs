@@ -27,13 +27,32 @@ const config: Config = {
     './src/clientModules/pathnameWatcher.ts',
   ],
 
-  // Search temporarily disabled. `@easyops-cn/docusaurus-search-local`
-  // produced a 56 MB combined search index (and 26 MB per-locale shards)
-  // for the ~1450 MDX corpus, which busts Cloudflare Pages's 25 MB
-  // per-file limit. Plugin has no excludeRoutes option to trim it.
-  // Plan: re-enable via Algolia DocSearch in a follow-up PR (free for
-  // public docs, no index size limit). Until then no search bar shows.
-  themes: [],
+  themes: [
+    [
+      '@easyops-cn/docusaurus-search-local',
+      {
+        hashed: true,
+        // English-only language tables to keep the per-locale shard small.
+        language: ['en'],
+        indexDocs: true,
+        indexPages: false,
+        indexBlog: false,
+        docsRouteBasePath: ['/tr', '/en', '/api-reference'],
+        docsPluginIdForPreferredVersion: 'tr',
+        // Per-context shards (tr/en/api-reference) so the global combined
+        // index is not the only path — needed for Cloudflare Pages's 25 MB
+        // single-asset cap.
+        searchContextByPaths: ['tr', 'en', 'api-reference'],
+        // Aggressive size cuts: drop stop-word filter and the lunr default
+        // stemmer; both add per-token metadata to the index. We still get
+        // exact + prefix search, which is the dominant use case.
+        removeDefaultStopWordFilter: true,
+        removeDefaultStemmer: true,
+        highlightSearchTermsOnTargetPage: true,
+        explicitSearchResultPath: true,
+      },
+    ],
+  ],
 
   presets: [
     [
