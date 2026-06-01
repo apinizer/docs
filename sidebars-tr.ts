@@ -404,6 +404,7 @@ const sidebars: SidebarsConfig = {
           "items": [
             "develop/politikalar/token-service/genel-bakis",
             "develop/politikalar/token-service/token-alma-yontemleri",
+            "develop/politikalar/token-service/manuel-token-uretimi-ve-validasyonu",
             "develop/politikalar/token-service/token-sss"
           ]
         }
