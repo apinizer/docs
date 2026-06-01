@@ -1,0 +1,3112 @@
+---
+title: "Kubernetes'e Kurulum"
+description: "Apinizer modüllerini Kubernetes üzerinde Manifest YAML veya Helm chart ile kurun. API Manager + Worker tek sayfada, Cache, Integration ve Portal ayrı sekmelerde."
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Frame} from '@site/src/components/Frame';
+import {Accordion} from '@site/src/components/Accordion';
+
+Apinizer modülleri Kubernetes üzerinde iki farklı yöntem ile kurulabilir: ham **Kubernetes Manifest YAML** dosyaları ile ya da **Helm chart** kullanılarak. Aşağıdaki üst sekmelerden tercih ettiğiniz dağıtım yöntemini, alt sekmelerden ise kurmak istediğiniz modülü seçebilirsiniz. Her modülün kendine ait kaynak gereksinimleri, ortam değişkenleri ve servis tanımları vardır.
+
+## Kurulum Akışı
+
+<Steps>
+  <Step title="MongoDB (Önkoşul)">
+    Apinizer Manager metadata, deploy edilmiş proxy snapshot'ları ve Integration scheduler kuyruğu için MongoDB zorunludur. Hangi runtime ortamını seçerseniz seçin (Kubernetes, Docker, Sanal Sunucu), MongoDB kurulması gereklidir. Üretim ortamında replica set önerilir.
+    
+    [MongoDB Kurulumu](/tr/setup/mongodb) sayfasından detaylı adımları izleyin.
+  </Step>
+
+  <Step title="API Manager">
+    Apinizer Yönetim Konsolu (API Manager), Apinizer platformunun merkezi kontrol ve yönetim bileşenidir. API Trafik Yöneticileri, API'leri yöneten kişiler ve sistem yöneticileri bu uygulama üzerinden kullanıcı ve yetkilendirme yönetimi, ortam kurulumu, deployment yönetimi ve lisans anahtarı yüklemesini gerçekleştirir. API Manager ayağa kalktıktan sonra diğer modülleri kurabilirsiniz.
+  </Step>
+
+  <Step title="Gateway">
+    Apinizer'ın asıl API Gateway modülüdür. API isteklerinin gelen noktası ve yönetim politikalarının uygulandığı yer burasıdır. API Manager üzerinden en az bir environment tanımlanması zorunludur. Gateway, Managed (Apinizer tarafından yönetilen, K8s cluster'a dağıtılan) veya Remote (harici cluster'a kurulu, Manager tarafından yönetilen) olarak kurulabilir.
+  </Step>
+</Steps>
+
+### Opsiyonel Modüller
+
+Aşağıdaki modüller API yönetimi için gerekli değildir; ancak özel gereksinimlerinize (cache, zamanlı işler, geliştirici portali, yüksek hacim logging) göre kurabilirsiniz.
+
+<CardGroup cols={2}>
+  <Card title="Cache" href="#cache-kurulumu-ve-tanmlanmas">
+    Paylaşımlı Hazelcast cache kümesi. Rate limit, JWT token cache, cluster genelinde durum paylaşımı ve distributed lock'lar için önerilir. Managed (K8s) veya Remote olarak kurulabilir.
+  </Card>
+
+  <Card title="Integration" href="#integration-kurulumu-ve-tanmlanmas">
+    Quartz tabanlı görev zamanlayıcı. Zamanlı API çağrıları, batch işler, webhook trigger'ları ve periyodik senkronizasyon işlemleri için kullanılır.
+  </Card>
+
+  <Card title="API Portal" href="#api-portal-kurulumu">
+    Geliştiriciler için API katalog ve self-service portalı. API tüketicileri bu portal üzerinden token oluşturur, API'leri keşfeder, dokümantasyonu okur ve test eder.
+  </Card>
+
+  <Card title="Elasticsearch" href="/tr/setup/kuruluma-genel-bakis">
+    Yüksek hacim API trafik loglarının gerçek zamanlı indexlenmesi ve analizi. Elasticsearch kurmazsanız loglar MongoDB'ye yazılır — ancak yüksek trafikli ortamlarda Elasticsearch önerilir.
+  </Card>
+
+  <Card title="SSL ile API Manager" href="#api-manager-i-ssl-ile-balatmak">
+    API Manager uygulaması için HTTPS terminasyonu. Load balancer veya reverse proxy kullanarak Manager trafiğini şifreli hale getirin.
+  </Card>
+</CardGroup>
+
+:::tip
+
+Aşağıdaki sekmelerden tercih ettiğiniz dağıtım yöntemini (**Manifest YAML** veya **Helm Chart**) seçin; her yöntem aynı kurulum adımlarını izler.
+
+:::
+
+<Tabs>
+  <TabItem value="kubernetes-manifest" label="Kubernetes Manifest">
+    Apinizer modüllerini ham **Kubernetes Manifest (YAML)** dosyaları ile cluster üzerinde adım adım kurar. Bu yöntem cluster'a tam kontrol sağlar; her modülün Deployment, Service, ConfigMap, Secret, RBAC ve Ingress tanımlarını ayrı dosyalar halinde uygular. Helm gibi paket yöneticisi kullanmaz, doğrudan `kubectl apply -f` ile çalışır.
+
+    **API Manager ve Gateway kurulumları zorunludur** — Apinizer'ın asıl API Gateway'i bu Gateway modülüdür. Aşağıdaki adımları sırayla uygulayın: önce API Manager ayağa kalkmalı, ardından en az bir Gateway kurulup Manager üzerinden **environment olarak tanımlanmalıdır**. Cache, Integration ve API Portal modülleri **opsiyoneldir** ve sayfanın alt kısmındaki sekmelerden kurulabilir.
+
+    ## API Manager Kurulumu
+
+    Apinizer Yönetim Konsolu (**API Manager**), Apinizer'ın yönetildiği bileşendir. API Trafik Yöneticileri, API'leri yöneten kişiler ve API tüketicileri bu uygulama üzerinden gerekli işlemlerini yapabilirler.
+
+    :::info
+
+Apinizer imajları Kubernetes ortamına deploy edildikten sonra Apinizer tarafından size verilen Lisans Anahtarını veri tabanına eklemeniz gerekir.
+
+:::
+
+    ## Kurulum Öncesi Adımlar
+
+    :::warning
+
+**MongoDB kurulumu zorunludur** — Apinizer'ı çalıştırmadan önce ayağa kalkmış bir MongoDB instance'ınız olmalı. Manager metadata'sı, deploy edilmiş proxy snapshot'ları, Integration scheduler kuyruğu ve audit kayıtları tamamen MongoDB üzerinde tutulur. Hangi runtime'ı (Kubernetes, Docker veya Sanal Sunucu) seçerseniz seçin bu bağımlılık değişmez.
+
+      Üretim için **replica set** önerilir; tek node sadece PoC / geliştirme için uygundur. Kurulum adımları için → [MongoDB Kurulumu](/tr/setup/mongodb) sayfasından devam edin.
+
+:::
+
+    :::note
+
+**Elasticsearch**, API trafik loglarının indekslenmesi ve aranması için önemlidir; opsiyoneldir. Elasticsearch kurmazsanız trafik logları MongoDB üzerine yazılır — yüksek trafikli ortamlar için Elasticsearch önerilir. Detay için → [Elasticsearch Kurulumu](/tr/setup/kuruluma-genel-bakis) sayfasına bakın.
+
+:::
+
+    ## Kubernetes Yetkilerinin Tanımlanması ve Namespace'lerin Oluşturulması
+
+    Apinizer'ın oluşturulan Namespace'deki pod'lara erişim için Kubernetes API'sinin izinlerin tanımlanması gerekmektedir.
+
+    Kubernetes'de **ClusterRole** ve **ClusterRoleBinding**, Kubernetes küme düzeyinde rol ve rol atama mekanizmalarını sağlar. Bu iki kaynak, küme yöneticilerinin ve uygulama geliştiricilerinin Kubernetes kaynaklarına erişim ve izinlerini yönetmelerini sağlar.
+
+    Ortam (Environment) yönetimleri API Manager üzerinden yapılacaksa, Apinizer'ın Kubernetes API'lerine erişip, Namespace, Deployment, Pod, Service oluşturma, silme, güncelleme ve izleme işlemlerini yapabilmesi için yetkilerin tanımlanması gerekir.
+
+    #### Kubernetes yönetimi Apinizer ile yapılıyor ise
+
+    Aşağıdaki adımda, Kubernetes üzerinde Role ve RoleBinding oluşturup yetkiler tanımlanır. Bu adımda oluşturulacak tüm environment'lar için yetki verilir.
+
+    ```bash
+    vi apinizer-role.yaml
+    ```
+
+    <Accordion title="apinizer-role.yaml — Apinizer namespace + RBAC">
+      ```yaml
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: apinizer
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: apinizer-role-binding
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: apinizer-role
+      subjects:
+        - apiGroup: rbac.authorization.k8s.io
+          kind: Group
+          name: system:serviceaccounts
+      ---
+      kind: ClusterRole
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: apinizer-role
+      rules:
+        - apiGroups:
+            - ''
+          resources:
+            - nodes
+            - services
+            - namespaces
+            - pods
+            - endpoints
+            - pods/log
+            - secrets
+            - configmaps
+          verbs:
+            - get
+            - list
+            - watch
+            - update
+            - create
+            - patch
+            - delete
+        - apiGroups:
+            - apps
+          resources:
+            - deployments
+            - replicasets
+            - statefulsets
+            - configmaps
+          verbs:
+            - get
+            - list
+            - watch
+            - update
+            - create
+            - patch
+            - delete
+      ```
+    </Accordion>
+
+    ```bash
+    kubectl apply -f apinizer-role.yaml
+    ```
+
+    ### Kubernetes yönetimi Apinizer ile yapılmıyor ise
+
+    Burada sadece Apinizer namespace'indeki manager uygulaması için yetkiler ayarlanır.
+
+    ```bash
+    vi apinizer-manager-role.yaml
+    ```
+
+    <Accordion title="apinizer-manager-role.yaml — Manager-only namespace + RBAC">
+      ```yaml
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: apinizer
+      ---
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: manager-serviceaccount
+        namespace: apinizer
+      ---
+      kind: Role
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: apinizer-role
+        namespace: apinizer
+      rules:
+        - apiGroups:
+            - ''
+          resources:
+            - services
+            - namespaces
+            - pods
+            - endpoints
+            - pods/log
+            - secrets
+          verbs:
+            - get
+            - list
+            - watch
+            - update
+            - create
+            - patch
+            - delete
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: manager-serviceaccount-apinizer-role-binding
+        namespace: apinizer
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: apinizer-role
+      subjects:
+        - kind: ServiceAccount
+          name: manager-serviceaccount
+          namespace: apinizer
+      ```
+    </Accordion>
+
+    ```bash
+    kubectl apply -f apinizer-manager-role.yaml
+    ```
+
+    ### Yapılandırma Parametreleri
+
+    API Manager, API'lerin, Politikaların, Kullanıcı, Credential'ların ve konfigürasyonların tanımladığı ve API Trafik ve Analitik verilerinin görüntülenip analiz edildiği web tabanlı bir yönetim arayüzüdür. API Manager'ın Kubernetes'e deployment'ı öncesi aşağıdaki değişkenleri kendi ortamınıza uygun şekilde konfigüre edin.
+
+    * **APINIZER_VERSION** - Hangi Apinizer versiyonunu kuracağınızı belirten parametredir. [Mevcut sürümleri görmek için lütfen tıklayınız](https://hub.docker.com/r/apinizercloud/manager/tags). Yeni kurulumlarda her zaman en son sürümü kullanmanız önerilir. [Sürüm notlarını incelemek için lütfen tıklayınız](/tr/release-notes/genel-bakis).
+    * **MONGO_DBNAME** - Apinizer konfigürasyonları için kullanılacak veritabanı URL bilgisi. Varsayılan olarak "apinizerdb" ismi kullanılması önerilir.
+    * **MONGOX_IP ve MONGOX_PORT** - MongoDB sunucularına ait IP ve port bilgileri. MongoDB varsayılan portu 25080'dir. Apinizer varsayılan olarak 25080 portunu kullanır.
+    * **MONGO_USERNAME ve MONGO_PASSWORD** - MongoDB uygulamanıza ait Apinizer için tanımlanmış, ilgili veritabanı üzerinde yetkili ya da o veritabanı oluşturma yetkisine sahip olan kullanıcıya ait olan bilgiler.
+    * **YOUR_LICENSE_KEY** - Apinizer tarafından tarafınıza gönderilen lisans anahtarı.
+    * **K8S_ANY_WORKER_IP** - Apinizer kurulumu tamamlandığında herhangi bir web tarayıcıdan Apinizer Yönetim Konsolu arayüzüne erişebilmeniz için Kubernetes Cluster'ınızdan bir IP gerekmektedir. Bu genelde Kubernetes Worker sunucularından biri olarak tercih edilir ve daha sonra bir Yük Dağıtıcı (Load Balancer) ve DNS arkasına konulması önerilir.
+
+    ## Mongodb bilgileriyle secret oluşturulması
+
+    MongoDB veritabanı bağlantı bilgilerinizi kubernetes deployment'larda Encoded bir şekilde kayıtlı olması tavsiye edilmektedir. Bunun için Linux tabanlı bir işletim sisteminin terminalinde aşağıdaki adımları uygulayın.
+
+    ```bash
+    DB_URL='mongodb://<MONGO_USERNAME>:<MONGO_PASSWORD>@<MONGO1_IP>:<MONGO1_PORT>,<MONGO2_IP>:<MONGO2_PORT>,<MONGO3_IP>:<MONGO3_PORT>/?authSource=admin&replicaSet=apinizer-replicaset'
+
+    DB_NAME=<MONGO_DBNAME>
+    # <MONGO_DBNAME> değişkeni için default önerimiz "apinizerdb" ismidir
+
+    echo -n ${DB_URL} | base64
+    # Bunun çıktısını bir sonraki adımda <ENCODED_URL> değişkeni yerine koyacağız
+
+    echo -n ${DB_NAME} | base64
+    # Bunun çıktısını bir sonraki adımda <ENCODED_DB_NAME> değişkeni yerine koyacağız
+    vi secret.yaml
+    ```
+
+    Mongodb bilgileriyle secret yaml'ının hazırlanması:
+
+    <Accordion title="mongo-secret.yaml — MongoDB connection secret">
+      ```yaml
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: mongo-db-credentials
+        namespace: apinizer
+      type: Opaque
+      data:
+        dbUrl: <ENCODED_URL>
+        dbName: <ENCODED_DB_NAME>
+      ```
+    </Accordion>
+
+    ```bash
+    kubectl apply -f secret.yaml
+    ```
+
+    ## API Manager'in Kubernetes deployment'ı
+
+    Aşağıdaki örnek yaml dosyasını sistemlerinize uygun olacak şekilde değiştirerek Kubernetes Cluster'ınıza yükleyin.
+
+    ```bash
+    vi apinizer-manager-deployment.yaml
+    ```
+
+    <Accordion title="apimanager-deployment.yaml — API Manager Deployment + Service">
+      ```yaml
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: apimanager
+        namespace: apinizer
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: apimanager
+            version: v1
+        strategy:
+          type: Recreate
+        template:
+          metadata:
+            labels:
+              app: apimanager
+              version: v1
+          spec:
+            containers:
+            - env:
+              - name: JAVA_OPTS
+                value: '-XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+              - name: SPRING_PROFILES_ACTIVE
+                value: prod
+              - name: WORKER_DEPLOYMENT_TIMEOUT
+                value: '120'
+              - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE
+                value: '70MB'
+              - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE
+                value: '70MB'
+              - name: SPRING_DATA_MONGODB_URI
+                valueFrom:
+                  secretKeyRef:
+                    key: dbUrl
+                    name: mongo-db-credentials
+              - name: SPRING_DATA_MONGODB_DATABASE
+                valueFrom:
+                  secretKeyRef:
+                    key: dbName
+                    name: mongo-db-credentials
+              name: apimanager
+              image: apinizercloud/apimanager:<APINIZER_VERSION>
+              imagePullPolicy: IfNotPresent
+              ports:
+              - containerPort: 8080
+                protocol: TCP
+              resources:
+                limits:
+                  cpu: 1
+                  memory: 3Gi
+              startupProbe:
+                failureThreshold: 12
+                httpGet:
+                  path: /apinizer/management/health
+                  port: 8080
+                  scheme: HTTP
+                initialDelaySeconds: 60
+                periodSeconds: 10
+                successThreshold: 1
+                timeoutSeconds: 10
+              readinessProbe:
+                failureThreshold: 12
+                httpGet:
+                  path: /apinizer/management/health
+                  port: 8080
+                  scheme: HTTP
+                initialDelaySeconds: 60
+                periodSeconds: 10
+                successThreshold: 1
+                timeoutSeconds: 10
+              livenessProbe:
+                failureThreshold: 12
+                httpGet:
+                  path: /apinizer/management/health
+                  port: 8080
+                  scheme: HTTP
+                initialDelaySeconds: 60
+                periodSeconds: 10
+                successThreshold: 1
+                timeoutSeconds: 10
+            dnsPolicy: ClusterFirst
+            restartPolicy: Always
+            hostAliases:
+            - ip: "<IP_ADDRESS>"
+              hostnames:
+              - "<DNS_ADDRESS_1>"
+              - "<DNS_ADDRESS_2>"
+      ```
+    </Accordion>
+
+    :::info
+
+Eğer Ortamlar Apinizer Üzerinden Yönetilmeyecekse Manager'ın Deployment'ı Değiştirilir
+
+      Deployment objelerinin gerekli ServiceAccount'a bind olabilmesi için spec alanına aşağıdaki gibi serviceAccountName alanı eklenir:
+
+      ```yaml
+      spec:
+        serviceAccountName: manager-serviceaccount
+      ```
+
+:::
+
+    :::info
+
+**Ortam Değişkenleri**
+
+      Apinizer API Manager, Spring Boot alt yapısından çalışır. Spring Boot'da Ortam değişkenlerini genellikle alt çizgi (`_`) kullanarak ve büyük harfle ifade eder. Bu nedenle örneğin, `spring.servlet.multipart.max-file-size` ve `spring.servlet.multipart.max-request-size` özelliklerini ortam değişkenleri olarak ayarlarken alt çizgi kullanmanız gerekebilir.
+
+      Örnek: `SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE` ve `SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE` ortam değişkenlerini olarak tanımlayabilirsiniz.
+
+      Eğer NGINX gibi bir proxy sunucu kullanıyorsanız ve dosya yükleme limitini artırmak istiyorsanız, NGINX yapılandırma dosyasına aşağıdaki ayarı eklemeniz gerekmektedir:
+
+      ```nginx
+      http {
+        ...
+        client_max_body_size 70M; # 70MB dosya limiti
+        ...
+      }
+      ```
+
+:::
+
+    :::info
+
+**Ortam Değişkenleri**
+
+      Deployment işlemleri veri bütünlüğünün sağlanması amacıyla senkron olarak yapılmaktadır. WORKER_DEPLOYMENT_TIMEOUT parametresi, API Manager üzerinden veya Management API ile yapılan deploy işleminin kaç saniye sonra zaman aşımına uğrayacağını ifade eder.
+
+      ```yaml
+      env:
+        - name: WORKER_DEPLOYMENT_TIMEOUT
+          value: '120'
+      ```
+
+:::
+
+    API Manager için Kubernetes Servis oluşturun:
+
+    ```bash
+    vi apinizer-manager-service.yaml
+    ```
+
+    <Accordion title="apimanager-service.yaml — API Manager Service">
+      ```yaml
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: apimanager
+        namespace: apinizer
+        labels:
+          app: apimanager
+      spec:
+        selector:
+          app: apimanager
+        type: NodePort
+        ports:
+          - name: http
+            port: 8080
+            nodePort: 32080
+      ```
+    </Accordion>
+
+    ```bash
+    kubectl apply -f apinizer-manager-deployment.yaml
+    kubectl apply -f apinizer-manager-service.yaml
+    ```
+
+    :::info
+
+API Manager Kubernetes üzerinde deploy olurken manager isminde ve NodePort tipinde bir Kubernetes servisi oluşturur. Bu servis kubernetes dışından API Manager'a erişim için gereklidir. Ancak sizi bu servisi silip Ingress veya kurumunuzda bağlantı yöntemi için hangi yapıyı kullanıyorsanız ona göre uyarlayabilirsiniz.
+
+:::
+
+    Bu işlem sonrasında oluşturulan pod'u takip etmek ve logunu incelemek için aşağıdaki ilk kodu çalıştırıp pod ismi alınır ve ikinci kodda kullanılır.
+
+    ```bash
+    kubectl get pods -n apinizer
+    kubectl logs <PODADI> -n apinizer
+    ```
+
+    :::warning
+
+Apinizer imajları Kubernetes ortamına deploy edildikten sonra Apinizer tarafından size verilen Lisans Anahtarını veri tabanına eklemeniz gerekir.
+
+:::
+
+    ## API Manager lisans anahtarının girilmesi
+
+    Apinizer tarafından size verilen Lisans Anahtarını aşağıdaki gibi bir `.js` dosyasında güncelleyip veri tabanındaki lisans bilgisi güncellenebilir.
+
+    ```bash
+    vi license.js
+    ```
+
+    ```javascript
+    db.general_settings.updateOne(
+      {"_class":"GeneralSettings"},
+      { $set: { licenseKey: '<YOUR_LICENSE_KEY>'}}
+    )
+    ```
+
+    Oluşturulan license.js MongoDB sunucusu üzerinde çalıştırılır. Matched = 1 şeklinde bir sonuç görülmesi beklenir.
+
+    ```bash
+    mongosh mongodb://<MONGODB_IP>:<MONGO_PORT>/<MONGO_DBNAME> --authenticationDatabase "admin" -u "apinizer" -p '<MONGO_PASSWORD>' < license.js
+    ```
+
+    Kurulum işlemi başarılı olduysa aşağıdaki adresten Apinizer API Manager (Yönetim Konsolu'na) erişebilirsiniz.
+
+    ```
+    http://<K8S_ANY_WORKER_IP>:32080
+    ```
+
+    **Varsayılan Kullanıcı Adı:** admin
+
+    **Varsayılan Kullanıcı Parola:** Apinizer destek ekibinden yardım isteyin.
+
+    :::warning
+
+Apinizer Yönetim Konsoluna ilk girişiniz sonrasında şifrenizi değiştirmeniz önerilir.
+
+:::
+
+    <Frame caption="Parola Değiştir sayfası - İlk giriş sonrası şifre değiştirme ekranı">
+      <img
+        src="/images/setup/apinizer/sifre-degistirme.png"
+        alt="Parola Değiştir Sayfası"
+        width="1200"
+        height="800"
+        style={{ borderRadius: '0.5rem' }}
+      />
+    </Frame>
+
+    :::note
+
+**HTTPS/SSL ile Apinizer Manager'ı çalıştırmak istiyorsanız** — TLS sertifikası, JKS/PKCS12 dönüşümü, K8s Secret oluşturma ve SSL etkin Deployment YAML örneği için sayfanın alt kısmındaki **[API Manager'ı SSL ile Başlatmak](#api-manageri-ssl-ile-baslatmak)** sekmesine bakın. HTTPS opsiyoneldir; production'da TLS önerilir ancak PoC ortamında HTTP de çalışır.
+
+:::
+
+    ## Sıradaki Adım — Gateway Kurulumu (Zorunlu)
+
+    API Manager kurulumu ve Lisans Anahtarı tanımı tamamlandığında Yönetim Konsoluna giriş yapabilirsiniz. Sıradaki adım **Gateway kurulumu ve environment tanımıdır** — bu adım **zorunludur**; Apinizer'ın asıl API Gateway'i bu modüldür ve Manager üzerinden en az bir environment olarak tanımlanmalıdır. Cache, Integration ve API Portal modülleri **opsiyoneldir** ve aşağıdaki sekmelerden bağımsız olarak kurulabilir. Önerilen sıra: **Gateway → Cache → Integration → API Portal**.
+
+    Apinizer'in en önemli bileşenidir. İstemcilerden gelen isteklerin karşılandığı, **Politika Uygulama Noktası (Policy Enforcement Point)** olarak görev yapan, isteği tanımlanmış politikalara göre işleyip backend API/servise yönlendiren modüldür. Gateway kurulumu zorunludur ve Manager üzerinden en az bir Gateway tanımlanmalıdır.
+
+    Gateway iki şekilde tanımlanabilir:
+    - **Managed Gateway** — Apinizer hedef Kubernetes cluster'ı yönetir; Manager UI üzerinden environment oluşturulduğunda namespace, RBAC, Deployment, Service ve secret kopya işlemlerini Apinizer otomatik yapar.
+    - **Remote Gateway** — Gateway'in çalışacağı cluster Apinizer yönetiminde değildir. Operatör manuel olarak YAML manifest'lerini deploy eder ve Manager'a bağlantı adreslerini "Remote Gateway" olarak tanımlar.
+
+    <Tabs>
+      <TabItem value="managed-gateway-apinizer-yonetiminde" label="Managed Gateway (Apinizer Yönetiminde)">
+        ## Managed Gateway Nedir?
+
+        Apinizer'ın Kubernetes cluster'ında hem **Yönetim** hem **Provisioning** rolünü üstlendiği modeldir. Manager UI'dan yeni bir Gateway environment oluşturduğunuzda Apinizer:
+        - Hedef namespace'i oluşturur
+        - Gerekli `Role`, `ServiceAccount` ve `RoleBinding`'leri uygular
+        - `Gateway` ve (varsa) `Cache` `Deployment`'larını yayar
+        - HTTP/HTTPS `Service`'leri ve isteğe bağlı `NodePort`'ları açar
+        - MongoDB secret'ını hedef namespace'e kopyalar
+        - Pod sayısını, JVM parametrelerini, kaynak limitlerini UI üzerinden kontrol etmenizi sağlar
+
+        Bu model **PoC'den production'a en hızlı yol** olarak önerilir. Manuel YAML hazırlığı yoktur.
+
+        ## Önkoşullar
+
+        <Steps>
+          <Step title="API Manager çalışır durumda">
+            API Manager'a `admin` kullanıcısı ile giriş yapılmış olmalı. Eğer Manager kurulu değilse yukarıdaki **API Manager Kurulumu** bölümünden devam edin.
+          </Step>
+          <Step title="Apinizer Kubernetes yönetim modu aktif">
+            System Settings → General Settings'te **"Apinizer üzerinden Kubernetes yönetimi"** seçeneği işaretli olmalı. Bu seçenek kapatıldığında Manager sadece Remote Gateway oluşturabilir.
+          </Step>
+          <Step title="Cluster RBAC'ı uygulanmış">
+            Manager'ın hedef cluster'a deploy yapabilmesi için API Manager Kurulumu adımındaki `apinizer-role.yaml` ve `apinizer-manager-role.yaml` (cluster-wide) uygulanmış olmalı.
+          </Step>
+          <Step title="Docker imajlarına erişim">
+            Cluster, `apinizercloud/worker:<APINIZER_VERSION>` ve `apinizercloud/cache:<APINIZER_VERSION>` imajlarını çekebilmeli (internet veya internal registry üzerinden).
+          </Step>
+        </Steps>
+
+        ## Yeni Gateway Oluşturma
+
+        Manager UI'da **Sunucu Yönetimi → Gateway Runtime'ları** sayfasında **Yeni** butonuna tıklayın. Açılan form aşağıdaki bölümleri içerir.
+
+        <Frame>
+          <img
+            src="/images/yonetici/envManaged.png"
+            alt="Managed Gateway Environment oluşturma formu"
+          />
+        </Frame>
+
+        ### 1. Platform Seçimi
+
+        İlk adım hangi platformda Gateway çalıştıracağınızı seçmektir.
+
+        | Seçenek | Açıklama |
+        |---------|----------|
+        | **Kubernetes** | Gateway Kubernetes cluster'ında pod olarak çalışır. Apinizer (Managed) veya operatör (Remote) tarafından yönetilebilir. |
+        | **Sanal Sunucu / Docker (Standalone)** | Gateway bare-metal Linux veya Docker container olarak çalışır. Bu durumda her zaman Remote olarak tanımlanır. |
+
+        Managed Gateway için **Kubernetes** seçin.
+
+        ### 2. Yönetim Tipi
+
+        | Seçenek | Açıklama |
+        |---------|----------|
+        | **Apinizer Tarafından Yönetilen (Managed)** | Apinizer Manager UI tüm Kubernetes nesnelerini otomatik oluşturur. |
+        | **Remote Gateway** | Operatör manuel YAML deploy eder; Manager sadece bağlantı bilgilerini tutar. |
+
+        Bu sekmede **Apinizer Tarafından Yönetilen** seçili kabul edilir.
+
+        ### 3. Temel Bilgiler
+
+        | Alan | Açıklama | Validation |
+        |------|----------|------------|
+        | **Ortam Tipi** | DEV, TEST, PROD vb. ortam sınıflandırması. | Zorunlu |
+        | **İletişim Protokolü Türü** | HTTP, HTTPS, gRPC, WebSocket. Tek environment'ta tek protokol türü çalışır; karışık protokol için ayrı environment'lar oluşturun. | Zorunlu |
+        | **Ortam Adı (Name)** | Gateway environment'ının görüntülenecek adı. Kubernetes namespace olarak da bu kullanılır. | a-z 0-9 ve `-` karakterleri; 3-64 karakter; eşsiz |
+        | **Ortam Anahtarı (Environment Key)** | API URL'lerinin path prefix'i olarak da kullanılır (örn: `/test/...`). | a-zA-Z `-` karakterleri; 3-24 karakter; eşsiz |
+        | **Erişim Adresi (Access URL)** | Bu Gateway'e dış dünyadan erişim için kullanılacak public URL (Load Balancer / Ingress / NodePort önündeki host). | Zorunlu |
+        | **Açıklama** | Operatör notları. | Opsiyonel |
+
+        ### 4. Node Yönetimi (Node List)
+
+        Gateway pod'larının çalışacağı Kubernetes node'larını sınırlamak için `nodeSelector`/`nodeAffinity` listesi belirleyebilirsiniz. Boş bırakılırsa Kubernetes scheduler default davranışı uygular.
+
+        :::tip
+
+Yüksek trafikli ortamlarda Gateway'i adanmış node'larda çalıştırmak gürültülü komşu (noisy neighbor) etkisini azaltır.
+
+:::
+
+        ### 5. Gateway Kaynak Yapılandırması
+
+        | Alan | Açıklama | Varsayılan |
+        |------|----------|------------|
+        | **Replica Count** | Aynı anda çalışacak Gateway pod sayısı. Production için ≥ 2 önerilir. | 1 |
+        | **CPU Limit** | Pod başına CPU limit (core). | 4 |
+        | **Memory Limit** | Pod başına memory limit. | 4 |
+        | **Memory Unit** | Mi / Gi. | Gi |
+
+        CPU değeri değiştiğinde Apinizer **JVM tuning parametrelerini** (`tuneWorkerThreads`, `tuneIoThreads`, vb.) otomatik hesaplayıp Ek Değişkenler tablosuna yansıtır.
+
+        ### 6. Host Aliases
+
+        Gateway pod'larının `/etc/hosts`'una eklenecek IP ↔ hostname eşlemeleri. Backend'in DNS'i çözmeyen kapalı bir ortamda çalışıyorsa veya hardcoded IP/host eşleştirmesi gerekiyorsa burada tanımlayın. Bu alan yalnızca Managed Gateway'de UI üzerinden tanımlanır; Remote Gateway'de operatör manifest içinde `hostAliases` bloğunu kendisi yazar.
+
+        ## Ortamı Yayınlama (Publish)
+
+        Form doldurulduktan sonra **Oluştur** butonuna basın. Apinizer:
+        1. Hedef namespace'i oluşturur (Ortam Adı = namespace adı)
+        2. RBAC, ServiceAccount, Deployment, Service'leri uygular
+        3. MongoDB secret'ını namespace'e kopyalar
+        4. Pod'ların `Ready` durumuna geçmesini bekler
+        5. Environment'ı `published` olarak işaretler
+
+        Yayım sonrası Manager → **Gateway Runtime'ları** sayfasında ortamı görebilir, **API Proxy'leri** bu ortama deploy edebilirsiniz.
+
+        :::info
+
+Detaylı Gateway Runtime yönetimi, JWT token doğrulama anahtarı, metrik monitörü ve diagnostics için → [Gateway Runtime'ları](/tr/admin/server-management/gateway-runtime-lari) sayfasına bakın.
+
+:::
+      </TabItem>
+      <TabItem value="remote-gateway-manuel-deploy" label="Remote Gateway (Manuel Deploy)">
+        ## Remote Gateway Nedir?
+
+        Gateway'in çalışacağı Kubernetes cluster Apinizer Manager'ın yönetimi DIŞINDADIR. Operatör Gateway pod/service/RBAC'ını manuel olarak `kubectl` ile deploy eder. Manager sadece bu Gateway'in **Management API URL** ve **Cache Management API URL** adreslerini tutar; deployment yaşam döngüsünü cluster operatörü yönetir.
+
+        Remote Gateway tercih edilen durumlar:
+        - Apinizer'ın cluster'a deploy yetkisi yok (RBAC kısıtı)
+        - Multi-cluster: Manager farklı bir cluster'da, Gateway başka cluster'da
+        - Cluster operatörü deployment'ları kendi CI/CD pipeline'ından yönetiyor
+        - Air-gapped / regülasyon ortamı (deploy operasyonu denetim altında)
+
+        ## Önkoşullar
+
+        - API Manager kurulu ve çalışır durumda
+        - Hedef Kubernetes cluster'a `kubectl` erişimi
+        - `apinizercloud/worker:<APINIZER_VERSION>` ve (kullanılacaksa) `apinizercloud/cache:<APINIZER_VERSION>` imajlarına erişim
+        - Manager'ın bağlı olduğu MongoDB cluster'a hedef cluster'dan ağ erişimi
+        - Gateway erişim adresi belirlenmiş (NodePort + node IP, ya da LoadBalancer / Ingress önünde DNS)
+
+        ## Manuel Kubernetes Deploy
+
+        ### 1. Gateway için role ve rolebinding'leri oluşturma
+
+        Oluşturulacak ortamların isimleri önden belirlenmeli ve `<GATEWAY_NAMESPACE>` değişkenleri bu şekilde ayarlanarak, oluşturulacak her ortam için aşağıdaki adımlar uygulanmalıdır.
+
+        ```bash
+        vi apinizer-gateway-role-ns.yaml
+        ```
+
+        <Accordion title="gateway-role-ns.yaml — Gateway RBAC">
+          ```yaml
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: <GATEWAY_NAMESPACE>
+          ---
+          kind: Role
+          apiVersion: rbac.authorization.k8s.io/v1
+          metadata:
+            name: gateway-role
+            namespace: <GATEWAY_NAMESPACE>
+          rules:
+            - apiGroups:
+                - ''
+              resources:
+                - services
+                - namespaces
+                - pods
+                - endpoints
+                - pods/log
+                - secrets
+              verbs:
+                - get
+                - list
+                - watch
+                - update
+                - create
+                - patch
+                - delete
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: manager-serviceaccount-gateway-role-binding
+            namespace: <GATEWAY_NAMESPACE>
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: gateway-role
+          subjects:
+            - kind: ServiceAccount
+              name: manager-serviceaccount
+              namespace: <GATEWAY_NAMESPACE>
+          ```
+        </Accordion>
+
+        ```bash
+        vi apinizer-gateway-rolebinding.yaml
+        ```
+
+        <Accordion title="gateway-rolebinding.yaml — ServiceAccount + RoleBindings">
+          ```yaml
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: gateway-serviceaccount
+            namespace: <GATEWAY_NAMESPACE>
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: gateway-serviceaccount-apinizer-role-binding
+            namespace: apinizer
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: apinizer-role
+          subjects:
+            - kind: ServiceAccount
+              name: gateway-serviceaccount
+              namespace: <GATEWAY_NAMESPACE>
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: RoleBinding
+          metadata:
+            name: gateway-serviceaccount-gateway-role-binding
+            namespace: <GATEWAY_NAMESPACE>
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: Role
+            name: gateway-role
+          subjects:
+            - kind: ServiceAccount
+              name: gateway-serviceaccount
+              namespace: <GATEWAY_NAMESPACE>
+          ```
+        </Accordion>
+
+        ```bash
+        kubectl apply -f apinizer-gateway-role-ns.yaml
+        kubectl apply -f apinizer-gateway-rolebinding.yaml
+        ```
+
+        ### 2. Gateway deployment'ının oluşturulması
+
+        ```bash
+        vi apinizer-gateway-deployment.yaml
+        ```
+
+        <Accordion title="gateway-deployment.yaml — Gateway Deployment">
+          ```yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: gateway
+            namespace: <GATEWAY_NAMESPACE>
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: gateway
+            strategy:
+              type: "RollingUpdate"
+              rollingUpdate:
+                maxUnavailable: 75%
+                maxSurge: 1
+            template:
+              metadata:
+                labels:
+                  app: gateway
+              spec:
+                serviceAccountName: gateway-serviceaccount
+                containers:
+                  - name: gateway
+                    image: apinizercloud/worker:<APINIZER_VERSION>
+                    imagePullPolicy: IfNotPresent
+                    env:
+                      - name: JAVA_OPTS
+                        value: -server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true
+                      - name: WORKER_TIMEZONE
+                        value: "+03:00"
+                      - name: tuneWorkerThreads
+                        value: "1024"
+                      - name: tuneWorkerMaxThreads
+                        value: "4096"
+                      - name: tuneBufferSize
+                        value: "16384"
+                      - name: tuneIoThreads
+                        value: "4"
+                      - name: tuneBacklog
+                        value: "10000"
+                      - name: tuneRoutingConnectionPoolMaxConnectionPerHost
+                        value: "1024"
+                      - name: tuneRoutingConnectionPoolMaxConnectionTotal
+                        value: "4096"
+                      - name: tuneReadTimeout
+                        value: "30000"
+                      - name: tuneNoRequestTimeout
+                        value: "60000"
+                      - name: SPRING_DATA_MONGODB_DATABASE
+                        value: null
+                        valueFrom:
+                          secretKeyRef:
+                            name: mongo-db-credentials
+                            key: dbName
+                      - name: SPRING_DATA_MONGODB_URI
+                        value: null
+                        valueFrom:
+                          secretKeyRef:
+                            name: mongo-db-credentials
+                            key: dbUrl
+                      - name: SPRING_PROFILES_ACTIVE
+                        value: prod
+                    lifecycle:
+                      preStop:
+                        exec:
+                          command:
+                            - /bin/sh
+                            - -c
+                            - sleep 10
+                    livenessProbe:
+                      failureThreshold: 12
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8091
+                        scheme: HTTP
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      successThreshold: 1
+                      timeoutSeconds: 10
+                    ports:
+                      - containerPort: 8091
+                        protocol: TCP
+                    readinessProbe:
+                      failureThreshold: 12
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8091
+                        scheme: HTTP
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      successThreshold: 1
+                      timeoutSeconds: 10
+                    resources:
+                      limits:
+                        cpu: 4
+                        memory: 4Gi
+                    startupProbe:
+                      failureThreshold: 12
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8091
+                        scheme: HTTP
+                      initialDelaySeconds: 60
+                      periodSeconds: 10
+                      successThreshold: 1
+                      timeoutSeconds: 10
+                restartPolicy: Always
+                hostAliases:
+                  - ip: "<IP_ADDRESS>"
+                    hostnames:
+                      - "<DNS_ADDRESS_1>"
+                      - "<DNS_ADDRESS_2>"
+          ```
+        </Accordion>
+
+        :::warning
+
+Eğer Gateway'in türü HTTP+Websocket olarak belirlenecekse **http2Enabled** parametresinin false olarak girilmesi önerilmektedir [bkz](/tr/admin/server-management/gateway-runtime-lari).
+
+          ```yaml
+          - name: http2Enabled
+            value: "false"
+          ```
+
+:::
+
+        :::info
+
+Gateway uygulaması HTTPS ile sunulmak istenilirse yukarıdaki yaml'da **livenessProbe**, **readinessProbe** ve **startupProbe**'ların altındaki **port** değeri **8443**, **scheme** değeri **HTTPS** olarak verilmelidir.
+
+:::
+
+        :::warning
+
+Gateway deployment içindeki **spec.selector.matchLabels.app** ve **spec.template.metadata.labels.app** etiketleri, Apinizer'ın Gateway pod'larını doğru şekilde tanıyıp kontrol etmesini sağlar. Bu etiketlerin değiştirilmesi, pod'ların doğru şekilde seçilmesini engelleyebilir ve sistemin işleyişini bozabilir. Bu nedenle, bu etiketlerin değerleri değiştirilmemelidir.
+
+:::
+
+        ```bash
+        kubectl apply -f apinizer-gateway-deployment.yaml
+        ```
+
+        ### 3. Gateway için servis oluşturma
+
+        ```bash
+        vi apinizer-gateway-service.yaml
+        ```
+
+        <Accordion title="gateway-service.yaml — Gateway Service">
+          ```yaml
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: gateway-management-api-http-service
+            namespace: <GATEWAY_NAMESPACE>
+          spec:
+            ports:
+              - port: 8091
+                protocol: TCP
+                targetPort: 8091
+            selector:
+              app: gateway
+            type: ClusterIP
+          ---
+          # Eğer, Gateway'inizin İletişim Protokolü Türü HTTP veya websocket ise aşağıdaki
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: gateway-http-service
+            namespace: <GATEWAY_NAMESPACE>
+          spec:
+            ports:
+              - nodePort: 30080
+                port: 8091
+                protocol: TCP
+                targetPort: 8091
+            selector:
+              app: gateway
+            type: NodePort
+          ---
+          # Eğer, Gateway'inizin İletişim Protokolü Türü gRPC ise aşağıdaki
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: gateway-grpc-service
+            namespace: <GATEWAY_NAMESPACE>
+          spec:
+            ports:
+              - nodePort: 30152
+                port: 8094
+                protocol: TCP
+                targetPort: 8094
+            selector:
+              app: gateway
+            type: NodePort
+          ```
+        </Accordion>
+
+        :::info
+
+Gateway HTTPS ile sunulmak istenilirse yukarıdaki yaml'da **port** ve **targetPort** değerleri **8443** olarak verilmelidir.
+
+:::
+
+        ```bash
+        kubectl apply -f apinizer-gateway-service.yaml
+        ```
+
+        ### 4. MongoDB secret'ını hedef namespace'e kopyalama
+
+        Gateway ve Cache Server uygulamaları da MongoDB'ye bağlanacağı için, Manager uygulaması için oluşturulan secret diğer namespace'lere kopyalanır. Aşağıdaki örnek apinizer namespace'inde olan bir secret'i ilgili namespace'ine kopyalar.
+
+        ```bash
+        kubectl get secret mongo-db-credentials -n apinizer -o yaml | sed 's/namespace: apinizer/namespace: <GATEWAY_NAMESPACE>/' | kubectl create -f -
+        ```
+
+        ## Manager UI Üzerinden Remote Gateway Tanımlama
+
+        Gateway pod'ları cluster'da çalışmaya başladıktan sonra Manager UI'a giderek **Sunucu Yönetimi → Gateway Runtime'ları → Yeni** yolunu izleyin.
+
+        <Frame>
+          <img
+            src="/images/yonetici/envRemote.png"
+            alt="Remote Gateway Environment tanımlama formu"
+          />
+        </Frame>
+
+        ### Form Alanları
+
+        | Alan | Değer |
+        |------|-------|
+        | **Platform** | Kubernetes |
+        | **Yönetim Tipi** | **Remote Gateway** |
+        | **Ortam Tipi** | DEV / TEST / PROD |
+        | **İletişim Protokolü Türü** | Gateway'in açtığınız servisine uygun (HTTP / HTTPS / gRPC / WebSocket) |
+        | **Ortam Adı** | Hedef cluster'daki Gateway namespace ile aynı |
+        | **Ortam Anahtarı** | API URL prefix (örn: `prod`) |
+        | **Erişim Adresi** | Gateway'in dış erişim URL'i |
+
+        ### Gateway Node Listesi (Manuel URL Tablosu)
+
+        Remote Gateway seçildiğinde form üzerinde **Gateway Node Listesi** tablosu görünür. Her node için:
+
+        | Alan | Açıklama |
+        |------|----------|
+        | **Adı (Name)** | Tanımlayıcı isim (örn: `node-1`) |
+        | **Gateway Yönetim API URL** | `http://<NODE_IP>:8091` (Gateway Management API endpoint'i) |
+        | **Cache Yönetim API URL** | `http://<CACHE_IP>:8092` (varsa Cache Management API endpoint'i) |
+
+        :::warning
+
+Bu URL'ler Manager'dan **erişilebilir** olmalı. Manager bu adresleri kullanarak Gateway'e proxy push, sağlık kontrolü ve diagnostics yapar.
+
+:::
+
+        ## Ortamı Yayınlama (Publish)
+
+        **Oluştur** butonuna basın. Remote Gateway için Apinizer kubernetes deployment YAPMAZ; sadece Manager metadata'sına ortamı kaydeder. Manager Gateway'e bağlanmayı dener — başarılı olursa environment `published` olarak işaretlenir.
+
+        :::info
+
+Yayım sonrası API Proxy'leri bu Remote Gateway'e deploy edebilirsiniz. Manager API Proxy YAML'larını Gateway'in Management API endpoint'ine push eder.
+
+:::
+      </TabItem>
+    </Tabs>
+
+    ## Ortak Ayarlar (Her İki Yöntem İçin)
+
+    Managed veya Remote ayrımından bağımsız olarak Manager UI üzerinden Gateway environment formunda doldurulan aşağıdaki alanlar, her iki yöntem için de aynı şekilde geçerlidir. Bu bölüm form üzerinde Managed Gateway ve Remote Gateway için ortak görüntülenen alt-bölümleri açıklar.
+
+    ### Yönetim API Erişim Endpoint'leri (Management API Access Endpoints)
+
+    :::note
+
+Bu bölüm **opsiyoneldir** — hem Managed hem Remote Gateway için form üzerinde zorunlu değildir. Ancak Gateway'in **en doğru şekilde çalışabilmesi** (proxy yayım, sağlık kontrolü, diagnostics) için en az bir endpoint tanımlamanız **şiddetle önerilir**. Tanım yapılmadığında Manager Gateway pod'larına bağlanamaz ve yayım/izleme işlemleri başarısız olur.
+
+:::
+
+    Bu endpoint'ler Apinizer Yönetim Konsolu'nun Gateway pod'larına proxy yayım (deploy), sağlık kontrolü (health check) ve diagnostics için bağlandığı adreslerdir. Form üzerinde **Gateway ve Cache Yönetim API'si Erişim URL'leri** başlığı altında bir tablo olarak görünür.
+
+    Her endpoint girişi üç alandan oluşur:
+
+    | Alan | Açıklama | Örnek |
+    |------|----------|-------|
+    | **Ad (Name)** | Endpoint'in tanımlayıcı adı; çoklu cluster / DR site ayrımı için kullanılır. | `Production Cluster`, `DR Site`, `Region-EU` |
+    | **Gateway Yönetim API'si Erişim URL'si** | Gateway Management API'sine HTTP/HTTPS erişim adresi. | `http://gateway-management-api-http-service.prod.svc.cluster.local:8091` |
+    | **Cache Yönetim API'si Erişim URL'si** | (Varsa) Cache Management API'sine erişim adresi. | `http://cache-http-service.apinizer-cache.svc.cluster.local:8090` |
+
+    **Çoklu endpoint senaryoları:**
+    - **Multi-region / DR**: Birden fazla cluster'da çalışan Gateway için her cluster ayrı bir endpoint olarak tanımlanır.
+    - **HA setup**: Aynı Gateway için redundant management URL'leri.
+    - **Multi-cluster**: Manager farklı bir cluster'da, Gateway başka cluster'da; her hedef cluster için ayrı endpoint girilir.
+
+    Birden fazla endpoint tanımlandığında, Manager'ın bir API Proxy deploy işleminde hangi endpoint'i kullanacağı **`environmentClusterName`** Ek Değişkeni (Additional Variable) üzerinden belirlenir. Bu değişken Gateway pod'unun hangi cluster'a ait olduğunu işaretler; Manager deploy sırasında bu cluster adına eşleşen endpoint'i seçer.
+
+    **Cross-namespace iletişim** için Kubernetes service discovery formatı kullanılır:
+
+    ```
+    <service-name>.<namespace>.svc.cluster.local:<port>
+    ```
+
+    :::warning
+
+Tanımlanan her endpoint hem **Gateway** hem **Cache** Management API URL'i içermelidir (Cache yoksa Cache alanı boş bırakılabilir). Bu adresler Apinizer Manager'dan ağ üzerinden erişilebilir olmalı — aksi halde proxy publish, health check ve diagnostics başarısız olur.
+
+:::
+
+    :::info
+
+Bu endpoint'ler API Proxy trafiği için kullanılan ana HTTP/HTTPS servislerinden **ayrıdır**. Yalnızca yönetim işlemleri (konfigürasyon push, health, izleme) için kullanılır.
+
+:::
+
+    ### Ortam Yayımlama Erişimi (Environment Publishing Access)
+
+    Bu alt-bölüm, bu Gateway environment'ına hangi projelerin API Proxy'lerini deploy edebileceğini kısıtlar. Form üzerinde **Projelerden Ortama Erişilebilirlik** başlığı altında çoklu seçim listesi olarak görünür.
+
+    Davranış:
+    - **Boş bırakılırsa**: Tüm projeler bu environment'a deploy edebilir (varsayılan).
+    - **Bir veya daha fazla proje seçilirse**: Sadece listedeki projeler bu environment'a deploy edebilir.
+    - Sonradan eklenen yeni projeler otomatik olarak listeye dahil edilmez — operatörün manuel olarak eklemesi gerekir.
+
+    :::tip
+
+Bir proje seçildiğinde, sadece o proje içindeki API Proxy / API Proxy Group / Credential / Connection nesneleri bu Gateway environment'a deploy edilebilir. Bu, ortam izolasyonu (ör. prod ortamına yalnızca prod projelerinin erişmesi) için temel mekanizmadır.
+
+:::
+
+    :::warning
+
+Daha önce listede yer alan bir projeyi **listeden çıkardığınızda**, o projeye ait API Proxy, API Proxy Group, Credential ve Connection nesneleri bu environment'tan otomatik olarak **undeploy** edilir. İşlem geri alınamaz; undeploy edilen nesneler yeniden deploy edilmek istendiğinde manuel olarak yayınlanmalıdır.
+
+:::
+
+    ### API Proxy Trafik Log Konnektörleri (API Traffic Log Connectors)
+
+    Bu Gateway environment'ı içindeki API Proxy'lerin **trafik log'larının yazılacağı konnektörleri** tanımlar. Form üzerinde **API Trafik Log Konnektörleri** başlığı altında görünür; birden fazla konnektör eklenebilir, her birinin **enabled / disabled** toggle'ı vardır.
+
+    Apinizer üzerinden akacak trafik loglarının nereye gönderileceği bilgisinin Apinizer'a tanımlanması gerekmektedir. Bu tanımlama Sistem Ayarları → **Bağlantı Yönetimi** sayfasındaki konnektörler aracılığıyla yapılır. API Trafik ve API Analitik verilerinizi kendi log sistemleriniz ile yönetecekseniz size uygun entegrasyon ayarlarından uygun gördükleriniz tanımlanabilir. Eğer özel bir seçiminiz yoksa Apinizer'ın Analitik ve İzleme kabiliyetlerinden tam manada yararlanabilmeniz için veri yönetimi de Apinizer'dan ayarlanacak şekilde bir Elasticsearch konnektörü kullanabilirsiniz.
+
+    **Desteklenen konnektör tipleri:**
+    - [Elasticsearch](/tr/integrations/konnektorler/elasticsearch-konnektor) (önerilir — Apinizer'ın yerleşik log indexing ve analiz desteği için)
+    - [Kafka](/tr/integrations/konnektorler/kafka-konnektor)
+    - [Veritabanı (JDBC)](/tr/integrations/konnektorler/database-konnektor)
+    - [RabbitMQ](/tr/integrations/konnektorler/rabbitmq-konnektor)
+    - [ActiveMQ](/tr/integrations/konnektorler/activemq-konnektor)
+    - [Syslog](/tr/integrations/konnektorler/syslog-konnektor)
+    - [Webhook](/tr/integrations/konnektorler/webhook-konnektor)
+
+    :::warning
+
+Hiçbir **Elasticsearch konnektörü** atanmazsa form üzerinde sarı uyarı çıkar: API Trafik log'ları Elasticsearch'e gönderilmez ve log yönetimi tamamen operatöre kalır. Apinizer'ın Dashboard / Log Görüntüleyici / Raporlama özelliklerinin çalışabilmesi için en az bir Elasticsearch konnektörü tanımlanması önerilir.
+
+:::
+
+    **Ön koşul:** Konnektör seçilebilmesi için önce Sistem Ayarları → **Bağlantı Yönetimi** sayfasından konnektör tanımı yapılmış olmalıdır.
+
+    Detay için: [Gateway Ortamlarına Konnektör Eklenmesi](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi).
+
+    ### Protokol ve Güvenlik Ayarları (Protocol and Security Settings)
+
+    Gateway'in gelen verileri kabul ederken kullanacağı ağ protokolleri (HTTP, HTTPS) ve zorunlu güvenlik mekanizmalarını (mTLS, Keystore/Truststore) tanımlar. Form üzerinde **Protokol ve Güvenlik Ayarları** başlığı altında görünür.
+
+    #### HTTP / HTTPS / mTLS Aktivasyonu
+
+    | Alan | i18n Key | Açıklama |
+    |------|----------|----------|
+    | **Gateway'in HTTP protokolü etkin** | `httpEnabled` | Gateway HTTP üzerinden istek kabul eder. Varsayılan olarak seçili gelir. |
+    | **Gateway'in SSL protokolü etkin** | `httpsEnabled` | Gateway HTTPS üzerinden istek kabul eder. Açıldığında Keystore/Truststore dosyaları yüklenmelidir. |
+    | **mTLS Etkin** | `mtlsEnabled` | Sadece HTTPS aktifken ve gRPC haricinde kullanılabilir. Etkinleştirildiğinde client sertifika doğrulaması yapılır. |
+
+    #### Sertifika Dosyaları (HTTPS aktifse)
+
+    HTTPS aktif edildiğinde aşağıdaki sertifika alanları doldurulur:
+
+    | Alan | Format | Açıklama |
+    |------|--------|----------|
+    | **Keystore** | `.jks` veya `.pfx` | Gateway TLS sunucu sertifikası. |
+    | **Truststore** | `.jks` veya `.pfx` | Güvenilen client / CA sertifikaları (mTLS için zorunlu). |
+    | **Keystore Şifresi** | string | Şifreli saklanır (UI'da gizli giriş). |
+    | **Truststore Şifresi** | string | Şifreli saklanır (UI'da gizli giriş). |
+
+    #### Kubernetes Servis Tanımlama (defineServiceInKubernetes)
+
+    Form üzerinde **Kubernetes'te servis tanımlayın** başlığı altında görünür. Apinizer'ın Gateway için Kubernetes Service nesnelerini otomatik oluşturmasını kontrol eder.
+
+    | Seçenek | i18n Key | Açıklama |
+    |---------|----------|----------|
+    | Gateway Yönetim API HTTP Servisi | `httpServiceForManagementAPIEnabled` (`createHttpServiceForGatewayManagementAPI`) | "Gateway Servisi'nin HTTP Portunu (8091), özel bir ClusterIP Servisi aracılığıyla dahili küme erişimine aç" — Manager'ın Gateway pod'larına konfigürasyon güncellemesi için. |
+    | Gateway Yönetim API HTTPS Servisi | `httpsServiceForManagementAPIEnabled` (`createHttpsServiceForGatewayManagementAPI`) | "Gateway Servisi'nin HTTPs Portunu (8443), özel bir ClusterIP Servisi aracılığıyla dahili küme erişimine aç" — yönetim trafiği için TLS gerektiğinde. |
+    | Gateway Servisi NodePort (HTTP) | `unsecureNodePortEnabled` (`createServiceForGatewayServiceAccess`) | "Gateway Servis erişimi için servis oluştur" — Gateway external HTTP trafiği için NodePort. |
+    | Gateway Servisi Güvenli NodePort (HTTPS) | `secureNodePortEnabled` (`createSecureServiceForGatewayServiceAccess`) | "Gateway Servis erişimi için güvenli servis oluştur" — Gateway external HTTPS trafiği için NodePort. |
+
+    **NodePort port aralığı:** 30080-32767.
+
+    :::note
+
+Bu alt-bölüm sadece **Managed Gateway** için anlamlıdır. **Remote Gateway** seçiminde Apinizer Kubernetes Service nesnelerini yönetmez — operatör Service YAML'larını manuel olarak yazar ve `kubectl apply` ile cluster'a uygular. Remote Gateway'de bu seçeneklerin etkisi yoktur.
+
+:::
+
+    :::note
+
+Gateway'in ek değişkenleri (JVM tuning, gRPC, WebSocket, CORS, güvenlik, vb.) ve konfigürasyon ayarları (System Settings, Backup, vb.) için [Gateway Ayarları](/tr/setup/gateway-ayarlari) sayfasına bakın.
+
+:::
+
+    :::info
+
+**Sıkıştırma Bombası Koruması:**
+
+        Gateway, sıkıştırılmış istek ve yanıt gövdelerini açarken maksimum boyut limiti uygulayarak sıkıştırma bombası saldırılarına karşı koruma sağlar. Küçük boyutlu sıkıştırılmış bir gövde, açıldığında gigabyte'larca bellek tüketebilir — `tuneMaxDecompressedBodySize` parametresi bu durumu engeller.
+
+        Varsayılan değer 2 GB olarak belirlenmiştir ve mevcut kullanım senaryolarının büyük çoğunluğunu kapsar. Güvenlik gereksinimlerinize göre bu değeri düşürebilirsiniz (örneğin 50 MB = 52428800, 100 MB = 104857600). Değer byte cinsinden belirtilir.
+
+:::
+
+    :::warning
+
+Bu limiti çok düşük ayarlamak, büyük boyutlu meşru istek veya yanıtların reddedilmesine neden olabilir. Ortamınızdaki tipik istek boyutlarını göz önünde bulundurarak uygun bir değer belirleyin.
+
+:::
+
+    :::info
+
+**Asenkron İşlemler Thread Pool'u:**
+
+        RestApi Politası ve Script politikası, asenkron işlemler için `ManagementConfig`'de yapılandırılan merkezi thread pool'u kullanır. Bu, thread yönetimini iyileştirir ve kaynak kullanımını optimize eder. Gateway Runtime ortamlarında gerçekleştirilen asenkron işlemler, bu ayrı thread pool tarafından yönetilir ve optimal performans ve kaynak tahsisi için belirli parametrelerle yapılandırılabilir.
+
+        **Kullanım Senaryoları:**
+        - **Rest API Politikası:** Harici servislere yapılan asenkron HTTP çağrıları
+        - **Script Politikası:** Ana istek thread'ini bloklamayan asenkron script çalıştırmaları
+        - **Loglama İşlemleri:** Asenkron log yazma işlemleri
+        - **Trafik Aynalama:** İsteklerin ikincil endpoint'lere asenkron olarak aynalanması
+
+        **Yapılandırma Kılavuzu:**
+        - `tuneAsyncExecutorCorePoolSize`: Pool'da canlı tutulan minimum thread sayısı (varsayılan: `tuneWorkerThreads` ile aynı)
+        - `tuneAsyncExecutorMaxPoolSize`: Oluşturulabilecek maksimum thread sayısı (varsayılan: `tuneWorkerMaxThreads` ile aynı)
+        - `tuneAsyncExecutorQueueCapacity`: Yeni thread'ler oluşturulmadan önce kuyrukta bekleyebilecek maksimum görev sayısı (varsayılan: `tuneMaxQueueSize` > 0 ise bu değer, aksi halde 1000)
+
+:::
+
+    :::warning
+
+**Thread Pool Boyutlandırma:**
+
+        Asenkron executor thread pool'u ana worker thread pool'undan ayrıdır. Toplam thread sayısının (worker thread'leri + asenkron executor thread'leri) sisteminizin kapasitesini aşmadığından emin olun. Bu değerleri yapılandırırken CPU core'ları ve belleği göz önünde bulundurun.
+
+:::
+
+    :::tip
+
+**Tier Bazlı Önerilen Thread ve Bağlantı Değerleri:**
+
+        Aşağıdaki değerler wrk2 yük testleriyle doğrulanmış optimum ayarlardır. Her tier için entrypoint varsayılan olarak bu değerleri otomatik uygular; üretim ortamı ihtiyacınıza göre ince ayar yapabilirsiniz.
+
+        | Tier | CPU | `tuneIoThreads` | `tuneWorkerThreads` | `tuneWorkerMaxThreads` | `tuneBacklog` | `tuneMaxConcurrentRequest` |
+        |------|-----|-----------------|---------------------|------------------------|---------------|---------------------------|
+        | W1 | 1 | 2 | 128 | 256 | 2048 | 500 |
+        | W2 | 2 | 4 | 256 | 512 | 4096 | 750 |
+        | W4 | 4 | 8 | 512 | 1024 | 8192 | 3000 |
+        | W8 | 8 | 16 | 1536 | 3072 | 16384 | 10000 |
+
+        **Routing Bağlantı Havuzu (`tuneRoutingConnectionPoolMaxConnectionPerHost` / `tuneRoutingConnectionPoolMaxConnectionTotal`):**
+
+        | Tier | Max Conn/Host | Max Conn Total | ES Max Conn/Host |
+        |------|--------------|----------------|-----------------|
+        | W1 | 250 | 500 | 8 |
+        | W2 | 500 | 1000 | 16 |
+        | W4 | 1000 | 2000 | 32 |
+        | W8 | 2000 | 4000 | 128 |
+
+:::
+
+    :::warning
+
+**Java Options Uyarısı:**
+
+        Apinizer entrypointi, JVM heap değerlerini tier ve container bellek limitine göre otomatik yapılandırır:
+        - **W1 / W2** (2 GB): `MaxRAMPercentage=60` — heap ~1.2 GB
+        - **W4** (4 GB): `MaxRAMPercentage=65` — heap ~2.6 GB
+        - **W8** (8 GB): `MaxRAMPercentage=65` — heap ~5.2 GB
+
+        `UseContainerSupport` varsayılan olarak aktiftir. `-Xmx` / `-Xms` değerleri verildiğinde otomatik boyutlandırma **devre dışı kalır**; bu değerleri yalnızca özel bir gereksinim varsa kullanın. GC algoritması olarak G1GC kullanılır.
+
+:::
+
+    :::note
+
+Gateway'in ek değişkenleri (JVM tuning, gRPC, WebSocket, CORS, güvenlik, vb.) ve konfigürasyon ayarları (System Settings, Backup, vb.) için [Gateway Ayarları](/tr/setup/gateway-ayarlari) sayfasına bakın.
+
+:::
+
+    ## Opsiyonel Modüller
+
+    Aşağıdaki modüller opsiyoneldir; ihtiyaca göre seçilen sırada kurulabilir. Önerilen sıra: **Cache → Integration → API Portal**. API Manager'ı HTTPS/SSL ile çalıştırmak için en alttaki SSL sekmesine bakın.
+
+    <Tabs>
+      <TabItem value="cache-kurulum-ve-tanimlanmasi" label="Cache Kurulum ve Tanımlanması">
+        ## Apinizer Cache Kurulumu
+
+        API Cache Server, dağıtılmış önbellekte saklayarak hem bileşenlerin paylaştığı verileri yönetir, hem de performans iyileştirmesi sağlar. Hazelcast tabanlı bir cluster olarak çalışır; Worker'lar quota, OIDC token cache, circuit breaker durumları ve benzeri paylaşılan veriler için Cache'e bağlanır.
+
+        Cache modülü **opsiyoneldir** — kurulmadığı durumda bu özellikleri kullanan politikalar devre dışı kalır. Production'da en az bir Cache Server tanımlanması şiddetle önerilir.
+
+        Cache iki şekilde tanımlanabilir:
+        - **Managed Cache (Apinizer Yönetiminde)** — Manager UI üzerinden tek-tıkla; Apinizer namespace, deployment, service ve secret kopya işlemlerini otomatik yapar.
+        - **Remote Cache Server (Manuel Deploy)** — operatör manuel olarak YAML deploy eder; Manager sadece Cache Management API URL'lerini tutar.
+
+        :::warning
+
+Eğer Cache Server **standalone** (Docker, Sanal Sunucu veya bare-metal Linux) kurulduysa, mutlaka **Remote Cache Server** seçeneğini seçerek Manager'a register etmelisiniz. Standalone Cache'ler Manager tarafından deploy edilemez; sadece bağlantı bilgileri (Cache Management API URL) kaydedilir.
+
+:::
+
+        <Tabs>
+          <TabItem value="managed-cache-apinizer-yonetiminde" label="Managed Cache (Apinizer Yönetiminde)">
+            ## Managed Cache Nedir?
+
+            Apinizer'ın Cache Server'ı Kubernetes cluster'ında **otomatik olarak provision** ettiği modeldir. Manager UI'dan yeni bir Cache Server oluşturduğunuzda Apinizer:
+            - Hedef namespace'i oluşturur (veya mevcut bir namespace'i kullanır)
+            - Cache Server `Deployment`'ını uygular (Hazelcast-based cluster)
+            - HTTP (8090) ve Hazelcast (5701) `Service`'lerini açar
+            - MongoDB secret'ını hedef namespace'e kopyalar
+            - Pod sayısını, JVM parametrelerini, kaynak limitlerini UI'dan kontrol etmenizi sağlar
+
+            Apinizer'ın Worker'ları (Gateway pod'ları) bu Cache'e quota sayaçları, OIDC token cache, circuit breaker durumları ve circuit-breaker open state gibi paylaşılan veriler için bağlanır.
+
+            ## Önkoşullar
+
+            <Steps>
+              <Step title="API Manager çalışır durumda">
+                Manager'a `admin` kullanıcısı ile giriş yapılmış olmalı.
+              </Step>
+              <Step title="Apinizer Kubernetes yönetim modu aktif">
+                System Settings → General Settings'te "Apinizer üzerinden Kubernetes yönetimi" işaretli olmalı.
+              </Step>
+              <Step title="Cluster RBAC uygulanmış">
+                API Manager Kurulumu adımındaki `apinizer-role.yaml` ve `apinizer-manager-role.yaml` (cluster-wide) uygulanmış olmalı.
+              </Step>
+              <Step title="Docker image erişimi">
+                Cluster, `apinizercloud/cache:<APINIZER_VERSION>` imajını çekebilmeli.
+              </Step>
+            </Steps>
+
+            ## Yeni Cache Server Oluşturma
+
+            Manager UI'da **Sunucu Yönetimi → Dağıtık Cache** sayfasına gidin ve **Yeni** (`+`) butonuna tıklayın.
+
+            <Frame>
+              <img
+                src="/images/yonetici/cacheManaged.png"
+                alt="Managed Cache Server oluşturma formu"
+              />
+            </Frame>
+
+            ### 1. Tipi (Type) — Yönetim Modeli
+
+            | Seçenek | i18n Key | Açıklama |
+            |---------|----------|----------|
+            | **Apinizer Tarafından Yönetilen** | `managedByApinizer` | Apinizer namespace, deployment, service ve tüm gerekli K8s kaynaklarını otomatik oluşturur. |
+            | **Uzak Cache Server** | `remoteCache` | Manuel deploy edilmiş Cache'e bağlanır. (Bu sub-tab'da Managed seçilir.) |
+
+            ### 2. Ad (Name)
+
+            Cache Server'ın görüntülenecek adı. Validation: eşsiz olmalı.
+
+            ### 3. Namespace Yapılandırması
+
+            | Seçenek | Açıklama |
+            |---------|----------|
+            | **Yeni Namespace Oluştur** (`createNewNamespace`) | Apinizer girilen isimle yeni namespace oluşturur. Validation: RFC 1123 label (3-63 karakter, lowercase alphanumeric + `-`, alfanumerik karakterle başlayıp bitmeli). Örnek: `my-cache-ns`, `prod-cache`, `123-abc`. |
+            | **Mevcut Namespace Kullan** (`useExistingNamespace`) | Cluster'da var olan bir namespace listeden seçilir. |
+
+            ### 4. Cache Yönetim API Erişim URL'leri (Cache Management API Access URLs)
+
+            API Manager ve Gateway'in bu Cache Server ile iletişim kuracağı endpoint(ler). Tabloda her satır için:
+
+            | Alan | Açıklama | Örnek |
+            |------|----------|-------|
+            | **Ad (Name)** | Endpoint için tanımlayıcı isim | `Production`, `DR Site` |
+            | **Cache Server Erişim URL'si** | Cache Server health-check ve API endpoint adresi | `http://cache-http-service.prod.svc.cluster.local:8090` |
+            | **Durum (Status)** | Otomatik bağlantı kontrolü — `Reachable` / `Not Reachable` / `Checking...` |
+
+            :::tip
+
+Multi-cluster / DR senaryoları için birden fazla URL eklenebilir. Form üzerinde anlık **Test API Connection** butonu ile bağlantı doğrulaması yapılır.
+
+:::
+
+            ### 5. Cache Kaynak Yapılandırması (Cache Resource Configuration)
+
+            | Alan | i18n Key | Varsayılan | Açıklama |
+            |------|----------|------------|----------|
+            | **Replica Sayısı** | `replicaCount` | 1 | Cache pod sayısı. Production için ≥ 2 önerilir (Hazelcast cluster). |
+            | **CPU** | `cpu` | 1 | Pod başına CPU limit (core). |
+            | **Bellek** | `memory` | 1 | Pod başına memory limit. |
+            | **Bellek Birimi** | `memoryUnit` | Gi | Mi / Gi. |
+
+            ### 6. Ek Değişkenler (Additional Variables)
+
+            Cache pod'una geçirilecek ek environment değişkenleri. Tabloda Anahtar (Key) ve Değer (Value) sütunları. Önemli ön-tanımlı değişkenler:
+
+            **Tomcat Ayarları (Cache HTTP Management API için):**
+            - `SERVER_TOMCAT_MAX_THREADS` (1024)
+            - `SERVER_TOMCAT_MIN_SPARE_THREADS` (512)
+            - `SERVER_TOMCAT_ACCEPT_COUNT` (512)
+            - `SERVER_TOMCAT_MAX_CONNECTIONS` (1024)
+            - `SERVER_TOMCAT_CONNECTION_TIMEOUT` (20000 ms)
+            - `SERVER_TOMCAT_KEEPALIVE_TIMEOUT` (60000 ms)
+            - `SERVER_TOMCAT_MAX_KEEPALIVE_REQUESTS` (10000)
+            - `SERVER_TOMCAT_PROCESSOR_CACHE` (512)
+
+            **Hazelcast Cluster Ayarları:**
+            - `HAZELCAST_IO_WRITE_THROUGH` (false)
+            - `HAZELCAST_MAP_LOAD_CHUNK_SIZE` (10000)
+            - `HAZELCAST_MAP_LOAD_BATCH_SIZE` (10000)
+            - `HAZELCAST_CLIENT_SMART` (true)
+            - `HAZELCAST_MAPCONFIG_BACKUPCOUNT` (1)
+            - `HAZELCAST_MAPCONFIG_READBACKUPDATA` (false)
+            - `HAZELCAST_MAPCONFIG_ASYNCBACKUPCOUNT` (0)
+            - `HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY` (block)
+            - `HAZELCAST_MAP_WRITE_DELAY_SECONDS` (5)
+            - `HAZELCAST_MAP_WRITE_BATCH_SIZE` (100)
+            - `HAZELCAST_MAP_WRITE_COALESCING` (true)
+            - `HAZELCAST_MAP_WRITE_BEHIND_QUEUE_CAPACITY` (100000)
+
+            **Diğer:**
+            - `CACHE_QUOTA_TIMEZONE` (+03:00) — Quota policy hesaplaması için
+            - `JAVA_OPTS` — JVM heap parametreleri
+            - `CACHE_SERVICE_NAME` — Hazelcast service discovery için (default: `cache-hz-service`)
+
+            :::warning
+
+`HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY` değerini `"backoff"` yaparsanız: Cache pod'u CPU limitinin %90-100'ünü sürekli kullanacaktır. %5-10 performans artışı sağlar ancak CPU tüketimi yüksektir. Production'da dikkatli kullanın.
+
+:::
+
+            ### 7. Kubernetes'te Servis Tanımlayın (Define the service in Kubernetes)
+
+            `createK8sService` checkbox ile aktif edilir. Bu seçenek **şiddetle önerilir** — Cache Server'a Manager ve Gateway pod'larından erişim için zorunludur.
+
+            | Alan | i18n Key | Açıklama |
+            |------|----------|----------|
+            | **Servis Adı** | `serviceName` | K8s Service objesi adı (örn: `cache-http-service`) |
+            | **Servis Tipi** | `serviceType` | `Cluster IP` (default, küme içi erişim) veya `Node Port` (dış erişim) |
+            | **NodePort** | `nodePort` | Sadece NodePort tipinde zorunlu (30080-32767 aralığı) |
+
+            :::info
+
+**ClusterIP** Cache ve Gateway/Manager arasındaki dahili iletişim için en iyisidir. Çoğu durumda NodePort gerekmez.
+
+:::
+
+            ### 8. Host Alias Yapılandırması (Host Alias Configuration)
+
+            Cache pod'larının `/etc/hosts`'una eklenecek IP ↔ hostname eşlemeleri. DNS'te olmayan host adlarını çözümlemeniz gerektiğinde kullanılır. Tabloda IP Adresi ve Host İsimleri sütunları.
+
+            ### 9. Node İsim Listesi Yapılandırması (Node Name List Configuration)
+
+            Cache pod'larının zamanlanacağı Kubernetes node'larını sınırlamak için `nodeSelector` / `nodeAffinity` belirleyin. Boş bırakılırsa Kubernetes scheduler default davranışı uygular.
+
+            ## Yayınlama (Publish)
+
+            Form doldurulduktan sonra **Publish** butonuna basın. Apinizer:
+            1. Hedef namespace'i (varsa kullanır, yoksa oluşturur)
+            2. MongoDB secret'ını kopyalar
+            3. Cache Deployment'ı uygular
+            4. HTTP + Hazelcast Service'leri oluşturur
+            5. Pod'ların `Ready` durumuna geçmesini bekler
+            6. Cache Server'ı `Published` olarak işaretler
+
+            Yayım sonrası Gateway environment'ları otomatik olarak bu Cache'i kullanmaya başlar.
+
+            :::info
+
+Detaylı Cache yönetimi (monitoring, diagnostics, restart) için → [Dağıtık Cache](/tr/admin/server-management/dagitik-cache) sayfasına bakın.
+
+:::
+          </TabItem>
+          <TabItem value="remote-cache-server-manuel-deploy" label="Remote Cache Server (Manuel Deploy)">
+            ## Remote Cache Server Nedir?
+
+            Cache Server pod'unun çalıştığı Kubernetes cluster (veya standalone Linux/Docker) **Apinizer Manager'ın yönetimi DIŞINDADIR**. Operatör Cache'i manuel olarak deploy eder; Manager sadece Cache Management API URL'sini tutar.
+
+            Remote Cache tercih edilen durumlar:
+            - Cache Server **standalone** (Docker / Sanal Sunucu / Bare-metal Linux) çalışıyor — bu durumda zorunludur
+            - Apinizer'ın cluster'a deploy yetkisi yok
+            - Multi-cluster: Manager ile Cache farklı cluster'larda
+            - Cluster operatörü deployment'ları kendi CI/CD pipeline'ından yönetiyor
+
+            ## Önkoşullar
+
+            - API Manager kurulu
+            - Hedef Kubernetes cluster'a `kubectl` erişimi (veya standalone Cache çalışıyor)
+            - `apinizercloud/cache:<APINIZER_VERSION>` imajına erişim (Kubernetes için)
+            - Cache pod'larının `mongo-db-credentials` secret'ına erişebilmesi için MongoDB secret'ı hedef namespace'te bulunmalı
+            - Cache uygulaması Gateway ile aynı namespace içerisinde, aynı `gateway-serviceaccount` üzerinden çalışır. Yetki ve namespace adımlarının "Gateway Kurulumu ve Tanımlanması" sekmesindeki Remote Gateway alt-sekmesindeki **Gateway için Role ve RoleBinding'leri Oluşturma** bölümünden uygulanmış olduğu varsayılır.
+
+            ## Manuel Kubernetes Deploy
+
+            ### Cache deployment'ının oluşturulması
+
+            ```bash
+            vi apinizer-cache-deployment.yaml
+            ```
+
+            
+              <Accordion title="cache-deployment.yaml — Cache Deployment">
+                ```yaml
+                apiVersion: apps/v1
+                kind: Deployment
+                metadata:
+                  name: cache
+                  namespace: <GATEWAY_NAMESPACE>
+                spec:
+                  replicas: 1
+                  selector:
+                    matchLabels:
+                      app: cache
+                  strategy:
+                    type: "RollingUpdate"
+                    rollingUpdate:
+                      maxUnavailable: 75%
+                      maxSurge: 1
+                  template:
+                    metadata:
+                      labels:
+                        app: cache
+                    spec:
+                      serviceAccountName: gateway-serviceaccount
+                      containers:
+                        - name: cache
+                          image: apinizercloud/cache:<APINIZER_VERSION>
+                          imagePullPolicy: IfNotPresent
+                          env:
+                            - name: JAVA_OPTS
+                              value: -server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=1024 -Dlog4j.formatMsgNoLookups=true
+                            - name: SPRING_PROFILES_ACTIVE
+                              value: prod
+                            - name: SPRING_DATA_MONGODB_DATABASE
+                              value: null
+                              valueFrom:
+                                secretKeyRef:
+                                  name: mongo-db-credentials
+                                  key: dbName
+                            - name: SPRING_DATA_MONGODB_URI
+                              value: null
+                              valueFrom:
+                                secretKeyRef:
+                                  name: mongo-db-credentials
+                                  key: dbUrl
+                            - name: CACHE_SERVICE_NAME
+                              value: cache-hz-service
+                            - name: CACHE_QUOTA_TIMEZONE
+                              value: +03:00
+                            - name: SERVER_TOMCAT_MAX_THREADS
+                              value: "1024"
+                            - name: SERVER_TOMCAT_MIN_SPARE_THREADS
+                              value: "512"
+                            - name: SERVER_TOMCAT_ACCEPT_COUNT
+                              value: "512"
+                            - name: SERVER_TOMCAT_MAX_CONNECTIONS
+                              value: "1024"
+                            - name: SERVER_TOMCAT_CONNECTION_TIMEOUT
+                              value: "20000"
+                            - name: SERVER_TOMCAT_KEEPALIVE_TIMEOUT
+                              value: "60000"
+                            - name: SERVER_TOMCAT_MAX_KEEPALIVE_REQUESTS
+                              value: "10000"
+                            - name: SERVER_TOMCAT_PROCESSOR_CACHE
+                              value: "512"
+                            - name: HAZELCAST_IO_WRITE_THROUGH
+                              value: "false"
+                            - name: HAZELCAST_MAP_LOAD_CHUNK_SIZE
+                              value: "10000"
+                            - name: HAZELCAST_MAP_LOAD_BATCH_SIZE
+                              value: "10000"
+                            - name: HAZELCAST_CLIENT_SMART
+                              value: "true"
+                            - name: HAZELCAST_MAPCONFIG_BACKUPCOUNT
+                              value: "1"
+                            - name: HAZELCAST_MAPCONFIG_READBACKUPDATA
+                              value: "false"
+                            - name: HAZELCAST_MAPCONFIG_ASYNCBACKUPCOUNT
+                              value: "0"
+                            - name: HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY
+                              value: "block"
+                            - name: HAZELCAST_MAP_WRITE_DELAY_SECONDS
+                              value: "5"
+                            - name: HAZELCAST_MAP_WRITE_BATCH_SIZE
+                              value: "100"
+                            - name: HAZELCAST_MAP_WRITE_COALESCING
+                              value: "true"
+                            - name: HAZELCAST_MAP_WRITE_BEHIND_QUEUE_CAPACITY
+                              value: "100000"
+                          ports:
+                            - containerPort: 8090
+                            - containerPort: 5701
+                          resources:
+                            limits:
+                              cpu: 1
+                              memory: 1024Mi
+                          lifecycle:
+                            preStop:
+                              exec:
+                                command:
+                                  - /bin/sh
+                                  - -c
+                                  - sleep 10
+                          livenessProbe:
+                            failureThreshold: 12
+                            httpGet:
+                              path: /apinizer/management/health
+                              port: 8090
+                              scheme: HTTP
+                            initialDelaySeconds: 60
+                            periodSeconds: 10
+                            successThreshold: 1
+                            timeoutSeconds: 10
+                          readinessProbe:
+                            failureThreshold: 12
+                            httpGet:
+                              path: /apinizer/management/health
+                              port: 8090
+                              scheme: HTTP
+                            initialDelaySeconds: 60
+                            periodSeconds: 10
+                            successThreshold: 1
+                            timeoutSeconds: 10
+                          startupProbe:
+                            failureThreshold: 12
+                            httpGet:
+                              path: /apinizer/management/health
+                              port: 8090
+                              scheme: HTTP
+                            initialDelaySeconds: 60
+                            periodSeconds: 10
+                            successThreshold: 1
+                            timeoutSeconds: 10
+                      restartPolicy: Always
+                      hostAliases:
+                        - ip: "<IP_ADDRESS>"
+                          hostnames:
+                            - "<DNS_ADDRESS_1>"
+                            - "<DNS_ADDRESS_2>"
+                ```
+              </Accordion>
+            
+
+            :::info
+
+**Ortam Değişkenleri**
+
+              Bu environment değişkenleri, YAML dosyasına eklenerek Tomcat'in iş parçacığı ve bağlantı yönetimi ile Hazelcast'in veri yükleme, yedekleme ve write-behind davranışları yapılandırılır.
+
+              **Tomcat Ayarları:**
+              * `SERVER_TOMCAT_MAX_THREADS`: Tomcat'in işleyebileceği maksimum eşzamanlı iş parçacığı (thread) sayısı
+              * `SERVER_TOMCAT_MIN_SPARE_THREADS`: Tomcat'in hazırda beklettiği minimum boş thread sayısı
+              * `SERVER_TOMCAT_ACCEPT_COUNT`: Tüm thread'ler meşgulken sıraya alınabilecek maksimum bağlantı sayısı
+              * `SERVER_TOMCAT_MAX_CONNECTIONS`: Tomcat'in aynı anda kabul edebileceği maksimum bağlantı sayısı
+              * `SERVER_TOMCAT_CONNECTION_TIMEOUT`: Bağlantı zaman aşımı süresi (milisaniye)
+              * `SERVER_TOMCAT_KEEPALIVE_TIMEOUT`: Keep-alive bağlantılarının zaman aşımı süresi (milisaniye)
+              * `SERVER_TOMCAT_MAX_KEEPALIVE_REQUESTS`: Bir keep-alive bağlantısı üzerinden işlenebilecek maksimum istek sayısı
+              * `SERVER_TOMCAT_PROCESSOR_CACHE`: İşlemci önbelleğindeki maksimum processor sayısı
+
+              **Hazelcast Ayarları:**
+              * `HAZELCAST_IO_WRITE_THROUGH`: Hazelcast write-through modunun açık olup olmadığı
+              * `HAZELCAST_MAP_LOAD_CHUNK_SIZE`: Map yüklemesinde kullanılacak yığın (chunk) boyutu
+              * `HAZELCAST_MAP_LOAD_BATCH_SIZE`: Map yüklemesinde kullanılacak batch boyutu
+              * `HAZELCAST_CLIENT_SMART`: Hazelcast client'ın akıllı yönlendirme (smart routing) kullanıp kullanmayacağı
+              * `HAZELCAST_MAPCONFIG_BACKUPCOUNT`: Hazelcast map verisinin kaç yedek kopyasının tutulacağı
+              * `HAZELCAST_MAPCONFIG_READBACKUPDATA`: Yedek kopyalardan okuma yapılacak mı?
+              * `HAZELCAST_MAPCONFIG_ASYNCBACKUPCOUNT`: Asenkron yedekleme kopya sayısı
+              * `HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY`: Hazelcast yanıt kuyruğu boşta stratejisi (örneğin: block, busyspin, backoff)
+              * `HAZELCAST_MAP_WRITE_DELAY_SECONDS`: Map write-behind özelliği için gecikme süresi (saniye)
+              * `HAZELCAST_MAP_WRITE_BATCH_SIZE`: Map write-behind özelliği için batch boyutu
+              * `HAZELCAST_MAP_WRITE_COALESCING`: Write-behind işlemlerinde birleştirme (coalescing) yapılacak mı?
+              * `HAZELCAST_MAP_WRITE_BEHIND_QUEUE_CAPACITY`: Write-behind kuyruğunun maksimum kapasitesi
+
+:::
+
+            :::warning
+
+Eğer `HAZELCAST_OPERATION_RESPONSEQUEUE_IDLESTRATEGY` parametresini `"backoff"` ayarlarsanız: Pod'un CPU limitinin %90-100'ünü sürekli kullanacaktır. Bu durum %5-10 performans artışı sağlayabilir ancak Cache pod'unun CPU kaynaklarının limitini tüketir.
+
+:::
+
+            ```bash
+            kubectl apply -f apinizer-cache-deployment.yaml
+            ```
+
+            ### Cache için servis oluşturma
+
+            ```bash
+            vi apinizer-cache-service.yaml
+            ```
+
+            
+              <Accordion title="cache-service.yaml — Cache Services">
+                ```yaml
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: cache-http-service
+                  namespace: <GATEWAY_NAMESPACE>
+                spec:
+                  ports:
+                    - port: 8090
+                      protocol: TCP
+                      targetPort: 8090
+                  selector:
+                    app: cache
+                  type: ClusterIP
+                ---
+                apiVersion: v1
+                kind: Service
+                metadata:
+                  name: cache-hz-service
+                  namespace: <GATEWAY_NAMESPACE>
+                spec:
+                  ports:
+                    - port: 5701
+                      protocol: TCP
+                      targetPort: 5701
+                  selector:
+                    app: cache
+                  type: ClusterIP
+                ```
+              </Accordion>
+            
+
+            ```bash
+            kubectl apply -f apinizer-cache-service.yaml
+            ```
+
+            ### MongoDB Secret'ını Hedef Namespace'e Kopyalama
+
+            Cache pod'larının MongoDB'ye bağlanabilmesi için `mongo-db-credentials` secret'ının ilgili namespace'te olması gerekir.
+
+            ```bash
+            kubectl get secret mongo-db-credentials -n apinizer -o yaml | sed 's/namespace: apinizer/namespace: <GATEWAY_NAMESPACE>/' | kubectl create -f -
+            ```
+
+            :::info
+
+Daha kapsamlı kopyalama komutu için "API Manager ve Worker" sekmesindeki **Mongodb secret'ını Apinizer namespace'lerinden yeni oluşturulan namespace'lere kopyalama** bölümüne de bakabilirsiniz.
+
+:::
+
+            ## Manager UI Üzerinden Remote Cache Tanımlama
+
+            Cache pod'ları çalışmaya başladıktan sonra Manager UI'a giderek **Sunucu Yönetimi → Dağıtık Cache → Yeni** yolunu izleyin.
+
+            <Frame>
+              <img
+                src="/images/yonetici/cacheRemote.png"
+                alt="Remote Cache Server kayıt formu"
+              />
+            </Frame>
+
+            ### Form Alanları
+
+            | Alan | Değer |
+            |------|-------|
+            | **Tipi (Type)** | **Uzak Cache Server (Remote Cache Server)** |
+            | **Ad (Name)** | Tanımlayıcı isim (örn: `prod-cache`) |
+            | **Cache Yönetim API Erişim URL'leri** | Tablo — her node için ayrı URL |
+
+            ### Cache Yönetim API URL Tablosu
+
+            | Alan | Açıklama | Örnek |
+            |------|----------|-------|
+            | **Ad (Name)** | Endpoint için tanımlayıcı isim | `node-1`, `Production` |
+            | **Cache Server Erişim URL'si** | Cache Management API endpoint'i | `http://<CACHE_HOST>:8090` |
+            | **Durum (Status)** | Anlık bağlantı kontrolü |
+
+            :::warning
+
+Bu URL'ler Manager'dan **erişilebilir** olmalı. Manager Cache'in sağlık kontrolü ve quota/cache veri sorguları için bu adresleri kullanır.
+
+:::
+
+            ## Register (Kayıt)
+
+            **Register Remote Cache** butonuna basın. Apinizer **deployment yapmaz**, sadece bağlantı bilgilerini metadata'ya kaydeder. Manager Cache'e bağlanmayı dener — başarılı olursa Remote Cache `Published` olarak işaretlenir.
+          </TabItem>
+        </Tabs>
+      </TabItem>
+      <TabItem value="integration-kurulum-ve-tanimlanmasi" label="Integration Kurulum ve Tanımlanması">
+        API integration, bir veya birden fazla uç noktanın akıcı bir şekilde birbirine bağlanmasını sağlayarak, iş akışlarını oluşturma yeteneği sunar.
+
+        ### Kurulum Öncesi Adımlar
+
+        Apinizer API Integration'ın kurulumuna başlamadan önce şunlara dikkat edilmelidir:
+
+        <CardGroup cols={2}>
+          <Card title="Apinizer Kurulumu" icon="server" href="/tr/setup/kubernetes">
+            API Manager kurulumunu öğrenin
+          </Card>
+        </CardGroup>
+
+        :::warning
+
+API Manager'ın kurulu olması gerekmektedir. Ayrıca lisans anahtarınızda API Integration'ın bulunması gerekmektedir.
+
+:::
+
+        ### Kurulum Adımları
+
+        API Integration Kurulumu iki şekilde yapılmaktadır.
+
+        * Kubernetes yönetimi Apinizer üzerinden **yapılıyorsa**, API Manager üzerinden API Integration kurulumu yapabilirsiniz.
+        * Kubernetes yönetimi Apinizer üzerinden **yapılmıyorsa**, Kubernetes'e manuel kurulum yapılabilir ve ardından API Manager ile bağlantı sağlanabilir.
+
+        #### API Integration Kurulumu API Manager Üzerinden Yapılacaksa
+
+        API Manager üzerinden API Integration kurulumu için Genel Ayarlar menüsünde aşağıdaki bölümün aktif olması gerekmektedir.
+
+        :::warning
+
+Kubernetes yönetimi Apinizer üzerinden yapılıyorsa, Genel Ayarlar sayfasında "Kubernetes Yönetimi" seçeneğinin aktif olması gerekmektedir.
+
+:::
+
+        <Frame caption="API Integration kurulum diyaloğu - Gerekli ayarların yapılandırılması">
+          <img
+            src="/images/setup/apinizer/api-integration/02-integration-dialog.png"
+            alt="API Integration Kurulum Diyaloğu"
+            width="1200"
+            height="800"
+            style={{ borderRadius: '0.5rem' }}
+          />
+        </Frame>
+
+        API Manager'da, **Yönetim → Sunucu Yönetimi → Kubernetes Resources** sayfasına gidin. Deployment & Pods sekmesinden API Integration'ı etkinleştirin. Gerekli tanımları yaparak kurulumu tamamlayın.
+
+        <Frame caption="Kubernetes Resources sayfası - API Integration etkinleştirme">
+          <img
+            src="/images/setup/apinizer/api-integration/01-kubernetes-resources.png"
+            alt="Kubernetes Resources Sayfası"
+            width="1200"
+            height="600"
+            style={{ borderRadius: '0.5rem' }}
+          />
+        </Frame>
+
+        Açılan diyalogda, kurumunuza uygun olarak zorunlu alanları tanımlayın.
+
+        <Frame caption="Genel Ayarlar sayfası - API Integration modülü yapılandırması">
+          <img
+            src="/images/setup/apinizer/api-integration/04-genel-ayarlar.png"
+            alt="Genel Ayarlar Sayfası"
+            width="1200"
+            height="800"
+            style={{ borderRadius: '0.5rem' }}
+          />
+        </Frame>
+
+        | Alan | Açıklama |
+        |------|----------|
+        | **Erişim Adresi (Access URL)** | API Integration erişim adresidir. Örnek adres: `http://<API_INTEGRATION_ACCESS_URL>:<PORT>`. |
+        | **Sayısı (Count)** | API Integration uygulama sayısı, Kubernetes Cluster'daki replicaSet ayarını düzenler. |
+        | **Servis Portu (Service Port)** | API Integration erişim portu. |
+        | **Node Listesi (Node List)** | Pod'ların hangi Kubernetes Worker sunucularında çalışacağını ayarlar. Kubernetes'teki NodeAffinity ayarını düzenler. |
+        | **CPU** | Pod'un kullanacağı maksimum CPU core sayısı bilgisidir. |
+        | **Bellek (Memory)** | Pod'un kullanacağı maksimum bellek değeridir. |
+        | **Bellek Birimi (Memory Unit)** | Bellek için gerekli olan değerin birimi seçilir; MB, GB. |
+        | **Ek Değişkenler (Additional Variables)** | Pod içinde çalıştırılacak değişkenler ve değerleri tanımlanır. |
+        | **Host Takma Adlar (Host Aliases)** | Ağda bulunan IP adresleri bazen host isimleri arkasına konulabilir, bunlar eğer nameserver üzerinden çözülemiyorsa ya da host dosyasına tanımlanmamışsa, uygulama podlarının bu isimleri çözmesi için **Host Alias** tanımı yapılmalıdır. Her bir IP adresi için birden fazla domain ismi girilebilir. |
+
+        :::info
+
+**Ek Değişkenler**
+
+          Ek değişkenler alanındaki **Java Options** ayarını yapılandırırken aşağıdaki uyarı dikkate alınmalıdır:
+
+          * **-Xmx** ve **-Xms** parametreleri kullanıldığında, otomatik yığın (heap) boyutlandırması devre dışı bırakılır.
+          * Apinizer, **JVM Yığın (Heap)** değerlerini konteyner içinde çalıştığından konteynere verilen belleğin **%75.0**'ini kullanacak şekilde ayarlar.
+          * **UseContainerSupport** varsayılan olarak aktif gelmektedir.
+          * Eski bayraklar (flag) **-XX: &#123;Min \| Max&#125; RAMFraction** artık kullanımdan kaldırıldı. 0.0 ve 100.0 arasında bir değer alan ve varsayılan olarak 75.0 olan yeni bir **-XX: MaxRAMPercentage** bayrağı (flag) vardır. Bu nedenle, 1 GB bellek sınırı varsa, JVM yığını (heap) varsayılan olarak ~ 750 MB ile sınırlıdır.
+
+          Detaylı bilgi için [tıklayınız](https://www.eclipse.org/openj9/docs/xxinitialrampercentage/).
+
+:::
+
+        Yukarıdaki adımlar tamamlandıktan ve Kubernetes üzerinde API Integration'a ait olan Pod'ların hazır durumda olduğundan emin olduktan sonra **Project → Geliştirme(Development)→ API Entegratörü (Integration)→ Görev Akışları (Task Flows)** menüsünden kullanmaya başlayabilirsiniz.
+
+        #### API Integration Kurulumu API Manager Üzerinden Yapılmayacaksa
+
+        Integration için bir namespace oluşturulur.
+
+        ```bash
+        kubectl create ns apinizer-integration
+        ```
+
+        Apinizer namespace'inde bulunan 'mongo-db-credentials' secret'ı apinizer-integration namespace'ine kopyalanır.
+
+        ```bash
+        kubectl get secret mongo-db-credentials -n apinizer -o yaml | sed 's/namespace: apinizer/namespace: apinizer-integration/' | kubectl create -f -
+        ```
+
+        Integration için Deployment yaml oluşturulur.
+
+        ```bash
+        vi integration-deployment.yaml
+        ```
+
+        ```yaml
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: integration
+          namespace: apinizer-integration
+        spec:
+          replicas: 1
+          selector:
+            matchLabels:
+              app: integration
+              version: v1
+          strategy:
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 75%
+            type: RollingUpdate
+          template:
+            metadata:
+              labels:
+                app: integration
+                version: v1
+            spec:
+              containers:
+                - env:
+                    - name: JAVA_OPTS
+                      value: -server -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true
+                    - name: SPRING_DATA_MONGODB_URI
+                      valueFrom:
+                        secretKeyRef:
+                          key: dbUrl
+                          name: mongo-db-credentials
+                    - name: SPRING_DATA_MONGODB_DATABASE
+                      valueFrom:
+                        secretKeyRef:
+                          key: dbName
+                          name: mongo-db-credentials
+                    - name: SPRING_PROFILES_ACTIVE
+                      value: prod
+                  image: apinizercloud/integration:<APINIZER_VERSION>
+                  imagePullPolicy: IfNotPresent
+                  livenessProbe:
+                    failureThreshold: 3
+                    httpGet:
+                      path: /apinizer/management/health
+                      port: 8092
+                      scheme: HTTP
+                    initialDelaySeconds: 120
+                    periodSeconds: 30
+                    successThreshold: 1
+                    timeoutSeconds: 30
+                  name: integration
+                  ports:
+                    - containerPort: 8092
+                      protocol: TCP
+                  readinessProbe:
+                    failureThreshold: 3
+                    httpGet:
+                      path: /apinizer/management/health
+                      port: 8092
+                      scheme: HTTP
+                    initialDelaySeconds: 120
+                    periodSeconds: 30
+                    successThreshold: 1
+                    timeoutSeconds: 30
+                  resources:
+                    limits:
+                      cpu: "1"
+                      memory: 1024Mi
+                  startupProbe:
+                    failureThreshold: 3
+                    httpGet:
+                      path: /apinizer/management/health
+                      port: 8092
+                      scheme: HTTP
+                    initialDelaySeconds: 91
+                    periodSeconds: 30
+                    successThreshold: 1
+                    timeoutSeconds: 30
+              hostAliases:
+                - ip: "<IP_ADDRESS>"
+                  hostnames:
+                    - "<DNS_ADDRESS_1>"
+                    - "<DNS_ADDRESS_2>"
+        ```
+
+        ```bash
+        kubectl apply -f integration-deployment.yaml
+        ```
+
+        Oluşturulan Pod'un durumunu görmek için, aşağıdaki Kubectl komutunu kullanabilirsiniz:
+
+        ```bash
+        kubectl get pods -n apinizer-integration
+        ```
+
+        Servis oluşturulmasında eğer Ingress kullanılmayacaksa tanım NodePort tipiyle oluşturulur ve pod'un cluster dışı erişimi ayarlanır.
+
+        ```bash
+        vi apinizer-integration-service.yaml
+        ```
+
+        ```yaml
+        apiVersion: v1
+        kind: Service
+        metadata:
+          name: integration
+          namespace: apinizer-integration
+          labels:
+            app: integration
+        spec:
+          ports:
+            - nodePort: 32090
+              port: 8092
+              protocol: TCP
+              targetPort: 8092
+          selector:
+            app: integration
+          type: NodePort
+        ```
+
+        ```bash
+        kubectl apply -f apinizer-integration-service.yaml
+        ```
+
+        **Oluşturulan API Integration Uygulamasının API Management Konsoluna Bağlanması**
+
+        API Manager'da, **Sistem Ayarları → Genel Ayarlar** sayfasına gidin. "API Entegrasyon (Task Flow) Modülünün bilgilerini tanımlayın." bölümünden API Integration'ı etkinleştirin. Gerekli tanımları yaparak kurulumu tamamlayın.
+
+        <Frame caption="Task Flows menüsü - API Integration görev akışları yönetimi">
+          <img
+            src="/images/setup/apinizer/api-integration/05-task-flows.png"
+            alt="Task Flows Menüsü"
+            width="1200"
+            height="800"
+            style={{ borderRadius: '0.5rem' }}
+          />
+        </Frame>
+      </TabItem>
+      <TabItem value="api-portal-kurulumu" label="API Portal Kurulumu">
+        API Tüketicilerinin (API Consumers), bir organizasyonun sunduğu API'lerle ilgili dökümantasyona erişebilecekleri, bunları test edebilecekleri, belirli kısıtlamalar içinde kullanabilecekleri ve bu konular hakkında soru sorup cevaplayabilecekleri son kullanıcı veya geliştirici portalidir.
+
+        API Geliştirici Portalı, diğer Apinizer ürünleri gibi Kubernetes Platformu üzerinde çalışır. Portal işlemleri için herhangi bir veritabanı kullanılmaz, bunun yerine doğrudan API Manager'ın sağladığı API'lerle etkileşim sağlanır.
+
+        ### Kurulum Öncesi Adımlar
+
+        Apinizer API Portalı'nın kurulumuna başlamadan önce şunlara dikkat edilmelidir:
+
+        <CardGroup cols={2}>
+          <Card title="Apinizer Kurulumu" icon="server" href="/tr/setup/kubernetes">
+            API Manager kurulumunu öğrenin
+          </Card>
+        </CardGroup>
+
+        :::warning
+
+API Manager'ın kurulu olması gerekmektedir. Ayrıca lisans anahtarınızda API Developer Portal'ının bulunması gerekmektedir.
+
+:::
+
+        ### Kurulum Adımları
+
+        API Portal Kurulumu iki şekilde yapılmaktadır. Aşağıdaki sekmelerden hangisini kullanacağınızı seçin.
+
+        * Kubernetes yönetimi Apinizer üzerinden **yapılıyorsa**, API Manager üzerinden API Developer Portal kurulumu yapabilirsiniz.
+        * Kubernetes yönetimi Apinizer üzerinden **yapılmıyorsa**, Kubernetes'e manuel kurulum yapılabilir ve ardından API Manager ile bağlantı sağlanabilir.
+
+        #### Kişisel API Erişimi İçin Token Oluşturma
+
+        Token bilgileri, yeni bir token oluşturarak veya Profilim sayfasında mevcut bir token kullanılarak elde edilebilir. Personel tokenları genellikle `apnz_` öneki ile başlar.
+
+        :::info
+
+Token oluşturma işlemi için API Manager'da Profilim sayfasına giderek yeni bir token oluşturabilirsiniz.
+
+:::
+
+        <Frame caption="Token oluşturma - Profilim sayfasından kişisel API token oluşturma">
+          <img
+            src="/images/setup/apinizer/api-portal/01-token-olusturma.png"
+            alt="Token Oluşturma"
+            width="1200"
+            height="800"
+            style={{ borderRadius: '0.5rem' }}
+          />
+        </Frame>
+
+        <Tabs>
+          <TabItem value="api-manager-uzerinden-yapilacaksa" label="API Manager Üzerinden Yapılacaksa">
+            #### Kurulum Akışı
+
+            API Manager üzerinden API Developer Portal kurulumu için Genel Ayarlar menüsünde aşağıdaki bölümün aktif olması gerekmektedir.
+
+            :::warning
+
+Kubernetes yönetimi Apinizer üzerinden yapılıyorsa, Genel Ayarlar sayfasında "Kubernetes Yönetimi" seçeneğinin aktif olması gerekmektedir.
+
+:::
+
+            API Manager'da, **Yönetim → Sunucu Yönetimi → Kubernetes Resources** sayfasına gidin. Deployment & Pods sekmesinden API Portal'ı etkinleştirin. Gerekli tanımları yaparak kurulumu tamamlayın.
+
+            <Frame caption="Kubernetes Resources sayfası - API Portal etkinleştirme">
+              <img
+                src="/images/setup/apinizer/api-portal/02-kubernetes-resources.png"
+                alt="Kubernetes Resources Sayfası"
+                width="1200"
+                height="600"
+                style={{ borderRadius: '0.5rem' }}
+              />
+            </Frame>
+
+            Açılan diyalogda, kurumunuza uygun olarak zorunlu alanları tanımlayın.
+
+            <Frame caption="API Portal kurulum diyaloğu - Gerekli ayarların yapılandırılması">
+              <img
+                src="/images/setup/apinizer/api-portal/03-api-portal-dialog.png"
+                alt="API Portal Kurulum Diyaloğu"
+                width="1200"
+                height="800"
+                style={{ borderRadius: '0.5rem' }}
+              />
+            </Frame>
+
+            <Frame caption="API Portal ayarları - API Manager ile entegrasyon yapılandırması">
+              <img
+                src="/images/setup/apinizer/api-portal/04-api-portal-ayarlari.png"
+                alt="API Portal Ayarları"
+                width="1200"
+                height="800"
+                style={{ borderRadius: '0.5rem' }}
+              />
+            </Frame>
+
+            #### Form Alanları
+
+            | Alan | Açıklama |
+            |------|----------|
+            | **Apinizer Portal Management API URL** | API Developer Portalin Apinizer Management API'lerini tüketebilmesi için gerekli olan API Manager tarafından çalıştırılan Management API adresidir. Örnek adres: `http://<API_MANAGER_ACCESS_URL>:<PORT>/` |
+            | **Apinizer Portal Management API Key/Token** | API Developer Portalinin Apinizer Yönetim API'lerini tüketebilmesi için gereken token bilgisidir. |
+            | **Sayısı (Count)** | Gateway engine sayısı, Kubernetes Cluster'daki replicaSet ayarını düzenler. |
+            | **Servis Portu (Service Port)** | Gateway engine erişim portu, Kubernetes Cluster'daki servis objesinin NodePort ayarını düzenler. |
+            | **Node Listesi (Node List)** | Pod'ların hangi Kubernetes Worker sunucularında çalışacağını ayarlar. Kubernetes'teki NodeAffinity ayarını düzenler. |
+            | **CPU** | Pod'un kullanacağı maksimum CPU core sayısı bilgisidir. |
+            | **Bellek (Memory)** | Pod'un kullanacağı maksimum bellek değeridir. |
+            | **Bellek Birimi (Memory Unit)** | Bellek için gerekli olan değerin birimi seçilir; MB, GB. |
+            | **Ek Değişkenler (Additional Variables)** | Pod içinde çalıştırılacak varsayılan ve opsiyonel değişkenler ve değerleri tanımlanır. Varsayılan değişkenler silinemez, sadece değerleri düzenlenebilir. |
+            | **Host Takma Adları (Host Aliases)** | Ağda bulunan IP adresleri bazen host isimleri arkasına konulabilir, bunlar eğer nameserver ya da host dosyasına tanımlanmamışsa ya da bir şekilde Apinizer'ın bunları çözmesi sağlanamamışsa, worker podların bu isimleri çözmesi için **Host Alias** tanımı yapılmalıdır. |
+
+            :::info
+
+**Ek Değişkenler**
+
+              Ek değişkenler alanındaki **Java Options** ayarını yapılandırırken aşağıdaki uyarı dikkate alınmalıdır:
+
+              * **-Xmx** ve **-Xms** parametreleri kullanıldığında, otomatik yığın (heap) boyutlandırması devre dışı bırakılır.
+              * Apinizer, **JVM Yığın (Heap)** değerlerini konteyner içinde çalıştığından konteynere verilen belleğin **%75.0**'ini kullanacak şekilde ayarlar.
+              * **UseContainerSupport** varsayılan olarak aktif gelmektedir.
+              * Eski bayraklar (flag) **-XX: &#123;Min \| Max&#125; RAMFraction** artık kullanımdan kaldırıldı. 0.0 ve 100.0 arasında bir değer alan ve varsayılan olarak 75.0 olan yeni bir **-XX: MaxRAMPercentage** bayrağı (flag) vardır. Bu nedenle, 1 GB bellek sınırı varsa, JVM yığını (heap) varsayılan olarak ~ 750 MB ile sınırlıdır.
+
+              Detaylı bilgi için [tıklayınız](https://www.eclipse.org/openj9/docs/xxinitialrampercentage/).
+
+:::
+          </TabItem>
+          <TabItem value="api-manager-uzerinden-yapilmayacaksa-manuel" label="API Manager Üzerinden Yapılmayacaksa (Manuel)">
+            API Developer Portali'nin manuel olarak kurulması için aşağıdaki adımlar takip edilmelidir.
+
+            :::warning
+
+**Önemli:** API Manager API adresi ve API Key/Token bilgisini içeren Kubernetes **Secret** oluşturulmalıdır. Aşağıdaki bilgiler kurumunuza göre doldurulmalıdır.
+
+:::
+
+            * **apinizerManagementApiBaseUrl**: API Developer Portal'in Apinizer Management API'lerini tüketebilmesi için gerekli olan API Manager üzerinde çalışan Management API adresidir. Örnek bir adres: `http://apimanager-ui-ip-address:port`
+            * **apiKey**: API Developer Portal'in Apinizer Management API'lerini tüketebilmesi için gerekli olan token bilgisidir.
+
+            #### 1. Secret Hazırlığı
+
+            Aşağıdaki komutlarla URL, API key ve portal ID değerlerini base64'e çevirip secret YAML'ı hazırlayın.
+
+            ```bash
+            API_MANAGER_URL='<APINIZER_MANAGEMENT_API_BASE_URL>'
+            API_MANAGER_APIKEY='<API_KEY>'
+            API_PORTAL_ID='<API_PORTAL_ID>' # Portal genel bakıştan alınan ID
+
+            echo -n ${API_MANAGER_URL} | base64  # Bunun çıktısını bir sonraki adımda <ENCODED_URL> değişkeni yerine koyacağız
+            echo -n ${API_MANAGER_APIKEY} | base64  # Bunun çıktısını bir sonraki adımda <ENCODED_API_KEY> değişkeni yerine koyacağız
+            echo -n ${API_PORTAL_ID} | base64 # Çıktıyı <ENCODED_API_PORTAL_ID> yerine yazın
+
+            vi api-portal-secret.yaml
+            ```
+
+            <Accordion title="api-portal-secret.yaml — API Manager bağlantı bilgileri Secret">
+              ```yaml
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: apinizer-portal
+              ---
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: apinizer-portal-secret
+                namespace: apinizer-portal
+              type: Opaque
+              data:
+                apinizerManagementApiBaseUrl: <ENCODED_URL>
+                apiKey: <ENCODED_API_KEY>
+                apiPortalId: <ENCODED_API_PORTAL_ID>
+              ```
+            </Accordion>
+
+            ```bash
+            kubectl apply -f api-portal-secret.yaml
+            ```
+
+            #### 2. Deployment
+
+            ```bash
+            vi apinizer-portal-deployment.yaml
+            ```
+
+            <Accordion title="apinizer-portal-deployment.yaml — API Developer Portal Deployment + Service">
+              ```yaml
+              ---
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: apinizer-portal
+                namespace: apinizer-portal
+              spec:
+                replicas: 1
+                selector:
+                  matchLabels:
+                    app: apinizer-portal
+                    version: v1
+                template:
+                  metadata:
+                    labels:
+                      app: apinizer-portal
+                      version: v1
+                  spec:
+                    containers:
+                      - name: apinizer-portal-app
+                        image: apinizercloud/apiportal:<APINIZER_VERSION>
+                        env:
+                          - name: SPRING_PROFILES_ACTIVE
+                            value: prod
+                          - name: JAVA_OPTS
+                            value: -XX:MaxRAMPercentage=75.0
+                          - name: API_PORTAL_MANAGEMENT_API_BASE_URL
+                            valueFrom:
+                              secretKeyRef:
+                                key: apinizerManagementApiBaseUrl
+                                name: apinizer-portal-secret
+                          - name: API_PORTAL_MANAGEMENT_API_KEY
+                            valueFrom:
+                              secretKeyRef:
+                                key: apiKey
+                                name: apinizer-portal-secret
+                          - name: API_PORTAL_ID
+                            valueFrom:
+                              secretKeyRef:
+                                key: apiPortalId
+                                name: apinizer-portal-secret
+                        livenessProbe:
+                          failureThreshold: 13
+                          httpGet:
+                            path: /apinizer/management/health
+                            port: 8080
+                            scheme: HTTP
+                          initialDelaySeconds: 60
+                          periodSeconds: 10
+                          successThreshold: 1
+                          timeoutSeconds: 30
+                        ports:
+                          - containerPort: 8080
+                            protocol: TCP
+                        readinessProbe:
+                          failureThreshold: 13
+                          httpGet:
+                            path: /apinizer/management/health
+                            port: 8080
+                            scheme: HTTP
+                          initialDelaySeconds: 30
+                          periodSeconds: 10
+                          successThreshold: 1
+                          timeoutSeconds: 30
+                        resources:
+                          limits:
+                            cpu: "1"
+                            memory: 1Gi
+                        startupProbe:
+                          failureThreshold: 13
+                          httpGet:
+                            path: /apinizer/management/health
+                            port: 8080
+                            scheme: HTTP
+                          initialDelaySeconds: 60
+                          periodSeconds: 10
+                          successThreshold: 1
+                          timeoutSeconds: 30
+              ---
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: apinizer-portal-service
+                namespace: apinizer-portal
+                labels:
+                  app: apinizer-portal
+              spec:
+                selector:
+                  app: apinizer-portal
+                type: NodePort
+                ports:
+                  - name: http
+                    port: 8080
+                    nodePort: <API_DEVELOPER_PORTAL_PORT>
+              ```
+            </Accordion>
+
+            ```bash
+            kubectl apply -f apinizer-portal-deployment.yaml
+            ```
+
+            :::warning
+
+**Önemli**
+
+              Bu aşamaya kadar API Developer Portal arayüzü kurulumu yapılmış olabilir, ancak API'lerin API Developer Portal üzerinde görüntülenebilmesi, Credential'ların oluşturulması ve diğer yeteneklerin kullanılabilmesi için API Manager ile entegrasyonunun yapılması gerekmektedir.
+
+:::
+          </TabItem>
+        </Tabs>
+
+        ### API Developer Portal'in API Manager ile Entegrasyonu
+
+        API Manager'da, **Portal → Ayarlar → Portal** sayfasına giderek, kurumunuza uygun tanımları yapınız.
+
+        [Detaylı bilgi için tıklayınız](/tr/api-portal/api-portal-ayarlari).
+
+        ### API Developer Portal'i SSL ile Başlatma
+
+        İstenilen durumlarda API Developer Portal SSL ile erişime açılabilir. Uzantısı .p12 olan sertifika dosyası Kubernetes Control Plane sunucularından birine aktarılır ve **/etc/ssl/certs** dizinine taşınır/kopyalanır.
+
+        İlgili adresteyken aşağıdaki komut ile sertifika dosyası secret olarak Kubernetes'e yüklenir.
+
+        ```bash
+        kubectl create secret generic apinizer-portal-tls --from-file=portal.p12 -n apinizer-portal
+        ```
+
+        Eğer elinizde sadece .jks uzantılı dosya bulunmaktaysa, bu dosyadan .p12 uzantılı dosya aşağıdaki gibi oluşturulabilir. Sonrasında önceki adım uygulanır.
+
+        Sertifikanın alias tanımını almak için aşağıdaki kod çalıştırılır.
+
+        ```bash
+        keytool -list -v -keystore portal.p12 -storetype PKCS12
+        ```
+
+        Alias tanımı bilinen .jks uzantılı dosyadan .p12 uzantılı dosya oluşturulur.
+
+        ```bash
+        keytool -genkeypair -alias <ALIAS> -keyalg RSA -keysize 4096 -storetype PKCS12 -keystore portal.p12 -validity 3650 -storepass <PASSWORD>
+        ```
+
+        Tanımlanması gereken değişkenler:
+
+        | Değişken                  | Açıklama                                                                                                            |
+        | ------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+        | SSL_KEY_STORE             | SSL sertifikasını içeren anahtar deposunun yolu. Örneğimizde, Spring Boot'un bunu classpath'te aramasını istiyoruz. |
+        | SSL_KEY_STORE_PASSWORD    | Anahtar deposuna erişmek için kullanılan şifre.                                                                     |
+        | SSL_KEY_STORE_TYPE        | Anahtar deposunun türü (Kullanım: PKCS12).                                                                          |
+        | SSL_KEY_ALIAS             | Anahtar deposundaki anahtarı tanımlayan takma ad.                                                                   |
+        | SSL_ENABLED               | Spring Boot uygulamasının HTTPS protokolünü kullanmasını sağlar.                                                    |
+        | SERVER_PORT               | Sunucunun dinlediği port. 8443 kullanılmalıdır.                                                                     |
+
+        Sertifika bilgilerinin kullanıldığı örnek bir deployment yaml dosyası aşağıdaki gibi olacaktır.
+
+        <Accordion title="apinizer-portal-ssl-deployment.yaml — SSL etkin API Developer Portal Deployment + Service">
+          ```yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: apinizer-portal
+            namespace: apinizer-portal
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: apinizer-portal
+                version: v1
+            template:
+              metadata:
+                labels:
+                  app: apinizer-portal
+                  version: v1
+              spec:
+                volumes:
+                - name: apinizer-portal-tls
+                  secret:
+                    secretName: apinizer-portal-tls
+                containers:
+                - name: apinizer-portal
+                  image: apinizercloud/portal:<APINIZER_VERSION>
+                  imagePullPolicy: IfNotPresent
+                  resources:
+                    limits:
+                      cpu: 1
+                      memory: 2Gi
+                  lifecycle:
+                    preStop:
+                      exec:
+                        command:
+                        - /bin/sh
+                        - -c
+                        - sleep 10
+                  ports:
+                  - containerPort: 8443
+                    protocol: TCP
+                  env:
+                  - name: SPRING_PROFILES_ACTIVE
+                    value: prod
+                  - name: JAVA_OPTS
+                    value: "-XX:MaxRAMPercentage=75.0"
+                  - name: SSL_KEY_STORE
+                    value: /etc/ssl/certs/portal.p12
+                  - name: SSL_KEY_STORE_PASSWORD
+                    value: <PASSWORD>
+                  - name: SSL_KEY_STORE_TYPE
+                    value: PKCS12
+                  - name: SSL_KEY_ALIAS
+                    value: <ALIAS>
+                  - name: SSL_ENABLED
+                    value: "true"
+                  - name: SERVER_PORT
+                    value: "8443"
+                  - name: API_PORTAL_MANAGEMENT_API_BASE_URL
+                    valueFrom:
+                      secretKeyRef:
+                        key: apinizerManagementApiBaseUrl
+                        name: apinizer-portal-secret
+                  - name: API_PORTAL_MANAGEMENT_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        key: apiKey
+                        name: apinizer-portal-secret
+                  volumeMounts:
+                  - name: apinizer-portal-tls
+                    mountPath: /etc/ssl/certs
+                dnsPolicy: ClusterFirst
+                restartPolicy: Always
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: apinizer-portal-https-service
+            namespace: apinizer-portal
+            labels:
+              app: apinizer-portal
+          spec:
+            selector:
+              app: apinizer-portal
+            type: NodePort
+            ports:
+              - name: http
+                port: 8443
+                nodePort: 31843
+          ```
+        </Accordion>
+
+        Yukarıdaki adımlar tamamlandıktan ve Kubernetes üzerinde API Portal'e ait olan Pod'ların hazır durumda olduğundan emin olduktan sonra, Portal Arayüzüne erişmek için aşağıdaki adresten erişim sağlanabilir.
+
+        ```
+        http://<KUBERNETES_WORKER_IP>:<API_PORTAL_PORT>
+        ```
+      </TabItem>
+      <TabItem value="api-manager-i-ssl-ile-baslatmak" label="API Manager'ı SSL ile Başlatmak">
+        API Manager'ı HTTPS/SSL ile çalıştırmak için sertifika hazırlığı, JKS/PKCS12 dönüşümü, Kubernetes Secret tanımı ve SSL etkin Deployment YAML adımları aşağıdadır. Bu yapılandırma opsiyoneldir ancak production ortamlar için önerilir.
+
+        Apinizer Manager'ı HTTPS üzerinden yayınlamak için sertifikaları hazırladıktan sonra Deployment'a SSL ortam değişkenleri eklenerek 8443 portu üzerinden servis verilir.
+
+        ## Yapılandırma Adımları
+
+        <Steps>
+          <Step title="Sertifika Hazırlığı">
+            Sertifikaları hazırlayın:
+
+            * SSL/TLS sertifikası oluşturun veya temin edin
+            * Private key'i hazırlayın
+            * Certificate chain'i hazırlayın (gerekirse)
+
+            :::note
+
+Sertifikaların geçerli olması ve güvenilir bir sertifika otoritesi tarafından imzalanmış olması önerilir.
+
+:::
+          </Step>
+
+          <Step title="Sertifika Formatı Dönüşümü">
+            Gerekirse sertifika formatını JKS / PKCS12 formatına dönüştürün (PFX → JKS, PEM → JKS).
+
+            :::tip
+
+Sertifika dönüşüm işlemleri için [PFX JKS Dönüştürme](/tr/operations/yonetici-kilavuzlari/pfx-jks-donusturme) sayfasına bakabilirsiniz.
+
+:::
+          </Step>
+
+          <Step title="Kubernetes Secret Oluşturma">
+            Sertifikaları Kubernetes secret olarak oluşturun:
+
+            ```bash
+            kubectl create secret generic manager-tls --from-file=manager.p12 -n apinizer
+            ```
+
+            :::warning
+
+Secret oluştururken sertifika ve private key dosyalarının doğru yollarını belirttiğinizden emin olun.
+
+:::
+          </Step>
+
+          <Step title="Deployment Yapılandırması">
+            Deployment yapılandırmasında SSL ortam değişkenlerini ve 8443 portunu ayarlayın (örnek deployment dosyası aşağıdadır).
+          </Step>
+        </Steps>
+
+        ## Sertifika Alias'ını Bulma
+
+        Bir sertifikanın Alias'ını bulmak için:
+
+        ```bash
+        keytool -list -v -keystore manager.p12 -storetype PKCS12
+        ```
+
+        ## JKS'den PKCS12 Oluşturma
+
+        JKS formatındaki sertifikayı PKCS12 formatına dönüştürmek için:
+
+        ```bash
+        keytool -genkeypair -alias <ALIAS> -keyalg RSA -keysize 4096 -storetype PKCS12 -keystore manager.p12 -validity 3650 -storepass <PASSWORD>
+        ```
+
+        :::tip
+
+Uzantısı `.p12` olan dosyanızı `/etc/ssl/certs` dizinine ekleyiniz.
+
+:::
+
+        ## Gerekli Ortam Değişkenleri
+
+        Deployment yaml tanımında olması gereken değişkenler:
+
+        | Değişken | Açıklama |
+        | --- | --- |
+        | `SSL_KEY_STORE` | SSL sertifikasını içeren anahtar deposunun yolu |
+        | `SSL_KEY_STORE_PASSWORD` | Anahtar deposuna erişmek için kullanılan şifre |
+        | `SSL_KEY_STORE_TYPE` | Anahtar deposunun türü (Kullanım: PKCS12) |
+        | `SSL_KEY_ALIAS` | Anahtar deposundaki anahtarı tanımlayan takma ad |
+        | `SSL_ENABLED` | Spring Boot uygulamasının HTTPS protokolünü kullanmasını sağlar |
+        | `SERVER_PORT` | Sunucunun dinlediği port (8443 kullanılmalıdır) |
+
+        ## Örnek API Manager Deployment (SSL etkin)
+
+        <Accordion title="apimanager-deployment-ssl.yaml — SSL etkin API Manager Deployment + Service">
+          ```yaml
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: manager
+            namespace: apinizer
+          spec:
+            progressDeadlineSeconds: 600
+            replicas: 1
+            revisionHistoryLimit: 10
+            selector:
+              matchLabels:
+                app: manager
+                version: v1
+            strategy:
+              rollingUpdate:
+                maxSurge: 1
+                maxUnavailable: 75%
+              type: RollingUpdate
+            template:
+              metadata:
+                labels:
+                  app: manager
+                  version: v1
+              spec:
+                automountServiceAccountToken: true
+                volumes:
+                  - name: manager-tls
+                    secret:
+                      secretName: manager-tls
+                containers:
+                  - env:
+                      - name: JAVA_OPTS
+                        value: ' -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true'
+                      - name: LOGGING_LEVEL_ROOT
+                        value: INFO
+                      - name: LOGGING_LEVEL_com_apinizer_manager
+                        value: INFO
+                      - name: SPRING_SERVLET_MULTIPART_MAX_FILE_SIZE
+                        value: 20MB
+                      - name: SPRING_SERVLET_MULTIPART_MAX_REQUEST_SIZE
+                        value: 50MB
+                      - name: SPRING_PROFILES_ACTIVE
+                        value: prod
+                      - name: SSL_KEY_STORE
+                        value: /etc/ssl/manager.p12
+                      - name: SSL_KEY_STORE_PASSWORD
+                        value: <PASSWORD>
+                      - name: SSL_KEY_STORE_TYPE
+                        value: PKCS12
+                      - name: SSL_KEY_ALIAS
+                        value: <ALIAS>
+                      - name: SSL_ENABLED
+                        value: "true"
+                      - name: SERVER_PORT
+                        value: "8443"
+                      - name: SPRING_DATA_MONGODB_URI
+                        valueFrom:
+                          secretKeyRef:
+                            key: dbUrl
+                            name: mongo-db-credentials
+                      - name: SPRING_DATA_MONGODB_DATABASE
+                        valueFrom:
+                          secretKeyRef:
+                            key: dbName
+                            name: mongo-db-credentials
+                    volumeMounts:
+                      - name: manager-tls
+                        mountPath: /etc/ssl/
+                    image: apinizercloud/manager:<APINIZER_VERSION>
+                    imagePullPolicy: IfNotPresent
+                    lifecycle:
+                      preStop:
+                        exec:
+                          command:
+                            - /bin/sh
+                            - -c
+                            - sleep 10
+                    livenessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8443
+                        scheme: HTTPS
+                      initialDelaySeconds: 120
+                      periodSeconds: 30
+                      successThreshold: 1
+                      timeoutSeconds: 30
+                    name: manager
+                    ports:
+                      - containerPort: 8443
+                        protocol: TCP
+                    readinessProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8443
+                        scheme: HTTPS
+                      initialDelaySeconds: 120
+                      periodSeconds: 30
+                      successThreshold: 1
+                      timeoutSeconds: 30
+                    resources:
+                      limits:
+                        cpu: 1
+                        memory: 3Gi
+                    securityContext:
+                      allowPrivilegeEscalation: true
+                      readOnlyRootFilesystem: false
+                      runAsGroup: 0
+                      runAsNonRoot: false
+                      runAsUser: 0
+                    startupProbe:
+                      failureThreshold: 3
+                      httpGet:
+                        path: /apinizer/management/health
+                        port: 8443
+                        scheme: HTTPS
+                      initialDelaySeconds: 90
+                      periodSeconds: 30
+                      successThreshold: 1
+                      timeoutSeconds: 30
+                    terminationMessagePath: /dev/termination-log
+                    terminationMessagePolicy: File
+                dnsPolicy: ClusterFirst
+                restartPolicy: Always
+                schedulerName: default-scheduler
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: manager
+            namespace: apinizer
+            labels:
+              app: manager
+          spec:
+            selector:
+              app: manager
+            type: NodePort
+            ports:
+              - name: http
+                port: 8443
+                targetPort: 8443
+                nodePort: 32843
+          ```
+        </Accordion>
+
+        ## Sertifika Oluşturma (Kendi Sertifikanız)
+
+        Kendi sertifikanızı oluşturmak için:
+
+        <Steps>
+          <Step title="Private Key Oluşturma">
+            ```bash
+            openssl genrsa -out server.key 2048
+            ```
+          </Step>
+          <Step title="CSR (Certificate Signing Request) Oluşturma">
+            ```bash
+            openssl req -new -key server.key -out server.csr
+            ```
+          </Step>
+          <Step title="İmzalı Sertifika Oluşturma">
+            ```bash
+            openssl x509 -req -days 365 -in server.csr -signkey server.key -out server.crt
+            ```
+          </Step>
+          <Step title="PKCS#12 Formatına Dönüştürme">
+            ```bash
+            openssl pkcs12 -export -out manager.p12 -inkey server.key -in server.crt
+            ```
+          </Step>
+        </Steps>
+      </TabItem>
+    </Tabs>
+  </TabItem>
+  <TabItem value="helm" label="Helm">
+
+Apinizer modülleri **Helm chart** ile kurulur. Helm; manifest'leri parametrize eder, sürüm yönetimi (`helm upgrade`, `helm rollback`) sağlar ve cluster üzerindeki kurulu sürümleri (`helm list`) takip eder. Üretim için ham Manifest yerine **Helm önerilir**.
+
+Apinizer artık **modül-bazlı bağımsız chart'lar** olarak dağıtılır; her modül kendi chart'ı ile ayrı ayrı kurulur. Chart'lar Docker Hub OCI registry'sinden (`oci://registry-1.docker.io/apinizercloud`) çekilir.
+
+| Modül | OCI Chart | Namespace | Varsayılan Servis Adı | Önerilen NodePort |
+|-------|-----------|-----------|------------------------|-------------------|
+| API Manager | `apinizer-apimanager` | `apinizer` | `apimanager` | 32080 |
+| Worker | `apinizer-worker` | `apinizer` | `worker-http-service` | 30080 |
+| Cache | `apinizer-cache` | `apinizer` | `cache-http-service` | 30090 |
+| Integration | `apinizer-integration` | `apinizer` | `integration` | 32090 |
+| API Portal | `apinizer-apiportal` | `apinizer-portal` | `apinizer-portal-service` | 31843 |
+
+:::info
+
+Apinizer kurulum sırasında MongoDB'ye ihtiyaç duyar (API Manager, Worker, Cache ve Integration modülleri). Bir MongoDB kurulu değilse öncelikle onun kurulması gerekir.
+
+:::
+
+### Ön Koşullar
+
+* Kubernetes cluster'ının hazır ve erişilebilir olması
+* **Helm 3.8+** (OCI registry desteği için) kurulu olması
+* MongoDB'nin kurulu ve cluster'dan erişilebilir olması
+
+:::note
+
+Helm kurulu değilse [Helm resmi kurulum dokümanını](https://helm.sh/docs/intro/install/) inceleyebilirsiniz.
+
+:::
+
+### Ortak Hazırlık
+
+MongoDB'ye bağlanan modüller (API Manager, Worker, Cache, Integration) bağlantı bilgilerini **base64** kodlu bekler:
+
+```bash
+MONGO_URL=$(echo -n "mongodb://<MONGO_USERNAME>:<MONGO_PASSWORD>@<MONGO_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset" | base64 -w 0)
+DB_NAME=$(echo -n "<MONGO_DBNAME>" | base64 -w 0)
+```
+
+:::note
+
+`base64 -w 0` Linux/Git Bash içindir. PowerShell'de: `$MONGO_URL = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("mongodb://..."))`
+
+:::
+
+### Servis Tipi (NodePort / ClusterIP)
+
+Her modülün servis tipi tek bir toggle ile seçilir:
+
+* `service.nodePort.enabled=false` (**varsayılan**) → `ClusterIP`; servise yalnızca cluster içinden `service.name` ile erişilir.
+* `service.nodePort.enabled=true` → `NodePort`; servis dışarıya `service.nodePort.port` üzerinden açılır (Ingress de kullanılabilir).
+
+Cache'in Hazelcast servisi (`cache-hz-service`, 5701) ve Worker'ın yönetim servisi (`worker-management-api-http-service`, 8091) bu toggle'dan etkilenmez; daima ClusterIP kalır.
+
+### Modül Kurulumu
+
+Aşağıdaki sekmelerden kurmak istediğiniz modülü seçin.
+
+:::note
+
+Komutlardaki `<APINIZER_IMAGE_TAG>` ifadesini kurmak istediğiniz Apinizer sürümüyle değiştirin (örn. `2026.04.4`). Yayınlanan tüm sürümleri [Docker Hub](https://hub.docker.com/u/apinizercloud) üzerinden görebilirsiniz.
+
+:::
+
+<Tabs>
+  <TabItem value="api-manager" label="API Manager">
+
+API Manager, yönetim arayüzü ve REST API'sini sağlar; MongoDB'ye bağlanır.
+
+```bash
+helm install apimanager oci://registry-1.docker.io/apinizercloud/apinizer-apimanager \
+  --version 0.1.1 \
+  -n <API-Manager-Namespace> --create-namespace \
+  --set apinizer.kubernetesManagementEnabled=true \
+  --set image.tag="<APINIZER_IMAGE_TAG>" \
+  --set mongo.dbUrl="$MONGO_URL" \
+  --set mongo.dbName="$DB_NAME" \
+  --set service.name=apimanager \
+  --set resources.limits.cpu="1" \
+  --set resources.limits.memory="3Gi"
+```
+
+`kubernetesManagementEnabled=true`, Worker dağıtımlarının Apinizer tarafından cluster üzerinde yönetilmesini sağlar. Worker'ları harici yöneteceksiniz `--set apinizer.kubernetesManagementEnabled=false` verin.
+
+NodePort ile dışarı açmak için komuta ekleyin:
+
+```bash
+  --set service.nodePort.enabled=true \
+  --set service.nodePort.port=32080
+```
+
+Doğrulama:
+
+```bash
+kubectl -n <API-Manager-Namespace> rollout status deploy/apimanager
+kubectl -n <API-Manager-Namespace> get pods,svc
+```
+
+**Ayarlanabilir değerler (`--set`):**
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `image.repository` | `apinizercloud/apimanager` | İmaj deposu |
+| `image.tag` | `<APINIZER_IMAGE_TAG>` | İmaj sürümü |
+| `image.pullPolicy` | `IfNotPresent` | İmaj çekme politikası |
+| `replicaCount` | `1` | Pod replika sayısı |
+| `apinizer.kubernetesManagementEnabled` | `true` | Worker'ların Apinizer tarafından Kubernetes üzerinde yönetilmesi |
+| `service.name` | `apimanager` | Servis adı (ClusterIP modunda cluster içi erişim adı) |
+| `service.port` | `8080` | Servis portu |
+| `service.nodePort.enabled` | `false` | `true` ise servis NodePort olarak dışarı açılır |
+| `service.nodePort.port` | `32080` | NodePort portu (`enabled=true` iken) |
+| `resources.limits.cpu` | `1` | CPU limiti |
+| `resources.limits.memory` | `3Gi` | Bellek limiti |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret adı |
+| `mongo.dbUrl` | — | MongoDB bağlantı URL'i (base64) |
+| `mongo.dbName` | — | MongoDB veritabanı adı (base64) |
+| `env.JAVA_OPTS` | `-XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true` | JVM seçenekleri |
+| `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profili |
+| `env.WORKER_DEPLOYMENT_TIMEOUT` | `120` | Worker dağıtımı zaman aşımı (sn) |
+
+#### API Manager Lisans Anahtarının Girilmesi
+
+API Manager kurulduktan sonra, Apinizer tarafından size verilen Lisans Anahtarını veri tabanına eklemeniz gerekir. Lisans Anahtarını aşağıdaki gibi bir `.js` dosyasında güncelleyip veri tabanındaki lisans bilgisi güncellenebilir.
+
+```bash
+vi license.js
+```
+
+```javascript
+db.general_settings.updateOne(
+  {"_class":"GeneralSettings"},
+  { $set: { licenseKey: '<YOUR_LICENSE_KEY>'}}
+)
+```
+
+Oluşturulan license.js MongoDB sunucusu üzerinde çalıştırılır. Matched = 1 şeklinde bir sonuç görülmesi beklenir.
+
+```bash
+mongosh mongodb://<MONGODB_IP>:<MONGO_PORT>/<MONGO_DBNAME> --authenticationDatabase "admin" -u "apinizer" -p '<MONGO_PASSWORD>' < license.js
+```
+
+Kurulum işlemi başarılı olduysa aşağıdaki adresten Apinizer API Manager (Yönetim Konsolu'na) erişebilirsiniz.
+
+```
+http://<K8S_ANY_WORKER_IP>:32080
+```
+
+**Varsayılan Kullanıcı Adı:** admin
+
+**Varsayılan Kullanıcı Parola:** Apinizer destek ekibinden yardım isteyin.
+
+:::warning
+
+Apinizer Yönetim Konsoluna ilk girişiniz sonrasında şifrenizi değiştirmeniz önerilir.
+
+:::
+
+  </TabItem>
+  <TabItem value="worker" label="Worker">
+
+Worker, API trafiğini işleyen runtime (data-plane) bileşenidir; MongoDB'ye bağlanır.
+
+```bash
+helm install worker oci://registry-1.docker.io/apinizercloud/apinizer-worker \
+  --version 0.1.1 \
+  -n <Worker-Namespace> --create-namespace \
+  --set image.tag="<APINIZER_IMAGE_TAG>" \
+  --set mongo.dbUrl="$MONGO_URL" \
+  --set mongo.dbName="$DB_NAME" \
+  --set service.name=worker-http-service \
+  --set resources.limits.cpu="4" \
+  --set resources.limits.memory="4Gi"
+```
+
+NodePort ile dışarı açmak için komuta ekleyin:
+
+```bash
+  --set service.nodePort.enabled=true \
+  --set service.nodePort.port=30080
+```
+
+Doğrulama:
+
+```bash
+kubectl -n <Worker-Namespace> rollout status deploy/worker
+kubectl -n <Worker-Namespace> logs -l app=worker --tail=100
+```
+
+**Ayarlanabilir değerler (`--set`):**
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `image.repository` | `apinizercloud/worker` | İmaj deposu |
+| `image.tag` | `<APINIZER_IMAGE_TAG>` | İmaj sürümü |
+| `image.pullPolicy` | `IfNotPresent` | İmaj çekme politikası |
+| `replicaCount` | `1` | Pod replika sayısı |
+| `service.name` | `worker-http-service` | API trafiği servis adı |
+| `service.port` | `8091` | Servis portu |
+| `service.nodePort.enabled` | `false` | `true` ise servis NodePort olarak dışarı açılır |
+| `service.nodePort.port` | `30080` | NodePort portu (`enabled=true` iken) |
+| `resources.limits.cpu` | `4` | CPU limiti |
+| `resources.limits.memory` | `4Gi` | Bellek limiti |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret adı |
+| `mongo.dbUrl` | — | MongoDB bağlantı URL'i (base64) |
+| `mongo.dbName` | — | MongoDB veritabanı adı (base64) |
+| `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true` | JVM seçenekleri |
+| `env.tuneWorkerThreads` | `1024` | Worker thread sayısı |
+| `env.tuneWorkerMaxThreads` | `4096` | Maksimum worker thread sayısı |
+| `env.tuneRoutingConnectionPoolMaxConnectionPerHost` | `1024` | Host başına maksimum bağlantı |
+| `env.tuneRoutingConnectionPoolMaxConnectionTotal` | `4096` | Toplam maksimum bağlantı |
+
+  </TabItem>
+  <TabItem value="cache" label="Cache">
+
+Cache, Hazelcast tabanlı dağıtık önbellek cluster'ıdır; konfigürasyon için MongoDB'ye bağlanır.
+
+```bash
+helm install cache oci://registry-1.docker.io/apinizercloud/apinizer-cache \
+  --version 0.1.1 \
+  -n <Cache-Namespace> --create-namespace \
+  --set image.tag="<APINIZER_IMAGE_TAG>" \
+  --set mongo.dbUrl="$MONGO_URL" \
+  --set mongo.dbName="$DB_NAME" \
+  --set service.name=cache-http-service \
+  --set resources.limits.cpu="1" \
+  --set resources.limits.memory="1Gi"
+```
+
+Doğrulama:
+
+```bash
+kubectl -n <Cache-Namespace> rollout status deploy/cache
+kubectl -n <Cache-Namespace> get pods -l app=cache
+```
+
+**Ayarlanabilir değerler (`--set`):**
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `image.repository` | `apinizercloud/cache` | İmaj deposu |
+| `image.tag` | `<APINIZER_IMAGE_TAG>` | İmaj sürümü |
+| `image.pullPolicy` | `IfNotPresent` | İmaj çekme politikası |
+| `replicaCount` | `1` | Pod replika sayısı |
+| `service.name` | `cache-http-service` | HTTP servis adı |
+| `service.port` | `8090` | Servis portu |
+| `service.nodePort.enabled` | `false` | `true` ise servis NodePort olarak dışarı açılır |
+| `service.nodePort.port` | `30090` | NodePort portu (`enabled=true` iken) |
+| `resources.limits.cpu` | `1` | CPU limiti |
+| `resources.limits.memory` | `1Gi` | Bellek limiti |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret adı |
+| `mongo.dbUrl` | — | MongoDB bağlantı URL'i (base64) |
+| `mongo.dbName` | — | MongoDB veritabanı adı (base64) |
+| `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=1024 -Dlog4j.formatMsgNoLookups=true` | JVM seçenekleri |
+| `env.SERVER_TOMCAT_MAX_THREADS` | `256` | Tomcat maksimum thread |
+| `env.SERVER_TOMCAT_MIN_SPARE_THREADS` | `128` | Tomcat minimum boşta thread |
+| `env.SERVER_TOMCAT_ACCEPT_COUNT` | `256` | Tomcat accept kuyruğu |
+| `env.SERVER_TOMCAT_MAX_CONNECTIONS` | `2048` | Tomcat maksimum bağlantı |
+
+  </TabItem>
+  <TabItem value="integration" label="Integration">
+
+Integration, Quartz tabanlı görev akışı (task flow) modülüdür; MongoDB'ye bağlanır.
+
+```bash
+helm install integration oci://registry-1.docker.io/apinizercloud/apinizer-integration \
+  --version 0.1.1 \
+  -n <Integration-Namespace> --create-namespace \
+  --set image.tag="<APINIZER_IMAGE_TAG>" \
+  --set mongo.dbUrl="$MONGO_URL" \
+  --set mongo.dbName="$DB_NAME" \
+  --set service.name=integration \
+  --set resources.limits.cpu="1" \
+  --set resources.limits.memory="1Gi"
+```
+
+NodePort ile dışarı açmak için komuta ekleyin:
+
+```bash
+  --set service.nodePort.enabled=true \
+  --set service.nodePort.port=32090
+```
+
+**Ayarlanabilir değerler (`--set`):**
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `image.repository` | `apinizercloud/integration` | İmaj deposu |
+| `image.tag` | `<APINIZER_IMAGE_TAG>` | İmaj sürümü |
+| `image.pullPolicy` | `IfNotPresent` | İmaj çekme politikası |
+| `replicaCount` | `1` | Pod replika sayısı |
+| `service.name` | `integration` | Servis adı |
+| `service.port` | `8092` | Servis portu |
+| `service.nodePort.enabled` | `false` | `true` ise servis NodePort olarak dışarı açılır |
+| `service.nodePort.port` | `32090` | NodePort portu (`enabled=true` iken) |
+| `resources.limits.cpu` | `1` | CPU limiti |
+| `resources.limits.memory` | `1Gi` | Bellek limiti |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret adı |
+| `mongo.dbUrl` | — | MongoDB bağlantı URL'i (base64) |
+| `mongo.dbName` | — | MongoDB veritabanı adı (base64) |
+| `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true` | JVM seçenekleri |
+| `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profili |
+
+  </TabItem>
+  <TabItem value="api-portal" label="API Portal">
+
+API Portal, geliştiricilerin yayınlanmış API'lere eriştiği portaldır. MongoDB'ye **doğrudan bağlanmaz**; API Manager'ın Management API'si üzerinden beslenir.
+
+Portal credential'ları base64 kodlu verilir. `apiKey` ve `apiPortalId` değerleri, API Manager arayüzünde portal kaydı yapıldıktan sonra üretilir:
+
+```bash
+PORTAL_API_BASE_URL=$(echo -n "<APINIZER_APIMANAGER_ACCESS_URL>" | base64 -w 0)
+PORTAL_API_KEY=$(echo -n "<APINIZER_API_KEY>" | base64 -w 0)
+PORTAL_ID=$(echo -n "<API_PORTAL_ID>" | base64 -w 0)
+
+helm install portal oci://registry-1.docker.io/apinizercloud/apinizer-apiportal \
+  --version 0.1.1 \
+  -n <API-Portal-Namespace> --create-namespace \
+  --set image.tag="<APINIZER_IMAGE_TAG>" \
+  --set portalSecret.apinizerManagementApiBaseUrl="$PORTAL_API_BASE_URL" \
+  --set portalSecret.apiKey="$PORTAL_API_KEY" \
+  --set portalSecret.apiPortalId="$PORTAL_ID" \
+  --set service.name=apinizer-portal-service \
+  --set resources.limits.cpu="1" \
+  --set resources.limits.memory="1Gi"
+```
+
+NodePort ile dışarı açmak için komuta ekleyin:
+
+```bash
+  --set service.nodePort.enabled=true \
+  --set service.nodePort.port=31843
+```
+
+**Ayarlanabilir değerler (`--set`):**
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|------------|----------|
+| `image.repository` | `apinizercloud/apiportal` | İmaj deposu |
+| `image.tag` | `<APINIZER_IMAGE_TAG>` | İmaj sürümü |
+| `replicaCount` | `1` | Pod replika sayısı |
+| `service.name` | `apinizer-portal-service` | Servis adı |
+| `service.port` | `8080` | Servis portu |
+| `service.nodePort.enabled` | `false` | `true` ise servis NodePort olarak dışarı açılır |
+| `service.nodePort.port` | `31843` | NodePort portu (`enabled=true` iken) |
+| `resources.limits.cpu` | `1` | CPU limiti |
+| `resources.limits.memory` | `1Gi` | Bellek limiti |
+| `portalSecret.secretName` | `apinizer-portal` | Portal secret adı |
+| `portalSecret.apinizerManagementApiBaseUrl` | — | API Manager Management API adresi (base64) |
+| `portalSecret.apiKey` | — | Portal API anahtarı (base64) |
+| `portalSecret.apiPortalId` | — | Portal kimliği (base64) |
+| `env.JAVA_OPTS` | `-XX:MaxRAMPercentage=75.0` | JVM seçenekleri |
+| `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profili |
+
+  </TabItem>
+</Tabs>
+
+### Sürüm Yükseltme ve Geri Alma
+
+Helm ile kurulan modüllerin yeni sürüme yükseltilmesi (`helm upgrade --reuse-values --set image.tag=...`) ve geri alınması (`helm rollback`) için [Apinizer Sürüm Yükseltme → Helm](/tr/upgrade/apinizer-surum-yukseltme) sayfasına bakın.
+
+  </TabItem>
+</Tabs>

@@ -4,7 +4,7 @@
 
 Bu dokümantasyon, Apinizer platformunu kullanmak isteyen geliştiriciler, sistem yöneticileri ve iş analistleri için kapsamlı bir rehber sunar. Platformun tüm özelliklerini keşfetmek, API Proxy'lerinizi oluşturmak ve yönetmek, güvenlik politikalarınızı yapılandırmak ve sisteminizi optimize etmek için ihtiyacınız olan tüm bilgileri burada bulabilirsiniz.
 
-Dokümantasyon, farklı roller ve kullanım senaryolarına göre özelleştirilmiş içerikler içerir ve [Mintlify](https://mintlify.com) kullanılarak oluşturulmuştur. Hızlı başlangıç rehberlerinden derinlemesine teknik dokümantasyona kadar, Apinizer ile çalışırken ihtiyacınız olan her şeyi kapsar.
+Dokümantasyon, farklı roller ve kullanım senaryolarına göre özelleştirilmiş içerikler içerir ve [Docusaurus](https://docusaurus.io) kullanılarak oluşturulmuştur. Hızlı başlangıç rehberlerinden derinlemesine teknik dokümantasyona kadar, Apinizer ile çalışırken ihtiyacınız olan her şeyi kapsar.
 
 ## 🚀 Hızlı Başlangıç
 
@@ -43,8 +43,8 @@ Apinizer'ı denemek için [demo.apinizer.com](https://demo.apinizer.com/) adresi
 Dokümantasyonu yerel olarak görüntülemek ve düzenlemek için:
 
 ### Gereksinimler
-- Node.js (v18 veya üzeri)
-- npm veya yarn
+- Node.js (v20 veya üzeri)
+- npm
 
 ### Kurulum
 
@@ -54,14 +54,15 @@ git clone https://github.com/apinizer/docs.git
 cd docs
 ```
 
-2. Mintlify CLI'yi global olarak yükleyin:
+2. Bağımlılıkları yükleyin:
 ```bash
-npm i -g mint
+npm install
 ```
 
 3. Yerel geliştirme sunucusunu başlatın:
 ```bash
-mint dev
+npm run start        # Türkçe (port 3000)
+npm run start:en     # İngilizce
 ```
 
 4. Tarayıcınızda `http://localhost:3000` adresini açın
@@ -69,7 +70,8 @@ mint dev
 ### Dokümantasyon Düzenleme
 
 - Dokümantasyon dosyaları `.mdx` formatındadır
-- Ana konfigürasyon dosyası `docs.json` içindedir
+- Ana konfigürasyon `docusaurus.config.ts`; navigasyon `sidebars-tr.ts` / `sidebars-en.ts` / `sidebars-api-reference.ts` dosyalarındadır
+- Üretim derlemesi: `npm run build`
 - Değişiklikler otomatik olarak tarayıcıda yenilenir
 
 ## 📝 İçerik Katkısı

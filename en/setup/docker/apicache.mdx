@@ -1,0 +1,198 @@
+---
+title: "Cache (Hazelcast) — Docker"
+description: "Run the Apinizer Cache (Hazelcast data grid) as a Docker container — single-node or as a multi-node cluster."
+---
+
+This guide walks through running the Apinizer **Cache** (the Hazelcast data grid that backs quotas, OIDC sessions, circuit-breaker state and client-flow banners) as a Docker container. The Cache writes durable counter snapshots to MongoDB via Hazelcast MapStore and serves reads/writes to the Worker on a Spring Boot HTTP port.
+
+:::info
+
+Standalone mode is **auto-detected**: when the container does not have a Kubernetes service-account namespace file, the Cache switches Hazelcast discovery from the Kubernetes plug-in to TCP/IP.
+
+:::
+
+## Requirements
+
+- A Linux x86-64 host with Docker Engine 24+
+- A reachable Apinizer Manager-managed MongoDB instance
+- Free TCP ports on the host:
+  - `5701/tcp` — Hazelcast wire protocol (member-to-member and Worker → Cache)
+  - `8090/tcp` — Spring Boot HTTP (Worker → Cache REST)
+- For multi-node clusters: bidirectional reachability between Cache nodes on `5701/tcp`
+
+## 1. Pull the image
+
+```bash
+VERSION=2026.04.5
+docker pull apinizercloud/cache:${VERSION}
+```
+
+## 2. Configure
+
+Required:
+
+| Variable | Description |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+| `SPRING_DATA_MONGODB_DATABASE` | MongoDB database (same as Manager/Worker) |
+| `CACHE_QUOTA_TIMEZONE` | Quota window timezone offset (e.g. `+03:00`). **Must match** Worker and Manager. |
+
+Recommended:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HAZELCAST_CLUSTER_NAME` | `apnz-hz-cluster` | Logical cluster name. Override only if you run multiple independent Apinizer installs on the same LAN. **Mismatch with Worker → silent split-brain.** |
+| `APINIZER_CACHE_CLUSTER_MEMBERS` | empty | Comma-separated peer list for multi-node TCP/IP discovery |
+| `SERVER_PORT` | `8090` | Spring Boot HTTP port |
+
+## 3. Single-node Cache
+
+```bash
+docker run -d \
+  --name apinizer-cache \
+  -p 5701:5701 \
+  -p 8090:8090 \
+  --memory=4g \
+  -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+  -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+  -e CACHE_QUOTA_TIMEZONE='+03:00' \
+  -v apinizer-cache-logs:/app/logs \
+  --restart unless-stopped \
+  apinizercloud/cache:${VERSION}
+```
+
+Expected boot log:
+
+```
+Cache running in STANDALONE mode (cluster: apnz-hz-cluster)
+Standalone Hazelcast cluster members: 127.0.0.1
+Members {size:1, ver:1} [ Member [127.0.0.1]:5701 - ... ]
+```
+
+## 4. Multi-node Cache cluster
+
+Each node needs the **same** peer list and **the same cluster name**.
+
+### Compose (single-host, three replicas — for testing)
+
+```yaml
+services:
+  cache-1:
+    image: apinizercloud/cache:2026.04.5
+    container_name: apinizer-cache-1
+    networks:
+      apinizer:
+        ipv4_address: 172.30.0.11
+    environment: &cache-env
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      CACHE_QUOTA_TIMEZONE: "+03:00"
+      HAZELCAST_CLUSTER_NAME: apnz-hz-cluster
+      APINIZER_CACHE_CLUSTER_MEMBERS: 172.30.0.11,172.30.0.12,172.30.0.13
+    env_file: [./secrets/cache.env]
+    mem_limit: 4g
+    restart: unless-stopped
+
+  cache-2:
+    image: apinizercloud/cache:2026.04.5
+    container_name: apinizer-cache-2
+    networks:
+      apinizer:
+        ipv4_address: 172.30.0.12
+    environment: *cache-env
+    env_file: [./secrets/cache.env]
+    mem_limit: 4g
+    restart: unless-stopped
+
+  cache-3:
+    image: apinizercloud/cache:2026.04.5
+    container_name: apinizer-cache-3
+    networks:
+      apinizer:
+        ipv4_address: 172.30.0.13
+    environment: *cache-env
+    env_file: [./secrets/cache.env]
+    mem_limit: 4g
+    restart: unless-stopped
+
+networks:
+  apinizer:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+```
+
+### Multi-host
+
+On each host, set `APINIZER_CACHE_CLUSTER_MEMBERS` to the **same** comma-separated list of host IPs.
+
+:::tip
+
+TCP/IP discovery is **symmetric** — if host B does not list host A, B will not accept A as a member even though A reaches B. Distribute the same peer list to every node.
+
+:::
+
+## 5. Verify
+
+REST health:
+
+```bash
+curl -fsS http://127.0.0.1:8090/management/health
+```
+
+Hazelcast members:
+
+```bash
+docker logs apinizer-cache | grep -E 'Members \{'
+```
+
+Expected on a 3-node cluster:
+
+```
+Members {size:3, ver:3} [
+    Member [172.30.0.11]:5701 - ...
+    Member [172.30.0.12]:5701 - ...
+    Member [172.30.0.13]:5701 - ...
+]
+```
+
+If only one member is listed, check firewall rules on `5701/tcp` and that every node lists the same peers.
+
+## 6. Wire Workers to the Cache
+
+Each Worker must:
+
+- Use the **same** Hazelcast cluster name
+- Reach **every** Cache node on `5701/tcp`
+- See the same MongoDB database
+
+## 7. Operations
+
+| Action | Command |
+| --- | --- |
+| Status | `docker ps --filter name=apinizer-cache` |
+| Logs | `docker logs -f apinizer-cache` |
+| Restart | `docker restart apinizer-cache` |
+| Stop (drain) | `docker stop -t 30 apinizer-cache` |
+
+## 8. Resources
+
+| Workload | `mem_limit` |
+| --- | --- |
+| Single tenant, low traffic | 2 GB |
+| Production (1 Worker, ≤1 krps) | 4 GB |
+| Production cluster (3+ Workers) | 4–6 GB per node |
+
+Do not run the Cache with less than 2 GB of `mem_limit` in production.
+
+## Troubleshooting
+
+### `Members {size:1}` on every node even though the peer list is correct
+
+- Check `HAZELCAST_CLUSTER_NAME` matches on every node (case sensitive).
+- Verify `5701/tcp` is reachable both ways: `nc -zv <peer-ip> 5701` from each container.
+- On multi-host setups behind NAT (cloud), TCP/IP discovery requires routable, symmetric addresses.
+
+### Quotas reset unexpectedly
+
+The `CACHE_QUOTA_TIMEZONE` value differs from the Worker / Manager timezone. They must all agree.
