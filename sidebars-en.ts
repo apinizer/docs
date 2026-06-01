@@ -596,7 +596,8 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/login-log-connector-configuration",
         "admin/system-settings/license-management",
         "admin/system-settings/error-messages",
-        "admin/system-settings/ip-geolocation-setting"
+        "admin/system-settings/ip-geolocation-setting",
+        "admin/system-settings/token-management-settings"
       ]
     },
     {
