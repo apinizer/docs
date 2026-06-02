@@ -407,6 +407,7 @@ const sidebars: SidebarsConfig = {
           "items": [
             "develop/policies/token-service/overview",
             "develop/policies/token-service/token-acquisition-methods",
+            "develop/policies/token-service/token-introspection-revocation-discovery",
             "develop/policies/token-service/manual-token-generation-and-validation",
             "develop/policies/token-service/token-faq"
           ]

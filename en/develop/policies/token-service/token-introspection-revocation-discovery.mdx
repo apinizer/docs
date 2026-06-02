@@ -1,0 +1,144 @@
+---
+title: "Token Introspection, Revocation and Discovery"
+description: "You can inspect whether a token is still active, revoke tokens you have issued, and let clients discover the token endpoints and public keys through standards-based endpoints."
+---
+
+In addition to issuing tokens, Apinizer exposes standards-based endpoints for inspecting, revoking and discovering tokens. These endpoints are available under both management modes: the **"Manage From This Policy"** prefix `/auth` and the **"Manage From ACL"** prefix `/credential`.
+
+:::info[Where these endpoints run: API Gateway, not API Manager]
+
+Apinizer runs on two separate planes, and the token endpoints belong to the **API Gateway**:
+
+- **API Manager (control plane).** The administrative component where all configuration is made — API proxies, credentials, policies, settings. The Management API and APIops endpoints run here. The Manager is **not exposed to the outside world**; only administrators use it, to apply configuration changes. It is off the request hot path.
+- **API Gateway (data plane).** The high-performance runtime that processes every API request. The **token endpoints run here**, not on the Manager. They are **open to client access**: a client calls them to obtain a token and then uses that token to reach the proxied APIs. Because the Gateway carries production traffic, it is typically **placed behind a load balancer** and scaled horizontally.
+
+In short: configuration changes go to the Manager (APIops); token acquisition and API access go to the Gateway (token API). The two are deliberately separated — the Manager stays private and administrative, while the token API is reachable by clients.
+
+:::
+
+## Token Introspection
+
+The introspection endpoint lets a client ask the gateway whether a token is still valid and, if so, returns information about it. It follows RFC 7662.
+
+| Mode | Endpoint |
+|------|----------|
+| Manage From This Policy | `https://yourApinizerAddress/auth/introspect` |
+| Manage From ACL | `https://yourApinizerAddress/credential/introspect` |
+
+The request is sent with the `POST` method and the `application/x-www-form-urlencoded` content type. The caller authenticates the same way as on the token endpoint: in the policy-managed mode with the application key and secret, in the ACL mode with the credential's client identifier and secret.
+
+| Parameter | Description |
+|-----------|-------------|
+| `token` | The token value to inspect. Required. |
+| `token_type_hint` | Optional hint about which kind of token was sent: `access_token` or `refresh_token`. |
+
+A valid, active token returns `active: true` together with its details. An unknown, expired, tampered or empty token returns only `active: false`, with no further detail.
+
+```json
+{
+  "active": true,
+  "scope": "read write",
+  "client_id": "your-client",
+  "username": "user1",
+  "token_type": "Bearer",
+  "iat": 1780404201,
+  "exp": 1780407801,
+  "aud": "your-application-key"
+}
+```
+
+:::note
+
+A caller can only inspect tokens that belong to it; a token issued for another application or credential is always reported as `active: false`, so token details are never leaked across clients.
+
+:::
+
+:::tip
+
+A refresh token is not a usable access token, so a refresh JWT is reported as `active: false` on introspection — matching how the gateway rejects it during request-time validation. Opaque refresh tokens can still be inspected with `token_type_hint=refresh_token`.
+
+:::
+
+## Token Revocation
+
+The revocation endpoint lets a client invalidate a token it no longer needs. It follows RFC 7009.
+
+| Mode | Endpoint |
+|------|----------|
+| Manage From This Policy | `https://yourApinizerAddress/auth/revoke` |
+| Manage From ACL | `https://yourApinizerAddress/credential/revoke` |
+
+The request is sent with the `POST` method and the `application/x-www-form-urlencoded` content type, with the same caller authentication as the introspection endpoint.
+
+| Parameter | Description |
+|-----------|-------------|
+| `token` | The token value to revoke. Required. |
+| `token_type_hint` | Optional hint: `access_token` or `refresh_token`. |
+
+A successful request returns an empty response with HTTP 200. Per the standard, an unknown token or a token belonging to another client also returns HTTP 200, so no information is leaked about which tokens exist.
+
+How revocation behaves depends on the token type:
+
+- For OAuth2 (opaque) tokens, the stored token is deleted. Because the access and refresh values are kept together, revoking either one invalidates both immediately.
+- For JWT tokens, revocation applies to the refresh token: a revoked refresh token can no longer be exchanged for a new token. Since JWT access tokens are validated offline, they remain valid until their own short expiry. When immediate, per-token revocation is required, prefer OAuth2 (opaque) tokens.
+
+:::warning
+
+If the token store is temporarily unavailable, the revocation endpoint returns HTTP 503 instead of a false success, so the client knows the token was not revoked and can retry.
+
+:::
+
+## Discovery Metadata
+
+The discovery endpoint publishes the addresses of the token-related endpoints so that external clients can configure themselves automatically. It follows RFC 8414.
+
+| Mode | Endpoint |
+|------|----------|
+| Manage From This Policy | `https://yourApinizerAddress/auth/.well-known/oauth-authorization-server` |
+| Manage From ACL | `https://yourApinizerAddress/credential/.well-known/oauth-authorization-server` |
+
+This endpoint is public and is reached with the `GET` method; it requires no authentication. It returns the token, introspection, revocation and public-key addresses, the JWT issuance addresses, and the supported grant types and client authentication methods.
+
+```json
+{
+  "issuer": "https://yourApinizerAddress/auth",
+  "token_endpoint": "https://yourApinizerAddress/auth/token",
+  "introspection_endpoint": "https://yourApinizerAddress/auth/introspect",
+  "revocation_endpoint": "https://yourApinizerAddress/auth/revoke",
+  "jwks_uri": "https://yourApinizerAddress/auth/.well-known/jwks.json",
+  "grant_types_supported": ["client_credentials", "password", "refresh_token"],
+  "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"]
+}
+```
+
+:::info
+
+When Apinizer runs behind a load balancer or ingress that terminates TLS, the advertised addresses are derived from the forwarded protocol and host headers, so make sure those headers are passed through. This keeps the published addresses pointing at the external address clients actually use.
+
+:::
+
+## Public Keys
+
+The public-key endpoint publishes the public part of the signing key, so that external systems can verify the signature of Apinizer-issued JWT tokens offline, without calling Apinizer for each request.
+
+| Mode | Endpoint |
+|------|----------|
+| Manage From This Policy | `https://yourApinizerAddress/auth/.well-known/jwks.json` |
+| Manage From ACL | `https://yourApinizerAddress/credential/.well-known/jwks.json` |
+
+This endpoint is public and is reached with the `GET` method. Only the public part of the key is published; the private key is never exposed. The key identifier in the response matches the key identifier carried in the header of the issued JWT tokens, so verifiers can select the correct key.
+
+:::note
+
+This endpoint is meaningful for JWT tokens only. OAuth2 (opaque) tokens have no public key; use the introspection endpoint to check them.
+
+:::
+
+## Related Pages
+
+- [Token Acquisition Methods](/en/develop/policies/token-service/token-acquisition-methods)
+- [Token Management Settings](/en/admin/system-settings/token-management-settings)
+- [Token Service Frequently Asked Questions](/en/develop/policies/token-service/token-faq)
+- [Gateway Token Endpoints — Introspection](/api-reference/token-service/introspection)
+- [Gateway Token Endpoints — Revocation](/api-reference/token-service/revocation)
+- [Gateway Token Endpoints — Discovery & JWKS](/api-reference/token-service/discovery)

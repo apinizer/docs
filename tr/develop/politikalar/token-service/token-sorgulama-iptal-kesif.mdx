@@ -1,0 +1,144 @@
+---
+title: "Token Sorgulama, İptali ve Keşif"
+description: "Verilen bir token'ın halen geçerli olup olmadığını sorgulayabilir, çıkardığınız token'ları iptal edebilir ve istemcilere standartlara dayalı keşif uç noktaları ve genel anahtarlar sunabilirsiniz."
+---
+
+Token üretiminin yanı sıra, Apinizer standartlara dayalı uç noktalar sunarak token'ların sorgulanması, iptal edilmesi ve bulunabilirliğini sağlar. Bu uç noktalar her iki yönetim modunda da kullanılabilir: **"Bu Poliçe'den Yönet"** (`/auth` öneki) ve **"ACL'den Yönet"** (`/credential` öneki).
+
+:::info[Bu uç noktalar nerede çalışır: API Manager'da değil, API Gateway'de]
+
+Apinizer iki ayrı düzlemde çalışır ve token uç noktaları **API Gateway**'e aittir:
+
+- **API Manager (yönetim/kontrol düzlemi).** Tüm yapılandırmanın yapıldığı yönetimsel bileşen — API proxy'leri, kimlik bilgileri, politikalar, ayarlar. Management API ve APIops uç noktaları burada çalışır. Manager **dışarıya açılmaz**; yalnızca yöneticiler yapılandırma değişikliği için kullanır ve istek sıcak yolunda (hot path) değildir.
+- **API Gateway (veri düzlemi).** Her API isteğini işleyen yüksek performanslı çalışma zamanı. **Token uç noktaları burada çalışır**, Manager'da değil. **İstemci erişimine açıktır**: istemci token almak için bunları çağırır, sonra o token ile proxy'lenen API'lere erişir. Gateway üretim trafiğini taşıdığından genellikle **bir yük dengeleyici (load balancer) arkasına** konur ve yatay ölçeklenir.
+
+Kısaca: yapılandırma değişiklikleri Manager'a (APIops) gider; token alma ve API erişimi Gateway'e (token API) gider. İkisi bilinçli olarak ayrılmıştır — Manager özel ve yönetimsel kalır, token API ise istemciler tarafından erişilebilir.
+
+:::
+
+## Token Sorgulama
+
+Sorgulama uç noktası, bir istemcinin bir token'ın helen geçerli olup olmadığını öğrenmesini sağlar ve geçerliyse token hakkında bilgi döndürür. RFC 7662'yi izler.
+
+| Mod | Uç Nokta |
+|-----|---------|
+| Bu Poliçe'den Yönet | `https://apinizerErişimAdresiniz/auth/introspect` |
+| ACL'den Yönet | `https://apinizerErişimAdresiniz/credential/introspect` |
+
+İstek `POST` metodu ile `application/x-www-form-urlencoded` içerik türü kullanılarak gönderilir. Çağrı yapan taraf, token uç noktasıyla aynı şekilde kimlik doğrulaması yapar: poliçe yönetim modunda uygulama anahtarı ve gizli anahtarı ile, ACL modunda kimlik bilgisinin istemci tanımlayıcısı ve gizli anahtarı ile.
+
+| Parametre | Açıklama |
+|-----------|----------|
+| `token` | Sorgulanacak token değeri. Zorunlu. |
+| `token_type_hint` | Gönderilen token türü hakkında isteğe bağlı ipucu: `access_token` veya `refresh_token`. |
+
+Geçerli ve aktif bir token `active: true` ile birlikte ayrıntılarını döndürür. Bilinmeyen, süresi dolmuş, kurcalanmış veya boş bir token yalnızca `active: false` döndürür, başka bilgi vermez.
+
+```json
+{
+  "active": true,
+  "scope": "read write",
+  "client_id": "your-client",
+  "username": "user1",
+  "token_type": "Bearer",
+  "iat": 1780404201,
+  "exp": 1780407801,
+  "aud": "your-application-key"
+}
+```
+
+:::note
+
+Bir çağrı yapan taraf yalnızca kendisine ait olan token'ları sorgulayabilir; başka bir uygulama veya kimlik bilgisi için çıkarılan bir token her zaman `active: false` olarak bildirilir, böylece token ayrıntıları istemciler arasında sızıntıya uğramaz.
+
+:::
+
+:::tip
+
+Yenileme token'ı kullanılabilir bir erişim token'ı değildir, bu nedenle bir JWT yenileme token'ı sorgulamada `active: false` olarak bildirilir. Bu, ağ geçidinin istek zamanı doğrulaması sırasında reddetmesinin tutarlı olmasını sağlar. Opak yenileme token'ları yine de `token_type_hint=refresh_token` ile sorgulanabilir.
+
+:::
+
+## Token İptali
+
+İptal uç noktası, bir istemcinin artık gerekli olmayan bir token'ı geçersiz kılmasını sağlar. RFC 7009'u izler.
+
+| Mod | Uç Nokta |
+|-----|---------|
+| Bu Poliçe'den Yönet | `https://apinizerErişimAdresiniz/auth/revoke` |
+| ACL'den Yönet | `https://apinizerErişimAdresiniz/credential/revoke` |
+
+İstek `POST` metodu ile `application/x-www-form-urlencoded` içerik türü kullanılarak gönderilir ve sorgulama uç noktasıyla aynı çağrı yapan kimlik doğrulamasını kullanır.
+
+| Parametre | Açıklama |
+|-----------|----------|
+| `token` | İptal edilecek token değeri. Zorunlu. |
+| `token_type_hint` | İsteğe bağlı ipucu: `access_token` veya `refresh_token`. |
+
+Başarılı bir istek HTTP 200 ile boş yanıt döndürür. Standarda göre, bilinmeyen bir token veya başka bir istemciye ait bir token da HTTP 200 döndürür, böylece hangi token'ların var olduğu hakkında bilgi sızıntısı önlenir.
+
+İptal davranışı token türüne bağlıdır:
+
+- OAuth2 (opak) token'ları için saklanan token silinir. Erişim ve yenileme değerleri birlikte tutulduğundan, ikisinden birinin iptal edilmesi her ikisini de hemen geçersiz kılar.
+- JWT token'ları için iptal yenileme token'ına uygulanır: iptal edilmiş bir yenileme token'ı yeni bir token için değiştirilemez. JWT erişim token'ları çevrimdışı olarak doğrulanan için, kendi kısa sürelerine kadar geçerli kalır. Anında, token başına iptal gerekiyorsa OAuth2 (opak) token'larını tercih edin.
+
+:::warning
+
+Token deposu geçici olarak kullanılamıyorsa, iptal uç noktası yanlış bir başarı yerine HTTP 503 döndürür, böylece istemci token'ın iptal edilmediğini bilir ve yeniden deneyebilir.
+
+:::
+
+## Keşif Metadata
+
+Keşif uç noktası, token ile ilgili uç noktaların adreslerini yayınlayarak dış istemcilerin kendilerini otomatik olarak yapılandırmasını sağlar. RFC 8414'ü izler.
+
+| Mod | Uç Nokta |
+|-----|---------|
+| Bu Poliçe'den Yönet | `https://apinizerErişimAdresiniz/auth/.well-known/oauth-authorization-server` |
+| ACL'den Yönet | `https://apinizerErişimAdresiniz/credential/.well-known/oauth-authorization-server` |
+
+Bu uç nokta herkese açıktır ve `GET` metodu ile erişilir; kimlik doğrulama gerekmez. Token, sorgulama, iptal ve genel anahtar adreslerini, JWT çıkarma adreslerini, desteklenen izin türlerini ve istemci kimlik doğrulama yöntemlerini döndürür.
+
+```json
+{
+  "issuer": "https://apinizerErişimAdresiniz/auth",
+  "token_endpoint": "https://apinizerErişimAdresiniz/auth/token",
+  "introspection_endpoint": "https://apinizerErişimAdresiniz/auth/introspect",
+  "revocation_endpoint": "https://apinizerErişimAdresiniz/auth/revoke",
+  "jwks_uri": "https://apinizerErişimAdresiniz/auth/.well-known/jwks.json",
+  "grant_types_supported": ["client_credentials", "password", "refresh_token"],
+  "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"]
+}
+```
+
+:::info
+
+Apinizer bir yük dengeleyici veya TLS'yi sonlandıran giriş sunucusunun arkasında çalıştığında, yayınlanan adresler iletilen protokol ve ana bilgisayar başlıklarından türetilir, bu nedenle bu başlıkların geçmesini sağlayın. Bu, yayınlanan adreslerin istemcilerin gerçekte kullandığı dış adresi göstermesini tutar.
+
+:::
+
+## Genel Anahtarlar
+
+Genel anahtar uç noktası, imza anahtarının genel bölümünü yayınlayarak, dış sistemlerin Apinizer tarafından verilen JWT token'larının imzasını her istek için Apinizer'ı aramadan çevrimdışı olarak doğrulamasını sağlar.
+
+| Mod | Uç Nokta |
+|-----|---------|
+| Bu Poliçe'den Yönet | `https://apinizerErişimAdresiniz/auth/.well-known/jwks.json` |
+| ACL'den Yönet | `https://apinizerErişimAdresiniz/credential/.well-known/jwks.json` |
+
+Bu uç nokta herkese açıktır ve `GET` metodu ile erişilir. Yalnızca anahtarın genel bölümü yayınlanır; özel anahtar hiçbir zaman açıklanmaz. Yanıttaki anahtar tanımlayıcısı, verilen JWT token'larının başlığında taşınan anahtar tanımlayıcısı ile eşleşir, böylece doğrulayıcılar doğru anahtarı seçebilir.
+
+:::note
+
+Bu uç nokta yalnızca JWT token'ları için anlamlıdır. OAuth2 (opak) token'larının genel anahtarı yoktur; bunları kontrol etmek için sorgulama uç noktasını kullanın.
+
+:::
+
+## İlgili Sayfalar
+
+- [Token Alma Yöntemleri](/tr/develop/politikalar/token-service/token-alma-yontemleri)
+- [Token Yönetim Ayarları](/tr/admin/system-settings/token-yonetim-ayarlari)
+- [Token Servisi Sıkça Sorulan Sorular](/tr/develop/politikalar/token-service/token-sss)
+- [Gateway Token Uç Noktaları — Introspection](/api-reference/token-service/introspection)
+- [Gateway Token Uç Noktaları — Revocation](/api-reference/token-service/revocation)
+- [Gateway Token Uç Noktaları — Discovery & JWKS](/api-reference/token-service/discovery)

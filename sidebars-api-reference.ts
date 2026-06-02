@@ -625,6 +625,20 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Gateway Token Endpoints (OAuth2 / JWT)",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "token-service/overview",
+            "token-service/token-endpoint",
+            "token-service/jwt-endpoint",
+            "token-service/introspection",
+            "token-service/revocation",
+            "token-service/discovery"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Appendix",
           "collapsed": true,
           "collapsible": true,
