@@ -1,0 +1,161 @@
+---
+title: "Token Introspection"
+description: "Inspect whether a token is still active and retrieve its details. Follows RFC 7662. Supports both OAuth2 opaque and JWT tokens."
+---
+
+## Overview
+
+The introspection endpoint allows a client to ask the gateway whether a token is still valid and, if so, returns information about it. This is useful for:
+
+- Checking if a token has expired
+- Verifying the token belongs to the client making the request
+- Retrieving token claims (scope, issued time, etc.) without parsing a JWT
+
+## Endpoint
+
+| Mode | Method | Endpoint |
+|------|--------|----------|
+| Manage From This Policy | POST | `https://yourApinizerAddress/auth/introspect` |
+| Manage From ACL | POST | `https://yourApinizerAddress/credential/introspect` |
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Content-Type | application/x-www-form-urlencoded | Yes |
+| Authorization | Basic (base64-encoded credentials) | Yes |
+
+### Authentication
+
+Introspection requires HTTP Basic authentication, using the same credentials as the token endpoint:
+
+```
+Authorization: Basic base64(client_id:client_secret)
+```
+
+- **In "Manage From This Policy" mode**: Use the application key and secret.
+- **In "Manage From ACL" mode**: Use the credential's client ID and secret.
+
+### Request Body
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| token | string | Yes | The token value to inspect (can be opaque or JWT) |
+| token_type_hint | string | No | Optional hint: `access_token` or `refresh_token` |
+
+### Example Request
+
+```bash
+curl -X POST \
+  "https://yourApinizerAddress/auth/introspect" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -H "Authorization: Basic $(echo -n 'your-app-key:your-app-secret' | base64)" \
+  -d "token=the_token_value&token_type_hint=access_token"
+```
+
+## Response
+
+### Active Token (200 OK)
+
+If the token is valid and active, the response includes token details:
+
+```json
+{
+  "active": true,
+  "scope": "read write",
+  "client_id": "your-app-key",
+  "username": "user1",
+  "token_type": "Bearer",
+  "iat": 1780404201,
+  "exp": 1780407801,
+  "aud": "your-app-key"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| active | boolean | Always `true` for an active token |
+| scope | string | Space-separated list of scopes assigned to the token |
+| client_id | string | The client (application key or credential) that issued the token |
+| username | string | The username, if the token was issued with password grant; otherwise absent |
+| token_type | string | The type of token (usually `Bearer`) |
+| iat | integer | Issued at time (unix timestamp) |
+| exp | integer | Expiration time (unix timestamp) |
+| aud | string | Audience (usually the application key or credential ID) |
+
+### Inactive or Expired Token (200 OK)
+
+If the token is unknown, expired, revoked, or tampered with, the response is:
+
+```json
+{
+  "active": false
+}
+```
+
+:::note
+
+To prevent leaking information about which tokens exist, introspection always returns HTTP 200 — even if the token was issued by a different client, the response is simply `\{\"active\": false\}`.
+
+:::
+
+:::warning
+
+A client can only inspect tokens that belong to it. A token issued for another application or credential is always reported as `\{\"active\": false\}`, even if that token is valid for its own issuer. This ensures token details are never leaked across clients.
+
+:::
+
+### JWT Refresh Tokens
+
+A JWT refresh token is not a usable access token. When introspected, a refresh JWT is reported as `\{\"active\": false\}` — matching how the gateway rejects it during request-time validation. Opaque refresh tokens, however, can still be introspected with `token_type_hint=refresh_token`.
+
+## Error Responses
+
+### 400 Bad Request — Missing or Malformed Parameters
+
+```json
+{
+  "error": "invalid_request",
+  "error_description": "The token parameter is required."
+}
+```
+
+Possible causes:
+
+- Missing `token` parameter
+- Malformed request body
+- Invalid `Content-Type` header
+
+### 401 Unauthorized — Authentication Failed
+
+```json
+{
+  "error": "invalid_client",
+  "error_description": "Authentication failed. Check your credentials."
+}
+```
+
+Possible causes:
+
+- Missing or invalid `Authorization` header
+- Incorrect client_id or client_secret
+- Basic auth decoding failed
+
+### 503 Service Unavailable
+
+```json
+{
+  "error": "server_error",
+  "error_description": "The token store is temporarily unavailable."
+}
+```
+
+This can occur if the backend token storage is unreachable. Retry the request.
+
+## Related Pages
+
+- [Token Issuance Endpoints](/api-reference/token-service/token-endpoint) — Obtain tokens
+- [Token Revocation](/api-reference/token-service/revocation) — Revoke tokens
+- [Discovery & JWKS](/api-reference/token-service/discovery) — Discover endpoints and public keys

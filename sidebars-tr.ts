@@ -404,6 +404,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "develop/politikalar/token-service/genel-bakis",
             "develop/politikalar/token-service/token-alma-yontemleri",
+            "develop/politikalar/token-service/token-sorgulama-iptal-kesif",
+            "develop/politikalar/token-service/manuel-token-uretimi-ve-validasyonu",
             "develop/politikalar/token-service/token-sss"
           ]
         }
@@ -594,7 +596,8 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/login-log-konnektor-yapilandirmasi",
         "admin/system-settings/lisans-yonetimi",
         "admin/system-settings/hata-mesajlari",
-        "admin/system-settings/ip-geolocation-ayari"
+        "admin/system-settings/ip-geolocation-ayari",
+        "admin/system-settings/token-yonetim-ayarlari"
       ]
     },
     {

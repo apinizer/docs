@@ -406,7 +406,10 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "develop/policies/token-service/overview",
-            "develop/policies/token-service/token-acquisition-methods"
+            "develop/policies/token-service/token-acquisition-methods",
+            "develop/policies/token-service/token-introspection-revocation-discovery",
+            "develop/policies/token-service/manual-token-generation-and-validation",
+            "develop/policies/token-service/token-faq"
           ]
         }
       ]
@@ -596,7 +599,8 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/login-log-connector-configuration",
         "admin/system-settings/license-management",
         "admin/system-settings/error-messages",
-        "admin/system-settings/ip-geolocation-setting"
+        "admin/system-settings/ip-geolocation-setting",
+        "admin/system-settings/token-management-settings"
       ]
     },
     {
