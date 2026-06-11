@@ -2637,18 +2637,30 @@ If Helm is not installed, see the [official Helm installation document](https://
 
 :::
 
-### Common Preparation
+### Common Preparation — Namespace and Secret
 
-The modules that connect to MongoDB (API Manager, Worker, Cache, Integration) expect the connection details **base64**-encoded:
+:::warning The Secret is not created by Helm
+
+As of version `1.0.0` the charts **do not** create the Secret; they only reference it by **name**. Therefore the target **namespace** and **Secret** must already exist in the cluster before `helm install`.
+
+:::
+
+The modules that connect to MongoDB (API Manager, Worker, Cache, Integration) use a shared Secret holding the `dbUrl` and `dbName` keys. `kubectl create secret` base64-encodes the values automatically — pass plain text (do not encode manually):
 
 ```bash
-MONGO_URL=$(echo -n "mongodb://<MONGO_USERNAME>:<MONGO_PASSWORD>@<MONGO_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset" | base64 -w 0)
-DB_NAME=$(echo -n "<MONGO_DBNAME>" | base64 -w 0)
+kubectl create namespace <NAMESPACE>
+
+kubectl create secret generic mongo-db-credentials \
+  -n <NAMESPACE> \
+  --from-literal=dbUrl="mongodb://<MONGO_USERNAME>:<MONGO_PASSWORD>@<MONGO_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset" \
+  --from-literal=dbName="<MONGO_DBNAME>"
 ```
 
 :::note
 
-`base64 -w 0` is for Linux/Git Bash. On PowerShell: `$MONGO_URL = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("mongodb://..."))`
+* The Secret name (`mongo-db-credentials`) must match the module's `mongo.secretName`; the key names `dbUrl` and `dbName` are fixed.
+* The Secret must live in the **same namespace** as the module you install. Modules sharing a namespace (API Manager, Worker, Cache, Integration) need the Secret created only once.
+* API Portal does not connect to MongoDB; it uses its own Secret (see the **API Portal** tab).
 
 :::
 
@@ -2678,12 +2690,11 @@ API Manager provides the management UI and REST API; it connects to MongoDB.
 
 ```bash
 helm install apimanager oci://registry-1.docker.io/apinizercloud/apinizer-apimanager \
-  --version 0.2.0 \
-  -n <API-Manager-Namespace> --create-namespace \
+  --version 1.0.0 \
+  -n <API-Manager-Namespace> \
   --set apinizer.kubernetesManagementEnabled=true \
   --set image.tag="<APINIZER_IMAGE_TAG>" \
-  --set mongo.dbUrl="$MONGO_URL" \
-  --set mongo.dbName="$DB_NAME" \
+  --set mongo.secretName=mongo-db-credentials \
   --set service.name=apimanager \
   --set resources.limits.cpu="1" \
   --set resources.limits.memory="3Gi"
@@ -2720,12 +2731,57 @@ kubectl -n <API-Manager-Namespace> get pods,svc
 | `service.nodePort.port` | `32080` | NodePort port (when `enabled=true`) |
 | `resources.limits.cpu` | `1` | CPU limit |
 | `resources.limits.memory` | `3Gi` | Memory limit |
-| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret name |
-| `mongo.dbUrl` | — | MongoDB connection URL (base64) |
-| `mongo.dbName` | — | MongoDB database name (base64) |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB Secret name (created outside Helm, beforehand) |
 | `env.JAVA_OPTS` | `-XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true` | JVM options |
 | `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profile |
 | `env.WORKER_DEPLOYMENT_TIMEOUT` | `120` | Worker deployment timeout (s) |
+
+**Installation with `values.yaml`:**
+
+Instead of `--set`, you can install with the module's `values.yaml` file. This suits GitOps: keep `values.yaml` under version control (e.g. GitLab); when a parameter changes, apply the update by running `helm upgrade -f ...` with the same file.
+
+<Accordion title="apinizer-apimanager/values.yaml">
+
+```yaml
+apinizer:
+  kubernetesManagementEnabled: true
+
+image:
+  repository: apinizercloud/apimanager
+  tag: "<APINIZER_IMAGE_TAG>"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  nodePort:
+    enabled: false
+    port: 32080
+  name: apimanager
+  port: 8080
+
+resources:
+  limits:
+    cpu: "1"
+    memory: "3Gi"
+
+mongo:
+  secretName: mongo-db-credentials
+
+env:
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true"
+  SPRING_PROFILES_ACTIVE: "prod"
+  WORKER_DEPLOYMENT_TIMEOUT: "120"
+```
+
+</Accordion>
+
+```bash
+helm install apimanager oci://registry-1.docker.io/apinizercloud/apinizer-apimanager \
+  --version 1.0.0 \
+  -n <API-Manager-Namespace> \
+  -f apinizer-apimanager/values.yaml
+```
 
 #### Entering API Manager License Key
 
@@ -2771,11 +2827,10 @@ Worker is the runtime (data-plane) component that processes API traffic; it conn
 
 ```bash
 helm install worker oci://registry-1.docker.io/apinizercloud/apinizer-worker \
-  --version 0.2.0 \
-  -n <Worker-Namespace> --create-namespace \
+  --version 1.0.0 \
+  -n <Worker-Namespace> \
   --set image.tag="<APINIZER_IMAGE_TAG>" \
-  --set mongo.dbUrl="$MONGO_URL" \
-  --set mongo.dbName="$DB_NAME" \
+  --set mongo.secretName=mongo-db-credentials \
   --set service.name=worker-http-service \
   --set resources.limits.cpu="4" \
   --set resources.limits.memory="4Gi"
@@ -2809,14 +2864,58 @@ kubectl -n <Worker-Namespace> logs -l app=worker --tail=100
 | `service.nodePort.port` | `30080` | NodePort port (when `enabled=true`) |
 | `resources.limits.cpu` | `4` | CPU limit |
 | `resources.limits.memory` | `4Gi` | Memory limit |
-| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret name |
-| `mongo.dbUrl` | — | MongoDB connection URL (base64) |
-| `mongo.dbName` | — | MongoDB database name (base64) |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB Secret name (created outside Helm, beforehand) |
 | `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true` | JVM options |
 | `env.tuneWorkerThreads` | `1024` | Worker thread count |
 | `env.tuneWorkerMaxThreads` | `4096` | Maximum worker thread count |
 | `env.tuneRoutingConnectionPoolMaxConnectionPerHost` | `1024` | Max connections per host |
 | `env.tuneRoutingConnectionPoolMaxConnectionTotal` | `4096` | Max total connections |
+
+**Installation with `values.yaml`:**
+
+Instead of `--set`, you can install with the module's `values.yaml` file. This suits GitOps: keep `values.yaml` under version control (e.g. GitLab); when a parameter changes, apply the update by running `helm upgrade -f ...` with the same file.
+
+<Accordion title="apinizer-worker/values.yaml">
+
+```yaml
+image:
+  repository: apinizercloud/worker
+  tag: "<APINIZER_IMAGE_TAG>"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  nodePort:
+    enabled: false
+    port: 30080
+  name: worker-http-service
+  port: 8091
+
+resources:
+  limits:
+    cpu: "4"
+    memory: "4Gi"
+
+mongo:
+  secretName: mongo-db-credentials
+
+env:
+  JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+  tuneWorkerThreads: "1024"
+  tuneWorkerMaxThreads: "4096"
+  tuneRoutingConnectionPoolMaxConnectionPerHost: "1024"
+  tuneRoutingConnectionPoolMaxConnectionTotal: "4096"
+```
+
+</Accordion>
+
+```bash
+helm install worker oci://registry-1.docker.io/apinizercloud/apinizer-worker \
+  --version 1.0.0 \
+  -n <Worker-Namespace> \
+  -f apinizer-worker/values.yaml
+```
 
   </TabItem>
   <TabItem value="cache" label="Cache">
@@ -2825,11 +2924,10 @@ Cache is a Hazelcast-based distributed cache cluster; it connects to MongoDB for
 
 ```bash
 helm install cache oci://registry-1.docker.io/apinizercloud/apinizer-cache \
-  --version 0.2.0 \
-  -n <Cache-Namespace> --create-namespace \
+  --version 1.0.0 \
+  -n <Cache-Namespace> \
   --set image.tag="<APINIZER_IMAGE_TAG>" \
-  --set mongo.dbUrl="$MONGO_URL" \
-  --set mongo.dbName="$DB_NAME" \
+  --set mongo.secretName=mongo-db-credentials \
   --set service.name=cache-http-service \
   --set resources.limits.cpu="1" \
   --set resources.limits.memory="1Gi"
@@ -2837,12 +2935,13 @@ helm install cache oci://registry-1.docker.io/apinizercloud/apinizer-cache \
 
 :::warning Installing in the same namespace as Worker
 
-If Cache is installed in the **same namespace** as Worker, add the following parameter to the installation command:
+If Cache is installed in the **same namespace** as Worker, add the following parameter to the installation command to avoid a ServiceAccount conflict:
 
 ```bash
-  --set serviceAccount.name=cache-serviceaccount \
-  --set mongo.secretName=cache-mongo-db-credentials
+  --set serviceAccount.name=cache-serviceaccount
 ```
+
+Since the Secret is no longer created by Helm in `1.0.0`, Cache and Worker can safely share the same `mongo-db-credentials` Secret; you do not need to use a separate Secret name.
 
 :::
 
@@ -2869,14 +2968,62 @@ kubectl -n <Cache-Namespace> get pods -l app=cache
 | `service.nodePort.port` | `30090` | NodePort port (when `enabled=true`) |
 | `resources.limits.cpu` | `1` | CPU limit |
 | `resources.limits.memory` | `1Gi` | Memory limit |
-| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret name |
-| `mongo.dbUrl` | — | MongoDB connection URL (base64) |
-| `mongo.dbName` | — | MongoDB database name (base64) |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB Secret name (created outside Helm, beforehand) |
 | `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=1024 -Dlog4j.formatMsgNoLookups=true` | JVM options |
 | `env.SERVER_TOMCAT_MAX_THREADS` | `256` | Tomcat max threads |
 | `env.SERVER_TOMCAT_MIN_SPARE_THREADS` | `128` | Tomcat min spare threads |
 | `env.SERVER_TOMCAT_ACCEPT_COUNT` | `256` | Tomcat accept queue |
 | `env.SERVER_TOMCAT_MAX_CONNECTIONS` | `2048` | Tomcat max connections |
+
+**Installation with `values.yaml`:**
+
+Instead of `--set`, you can install with the module's `values.yaml` file. This suits GitOps: keep `values.yaml` under version control (e.g. GitLab); when a parameter changes, apply the update by running `helm upgrade -f ...` with the same file.
+
+<Accordion title="apinizer-cache/values.yaml">
+
+```yaml
+image:
+  repository: apinizercloud/cache
+  tag: "<APINIZER_IMAGE_TAG>"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+serviceAccount:
+  create: true
+  name: worker-cache-serviceaccount
+
+service:
+  nodePort:
+    enabled: false
+    port: 30090
+  name: cache-http-service
+  port: 8090
+
+resources:
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+mongo:
+  secretName: mongo-db-credentials
+
+env:
+  JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=1024 -Dlog4j.formatMsgNoLookups=true"
+  SERVER_TOMCAT_MAX_THREADS: "256"
+  SERVER_TOMCAT_MIN_SPARE_THREADS: "128"
+  SERVER_TOMCAT_ACCEPT_COUNT: "256"
+  SERVER_TOMCAT_MAX_CONNECTIONS: "2048"
+```
+
+</Accordion>
+
+```bash
+helm install cache oci://registry-1.docker.io/apinizercloud/apinizer-cache \
+  --version 1.0.0 \
+  -n <Cache-Namespace> \
+  -f apinizer-cache/values.yaml
+```
 
   </TabItem>
   <TabItem value="integration" label="Integration">
@@ -2885,11 +3032,10 @@ Integration is a Quartz-based task flow module; it connects to MongoDB.
 
 ```bash
 helm install integration oci://registry-1.docker.io/apinizercloud/apinizer-integration \
-  --version 0.2.0 \
-  -n <Integration-Namespace> --create-namespace \
+  --version 1.0.0 \
+  -n <Integration-Namespace> \
   --set image.tag="<APINIZER_IMAGE_TAG>" \
-  --set mongo.dbUrl="$MONGO_URL" \
-  --set mongo.dbName="$DB_NAME" \
+  --set mongo.secretName=mongo-db-credentials \
   --set service.name=integration \
   --set resources.limits.cpu="1" \
   --set resources.limits.memory="1Gi"
@@ -2916,11 +3062,52 @@ To expose it via NodePort, add to the command:
 | `service.nodePort.port` | `32090` | NodePort port (when `enabled=true`) |
 | `resources.limits.cpu` | `1` | CPU limit |
 | `resources.limits.memory` | `1Gi` | Memory limit |
-| `mongo.secretName` | `mongo-db-credentials` | MongoDB secret name |
-| `mongo.dbUrl` | — | MongoDB connection URL (base64) |
-| `mongo.dbName` | — | MongoDB database name (base64) |
+| `mongo.secretName` | `mongo-db-credentials` | MongoDB Secret name (created outside Helm, beforehand) |
 | `env.JAVA_OPTS` | `-server -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true` | JVM options |
 | `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profile |
+
+**Installation with `values.yaml`:**
+
+Instead of `--set`, you can install with the module's `values.yaml` file. This suits GitOps: keep `values.yaml` under version control (e.g. GitLab); when a parameter changes, apply the update by running `helm upgrade -f ...` with the same file.
+
+<Accordion title="apinizer-integration/values.yaml">
+
+```yaml
+image:
+  repository: apinizercloud/integration
+  tag: "<APINIZER_IMAGE_TAG>"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  nodePort:
+    enabled: false
+    port: 32090
+  name: integration
+  port: 8092
+
+resources:
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+mongo:
+  secretName: mongo-db-credentials
+
+env:
+  JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dlog4j.formatMsgNoLookups=true"
+  SPRING_PROFILES_ACTIVE: "prod"
+```
+
+</Accordion>
+
+```bash
+helm install integration oci://registry-1.docker.io/apinizercloud/apinizer-integration \
+  --version 1.0.0 \
+  -n <Integration-Namespace> \
+  -f apinizer-integration/values.yaml
+```
 
   </TabItem>
   <TabItem value="api-portal" label="API Portal">
@@ -2928,20 +3115,24 @@ To expose it via NodePort, add to the command:
 API Portal is where developers access published APIs. It does **not** connect to MongoDB directly; it is fed through the API Manager Management API.
 
 
-Portal credentials are passed base64-encoded. The `apiKey` and `apiPortalId` values are generated after the portal is registered in the API Manager UI:
+API Portal uses its own Secret (`apinizer-portal`), which is also not created by Helm. Create the namespace and Secret before installation. The `apiKey` and `apiPortalId` values are generated after the portal is registered in the API Manager UI. `kubectl create secret` base64-encodes the values automatically — pass plain text:
 
 ```bash
-PORTAL_API_BASE_URL=$(echo -n "<APINIZER_APIMANAGER_ACCESS_URL>" | base64 -w 0)
-PORTAL_API_KEY=$(echo -n "<APINIZER_API_KEY>" | base64 -w 0)
-PORTAL_ID=$(echo -n "<API_PORTAL_ID>" | base64 -w 0)
+kubectl create namespace <API-Portal-Namespace>
 
+kubectl create secret generic apinizer-portal \
+  -n <API-Portal-Namespace> \
+  --from-literal=apinizerManagementApiBaseUrl="<APINIZER_APIMANAGER_ACCESS_URL>" \
+  --from-literal=apiKey="<APINIZER_API_KEY>" \
+  --from-literal=apiPortalId="<API_PORTAL_ID>"
+```
+
+```bash
 helm install portal oci://registry-1.docker.io/apinizercloud/apinizer-apiportal \
-  --version 0.2.0 \
-  -n <API-Portal-Namespace> --create-namespace \
+  --version 1.0.0 \
+  -n <API-Portal-Namespace> \
   --set image.tag="<APINIZER_IMAGE_TAG>" \
-  --set portalSecret.apinizerManagementApiBaseUrl="$PORTAL_API_BASE_URL" \
-  --set portalSecret.apiKey="$PORTAL_API_KEY" \
-  --set portalSecret.apiPortalId="$PORTAL_ID" \
+  --set portalSecret.secretName=apinizer-portal \
   --set service.name=apinizer-portal-service \
   --set resources.limits.cpu="1" \
   --set resources.limits.memory="1Gi"
@@ -2967,12 +3158,51 @@ To expose it via NodePort, add to the command:
 | `service.nodePort.port` | `31843` | NodePort port (when `enabled=true`) |
 | `resources.limits.cpu` | `1` | CPU limit |
 | `resources.limits.memory` | `1Gi` | Memory limit |
-| `portalSecret.secretName` | `apinizer-portal` | Portal secret name |
-| `portalSecret.apinizerManagementApiBaseUrl` | — | API Manager Management API URL (base64) |
-| `portalSecret.apiKey` | — | Portal API key (base64) |
-| `portalSecret.apiPortalId` | — | Portal ID (base64) |
+| `portalSecret.secretName` | `apinizer-portal` | Portal Secret name (created outside Helm, beforehand) |
 | `env.JAVA_OPTS` | `-XX:MaxRAMPercentage=75.0` | JVM options |
 | `env.SPRING_PROFILES_ACTIVE` | `prod` | Spring profile |
+
+**Installation with `values.yaml`:**
+
+Instead of `--set`, you can install with the module's `values.yaml` file. This suits GitOps: keep `values.yaml` under version control (e.g. GitLab); when a parameter changes, apply the update by running `helm upgrade -f ...` with the same file.
+
+<Accordion title="apinizer-portal/values.yaml">
+
+```yaml
+image:
+  repository: apinizercloud/apiportal
+  tag: "<APINIZER_IMAGE_TAG>"
+
+replicaCount: 1
+
+service:
+  nodePort:
+    enabled: false
+    port: 31843
+  name: apinizer-portal-service
+  port: 8080
+
+resources:
+  limits:
+    cpu: "1"
+    memory: "1Gi"
+
+portalSecret:
+  secretName: apinizer-portal
+
+env:
+  JAVA_OPTS: "-XX:MaxRAMPercentage=75.0"
+  SPRING_PROFILES_ACTIVE: "prod"
+```
+
+</Accordion>
+
+```bash
+helm install portal oci://registry-1.docker.io/apinizercloud/apinizer-apiportal \
+  --version 1.0.0 \
+  -n <API-Portal-Namespace> \
+  -f apinizer-portal/values.yaml
+```
 
   </TabItem>
 </Tabs>
