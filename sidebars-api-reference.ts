@@ -395,7 +395,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/get-keystore",
                 "keys-secrets/crud/create-keystore",
                 "keys-secrets/crud/update-keystore",
-                "keys-secrets/crud/delete-keystore"
+                "keys-secrets/crud/delete-keystore",
+                "keys-secrets/crud/export-keystore",
+                "keys-secrets/crud/import-keystore"
               ]
             },
             {
@@ -408,7 +410,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/get-key",
                 "keys-secrets/crud/create-key",
                 "keys-secrets/crud/update-key",
-                "keys-secrets/crud/delete-key"
+                "keys-secrets/crud/delete-key",
+                "keys-secrets/crud/export-key",
+                "keys-secrets/crud/import-key"
               ]
             },
             {
