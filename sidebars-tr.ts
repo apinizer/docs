@@ -6,6 +6,21 @@
 import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
+  "ai-gateway": [
+    {
+      "type": "category",
+      "label": "AI Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/genel-bakis",
+        "ai-gateway/llm-saglayicilari",
+        "ai-gateway/token-kotalari",
+        "ai-gateway/maliyet-ayarlari",
+        "ai-gateway/raporlar"
+      ]
+    }
+  ],
   "genel-bakis": [
     {
       "type": "category",

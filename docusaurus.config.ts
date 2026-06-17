@@ -142,6 +142,7 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'tr', label: 'API Portal', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'operasyon', docsPluginId: 'tr', label: 'Operasyon', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'kilavuzlar', docsPluginId: 'tr', label: 'Kılavuzlar', position: 'left', className: 'navbar__item--tr'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'tr', label: 'AI Gateway', position: 'left', className: 'navbar__item--tr'},
         // English tabs.
         {type: 'docSidebar', sidebarId: 'overview', docsPluginId: 'en', label: 'Overview', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'versions', docsPluginId: 'en', label: 'Versions', position: 'left', className: 'navbar__item--en'},
@@ -152,6 +153,7 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'en', label: 'API Portal', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'operations', docsPluginId: 'en', label: 'Operations', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'guides', docsPluginId: 'en', label: 'Guides', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'en', label: 'AI Gateway', position: 'left', className: 'navbar__item--en'},
         // API Reference — shared between TR and EN contexts.
         {type: 'docSidebar', sidebarId: 'api-reference', docsPluginId: 'apiReference', label: 'API Reference', position: 'left', className: 'navbar__item--apiref'},
 

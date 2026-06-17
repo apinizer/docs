@@ -6,6 +6,21 @@
 import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
+  "ai-gateway": [
+    {
+      "type": "category",
+      "label": "AI Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/overview",
+        "ai-gateway/llm-providers",
+        "ai-gateway/token-quotas",
+        "ai-gateway/cost-settings",
+        "ai-gateway/reports"
+      ]
+    }
+  ],
   "overview": [
     {
       "type": "category",

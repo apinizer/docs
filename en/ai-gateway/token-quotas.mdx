@@ -1,0 +1,185 @@
+---
+title: "Token Quotas and Rate Limiting"
+description: "Configure token bucket quotas at multiple time scales (minute, hour, day, month) and set monthly USD budgets with per-model limits."
+---
+
+import {Card} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Overview
+
+Token quotas prevent runaway costs and ensure fair resource allocation. Apinizer enforces quotas at **four time scales**:
+
+- **Minute** — hard limit per minute
+- **Hour** — hard limit per hour
+- **Day** — hard limit per day
+- **Month** — hard limit per month, plus optional USD budget cap
+
+Quotas can be set at **four scopes**, with the effective limit being the **strictest** (minimum):
+
+1. **Credential level** — per API key
+2. **Organization level** — per credential organization
+3. **API Proxy level** — per gateway rule
+4. **Tenant level** — global system-wide
+
+Additionally, **per-model quotas** let you apply different limits to GPT-4o vs. GPT-4 Turbo, etc.
+
+## Time Buckets
+
+<Card title="Minute Bucket" icon="⏱️">
+  **Key format**: `ai_tokens:model_<scope>:<scopeRef>:<modelId>:YYYY-MM-DD'T'HH:mm`
+  
+  Resets every minute. Use for rate-limiting burst traffic.
+</Card>
+
+<Card title="Hour Bucket" icon="🕐">
+  **Key format**: `ai_tokens:model_<scope>:<scopeRef>:<modelId>:YYYY-MM-DD'T'HH`
+  
+  Resets every hour. Most commonly used for per-hour token limits.
+  
+  TTL: 3600 seconds (1 hour) + default reservation hold time.
+</Card>
+
+<Card title="Day Bucket" icon="📅">
+  **Key format**: `ai_tokens:model_<scope>:<scopeRef>:<modelId>:YYYY-MM-DD`
+  
+  Resets at 00:00 UTC. Use for daily spending caps.
+</Card>
+
+<Card title="Month Bucket" icon="📊">
+  **Key format**: `ai_tokens:model_<scope>:<scopeRef>:<modelId>:YYYY-MM`
+  
+  Resets at month start (UTC). Also supports **USD budget** spending cap.
+</Card>
+
+## Quota Scope Hierarchy
+
+Quotas are evaluated in order, with the **most restrictive (minimum) limit** applied:
+
+```
+1. Credential-level quota (tightest)
+2. Organization-level quota
+3. API Proxy-level quota
+4. Tenant-level quota (loosest)
+
+→ effective limit = minimum of all four
+```
+
+If a request exceeds **any** quota at **any** scope, it is **blocked**. The response includes which quota was exceeded.
+
+## Per-Model Quotas
+
+Within each scope, you can set **different limits for different models**:
+
+<Steps>
+  <Step title="Open Quota Settings">
+    Go to **AI Governance** → **Token Quotas**.
+  </Step>
+  
+  <Step title="Select Scope">
+    Choose Credential, Organization, Proxy, or Tenant.
+  </Step>
+  
+  <Step title="Set Base Limits">
+    Enter tokens per minute, hour, day, and month (applies to all models by default).
+  </Step>
+  
+  <Step title="Add Model-Specific Limit">
+    Click **Add Model Limit** and select a model (e.g., "gpt-4o").
+    
+    Enter different token quotas for that model. This overrides the base limit for requests using that model.
+  </Step>
+  
+  <Step title="Add Monthly Budget (Optional)">
+    Click **Add Budget** and enter a USD amount.
+    
+    When monthly token spending exceeds this budget:
+    - Soft limit: warning logged
+    - Hard limit: requests blocked
+  </Step>
+  
+  <Step title="Save">
+    Click **Save**. Quotas take effect immediately.
+  </Step>
+</Steps>
+
+{/* TODO: screenshot — Quota modal with Token/Minute, Token/Hour, Token/Day, Token/Month inputs, and per-model table with Add/Remove buttons */}
+
+## Overflow Actions
+
+When a request would exceed a quota, the system can:
+
+- **Block** — reject the request (HTTP 429 Too Many Requests)
+- **Soft Limit** — log a warning but allow the request (optional)
+
+## Reserve-All + Rollback
+
+To prevent quota race conditions, Apinizer uses an **atomic reserve-all** pattern:
+
+1. Before processing any tier (minute, hour, day, month), **reserve tokens for all tiers**
+2. If any tier has insufficient quota, **rollback all reserves** and reject
+3. If all tiers pass, **commit reserves** and process the request
+
+This ensures that either all quotas are updated together or none are updated, preventing partial quota consumption.
+
+## Monthly USD Budget
+
+The monthly bucket also supports a **USD spending limit** (not just tokens):
+
+```
+If monthly budget = $100:
+  - Cost per request = tokens × (model price / 1M)
+  - Sum of all request costs in the month ≤ $100
+  - Once exceeded → requests blocked (or warned, per policy)
+```
+
+Per-model pricing is configured in **AI Cost Settings** (see next section).
+
+## Quota Reset Times
+
+All quotas reset in **UTC**:
+
+- **Minute**: resets at `:00` and `:01`, `:02`, etc. every minute
+- **Hour**: resets at `00:00`, `01:00`, `02:00`, etc. UTC
+- **Day**: resets at `00:00 UTC` (midnight UTC, not local time)
+- **Month**: resets on the 1st of the month at `00:00 UTC`
+
+## Monitoring Quota Usage
+
+View real-time quota consumption in **AI Reports**:
+
+- **Tokens Used** — sum of all tokens in the current period
+- **Tokens Remaining** — quota limit minus tokens used
+- **Cost YTD** — cumulative cost (if budget is set)
+- **Warnings** — alerts when approaching quota limits
+
+{/* TODO: screenshot — AI Reports tab showing quota gauge or progress bar for current period */}
+
+## Backward Compatibility
+
+When you upgrade and add per-model quotas to an existing system:
+
+- **Old quota entries** (without model list) continue to work — they apply to all models
+- **New per-model entries** override the base quota for their specific model
+- **Mixed mode** is supported — base quota applies to unlisted models, specific models use their override
+
+## Troubleshooting
+
+**Request Blocked with 429**
+- Check which quota was hit (error message indicates scope and time bucket)
+- Increase the limit or adjust per-model quota if needed
+- Check if the blocked request uses an expensive model (e.g., GPT-4o)
+
+**Quota Reset Not Working**
+- Confirm system time is set to UTC
+- Check cache/distributed store (Hazelcast) is running
+
+**Monthly Budget Exceeded Earlier Than Expected**
+- High-token models (GPT-4) consume budget faster
+- Review per-model pricing in **AI Cost Settings**
+- Consider splitting by model with separate per-model quotas
+
+## Next Steps
+
+- **[AI Cost Settings](/en/ai-gateway/cost-settings)** — Configure per-model pricing and currency
+- **[Reports and Analytics](/en/ai-gateway/reports)** — Monitor quota and cost usage
