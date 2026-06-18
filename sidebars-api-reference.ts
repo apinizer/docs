@@ -77,6 +77,7 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/deployment",
                 "api-proxies/deployment/deploy-api-proxy",
                 "api-proxies/deployment/undeploy-api-proxy",
+                "api-proxies/deployment/get-invoke-info",
                 "api-proxies/deployment/list-deploy-history",
                 "api-proxies/deployment/get-deploy-history-detail",
                 "api-proxies/deployment/delete-deploy-history",
