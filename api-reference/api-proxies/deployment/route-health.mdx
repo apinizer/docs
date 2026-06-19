@@ -1,0 +1,210 @@
+---
+title: "Get Worker Route Health"
+description: "Verifies that an API proxy is actually serve-able on the worker pods of a given environment, closing the gap between an APIops deploy SUCCESS and the route being live. Each worker pod is probed against its in-memory configuration with no real backend call."
+---
+
+## Endpoint
+
+```
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/environments/{environmentName}/route-health/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+A deploy acknowledgement does not by itself guarantee the route is live on every worker pod. This endpoint probes every worker pod of the named environment, asking whether the proxy is loaded and routable in its in-memory configuration, and aggregates the answers. It makes no call to the real backend and performs no database write or cache change (read-only).
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+| apiProxyName | string | Yes | API Proxy name (must exist) |
+| environmentName | string | Yes | Environment name (must exist) |
+
+### Query Parameters
+
+None.
+
+### Request Body
+
+None (GET request).
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "success": true,
+  "result": [
+    {
+      "routeActive": true,
+      "servedPath": "/petstore/v2",
+      "methods": ["GET", "POST"],
+      "apinizerRootContext": "/gateway",
+      "podsResponded": 2,
+      "podsActive": 2,
+      "pods": [
+        {
+          "routeActive": true,
+          "servedPath": "/petstore/v2",
+          "methods": ["GET", "POST"],
+          "workerPodIp": "10.42.1.17",
+          "apinizerRootContext": "/gateway",
+          "error": null
+        },
+        {
+          "routeActive": true,
+          "servedPath": "/petstore/v2",
+          "methods": ["GET", "POST"],
+          "workerPodIp": "10.42.1.18",
+          "apinizerRootContext": "/gateway",
+          "error": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| success | boolean | Indicates if the request was successful |
+| result | array | Aggregated route health response (single object in array) |
+
+### Route Health Object Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| routeActive | boolean | True only when EVERY worker pod that responded reports the route active. A partial deploy (some pods still stale) surfaces as false; inspect `pods` to see which pods are out of sync. |
+| servedPath | string | Invoke path the gateway serves for this proxy. Taken from the first active pod (all active pods agree). |
+| methods | array | HTTP methods the route accepts (upper-case). |
+| apinizerRootContext | string | Gateway root context prefix (from the platform general settings). Combine it with the gateway base URL and `servedPath` to build the full invoke URL in one hop. |
+| podsResponded | integer | Number of worker pods that answered the probe. |
+| podsActive | integer | Number of responding pods that report the route as active. |
+| pods | array | Per-pod breakdown (see below), including any pod that returned an error. |
+
+### Per-Pod Object Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| routeActive | boolean | Whether the proxy is loaded and routable on this pod. |
+| servedPath | string | Invoke path this pod is serving. |
+| methods | array | HTTP methods accepted on this pod. |
+| workerPodIp | string | Pod hostname or IP that produced this answer (best-effort). |
+| apinizerRootContext | string | Gateway root context the pod is running with. |
+| error | string, nullable | Populated if the pod could not answer (proxy not loaded, lookup failure, etc.); null on success. |
+
+### Partial Deployment Example
+
+When a deployment is still rolling out and some pods have not yet loaded the new configuration:
+
+```json
+{
+  "success": true,
+  "result": [
+    {
+      "routeActive": false,
+      "servedPath": "/petstore/v2",
+      "methods": ["GET", "POST"],
+      "apinizerRootContext": "/gateway",
+      "podsResponded": 2,
+      "podsActive": 1,
+      "pods": [
+        {
+          "routeActive": true,
+          "servedPath": "/petstore/v2",
+          "methods": ["GET", "POST"],
+          "workerPodIp": "10.42.1.17",
+          "apinizerRootContext": "/gateway",
+          "error": null
+        },
+        {
+          "routeActive": false,
+          "servedPath": null,
+          "methods": [],
+          "workerPodIp": "10.42.1.18",
+          "apinizerRootContext": "/gateway",
+          "error": "Proxy not loaded in ManagementConfig"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "error": "bad_request",
+  "error_description": "ApiProxy with name (petstore-api) can not be deployed to Environment(production) because it is not exist!"
+}
+```
+
+#### Common Causes
+
+- API Proxy name does not exist
+- Environment name does not exist
+- User does not have access to the environment
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "error": "unauthorized_client",
+  "error_description": "Invalid token"
+}
+```
+
+### Error Response (404 Not Found)
+
+```json
+{
+  "error": "not_found",
+  "error_description": "Project (MyProject) is not found or user does not have privilege to access it!"
+}
+```
+
+## cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/petstore-api/environments/production/route-health/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+## Notes and Warnings
+
+- **Read-only**: No real backend request, no database write, no cache change.
+- **Use after a deploy**: Use after a deploy to confirm the route is actually serve-able before sending real traffic (E2E / CI-CD preflight).
+- **routeActive aggregation**: `routeActive` is true only when ALL responding pods are in sync. A partial deploy shows false with the per-pod breakdown identifying the stale pods.
+- **Build the full invoke URL**: The full gateway invoke URL is `\{gatewayBaseUrl\}\{apinizerRootContext\}\{servedPath\}` — `apinizerRootContext` is returned so you do not need a separate lookup.
+
+## Permissions
+
+User must have **`API_MANAGEMENT`** read access in the project.
+
+## Related Documentation
+
+- [Deploy API Proxy](/api-reference/api-proxies/deployment/deploy-api-proxy) - Deploy API proxy to environment
+- [Undeploy API Proxy](/api-reference/api-proxies/deployment/undeploy-api-proxy) - Undeploy API proxy from environment
+- [Get API Proxy Invoke Info](/api-reference/api-proxies/deployment/get-invoke-info) - Get gateway invoke URL components for all environments
