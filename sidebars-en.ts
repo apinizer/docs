@@ -669,7 +669,6 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/ldap-active-directory",
         "integrations/connection-management/kafka",
         "integrations/connection-management/rabbitMQ",
-        "integrations/connection-management/jiraOps",
         "integrations/connection-management/elasticsearch-configuration",
         "integrations/connection-management/ftp",
         "integrations/connection-management/graylog",

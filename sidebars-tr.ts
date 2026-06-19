@@ -665,7 +665,6 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/elasticsearch",
         "integrations/baglanti-yonetimi/elasticsearch-monitor",
         "integrations/baglanti-yonetimi/ldap-active-directory",
-        "integrations/baglanti-yonetimi/jiraOps",
         "integrations/baglanti-yonetimi/elasticsearch-configuration",
         "integrations/baglanti-yonetimi/kafka",
         "integrations/baglanti-yonetimi/rabbitMQ",
