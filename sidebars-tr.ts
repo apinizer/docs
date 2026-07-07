@@ -3,7 +3,7 @@
  * Locale: tr
  * Each key on the default export corresponds to one Mintlify tab.
  */
-import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   "genel-bakis": [
@@ -1383,7 +1383,8 @@ const sidebars: SidebarsConfig = {
         "articles/api-yuk-testi-performans-analizi-k6-jmeter",
         "articles/api-ekibi-mantrasi",
         "articles/apinizer-aktif-aktif-mimari-spof-riski",
-        "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi"
+        "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi",
+        "articles/apinizer-rate-limit-mekanizmalari-karsilastirmasi"
       ]
     }
   ]

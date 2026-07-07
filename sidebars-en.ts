@@ -3,7 +3,7 @@
  * Locale: en
  * Each key on the default export corresponds to one Mintlify tab.
  */
-import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   "overview": [
@@ -1384,7 +1384,8 @@ const sidebars: SidebarsConfig = {
         "articles/api-load-testing-performance-analysis-k6-jmeter",
         "articles/api-team-mantra",
         "articles/apinizer-active-active-architecture-eliminating-spof",
-        "articles/no-security-without-api-gateway-right-order-guide"
+        "articles/no-security-without-api-gateway-right-order-guide",
+        "articles/apinizer-rate-limit-mechanisms-comparison"
       ]
     }
   ]
