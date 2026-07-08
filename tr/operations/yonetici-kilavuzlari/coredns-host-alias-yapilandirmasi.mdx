@@ -1,0 +1,152 @@
+---
+title: "CoreDNS ile Host Alias Yapılandırması"
+description: "Apimanager ve worker pod'larında hostAliases yerine CoreDNS Corefile üzerinden hostname-IP eşlemesi yapılandırılır; alias değişikliklerinde pod restart gerekmez."
+---
+
+Bu dokümanda, `hostAliases` kullanımı yerine hostname–IP eşlemelerinin CoreDNS ConfigMap (`Corefile`) üzerinden tanımlanması anlatılmaktadır. Bu yöntemde alias değişikliklerinde pod restart gerekmez.
+
+Kapsam: **apimanager** ve **worker**.
+
+:::info
+
+İşlem için cluster’a `kubectl` erişimi ve `kube-system` namespace’inde yazma yetkisi gerekir.
+
+:::
+
+Mevcut bağlam doğrulanır:
+
+```bash
+kubectl config current-context
+```
+
+## Yedek Alma
+
+CoreDNS ConfigMap yedeği alınır:
+
+```bash
+mkdir -p ~/coredns-migration && cd ~/coredns-migration
+kubectl get configmap coredns -n kube-system -o yaml > coredns-backup.yaml
+```
+
+## Corefile'a Hosts Bloğu Ekleme
+
+Apimanager ve worker için kullanılacak IP/hostname listesi hazırlanır. Aynı hostname birden fazla IP ile tanımlanmışsa tek bir eşleme seçilir. `localhost` Corefile’a eklenmez.
+
+```bash
+kubectl edit configmap coredns -n kube-system
+```
+
+`kubernetes` satırından önce aşağıdaki blok eklenir:
+
+```
+        hosts {
+            <IP> <hostname>
+            <IP> <hostname>
+            fallthrough
+        }
+```
+
+Örnek Corefile yapısı:
+
+```
+.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+
+    hosts {
+        <IP> <hostname>
+        <IP> <hostname>
+        fallthrough
+    }
+
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30 {
+       disable success cluster.local
+       disable denial cluster.local
+    }
+    loop
+    reload
+    loadbalance
+}
+```
+
+Dosya kaydedilir. CoreDNS yaklaşık 30 saniye içinde `reload` eder; pod restart gerekmez.
+
+## Doğrulama
+
+```bash
+kubectl run dns-test --rm -it --restart=Never --image=alpine:3.19 -- getent hosts <hostname>
+```
+
+Beklenen IP dönmelidir. Sonuç alınamazsa yaklaşık 30 saniye beklenip komut yeniden çalıştırılır.
+
+:::note
+
+Noktasız hostname ile `nslookup <hostname>` komutu NXDOMAIN dönebilir. Bu durum sorun değildir; esas alınan sonuç `getent` çıktısıdır.
+
+:::
+
+Doğrulama tamamlanmadan `hostAliases` kaldırma adımına geçilmez.
+
+## hostAliases Kaldırma
+
+Bu adımda apimanager ve worker pod’ları bir kez yeniden başlatılır.
+
+```bash
+kubectl patch deployment apimanager -n apinizer --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/hostAliases"}]'
+
+kubectl patch deployment worker -n <ortam-namespace> --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/hostAliases"}]'
+```
+
+Rollout durumu kontrol edilir:
+
+```bash
+kubectl rollout status deployment/apimanager -n apinizer
+kubectl rollout status deployment/worker -n <ortam-namespace>
+```
+
+Pod içinden hostname çözümü doğrulanır:
+
+```bash
+kubectl exec -n apinizer deploy/apimanager -- getent hosts <hostname>
+kubectl exec -n <ortam-namespace> deploy/worker -- getent hosts <hostname>
+```
+
+## Alias Ekleme ve Silme
+
+Yeni alias ekleme veya mevcut alias silme işlemi CoreDNS ConfigMap üzerinden yapılır:
+
+```bash
+kubectl edit configmap coredns -n kube-system
+```
+
+`hosts { }` bloğuna satır eklenir veya silinir. Kaydetme sonrasında yaklaşık 30 saniye beklenir ve `getent` ile doğrulama yapılır. Bu işlemde pod restart gerekmez.
+
+## Geri Alma
+
+Yedekten geri dönüş için:
+
+```bash
+kubectl apply -f ~/coredns-migration/coredns-backup.yaml
+```
+
+Gerekirse `hostAliases` tanımları ilgili deployment’lara yeniden eklenir.
+
+## Dikkat Edilmesi Gerekenler
+
+- Aynı hostname, tüm namespace’lerde aynı IP adresine çözülür.
+- `localhost` Corefile’a yazılmaz.
+- Değişiklikler `reload` ve DNS cache nedeniyle kısa bir gecikmeyle yansır.
