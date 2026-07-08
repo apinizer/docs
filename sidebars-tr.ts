@@ -986,6 +986,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Container Registry",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "operations/container-registry/container-imajlari-ve-registry",
+        "operations/container-registry/nexus-kullanimi",
+        "operations/container-registry/harbor-kullanimi",
+        "operations/container-registry/private-registry-kurulumu"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Sorun Giderme",
       "collapsed": false,
       "collapsible": true,
@@ -1006,19 +1018,9 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "operations/kubernetes/kubernetes-docker-containerd-sorunlari",
-            "operations/sorun-giderme/kubernetes-sertifika-kontrol-yenileme",
             "operations/sorun-giderme/kubernetes-docker-containerd-sorunlari",
-            "operations/kubernetes/ansible-ile-ubuntu-uzerinde-kubernetes",
-            {
-              "type": "category",
-              "label": "Private/Local Docker Registry Kullanımı",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "operations/kubernetes/centos-7-uzerine-private-docker-registry"
-              ]
-            }
+            "operations/sorun-giderme/kubernetes-sertifika-kontrol-yenileme",
+            "operations/kubernetes/ansible-ile-ubuntu-uzerinde-kubernetes"
           ]
         },
         {
