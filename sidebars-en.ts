@@ -988,6 +988,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Container Registry",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "operations/container-registry/container-images-and-registry",
+        "operations/container-registry/nexus-usage",
+        "operations/container-registry/harbor-usage",
+        "operations/container-registry/private-registry-installation"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Troubleshooting",
       "collapsed": false,
       "collapsible": true,
@@ -1010,16 +1022,7 @@ const sidebars: SidebarsConfig = {
           "items": [
             "operations/troubleshooting/kubernetes-docker-containerd-troubleshooting",
             "operations/troubleshooting/kubernetes-certificate-check-renewal",
-            "operations/kubernetes/kubernetes-docker-containerd-commands",
-            {
-              "type": "category",
-              "label": "Private/Local Docker Registry Usage",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "operations/kubernetes/private-docker-registry-on-centos-7"
-              ]
-            }
+            "operations/kubernetes/kubernetes-docker-containerd-commands"
           ]
         },
         {
