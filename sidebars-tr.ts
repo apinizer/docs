@@ -921,6 +921,7 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
+            "operations/yonetici-kilavuzlari/coredns-host-alias-yapilandirmasi",
             "operations/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
             "operations/yonetici-kilavuzlari/mongodb-otomatik-yedekleme",
             "operations/yonetici-kilavuzlari/pfx-jks-donusturme",
