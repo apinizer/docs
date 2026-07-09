@@ -1,0 +1,424 @@
+---
+title: "Bileşen IP Değişiminde Etkiler ve Müdahale"
+description: "Kubernetes, MongoDB, Elasticsearch ve Apinizer bileşenlerinde IP veya hostname değiştiğinde neyin bozulduğunu, hangi yapılandırmaların güncellenmesi gerektiğini ve müdahale adımlarını açıklar."
+---
+
+import {Steps, Step} from '@site/src/components/Steps';
+
+Altyapı bileşenlerinde IP veya hostname değişikliği, Apinizer'ın bağlantı noktalarını, sertifikaları ve cluster keşfini etkileyebilir. Bu sayfa, hangi bileşende değişiklik yapıldığında neyin kırıldığını ve müdahale sırasını tek yerde toplar.
+
+:::warning
+
+IP veya hostname değişikliğine başlamadan önce **MongoDB yedeği** alın ve mümkünse **bakım penceresi** planlayın. Replica set ve Elasticsearch cluster işlemlerinde hata toleransına (`(n-1)/2`) dikkat edin.
+
+:::
+
+## Etki Özeti
+
+| Bileşen / Senaryo | Ne bozulur | Müdahale bölümü |
+|-------------------|------------|-----------------|
+| Kubernetes Master (control-plane) IP | API server erişimi, kubeconfig, apiserver sertifikaları | [Kubernetes Master IP değişimi](#kubernetes-master-ip-değişimi) |
+| Kubernetes → Virtual IP geçişi | Multi-master erişim, join endpoint, HA yapılandırması | [Virtual IP geçişi](#kubernetes-virtual-ip-geçişi) |
+| Kubernetes Worker node IP | Node `NotReady`, NodePort / erişim adresi | [Worker node IP değişimi](#kubernetes-worker-node-ip-değişimi) |
+| MongoDB node IP | Replica set üyeliği, Apinizer MongoDB bağlantısı | [MongoDB IP değişimi](#mongodb-ip-değişimi) |
+| MongoDB hostname | Replica set kimliği, auth çakışması | [MongoDB hostname değişimi](#mongodb-hostname-değişimi) |
+| Elasticsearch node IP | Cluster discovery, log yazımı, Kibana erişimi | [Elasticsearch IP değişimi](#elasticsearch-ip-değişimi) |
+| Apinizer erişim ve bağlantıları | Manager / Gateway erişimi, log konnektörü, secret URI | [Apinizer tarafında güncelleme](#apinizer-tarafında-güncelleme) |
+
+## Önerilen Müdahale Sırası
+
+1. **Yedek** — Özellikle MongoDB (`mongodump`) ve kritik yapılandırma dosyaları
+2. **Veri katmanı** — MongoDB, ardından Elasticsearch (Apinizer logları bu katmanlara bağlıdır)
+3. **Kubernetes** — Control-plane, gerekirse VIP geçişi, worker node'lar
+4. **Apinizer** — MongoDB secret / URI, Elasticsearch Connection, Gateway Access URL
+5. **Doğrulama** — [Doğrulama kontrol listesi](#doğrulama-kontrol-listesi)
+
+---
+
+## Kubernetes Master IP Değişimi
+
+Control-plane (master) sunucusunun IP adresi değiştiğinde Kubernetes yapılandırma dosyaları ve apiserver sertifikaları güncellenmelidir.
+
+### Yapılandırma dosyaları
+
+Aşağıdaki dosyalarda IP adreslerini yeni değerle güncelleyin:
+
+```bash
+/etc/kubernetes/admin.conf
+/etc/kubernetes/controller-manager.conf
+/etc/kubernetes/kubelet.conf
+/etc/kubernetes/scheduler.conf
+/etc/kubernetes/manifests/etcd.yaml
+/etc/kubernetes/manifests/kube-apiserver.yaml
+```
+
+### Sertifika yenileme
+
+Mevcut apiserver sertifikalarını silin ve yeniden oluşturun:
+
+```bash
+cd /etc/kubernetes/pki
+sudo rm -rf apiserver.* apiserver-kubelet-client.*
+
+sudo kubeadm init phase certs apiserver-kubelet-client
+sudo kubeadm init phase certs apiserver
+
+sudo systemctl restart kubelet
+```
+
+:::info
+
+Sertifika oluşturma aşamasında görülen bazı uyarılar göz ardı edilebilir. Sorun devam ederse [Kubernetes Sertifika Kontrolü ve Yenileme](/tr/operations/sorun-giderme/kubernetes-sertifika-kontrol-yenileme) sayfasına bakın.
+
+:::
+
+### Kubeconfig güncelleme
+
+Mevcut kullanıcının cluster erişimi için güncel config dosyasını kopyalayın:
+
+```bash
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+```
+
+---
+
+## Kubernetes Virtual IP Geçişi
+
+Birden fazla master node olan ortamlarda control-plane erişimini **Virtual IP (VIP)** veya load balancer arkasına almak için küme yeniden yapılandırılır. Bu senaryo, tek bir master IP değişiminden farklıdır; HA geçişi içindir.
+
+**Örnek ortam:** Master1, Master2, Master3, Worker1, Worker2 — küme Master1 üzerinde `kubeadm init` ile başlatılmıştır.
+
+Load balancer üzerinde **Virtual IP** tanımlayın; tüm control-plane erişimi bu VIP üzerinden **6443** portuna yönlendirilmelidir.
+
+:::warning
+
+Load balancer kullanılmıyorsa Keepalived ve HAProxy ile sanal IP oluşturma adımları için [Kubernetes Kurulumu — Yüksek Erişilebilirlik](/tr/setup/kubernetes) sayfasına bakın.
+
+:::
+
+### Master node'ları kümeden çıkarma
+
+Aşağıdaki komut **master1 hariç** diğer master'larda (master2, master3) çalıştırılır:
+
+```bash
+sudo kubeadm reset
+```
+
+Master1 üzerinden diğer master node'lar kümeden silinir:
+
+```bash
+kubectl delete node master2
+kubectl delete nodes master3
+```
+
+:::info
+
+Bu senaryoda master1 ve worker sunucularının kümede kalması beklenir.
+
+:::
+
+### Master1 sunucusunda yapılacaklar
+
+<Steps>
+  <Step title="Servisleri durdurma">
+    ```bash
+    sudo systemctl stop kubelet
+    sudo systemctl stop containerd
+    ```
+  </Step>
+
+  <Step title="Dosya yedekleme ve temizleme">
+    ```bash
+    sudo mv -f /etc/kubernetes /etc/kubernetes.backup
+    sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
+    sudo mkdir -p /etc/kubernetes/pki
+    sudo cp -r /etc/kubernetes.backup/pki /etc/kubernetes
+    sudo rm -rf /etc/kubernetes/pki/{apiserver.*,etcd/peer.*}
+    sudo rm -f ~/.kube/config
+    ```
+  </Step>
+
+  <Step title="Containerd başlatma">
+    ```bash
+    sudo systemctl start containerd
+    ```
+  </Step>
+
+  <Step title="Kubeadm init ile Virtual IP yapılandırması">
+    ```bash
+    sudo kubeadm init --pod-network-cidr "10.244.0.0/16" --control-plane-endpoint <VIRTUAL_IP> --upload-certs --ignore-preflight-errors=DirAvailable--var-lib-etcd
+    ```
+
+    :::warning
+
+    Kubeadm **join** komutlarını not edin; worker ve ek master node'lar için kullanılacaktır.
+
+    :::
+  </Step>
+</Steps>
+
+### Worker node'larda yapılacaklar
+
+<Steps>
+  <Step title="Servisleri durdurma">
+    ```bash
+    sudo systemctl stop kubelet
+    sudo systemctl stop containerd
+    ```
+  </Step>
+
+  <Step title="Dosya yedekleme">
+    ```bash
+    sudo mv -f /etc/kubernetes /etc/kubernetes.backup
+    sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
+    ```
+  </Step>
+
+  <Step title="Servisleri başlatma">
+    ```bash
+    sudo systemctl start containerd
+    sudo systemctl start kubelet
+    ```
+  </Step>
+
+  <Step title="Worker join">
+    Master1'de alınan kubeadm **worker join** komutunu worker node'larda çalıştırın.
+  </Step>
+</Steps>
+
+### Master2 ve Master3'te yapılacaklar
+
+Master2 ve master3 sunucularında kubeadm **master join** komutunu çalıştırmanız yeterlidir.
+
+### Küme durumu kontrolü
+
+```bash
+kubectl cluster-info
+kubectl get node -o wide
+```
+
+---
+
+## Kubernetes Worker Node IP Değişimi
+
+Worker node IP değiştiğinde node genellikle `NotReady` durumuna düşer ve NodePort / dış erişim adresleri etkilenir.
+
+### Ne bozulur
+
+- Node kaydı eski IP ile kalabilir
+- NodePort üzerinden Manager veya Gateway erişimi (`http://<WORKER_IP>:32080` vb.) kesilir
+- Apinizer Gateway Runtime **Erişim URL** tanımı node IP'sine bağlıysa istemci erişimi bozulur
+
+### Müdahale
+
+1. Worker node'da IP değişikliğini işletim sistemi seviyesinde tamamlayın (`/etc/netplan`, `nmcli` vb.)
+2. Gerekirse node'u kümeden çıkarıp yeniden ekleyin:
+
+```bash
+# Master node üzerinde
+kubectl delete node <WORKER_NODE_NAME>
+sudo kubeadm token create --print-join-command
+
+# Worker node üzerinde
+sudo kubeadm reset
+sudo kubeadm join <MASTER_OR_VIP_IP>:6443 --token <TOKEN> --discovery-token-ca-cert-hash sha256:<HASH>
+```
+
+3. Load balancer veya DNS kullanıyorsanız backend pool / kayıtları güncelleyin
+4. [Apinizer tarafında güncelleme](#apinizer-tarafında-güncelleme) bölümündeki Gateway Access URL ve erişim adreslerini kontrol edin
+
+---
+
+## MongoDB IP Değişimi
+
+MongoDB replica set üyelerinin `host` alanı IP adresine bağlıdır. IP değişince Apinizer Manager, Worker ve Cache pod'ları MongoDB'ye bağlanamaz.
+
+### Replica set güncelleme
+
+MongoDB'ye bağlanın:
+
+```bash
+mongosh mongodb://<NEW_MONGO_IP>:25080 --authenticationDatabase "admin" -u "apinizer" -p
+```
+
+Değişen üyenin host bilgisini güncelleyin (`members` dizinindeki indeks, değişen node'a göre ayarlanmalıdır):
+
+```javascript
+cfg = rs.conf()
+cfg.members[0].host = "<NEW_MONGO_IP>:25080"
+rs.reconfig(cfg, { force: true })
+```
+
+Tüm replica set üyelerinin durumunu kontrol edin:
+
+```javascript
+rs.status()
+```
+
+### Apinizer bağlantısı
+
+MongoDB IP değişikliğinden sonra [Apinizer tarafında güncelleme](#apinizer-tarafında-güncelleme) bölümündeki mongo secret ve URI adımlarını uygulayın.
+
+---
+
+## MongoDB Hostname Değişimi
+
+Hostname değişikliği IP değişiminden farklıdır; replica set kimliği hostname üzerinden tanımlanır. Node'u doğrudan yeniden adlandırmak çakışmalara yol açabilir.
+
+:::warning
+
+İşlem öncesi MongoDB yedeği alın. Replica set hata toleransına dikkat edin.
+
+:::
+
+<Steps>
+  <Step title="MongoDB yedeği alın">
+    Primary node'a bağlanın ve yedek alın:
+
+    ```bash
+    mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+    sudo mongodump --host localhost --port=25080 --username=apinizer --password=<PASSWORD> -d apinizerdb --authenticationDatabase=admin --gzip --archive=/home/apinizer/mongodump/apinizer-backup-<DATE>.archive
+    ```
+  </Step>
+
+  <Step title="Node'u replica set'ten çıkarın">
+    ```bash
+    mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
+    rs.status()
+
+    # Primary ise önce rs.stepDown() ile secondary'e geçin
+    rs.remove("<OLD_HOSTNAME>")
+    ```
+  </Step>
+
+  <Step title="Hostname değiştirin">
+    İlgili sunucuda:
+
+    ```bash
+    sudo systemctl stop mongod
+    sudo hostnamectl set-hostname <NEW_HOSTNAME>
+    sudo reboot
+    ```
+
+    `/etc/hosts` dosyasında eski hostname kaydı varsa güncelleyin.
+  </Step>
+
+  <Step title="Node'u replica set'e geri ekleyin">
+    ```bash
+    sudo systemctl start mongod
+
+    # Primary node üzerinden
+    rs.add("<NEW_HOSTNAME>")
+    rs.status()
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Elasticsearch IP Değişimi
+
+Elasticsearch node IP değiştiğinde cluster discovery ve transport katmanı etkilenir. Apinizer API trafik logları Elasticsearch konnektörü üzerinden bu cluster'a yazılır.
+
+### Ne bozulur
+
+- Node cluster'dan düşebilir (`discovery.seed_hosts`, `network.host`)
+- Apinizer Elasticsearch Connection host listesi eski IP'yi gösterir
+- Kibana / log arama erişimi kesilir
+
+### elasticsearch.yml güncelleme
+
+İlgili node'da `elasticsearch.yml` dosyasında IP'ye bağlı alanları güncelleyin:
+
+```yaml
+node.name: "<NEW_NODE_IP>"
+network.host: "<NEW_NODE_IP>"
+cluster.initial_master_nodes: ["<NEW_NODE_IP>"]
+discovery.seed_hosts: ["<NEW_NODE_IP>"]
+```
+
+Çok node'lu cluster'da tüm master/data node IP'lerini `discovery.seed_hosts` ve `cluster.initial_master_nodes` listelerinde tutarlı şekilde güncelleyin.
+
+```bash
+sudo systemctl restart elasticsearch
+```
+
+Cluster sağlığını kontrol edin:
+
+```bash
+curl -u elastic:<PASSWORD> -k "https://<NEW_NODE_IP>:9200/_cluster/health?pretty"
+```
+
+### Apinizer Elasticsearch Connection
+
+Management Console → **Bağlantı Yönetimi** → Elasticsearch konnektöründe **Host & Port** alanlarını yeni IP ile güncelleyin. Detay için [Elasticsearch Bağlantı Yönetimi](/tr/integrations/baglanti-yonetimi/elasticsearch) sayfasına bakın.
+
+---
+
+## Apinizer Tarafında Güncelleme
+
+Altyapı bileşenlerinde IP değişikliği tamamlandıktan sonra Apinizer'ın bu bileşenlere bağlandığı noktalar güncellenmelidir.
+
+### MongoDB bağlantı secret'ı (Kubernetes)
+
+Manager, Worker ve Cache deployment'ları MongoDB secret'ını kullanır. Secret'taki connection string yeni IP'leri içermelidir:
+
+```bash
+DB_URL='mongodb://<MONGO_USER>:<MONGO_PASSWORD>@<MONGO1_IP>:25080,<MONGO2_IP>:25080,<MONGO3_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset'
+echo -n "$DB_URL" | base64
+```
+
+Secret'ı güncelleyin ve ilgili namespace'lerde pod'ları yeniden başlatın:
+
+```bash
+kubectl apply -f mongo-secret.yaml
+kubectl rollout restart deployment/<MANAGER_DEPLOYMENT> -n <MANAGER_NAMESPACE>
+kubectl rollout restart deployment/<WORKER_DEPLOYMENT> -n <WORKER_NAMESPACE>
+kubectl rollout restart deployment/<CACHE_DEPLOYMENT> -n <CACHE_NAMESPACE>
+```
+
+Kurulum sırasında secret oluşturma adımları için [Kubernetes Kurulumu](/tr/setup/kubernetes) sayfasına bakın.
+
+### Gateway Runtime Erişim URL
+
+Management Console → **Sunucu Yönetimi** → **Gateway Runtime'ları** → ilgili ortam → **Erişim URL Adresi** alanını yeni load balancer DNS veya node IP / NodePort yapılandırmasına göre güncelleyin.
+
+Değişiklikten sonra ortamı **yeniden yayımlayın** (re-publish). Detay için [Gateway Runtime'ları](/tr/admin/server-management/gateway-runtime-lari) sayfasına bakın.
+
+### Manager erişim adresi
+
+Manager NodePort veya Ingress adresi değiştiyse kullanıcıların erişim URL'sini güncelleyin (örn. `http://<NEW_WORKER_IP>:32080`).
+
+### Elasticsearch konnektörü
+
+API trafik logları Elasticsearch'e yazılıyorsa konnektör host listesini güncelleyin ve bağlantı testini çalıştırın.
+
+### hostAliases (opsiyonel)
+
+Backend DNS çözümlemesi IP tabanlı yapılıyorsa deployment manifest'lerindeki `hostAliases` bloğunu yeni IP ile güncelleyin.
+
+---
+
+## Doğrulama Kontrol Listesi
+
+| Kontrol | Komut / işlem | Beklenen |
+|---------|---------------|----------|
+| Kubernetes node'ları | `kubectl get node -o wide` | Tüm node'lar `Ready` |
+| Cluster erişimi | `kubectl cluster-info` | API server yeni IP/VIP ile erişilebilir |
+| MongoDB replica set | `rs.status()` | Tüm üyeler `PRIMARY` / `SECONDARY`, sağlıklı |
+| Elasticsearch | `GET _cluster/health` | `status: green` veya `yellow` (kabul edilebilir) |
+| Manager pod | `kubectl get pods -n <MANAGER_NS>` | Pod `Running` / `Ready` |
+| Manager UI | Tarayıcıdan Manager URL | Giriş ekranı açılır |
+| Gateway erişimi | Gateway Access URL üzerinden health/version | Yanıt alınır |
+| Log yazımı | Kibana veya ES index kontrolü | Yeni log kayıtları geliyor |
+
+---
+
+## İlgili Dokümanlar
+
+- [Kubernetes Kurulumu](/tr/setup/kubernetes)
+- [MongoDB Kurulumu](/tr/setup/mongodb/ubuntu-mongodb)
+- [Elasticsearch Bağlantı Yönetimi](/tr/integrations/baglanti-yonetimi/elasticsearch)
+- [Gateway Runtime'ları](/tr/admin/server-management/gateway-runtime-lari)
+- [MongoDB Sorun Giderme](/tr/operations/sorun-giderme/mongodb-sorunlari)
