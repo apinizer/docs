@@ -1,26 +1,23 @@
 ---
-title: "Elasticsearch Index Bakım ve Temizleme Scriptleri"
-description: "Apinizer trafik index'leri üzerinde disk alanı yönetimi için kullanılan temizleme scriptlerini içerir: belirli alanların silinmesi (tüm dökümanlar / zaman aralığı / belirli proxy), belirli zaman aralığındaki dökümanların silinmesi ve index'lerin tamamen silinmesi. Tüm scriptler Basic Authentication'ı opsiyonel olarak destekler."
+title: "Elasticsearch Index Temizleme Scripti"
+description: "Apinizer trafik index'leri üzerinde disk alanı yönetimi için kullanılan tek dosyalık temizleme scriptini anlatmaktadır. Script, dosya içindeki ayar bölümünde doldurulan alanlara göre belirli alanları temizler veya dökümanları siler; zaman aralığı ve proxy filtreleri opsiyoneldir."
 ---
 
-Bu doküman, Apinizer trafik index'leri (`apinizer_api_traffic_*`) üzerinde disk alanı yönetimi için kullanılan temizleme scriptlerini içerir. Her senaryo için ayrı, tek başına çalıştırılabilir bir script verilmiştir.
+Bu doküman, Apinizer trafik index'leri (`apinizer_api_traffic_*`) üzerinde disk alanı kazanmak için kullanılan **tek dosyalık** `es_cleanup.sh` scriptini anlatır.
 
-| # | Script | İşlem | Etki |
-| --- | --- | --- | --- |
-| 1 | `es_clear_fields_all.sh` | Belirli alanları sil (tüm dökümanlar) | Alanlar `_source`'tan kaldırılır, döküman kalır |
-| 2 | `es_clear_fields_range.sh` | Belirli alanları sil (zaman aralığı) | Aralıktaki dökümanlardan alanlar kaldırılır |
-| 3 | `es_clear_fields_proxy.sh` | Belirli alanları sil (belirli proxy) | Sadece o proxy'nin dökümanlarından alanlar kaldırılır |
-| 4 | `es_delete_docs_range.sh` | Dökümanları sil (zaman aralığı) | Aralıktaki dökümanlar silinir |
-| 5 | `es_delete_index.sh` | Index'i tamamen sil | Index ve tüm verisi silinir |
+Script `vi` ile açılır, en üstteki **AYAR BÖLÜMÜ** doldurulur ve çalıştırılır. Yapılacak işlem ve işlemin kapsamı, **hangi alanların doldurulduğuna** göre otomatik belirlenir.
 
 :::warning[Önemli - Geri Alınamaz İşlemler]
 
-Bu scriptlerin tümü **geri alınamaz** işlemler yapar. Çalıştırmadan önce ilgili index'in **snapshot / yedeğinin** alınmış olduğundan emin olun. Özellikle 4. ve 5. scriptler doğrudan veri/index siler.
+Script **geri alınamaz** işlemler yapar. Çalıştırmadan önce ilgili index'in **snapshot / yedeğinin** alınmış olduğundan emin olun. İşlem öncesi `DRY_RUN="true"` ile planı kontrol etmeniz önerilir.
+
+Script index'in tamamını **silmez**; yalnızca alan temizler veya döküman siler.
 
 :::
 
-## Ön Koşullar ve Ortak Davranış
+## 1) Ön Koşullar
 
+- Elasticsearch sunucusuna erişim (`IP:PORT`) ve ilgili index üzerinde yazma/yönetim yetkisi
 - `curl` ve `jq` araçlarının kurulu olması
 
 ```bash
@@ -29,77 +26,292 @@ sudo apt update
 sudo apt install -y jq
 ```
 
-Tüm scriptler başlangıçta aynı ortak bilgileri sorar ve aynı ortak davranışı gösterir:
+## 2) Yapılacak İşlemin Belirlenmesi
+
+Ayar bölümündeki **iki işlem alanından yalnızca biri** kullanılır:
+
+| Doldurulan alan | Yapılan işlem | Yöntem |
+| --- | --- | --- |
+| `FIELDS="fcrb,tba"` | Seçilen **alanlar** temizlenir, dökümanlar kalır | `_update_by_query` |
+| `DELETE_DOCS="true"` | Eşleşen **dökümanlar** silinir | `_delete_by_query` |
+
+İkisi aynı anda doldurulursa script hata verip durur.
+
+## 3) İşlemin Kapsamının Belirlenmesi
+
+Kapsam alanları **opsiyoneldir**. Boş bırakılan filtre uygulanmaz:
+
+| Doldurulan alan(lar) | Kapsam |
+| --- | --- |
+| Hiçbiri | Index'teki **tüm dökümanlar** (`match_all`) |
+| `START_TS` + `END_TS` | Sadece o **zaman aralığındaki** dökümanlar |
+| `PROXY_VALUE` | Sadece o **proxy'ye ait** dökümanlar |
+| Her ikisi birden | Proxy **ve** zaman aralığının kesişimi |
+
+Dolu olan filtreler bir `bool.filter` içinde birleştirilir.
 
 :::info
 
-**Ortak Davranış**
+**Alan Adları ve Filtre Alanları**
 
-- **Basic Authentication (opsiyonel):** Kullanıcı adı sorulur. Kümede güvenlik aktifse kullanıcı adı/parola girilir ve tüm isteklere `-u "kullanici:parola"` eklenir. **Güvenlik kapalıysa** (`xpack.security.enabled: false`) kullanıcı adı **boş bırakılır** ve `-u` hiç kullanılmaz.
-- **Protokol:** `xpack.security.http.ssl` aktifse `https` girilir; self-signed sertifikalar için `-k` otomatik eklenir.
-- **Komut echo'lama:** Çalıştırılan her `curl` komutu `>> curl ...` formatında ekrana basılır; parola **maskelenir** (`kullanici:****`).
-- **Write bloğu:** Alan silme ve döküman silme scriptleri, index read-only ise write'ı geçici açar, işlem sonunda **önceki durumuna** geri koyar.
-- **Force merge:** Alan silme ve döküman silme sonrası disk alanını geri kazanmak için otomatik çalıştırılır.
-- **Alan adları:** Dökümanın `_source` içindeki **anahtar adıyla** birebir eşleşmelidir — Apinizer template'indeki kısaltmalar (`fcrb`, `tba`, `fbarb`, `tcb` …), açıklama isimleri **değil**. Disk kullanımının büyük kısmını `text` tipindeki body alanları oluşturur: `fcrb` (From Client Body), `tba` (To Backend Body), `fbarb` (From Backend Body), `tcb` (To Client Body).
-- **Proxy filtresi:** Proxy bazlı temizlemede filtreleme `apn` (API Proxy Adı) veya `api` (API Proxy ID) alanı üzerinden yapılır (bkz. template veri yapısı).
-- **Zaman aralığı:** Filtreleme `@timestamp` alanı üzerinden yapılır. Format: `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` (örnek: `2025-01-01T00:00:00.000Z`).
+- **Temizlenecek alanlar**, dökümanın `_source` içindeki **anahtar adıyla** birebir eşleşmelidir. Apinizer template'indeki kısaltmalar kullanılır (`fcrb`, `tba` …), açıklama isimleri **değil**. Disk kullanımının büyük kısmını `text` tipindeki body alanları oluşturur:
+
+| Alan | Açıklama |
+| --- | --- |
+| `fcrb` | From Client Body |
+| `tba` | To Backend Body |
+| `fbarb` | From Backend Body |
+| `tcb` | To Client Body |
+
+- **Proxy filtresi** `apn` (API Proxy Adı) veya `api` (API Proxy ID) alanı üzerinden yapılır.
+- **Zaman filtresi** `@timestamp` alanı üzerinden yapılır. Format: `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` (örnek: `2025-01-01T00:00:00.000Z`). `START_TS` ve `END_TS` birlikte doldurulmalıdır.
 
 :::
 
-## Alan Silme Yöntemi
+## 4) Data Stream Kullanılıyorsa (`.ds-` ile başlayan index'ler)
 
-Alan silme scriptleri (1, 2, 3) painless içinde `ctx._source.remove('alan')` kullanır. Alan `_source` içinden **tamamen kaldırılır**; en yüksek disk kazanımını bu sağlar.
+Apinizer log index'leri **data stream** olarak yapılandırılmış olabilir. Bu durumda gerçek veri, adı `.ds-` ile başlayan **backing index**'lerde tutulur:
 
-`remove()` çağrısı `containsKey()` kontrolü içine alınmıştır. Böylece ilgili alanı **zaten bulunmayan** dökümanlar boş yere yeniden yazılmaz (gereksiz reindex ve `_version` artışı önlenir).
+```bash
+.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025
+```
+
+:::warning[Data Stream Adı Değil, Backing Index Adı Girilmelidir]
+
+Elasticsearch data stream'leri **append-only** kabul eder; bir data stream adına doğrudan `_update_by_query` veya `_delete_by_query` **çalıştırılamaz**. Bu nedenle `INDEX` ayarına data stream adı (`apinizer-log-apiproxy-qa8`) değil, **backing index adı** (`.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025`) yazılmalıdır.
+
+:::
+
+Bir data stream'in backing index'leri rollover ile çoğalır. Tüm data stream'i temizlemek için backing index'lerin listesi alınır ve script **her biri için ayrı ayrı** çalıştırılır:
+
+```bash
+# Backing index listesi
+curl -s -u "elastic:PAROLA" -k -X GET \
+  "https://ES_HOST:ES_PORT/_data_stream/apinizer-log-apiproxy-qa8?pretty" \
+  | jq -r '.data_streams[].indices[].index_name'
+```
+
+```bash
+# Alternatif: _cat ile boyutlariyla birlikte
+curl -s -u "elastic:PAROLA" -k -X GET \
+  "https://ES_HOST:ES_PORT/_cat/indices/.ds-apinizer-log-apiproxy-qa8-*?v&h=index,docs.count,store.size&s=index"
+```
+
+:::info
+
+**Aktif Backing Index**
+
+Bir data stream'in en yeni backing index'i **yazma yapılan** index'tir. Temizleme sırasında yeni döküman gelmeye devam edeceğinden, işlem sonrası döküman sayısı beklenenden farklı olabilir. Bu normaldir; `conflicts=proceed` sayesinde işlem durmaz.
+
+ILM politikası backing index'i `cold`/`frozen` fazına aldıysa index read-only olabilir. Script bu durumu algılar, write bloğunu geçici açar ve işlem sonunda **eski durumuna geri koyar.**
+
+:::
+
+## 5) Alan Temizleme Yöntemi
+
+`FIELD_MODE` ayarı iki değer alır:
+
+| Değer | Davranış |
+| --- | --- |
+| `remove` (varsayılan) | Alan `_source`'tan **komple silinir** |
+| `empty` | Alan kalır, içeriği **boş string** (`""`) olur |
+
+Script painless içinde alanı `containsKey()` kontrolüyle işler. Böylece ilgili alanı **zaten bulunmayan** dökümanlar boş yere yeniden yazılmaz (gereksiz reindex ve `_version` artışı önlenir).
 
 ```groovy
-if (ctx._source.containsKey('fcrb')) { ctx._source.remove('fcrb'); }
+boolean changed = false;
+if (ctx._source.containsKey('fcrb')) { ctx._source.remove('fcrb'); changed = true; }
+if (!changed) { ctx.op = 'noop'; }
 ```
+
+:::info
+
+**`ctx.op = 'noop'` Neden Var?**
+
+`_update_by_query`, painless script `_source`'u hiç değiştirmese bile eşleşen **her dökümanı yeniden yazar**. Bu, gereksiz `_version` artışına, yeni segment oluşmasına ve boşa I/O harcanmasına yol açar.
+
+Script, hiçbir alan değişmediğinde `ctx.op = 'noop'` atar; Elasticsearch bu dökümanlara hiç dokunmaz.
+
+Pratik etkisi: **aynı temizlik ikinci kez çalıştırıldığında** (alanlar zaten silinmişse) tüm dökümanlar `noops` olarak raporlanır, disk ve CPU harcanmaz:
+
+```json
+{"total":1387,"updated":0,"noops":1387,"deleted":0,"failures":[]}
+```
+
+Bu koruma olmasaydı aynı çalıştırma `updated: 1387` gösterir ve 1387 döküman boşuna yeniden yazılırdı.
+
+:::
 
 :::warning[Alanın Dökümanda Kalmasını İstiyorsanız]
 
-Alanın **silinmesini değil**, yalnızca **içeriğinin boşaltılmasını** istiyorsanız (alan `_source` çıktısında görünmeye devam etsin, dökümanların şema yapısı bozulmasın) `remove()` yerine alanı boş string'e (`''`) eşitleyebilirsiniz.
+Alanın **silinmesini değil**, yalnızca **içeriğinin boşaltılmasını** istiyorsanız (alan `_source` çıktısında görünmeye devam etsin, dökümanların şema yapısı bozulmasın) `FIELD_MODE="empty"` kullanın.
 
-Bunun için scriptlerin içindeki `build_field_script` fonksiyonunda **tek bir satırı** değiştirmeniz yeterlidir. Bu alternatif, scriptlerde yorum satırı olarak zaten hazır bulunur:
+İki yöntemin karşılaştırması:
 
-```bash
-# VARSAYILAN - alani _source'tan komple siler:
-s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); } "
-
-# ALTERNATIF - alan kalir, icerigi bos string olur -> "fcrb": ""
-s+="if (ctx._source.containsKey('$f')) { ctx._source.$f = ''; } "
-```
-
-İki yaklaşımın karşılaştırması:
-
-| | `remove()` (varsayılan) | `= ''` (boş string) |
+| | `remove` (varsayılan) | `empty` |
 | --- | --- | --- |
 | `_source` içindeki anahtar | Tamamen kaldırılır | `"fcrb": ""` olarak kalır |
 | Disk kazanımı | **En yüksek** | Sınırlı |
 | API/dashboard çıktısı | Alan hiç dönmez | Alan boş string ile döner |
 | `exists` sorgusu eşleşir mi? | Hayır | **Evet** (boş string bir değerdir) |
 
-Disk alanı kazanmak birincil amaç olduğundan bu dokümanda **`remove()` tercih edilmiştir.** Boş string ataması, yalnızca alanın çıktıda görünmeye devam etmesi gereken özel durumlarda kullanılmalıdır.
+Disk alanı kazanmak birincil amaç olduğundan **`remove` tercih edilmelidir.** `empty`, yalnızca alanın çıktıda görünmeye devam etmesi gereken özel durumlarda kullanılmalıdır.
 
 :::
 
-## 1) Belirli Alanların Silinmesi - Tüm Dökümanlar
+## 6) Güvenlik ve Kontrol Ayarları
 
-`es_clear_fields_all.sh` — Index içindeki **tüm dökümanlardan** (`match_all`) seçilen alanları `_source`'tan kaldırır. Döküman sayısı değişmez.
+| Ayar | Açıklama |
+| --- | --- |
+| `ES_PASS` | **Boş bırakılırsa** çalışma anında sorulur. Parolanın dosyada saklanmaması önerilir. |
+| `ES_USER` | Kümede güvenlik kapalıysa (`xpack.security.enabled: false`) **boş bırakılır**; `-u` parametresi hiç kullanılmaz. |
+| `DRY_RUN` | `"true"` ise hiçbir değişiklik yapılmaz; plan, etkilenecek döküman sayısı ve üretilecek sorgu/painless script ekrana basılır. |
+| `SKIP_CONFIRM` | `"true"` ise onay sorulmaz. Yalnızca otomasyon için, dikkatli kullanılmalıdır. |
+| `FORCE_MERGE` | `"true"` ise işlem sonrası disk alanını geri kazanmak için force merge çalıştırılır. |
+
+Script ayrıca:
+
+- Çalıştırdığı her `curl` komutunu `>> curl ...` formatında ekrana basar; **parolayı maskeler** (`kullanici:****`).
+- İşlem öncesi `_count` ile **etkilenecek döküman sayısını** gösterir ve `yes` onayı ister.
+- Index read-only ise write bloğunu geçici açar, işlem sonunda **önceki durumuna** geri koyar.
+- `https` seçilirse self-signed sertifikalar için `-k` parametresini otomatik ekler.
+
+## 7) Script
 
 ```bash
 #!/bin/bash
-# ============================================================
-# Alanlari Sil - TUM Dokumanlar  (es_clear_fields_all.sh)
-# ============================================================
+# ============================================================================
+#  Apinizer - Elasticsearch Index Temizleme Scripti
+#  es_cleanup.sh
+# ----------------------------------------------------------------------------
+#  Tum temizleme senaryolarini tek dosyada toplar.
+#  Scripti "vi es_cleanup.sh" ile acin, asagidaki AYAR BOLUMUNU doldurun.
+#  Hangi alanlari doldurdugunuza gore islem ve kapsam otomatik belirlenir.
+#
+#  ISLEM (birini secin):
+#     FIELDS dolu           -> secilen ALANLAR temizlenir (dokumanlar kalir)
+#     DELETE_DOCS="true"    -> eslesen DOKUMANLAR silinir
+#
+#  KAPSAM (opsiyonel, bos birakilanlar uygulanmaz):
+#     START_TS + END_TS     -> sadece bu zaman araligindaki dokumanlar
+#     PROXY_VALUE           -> sadece bu proxy'ye ait dokumanlar
+#     ikisi de bos          -> index'teki TUM dokumanlar
+#
+#  Not: Bu script index'in tamamini SILMEZ; yalnizca alan temizler
+#       veya dokuman siler.
+#
+#  KULLANIM:
+#     vi es_cleanup.sh      # AYAR BOLUMUNU doldurun
+#     chmod +x es_cleanup.sh
+#     ./es_cleanup.sh
+# ============================================================================
 
-# ---- Ortak baglanti bilgileri ----
-read -p "Elasticsearch host (IP:PORT) girin: " ES_HOST
-read -p "Protokol (http/https) [http]: " ES_PROTO
-ES_PROTO=${ES_PROTO:-http}
-read -p "Elasticsearch kullanici adi girin (auth yoksa BOS birakin): " ES_USER
-if [ -n "$ES_USER" ]; then
-    read -s -p "Elasticsearch parolasi girin: " ES_PASS
+
+# ############################################################################
+# #                       AYAR BOLUMU  (BURAYI DOLDURUN)                     #
+# ############################################################################
+
+# ---- Baglanti (ZORUNLU) ----------------------------------------------------
+ES_HOST="10.10.10.10:9200"       # IP:PORT
+ES_PROTO="https"                 # http | https
+
+# ---- Kimlik dogrulama (OPSIYONEL) ------------------------------------------
+# Kumede guvenlik kapaliysa (xpack.security.enabled: false) ikisini de
+# BOS birakin; -u parametresi hic kullanilmaz.
+# ES_PASS bos birakilirsa calisma aninda sorulur (parolayi dosyada
+# saklamak istemiyorsaniz onerilir).
+ES_USER="elastic"
+ES_PASS=""
+
+# ---- Index (ZORUNLU) -------------------------------------------------------
+INDEX="apinizer_api_traffic_v2"
+
+# ############################################################################
+# #  ISLEM SECIMI - Asagidakilerden SADECE BIRINI kullanin                   #
+# ############################################################################
+
+# ---- ISLEM A: Alanlari temizle ---------------------------------------------
+# Virgulle ayrilir. Dokumanin _source anahtarlariyla birebir eslesmelidir.
+# Apinizer body alanlari (disk kullaniminin buyuk kismi):
+#     fcrb  = From Client Body
+#     tba   = To Backend Body
+#     fbarb = From Backend Body
+#     tcb   = To Client Body
+# BOS birakilirsa alan temizleme yapilmaz.
+FIELDS="fcrb,tba,fbarb,tcb"
+
+# Alan temizleme yontemi:
+#     "remove" -> alan _source'tan komple silinir  (varsayilan, en yuksek disk kazanimi)
+#     "empty"  -> alan kalir, icerigi "" olur      (disk kazanimi sinirli)
+FIELD_MODE="remove"
+
+# ---- ISLEM B: Dokumanlari sil ----------------------------------------------
+# "true" yapilirsa, asagidaki kapsama uyan DOKUMANLAR SILINIR.
+# FIELDS ile ayni anda kullanilamaz (FIELDS'i bosaltin).
+DELETE_DOCS="false"
+
+# ############################################################################
+# #  KAPSAM (OPSIYONEL) - Bos birakilan filtre uygulanmaz                    #
+# ############################################################################
+
+# ---- Zaman araligi ---------------------------------------------------------
+# Format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'
+# IKISI DE bos -> zaman filtresi yok (tum zamanlar)
+# Biri dolu digeri bos birakilamaz.
+START_TS=""                      # ornek: 2025-01-01T00:00:00.000Z
+END_TS=""                        # ornek: 2025-02-01T00:00:00.000Z
+
+# ---- Proxy -----------------------------------------------------------------
+# PROXY_VALUE bos -> proxy filtresi yok (tum proxy'ler)
+# PROXY_FIELD: apn = API Proxy Adi | api = API Proxy ID
+PROXY_FIELD="apn"
+PROXY_VALUE=""                   # ornek: MyProxy
+
+# ############################################################################
+# #  DAVRANIS                                                                #
+# ############################################################################
+
+FORCE_MERGE="true"               # Islem sonrasi disk alanini geri kazanmak icin
+DRY_RUN="false"                  # "true" -> degisiklik yapmaz, sadece plani gosterir
+SKIP_CONFIRM="false"             # "true" -> onay sormaz (otomasyon; DIKKATLI KULLANIN)
+
+# ############################################################################
+# #                 AYAR BOLUMU SONU - ASAGISINA DOKUNMAYIN                  #
+# ############################################################################
+
+
+set -o pipefail
+
+die() { echo "HATA: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Ayar dogrulama
+# ---------------------------------------------------------------------------
+command -v jq >/dev/null 2>&1 || die "'jq' kurulu degil. Kurun: sudo apt install -y jq"
+
+[ -z "$ES_HOST" ] && die "ES_HOST bos olamaz."
+[ -z "$INDEX" ]   && die "INDEX bos olamaz."
+[[ "$ES_PROTO" != "http" && "$ES_PROTO" != "https" ]] && die "ES_PROTO 'http' veya 'https' olmali."
+[[ "$FIELD_MODE" != "remove" && "$FIELD_MODE" != "empty" ]] && die "FIELD_MODE 'remove' veya 'empty' olmali."
+[[ "$PROXY_FIELD" != "apn" && "$PROXY_FIELD" != "api" ]] && die "PROXY_FIELD 'apn' veya 'api' olmali."
+
+# Zaman araligi: ya ikisi de dolu ya ikisi de bos
+[ -n "$START_TS" ] && [ -z "$END_TS" ] && die "START_TS dolu ama END_TS bos."
+[ -z "$START_TS" ] && [ -n "$END_TS" ] && die "END_TS dolu ama START_TS bos."
+
+# Islem secimi: tam olarak biri
+if [ -n "$FIELDS" ] && [ "$DELETE_DOCS" == "true" ]; then
+    die "FIELDS ile DELETE_DOCS ayni anda kullanilamaz. Ya alanlari temizleyin ya dokumanlari silin."
+fi
+if [ -z "$FIELDS" ] && [ "$DELETE_DOCS" != "true" ]; then
+    die "Yapilacak islem yok. FIELDS doldurun veya DELETE_DOCS=\"true\" yapin."
+fi
+
+# ---------------------------------------------------------------------------
+# Parola: dosyada bos birakildiysa calisma aninda sorulur
+# ---------------------------------------------------------------------------
+if [ -n "$ES_USER" ] && [ -z "$ES_PASS" ]; then
+    read -s -p "Elasticsearch parolasi ($ES_USER): " ES_PASS
     echo ""
 fi
 
@@ -108,7 +320,7 @@ CURL_OPTS=(-s)
 [ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (varsa)
 [ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
 
-# ---- Calistirilan curl komutunu (parola maskeli) ekrana basar ----
+# Calistirilan curl komutunu (parola maskeli) ekrana basar
 run_curl() {
     local shown=() arg
     for arg in "$@"; do
@@ -122,536 +334,280 @@ run_curl() {
     curl "$@"
 }
 
-# ---- Write blogunu acan / geri kapatan yardimcilar ----
-open_write() {
-    local wb
-    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
-        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
-    if [ "$wb" == "true" ]; then
-        echo "Index read-only, write aciliyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
-        echo ""
-        RESTORE_READONLY="true"
+# ---------------------------------------------------------------------------
+# Sorgu uretimi: dolu olan filtreler bool.filter icinde birlestirilir.
+# Hicbir filtre yoksa match_all -> index'teki tum dokumanlar.
+# ---------------------------------------------------------------------------
+build_query() {
+    local filters=()
+    [ -n "$PROXY_VALUE" ] && filters+=("{\"term\":{\"$PROXY_FIELD\":\"$PROXY_VALUE\"}}")
+    [ -n "$START_TS" ] && filters+=("{\"range\":{\"@timestamp\":{\"gte\":\"$START_TS\",\"lte\":\"$END_TS\"}}}")
+
+    if [ ${#filters[@]} -eq 0 ]; then
+        echo '{"match_all":{}}'
     else
-        RESTORE_READONLY="false"
+        local joined
+        joined=$(IFS=,; echo "${filters[*]}")
+        echo "{\"bool\":{\"filter\":[$joined]}}"
     fi
-}
-restore_write() {
-    if [ "$RESTORE_READONLY" == "true" ]; then
-        echo "Index tekrar read-only olarak ayarlaniyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
-        echo ""
-    fi
-}
-force_merge() {
-    echo "Force merge calistiriliyor..."
-    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
-        | tee forcemerge_result.json
-    echo ""
 }
 
-# ---- Alan listesinden painless scripti uretir ----
+# ---------------------------------------------------------------------------
+# Painless script uretimi
+#   FIELD_MODE="remove" -> alan _source'tan komple silinir
+#   FIELD_MODE="empty"  -> alan kalir, icerigi "" olur
 #
-# VARSAYILAN: alan _source'tan KOMPLE SILINIR  -> en yuksek disk kazanimi
+# containsKey kontrolu, alani zaten olmayan dokumanlarda islem yapilmasini onler.
 #
-# ALTERNATIF: Alanin dokumanda GORUNMEYE DEVAM ETMESINI istiyorsaniz, asagidaki
-# "s+=" satirini yorum yapip alttaki alternatif satiri aktif edin.
-# Alan _source'ta "fcrb": "" olarak kalir (disk kazanimi sinirlidir):
-#
-#   s+="if (ctx._source.containsKey('$f')) { ctx._source.$f = ''; } "
-#
+# ctx.op = 'noop': Hicbir alan degismediyse Elasticsearch dokumani hic yeniden
+# yazmaz. Bu olmadan _update_by_query, script _source'u degistirmese bile her
+# eslesen dokumani reindex eder (gereksiz _version artisi, segment copu, I/O).
+# Ozellikle ayni temizlik ikinci kez calistirildiginda onemlidir; o calismada
+# tum dokumanlar "noops" olarak raporlanir ve disk/CPU harcanmaz.
+# ---------------------------------------------------------------------------
 build_field_script() {
     local input="$1" IFS=',' fields s="" f
     read -r -a fields <<< "$input"
+    s="boolean changed = false; "
     for f in "${fields[@]}"; do
         f=$(echo "$f" | xargs)
         [ -z "$f" ] && continue
-        s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); } "
-    done
-    echo "$s"
-}
-
-read -p "Index adini girin: " INDEX
-read -p "Silinecek alanlar (virgulle, ornek: fcrb,tba,tcb): " FIELD_INPUT
-[ -z "$FIELD_INPUT" ] && { echo "Alan girilmedi. Islem iptal edildi."; exit 1; }
-SCRIPT=$(build_field_script "$FIELD_INPUT")
-
-open_write
-echo "Secilen alanlar KOMPLE SILINIYOR (tum dokumanlar): $FIELD_INPUT"
-run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_update_by_query?conflicts=proceed&wait_for_completion=true" \
-    -H 'Content-Type: application/json' \
-    -d "{\"script\":{\"source\":\"$SCRIPT\",\"lang\":\"painless\"},\"query\":{\"match_all\":{}}}" \
-    | tee update_result.json
-echo ""
-force_merge
-restore_write
-echo "Islem tamamlandi."
-```
-
-```bash
-chmod +x es_clear_fields_all.sh
-./es_clear_fields_all.sh
-```
-
-Örnek `update_result.json` çıktısı:
-
-```json
-{"took":41361,"timed_out":false,"total":86517,"updated":86517,"deleted":0,"batches":87,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"failures":[]}
-```
-
-## 2) Belirli Alanların Belirli Zaman Aralığında Silinmesi
-
-`es_clear_fields_range.sh` — 1. script ile aynıdır; yalnızca `@timestamp` aralığı ile sınırlar. Sadece belirtilen tarih aralığındaki dökümanlardan alanlar kaldırılır.
-
-```bash
-#!/bin/bash
-# ============================================================
-# Alanlari Sil - Zaman Araligi  (es_clear_fields_range.sh)
-# ============================================================
-
-# ---- Ortak baglanti bilgileri ----
-read -p "Elasticsearch host (IP:PORT) girin: " ES_HOST
-read -p "Protokol (http/https) [http]: " ES_PROTO
-ES_PROTO=${ES_PROTO:-http}
-read -p "Elasticsearch kullanici adi girin (auth yoksa BOS birakin): " ES_USER
-if [ -n "$ES_USER" ]; then
-    read -s -p "Elasticsearch parolasi girin: " ES_PASS
-    echo ""
-fi
-
-BASE_URL="$ES_PROTO://$ES_HOST"
-CURL_OPTS=(-s)
-[ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (varsa)
-[ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
-
-# ---- Calistirilan curl komutunu (parola maskeli) ekrana basar ----
-run_curl() {
-    local shown=() arg
-    for arg in "$@"; do
-        if [ -n "$ES_USER" ] && [[ "$arg" == "$ES_USER:$ES_PASS" ]]; then
-            shown+=("$ES_USER:****")
+        if [ "$FIELD_MODE" == "remove" ]; then
+            s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); changed = true; } "
         else
-            shown+=("$arg")
+            s+="if (ctx._source.containsKey('$f') && ctx._source.$f != '') { ctx._source.$f = ''; changed = true; } "
         fi
     done
-    echo ">> curl ${shown[*]}" >&2
-    curl "$@"
-}
-
-# ---- Write blogunu acan / geri kapatan yardimcilar ----
-open_write() {
-    local wb
-    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
-        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
-    if [ "$wb" == "true" ]; then
-        echo "Index read-only, write aciliyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
-        echo ""
-        RESTORE_READONLY="true"
-    else
-        RESTORE_READONLY="false"
-    fi
-}
-restore_write() {
-    if [ "$RESTORE_READONLY" == "true" ]; then
-        echo "Index tekrar read-only olarak ayarlaniyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
-        echo ""
-    fi
-}
-force_merge() {
-    echo "Force merge calistiriliyor..."
-    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
-        | tee forcemerge_result.json
-    echo ""
-}
-
-# ---- Alan listesinden painless scripti uretir ----
-#
-# VARSAYILAN: alan _source'tan KOMPLE SILINIR  -> en yuksek disk kazanimi
-#
-# ALTERNATIF: Alanin dokumanda GORUNMEYE DEVAM ETMESINI istiyorsaniz, asagidaki
-# "s+=" satirini yorum yapip alttaki alternatif satiri aktif edin.
-# Alan _source'ta "fcrb": "" olarak kalir (disk kazanimi sinirlidir):
-#
-#   s+="if (ctx._source.containsKey('$f')) { ctx._source.$f = ''; } "
-#
-build_field_script() {
-    local input="$1" IFS=',' fields s="" f
-    read -r -a fields <<< "$input"
-    for f in "${fields[@]}"; do
-        f=$(echo "$f" | xargs)
-        [ -z "$f" ] && continue
-        s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); } "
-    done
+    s+="if (!changed) { ctx.op = 'noop'; }"
     echo "$s"
 }
 
-read -p "Index adini girin: " INDEX
-read -p "Silinecek alanlar (virgulle, ornek: fcrb,tba,tcb): " FIELD_INPUT
-[ -z "$FIELD_INPUT" ] && { echo "Alan girilmedi. Islem iptal edildi."; exit 1; }
-read -p "Baslangic zamani (ornek: 2025-01-01T00:00:00.000Z): " START_TS
-read -p "Bitis zamani     (ornek: 2025-02-01T00:00:00.000Z): " END_TS
-SCRIPT=$(build_field_script "$FIELD_INPUT")
-QUERY="{\"range\":{\"@timestamp\":{\"gte\":\"$START_TS\",\"lte\":\"$END_TS\"}}}"
+QUERY=$(build_query)
 
-open_write
-echo "Secilen alanlar KOMPLE SILINIYOR ($START_TS - $END_TS): $FIELD_INPUT"
-run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_update_by_query?conflicts=proceed&wait_for_completion=true" \
-    -H 'Content-Type: application/json' \
-    -d "{\"script\":{\"source\":\"$SCRIPT\",\"lang\":\"painless\"},\"query\":$QUERY}" \
-    | tee update_result.json
-echo ""
-force_merge
-restore_write
-echo "Islem tamamlandi."
-```
-
-```bash
-chmod +x es_clear_fields_range.sh
-./es_clear_fields_range.sh
-```
-
-Örnek `update_result.json` çıktısı:
-
-```json
-{"took":1482,"timed_out":false,"total":2294,"updated":2294,"deleted":0,"batches":3,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"failures":[]}
-```
-
-## 3) Belirli Bir Proxy İçin Alanların Silinmesi
-
-`es_clear_fields_proxy.sh` — Sadece **belirli bir API Proxy'ye** ait dökümanlardan seçilen alanları kaldırır. Proxy, `apn` (Proxy Adı) veya `api` (Proxy ID) alanına göre bir `term` filtresiyle seçilir. Zaman aralığı **opsiyoneldir**: boş bırakılırsa o proxy'nin tüm zamanlardaki trafiği; girilirse yalnızca o aralık temizlenir.
-
-```bash
-#!/bin/bash
-# ============================================================
-# Alanlari Sil - Belirli Proxy  (es_clear_fields_proxy.sh)
-# ============================================================
-
-# ---- Ortak baglanti bilgileri ----
-read -p "Elasticsearch host (IP:PORT) girin: " ES_HOST
-read -p "Protokol (http/https) [http]: " ES_PROTO
-ES_PROTO=${ES_PROTO:-http}
-read -p "Elasticsearch kullanici adi girin (auth yoksa BOS birakin): " ES_USER
-if [ -n "$ES_USER" ]; then
-    read -s -p "Elasticsearch parolasi girin: " ES_PASS
-    echo ""
-fi
-
-BASE_URL="$ES_PROTO://$ES_HOST"
-CURL_OPTS=(-s)
-[ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (varsa)
-[ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
-
-# ---- Calistirilan curl komutunu (parola maskeli) ekrana basar ----
-run_curl() {
-    local shown=() arg
-    for arg in "$@"; do
-        if [ -n "$ES_USER" ] && [[ "$arg" == "$ES_USER:$ES_PASS" ]]; then
-            shown+=("$ES_USER:****")
-        else
-            shown+=("$arg")
-        fi
-    done
-    echo ">> curl ${shown[*]}" >&2
-    curl "$@"
-}
-
-# ---- Write blogunu acan / geri kapatan yardimcilar ----
-open_write() {
-    local wb
-    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
-        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
-    if [ "$wb" == "true" ]; then
-        echo "Index read-only, write aciliyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
-        echo ""
-        RESTORE_READONLY="true"
+# ---------------------------------------------------------------------------
+# Ozet
+# ---------------------------------------------------------------------------
+echo "===================================================================="
+echo " YAPILACAK ISLEM"
+echo "===================================================================="
+echo " Sunucu   : $BASE_URL"
+echo " Kimlik   : ${ES_USER:-<auth yok>}"
+echo " Index    : $INDEX"
+if [ -n "$FIELDS" ]; then
+    if [ "$FIELD_MODE" == "remove" ]; then
+        echo " Islem    : ALANLAR _source'TAN KOMPLE SILINECEK"
     else
-        RESTORE_READONLY="false"
+        echo " Islem    : ALANLARIN ICERIGI BOSALTILACAK (\"\")"
     fi
-}
-restore_write() {
-    if [ "$RESTORE_READONLY" == "true" ]; then
-        echo "Index tekrar read-only olarak ayarlaniyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
-        echo ""
-    fi
-}
-force_merge() {
-    echo "Force merge calistiriliyor..."
-    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
-        | tee forcemerge_result.json
-    echo ""
-}
-
-# ---- Alan listesinden painless scripti uretir ----
-#
-# VARSAYILAN: alan _source'tan KOMPLE SILINIR  -> en yuksek disk kazanimi
-#
-# ALTERNATIF: Alanin dokumanda GORUNMEYE DEVAM ETMESINI istiyorsaniz, asagidaki
-# "s+=" satirini yorum yapip alttaki alternatif satiri aktif edin.
-# Alan _source'ta "fcrb": "" olarak kalir (disk kazanimi sinirlidir):
-#
-#   s+="if (ctx._source.containsKey('$f')) { ctx._source.$f = ''; } "
-#
-build_field_script() {
-    local input="$1" IFS=',' fields s="" f
-    read -r -a fields <<< "$input"
-    for f in "${fields[@]}"; do
-        f=$(echo "$f" | xargs)
-        [ -z "$f" ] && continue
-        s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); } "
-    done
-    echo "$s"
-}
-
-read -p "Index adini girin: " INDEX
-read -p "Proxy alani (apn=Proxy Adi / api=Proxy ID) [apn]: " PROXY_FIELD
-PROXY_FIELD=${PROXY_FIELD:-apn}
-read -p "Proxy degeri (secilen alana gore Proxy Adi veya ID): " PROXY_VALUE
-read -p "Silinecek alanlar (virgulle, ornek: fcrb,tba,tcb): " FIELD_INPUT
-[ -z "$PROXY_VALUE" ] && { echo "Proxy degeri girilmedi. Islem iptal edildi."; exit 1; }
-[ -z "$FIELD_INPUT" ] && { echo "Alan girilmedi. Islem iptal edildi."; exit 1; }
-# Zaman araligi opsiyoneldir: bos birakilirsa proxy'nin TUM trafigi temizlenir
-read -p "Baslangic zamani (opsiyonel, bos = tum zamanlar): " START_TS
-read -p "Bitis zamani     (opsiyonel, bos = tum zamanlar): " END_TS
-
-SCRIPT=$(build_field_script "$FIELD_INPUT")
-
-# Sorgu: proxy filtresi (+ opsiyonel zaman araligi)
-FILTER="{\"term\":{\"$PROXY_FIELD\":\"$PROXY_VALUE\"}}"
-if [ -n "$START_TS" ] && [ -n "$END_TS" ]; then
-    RANGE="{\"range\":{\"@timestamp\":{\"gte\":\"$START_TS\",\"lte\":\"$END_TS\"}}}"
-    QUERY="{\"bool\":{\"filter\":[${FILTER},${RANGE}]}}"
-    echo "Proxy '$PROXY_VALUE' ($PROXY_FIELD) icin alanlar KOMPLE SILINIYOR ($START_TS - $END_TS): $FIELD_INPUT"
+    echo " Alanlar  : $FIELDS"
 else
-    QUERY="{\"bool\":{\"filter\":[${FILTER}]}}"
-    echo "Proxy '$PROXY_VALUE' ($PROXY_FIELD) icin alanlar KOMPLE SILINIYOR (tum zamanlar): $FIELD_INPUT"
+    echo " Islem    : DOKUMANLAR SILINECEK"
 fi
-
-open_write
-run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_update_by_query?conflicts=proceed&wait_for_completion=true" \
-    -H 'Content-Type: application/json' \
-    -d "{\"script\":{\"source\":\"$SCRIPT\",\"lang\":\"painless\"},\"query\":$QUERY}" \
-    | tee update_result.json
+echo " Kapsam   :"
+if [ -n "$PROXY_VALUE" ]; then
+    echo "   proxy  : $PROXY_FIELD = $PROXY_VALUE"
+else
+    echo "   proxy  : (filtre yok, tum proxy'ler)"
+fi
+if [ -n "$START_TS" ]; then
+    echo "   zaman  : $START_TS  ->  $END_TS"
+else
+    echo "   zaman  : (filtre yok, tum zamanlar)"
+fi
+if [ -z "$PROXY_VALUE" ] && [ -z "$START_TS" ]; then
+    echo "   ==> Index'teki TUM dokumanlar islenecek."
+fi
+echo " Force merge : $FORCE_MERGE"
+[ "$DRY_RUN" == "true" ] && echo " DRY_RUN     : true (hicbir degisiklik yapilmayacak)"
+echo "===================================================================="
 echo ""
-force_merge
-restore_write
-echo "Islem tamamlandi."
-```
 
-```bash
-chmod +x es_clear_fields_proxy.sh
-./es_clear_fields_proxy.sh
-```
-
-Örnek `update_result.json` çıktısı (tek proxy, dar kapsam):
-
-```json
-{"took":97,"timed_out":false,"total":154,"updated":154,"deleted":0,"batches":1,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"failures":[]}
-```
-
-## 4) Belirli Zaman Aralığındaki Dökümanların Silinmesi
-
-`es_delete_docs_range.sh` — Belirtilen tarih aralığındaki **dökümanların tamamını** siler. Silmeden önce `_count` ile etkilenecek döküman sayısını gösterir ve `yes` onayı ister.
-
-```bash
-#!/bin/bash
-# ============================================================
-# Dokumanlari Sil - Zaman Araligi  (es_delete_docs_range.sh)
-# ============================================================
-
-# ---- Ortak baglanti bilgileri ----nread -p "Elasticsearch host (IP:PORT) girin: " ES_HOST
-read -p "Protokol (http/https) [http]: " ES_PROTO
-ES_PROTO=${ES_PROTO:-http}
-read -p "Elasticsearch kullanici adi girin (auth yoksa BOS birakin): " ES_USER
-if [ -n "$ES_USER" ]; then
-    read -s -p "Elasticsearch parolasi girin: " ES_PASS
-    echo ""
-fi
-
-BASE_URL="$ES_PROTO://$ES_HOST"
-CURL_OPTS=(-s)
-[ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (varsa)
-[ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
-
-# ---- Calistirilan curl komutunu (parola maskeli) ekrana basar ----
-run_curl() {
-    local shown=() arg
-    for arg in "$@"; do
-        if [ -n "$ES_USER" ] && [[ "$arg" == "$ES_USER:$ES_PASS" ]]; then
-            shown+=("$ES_USER:****")
-        else
-            shown+=("$arg")
-        fi
-    done
-    echo ">> curl ${shown[*]}" >&2
-    curl "$@"
-}
-
-# ---- Write blogunu acan / geri kapatan yardimcilar ----
-open_write() {
-    local wb
-    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
-        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
-    if [ "$wb" == "true" ]; then
-        echo "Index read-only, write aciliyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
-        echo ""
-        RESTORE_READONLY="true"
-    else
-        RESTORE_READONLY="false"
-    fi
-}
-restore_write() {
-    if [ "$RESTORE_READONLY" == "true" ]; then
-        echo "Index tekrar read-only olarak ayarlaniyor..."
-        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
-            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
-        echo ""
-    fi
-}
-force_merge() {
-    echo "Force merge calistiriliyor..."
-    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
-        | tee forcemerge_result.json
-    echo ""
-}
-
-read -p "Index adini girin: " INDEX
-read -p "Baslangic zamani (ornek: 2025-01-01T00:00:00.000Z): " START_TS
-read -p "Bitis zamani     (ornek: 2025-02-01T00:00:00.000Z): " END_TS
-QUERY="{\"range\":{\"@timestamp\":{\"gte\":\"$START_TS\",\"lte\":\"$END_TS\"}}}"
-
-echo "Silinecek dokuman sayisi kontrol ediliyor..."
+# ---------------------------------------------------------------------------
+# Etkilenecek dokuman sayisi
+# ---------------------------------------------------------------------------
+echo "Etkilenecek dokuman sayisi kontrol ediliyor..."
 COUNT=$(run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_count" \
     -H 'Content-Type: application/json' -d "{\"query\":$QUERY}" | jq -r '.count')
-echo "Bu araliktaki dokuman sayisi: $COUNT"
-read -p "Bu dokumanlari SILMEK icin 'yes' yazin: " CONFIRM
-[ "$CONFIRM" != "yes" ] && { echo "Islem iptal edildi."; exit 1; }
-
-open_write
-run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_delete_by_query?conflicts=proceed&wait_for_completion=true" \
-    -H 'Content-Type: application/json' -d "{\"query\":$QUERY}" | tee delete_result.json
+echo "Etkilenecek dokuman sayisi: $COUNT"
 echo ""
-force_merge
-restore_write
-echo "Islem tamamlandi."
-```
 
-```bash
-chmod +x es_delete_docs_range.sh
-./es_delete_docs_range.sh
-```
+if [ -z "$COUNT" ] || [ "$COUNT" == "null" ]; then
+    die "Dokuman sayisi alinamadi. Baglanti bilgilerini ve index adini kontrol edin."
+fi
+if [ "$COUNT" == "0" ]; then
+    echo "Eslesen dokuman yok. Yapilacak islem yok."
+    exit 0
+fi
 
-Örnek `delete_result.json` çıktısı:
+# ---------------------------------------------------------------------------
+# DRY_RUN
+# ---------------------------------------------------------------------------
+if [ "$DRY_RUN" == "true" ]; then
+    echo "DRY_RUN - calistirilacak sorgu:"
+    echo "  $QUERY"
+    if [ -n "$FIELDS" ]; then
+        echo "DRY_RUN - calistirilacak painless script:"
+        echo "  $(build_field_script "$FIELDS")"
+    fi
+    echo ""
+    echo "DRY_RUN aktif oldugundan hicbir degisiklik yapilmadi."
+    exit 0
+fi
 
-```json
-{"took":32288,"timed_out":false,"total":316168,"deleted":316168,"batches":317,"version_conflicts":0,"noops":0,"retries":{"bulk":0,"search":0},"throttled_millis":0,"requests_per_second":-1.0,"failures":[]}
-```
-
-## 5) Index'in Tamamen Silinmesi
-
-`es_delete_index.sh` — Index'i ve içindeki tüm veriyi kalıcı olarak siler; disk alanını **anında** geri kazandırır (force merge gerekmez). `yes` onayı ister.
-
-Birden fazla index virgülle verilebilir. Script, girilen değerdeki **tüm boşlukları temizler**; böylece `idx1, idx2` veya ` idx1 , idx2 ` gibi girdiler de sorunsuz çalışır.
-
-```bash
-#!/bin/bash
-# ============================================================
-# Index(ler)i Tamamen Sil  (es_delete_index.sh)
-# ============================================================
-
-# ---- Ortak baglanti bilgileri ----
-read -p "Elasticsearch host (IP:PORT) girin: " ES_HOST
-read -p "Protokol (http/https) [http]: " ES_PROTO
-ES_PROTO=${ES_PROTO:-http}
-read -p "Elasticsearch kullanici adi girin (auth yoksa BOS birakin): " ES_USER
-if [ -n "$ES_USER" ]; then
-    read -s -p "Elasticsearch parolasi girin: " ES_PASS
+# ---------------------------------------------------------------------------
+# Onay
+# ---------------------------------------------------------------------------
+if [ "$SKIP_CONFIRM" != "true" ]; then
+    read -p "Devam etmek icin 'yes' yazin: " CONFIRM
+    [ "$CONFIRM" != "yes" ] && { echo "Islem iptal edildi."; exit 1; }
     echo ""
 fi
 
-BASE_URL="$ES_PROTO://$ES_HOST"
-CURL_OPTS=(-s)
-[ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (varsa)
-[ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
-
-# ---- Calistirilan curl komutunu (parola maskeli) ekrana basar ----
-run_curl() {
-    local shown=() arg
-    for arg in "$@"; do
-        if [ -n "$ES_USER" ] && [[ "$arg" == "$ES_USER:$ES_PASS" ]]; then
-            shown+=("$ES_USER:****")
-        else
-            shown+=("$arg")
-        fi
-    done
-    echo ">> curl ${shown[*]}" >&2
-    curl "$@"
+# ---------------------------------------------------------------------------
+# Write blogu / force merge yardimcilari
+# ---------------------------------------------------------------------------
+open_write() {
+    local wb
+    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
+        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
+    if [ "$wb" == "true" ]; then
+        echo "Index read-only, write aciliyor..."
+        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
+            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
+        echo ""
+        RESTORE_READONLY="true"
+    else
+        RESTORE_READONLY="false"
+    fi
+}
+restore_write() {
+    if [ "$RESTORE_READONLY" == "true" ]; then
+        echo "Index tekrar read-only olarak ayarlaniyor..."
+        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
+            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
+        echo ""
+    fi
+}
+force_merge() {
+    [ "$FORCE_MERGE" != "true" ] && return
+    echo "Force merge calistiriliyor..."
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
+        | tee forcemerge_result.json
+    echo ""
 }
 
-read -p "Silinecek index adi (birden fazla icin virgulle, ornek: idx1,idx2): " RAW_INDEX
+# ---------------------------------------------------------------------------
+# Islem
+# ---------------------------------------------------------------------------
+open_write
 
-# ============================================================
-# BOSLUK TEMIZLEME ADIMI
-# ============================================================
-# Kullanicinin girdisindeki tum bosluk karakterleri silinir.
-# Boylece "idx1, idx2" veya " idx1 , idx2 " gibi girdiler
-# "idx1,idx2" haline gelir.
-INDEX=$(echo "$RAW_INDEX" | tr -d ' ')
-# ============================================================
-
-echo "Silinecek index(ler): $INDEX"
-read -p "Index(leri) KALICI olarak silmek icin 'yes' yazin: " CONFIRM
-[ "$CONFIRM" != "yes" ] && { echo "Islem iptal edildi."; exit 1; }
-
-run_curl "${CURL_OPTS[@]}" -X DELETE "$BASE_URL/$INDEX?pretty" | tee delete_index_result.json
-
+if [ -n "$FIELDS" ]; then
+    SCRIPT=$(build_field_script "$FIELDS")
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_update_by_query?conflicts=proceed&wait_for_completion=true" \
+        -H 'Content-Type: application/json' \
+        -d "{\"script\":{\"source\":\"$SCRIPT\",\"lang\":\"painless\"},\"query\":$QUERY}" \
+        | tee update_result.json
+else
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_delete_by_query?conflicts=proceed&wait_for_completion=true" \
+        -H 'Content-Type: application/json' -d "{\"query\":$QUERY}" \
+        | tee delete_result.json
+fi
 echo ""
+
+force_merge
+restore_write
+
+# Ipucu komutu, calisma sirasinda kullanilan curl parametreleriyle ayni
+# olacak sekilde uretilir (auth varsa -u, https ise -k).
+HINT_AUTH=""
+HINT_K=""
+[ -n "$ES_USER" ] && HINT_AUTH="-u \"$ES_USER:PAROLA\" "
+[ "$ES_PROTO" == "https" ] && HINT_K="-k "
+
+echo "===================================================================="
 echo "Islem tamamlandi."
+echo "Not: Buyuk indexlerde disk alaninin hemen geri bosalmamasi normaldir."
+echo "Index boyutunu kontrol etmek icin:"
+echo "  curl -s ${HINT_AUTH}${HINT_K}-X GET \"$BASE_URL/$INDEX/_stats/store?pretty\" | jq -r '._all.primaries.store.size_in_bytes'"
+echo "===================================================================="
 ```
+
+## 8) Çalıştırma
 
 ```bash
-chmod +x es_delete_index.sh
-./es_delete_index.sh
+vi es_cleanup.sh        # AYAR BÖLÜMÜNÜ doldurun
+chmod +x es_cleanup.sh
+./es_cleanup.sh
 ```
 
-Örnek `delete_index_result.json` çıktısı:
+### Örnek Ayarlar
 
-```json
-{
-  "acknowledged" : true
-}
-```
-
-:::warning[Wildcard ile Silme]
-
-`apinizer_api_traffic_2024*` gibi wildcard ile toplu silme, kümede `action.destructive_requires_name: true` ayarı varsa **engellenir**. Bu durumda index'ler tek tek veya virgülle ad verilerek silinmelidir. Wildcard yanlışlıkla geniş silmelere yol açabileceğinden regüle ortamlarda önerilmez.
-
-:::
-
-## Örnek Çalışma Çıktısı
-
-Scriptler çalıştırdıkları `curl` komutlarını (parola maskelenmiş) ekrana basar:
+**Belirli bir proxy'nin, belirli tarih aralığındaki body alanlarını sil** (data stream backing index üzerinde):
 
 ```bash
+INDEX=".ds-apinizer-log-apiproxy-qa8-2026.07.09-000025"
+FIELDS="tba,tcb"
+FIELD_MODE="remove"
+DELETE_DOCS="false"
+START_TS="2026-07-09T13:10:00.600Z"
+END_TS="2026-07-09T14:13:00.600Z"
+PROXY_FIELD="apn"
+PROXY_VALUE="testm"
+```
+
+**Index'teki tüm dökümanların body alanlarını sil (filtresiz):**
+
+```bash
+INDEX="apinizer_api_traffic_v2"
+FIELDS="fcrb,tba,fbarb,tcb"
+DELETE_DOCS="false"
+START_TS=""
+END_TS=""
+PROXY_VALUE=""
+```
+
+**Belirli tarih aralığındaki dökümanları tamamen sil:**
+
+```bash
+INDEX="apinizer_api_traffic_v2"
+FIELDS=""
+DELETE_DOCS="true"
+START_TS="2025-01-01T00:00:00.000Z"
+END_TS="2025-02-01T00:00:00.000Z"
+PROXY_VALUE=""
+```
+
+## 9) Örnek Çalışma Çıktısı
+
+Script önce yapılacak işlemin özetini ve etkilenecek döküman sayısını gösterir:
+
+```bash
+====================================================================
+ YAPILACAK ISLEM
+====================================================================
+ Sunucu   : https://10.10.10.10:9200
+ Kimlik   : elastic
+ Index    : apinizer_api_traffic_v2
+ Islem    : ALANLAR _source'TAN KOMPLE SILINECEK
+ Alanlar  : fcrb,tba,fbarb,tcb
+ Kapsam   :
+   proxy  : apn = MyProxy
+   zaman  : 2025-01-01T00:00:00.000Z  ->  2025-02-01T00:00:00.000Z
+ Force merge : true
+====================================================================
+
+Etkilenecek dokuman sayisi kontrol ediliyor...
+>> curl -s -u elastic:**** -k -X POST https://10.10.10.10:9200/apinizer_api_traffic_v2/_count ...
+Etkilenecek dokuman sayisi: 4210
+
+Devam etmek icin 'yes' yazin: yes
+
 >> curl -s -u elastic:**** -k -X GET https://10.10.10.10:9200/apinizer_api_traffic_v2/_settings
 Index read-only, write aciliyor...
->> curl -s -u elastic:**** -k -X PUT https://10.10.10.10:9200/apinizer_api_traffic_v2/_settings ...
-Secilen alanlar KOMPLE SILINIYOR (tum dokumanlar): fcrb,tba,tcb
 >> curl -s -u elastic:**** -k -X POST https://10.10.10.10:9200/apinizer_api_traffic_v2/_update_by_query?...
-{"took":41361,"timed_out":false,"total":86517,...}
+{"took":1482,"timed_out":false,"total":2294,"updated":2294,"deleted":0,"batches":3,"version_conflicts":0,"noops":0,...,"failures":[]}
+
 Force merge calistiriliyor...
->> curl -s -u elastic:**** -k -X POST https://10.10.10.10:9200/apinizer_api_traffic_v2/_forcemerge?only_expunge_deletes=true&pretty
 {
   "_shards" : {
     "total" : 1,
@@ -660,7 +616,20 @@ Force merge calistiriliyor...
   }
 }
 Index tekrar read-only olarak ayarlaniyor...
+====================================================================
 Islem tamamlandi.
+====================================================================
+```
+
+`DRY_RUN="true"` ile çalıştırıldığında hiçbir değişiklik yapılmaz, yalnızca plan gösterilir:
+
+```bash
+DRY_RUN - calistirilacak sorgu:
+  {"bool":{"filter":[{"term":{"apn":"MyProxy"}},{"range":{"@timestamp":{"gte":"2025-01-01T00:00:00.000Z","lte":"2025-02-01T00:00:00.000Z"}}}]}}
+DRY_RUN - calistirilacak painless script:
+  if (ctx._source.containsKey('fcrb')) { ctx._source.remove('fcrb'); } if (ctx._source.containsKey('tba')) { ctx._source.remove('tba'); } ...
+
+DRY_RUN aktif oldugundan hicbir degisiklik yapilmadi.
 ```
 
 :::info
@@ -669,15 +638,16 @@ Islem tamamlandi.
 
 - `total` — sorguyla eşleşen döküman sayısı
 - `updated` / `deleted` — gerçekten güncellenen / silinen döküman sayısı
+- `noops` — değişiklik gerekmediği için dokunulmayan döküman sayısı (alanlar zaten temizlenmişse beklenen değerdir)
 - `version_conflicts` — `conflicts=proceed` sayesinde işlem durmaz; sıfırdan büyükse eşzamanlı yazma olmuştur
 - `failures` — boş dizi olmalıdır; dolu ise işlem kısmen başarısızdır
 - `_shards.failed` — force merge sonucunda `0` olmalıdır
 
 :::
 
-## Doğrulama
+## 10) Doğrulama
 
-İşlem sonrası index boyutu kontrol edilir (`ES_HOST`, kullanıcı ve `INDEX` kendi ortamınıza göre):
+İşlem sonrası index boyutu kontrol edilir:
 
 ```bash
 curl -s -u "elastic:PAROLA" -k -X GET "https://ES_HOST:ES_PORT/INDEX/_stats/store?pretty" \
@@ -692,6 +662,6 @@ Büyük index'lerde disk alanının hemen geri boşalmaması **normaldir**. Forc
 
 :::info
 
-Scriptler `update_result.json`, `delete_result.json`, `delete_index_result.json` ve `forcemerge_result.json` çıktı dosyalarını çalıştıkları dizinde oluşturur.
+Script `update_result.json`, `delete_result.json` ve `forcemerge_result.json` çıktı dosyalarını çalıştığı dizinde oluşturur.
 
 :::
