@@ -119,11 +119,11 @@ Veri iki ayrı pipeline üzerinden ilerliyor ve Grafana'da buluşuyor:
 
 | Bileşen | Namespace | Görevi |
 | --- | --- | --- |
-| **OTel Operator** | `monitoring` | Instrumentation CR'ı okur, gateway deployment'ına Java agent init container'ı enjekte eder |
+| **OTel Operator** | `monitoring` | Instrumentation CR'ı (Custom Resource) okur, gateway deployment'ına Java agent init container'ı enjekte eder |
 | **OTel Java Agent** | `<worker-namespace>` (worker pod) | Gateway kodunu değiştirmeden HTTP/JDBC/cache çağrılarını span'e dönüştürür |
 | **OTel Collector** | `monitoring` | Span'leri işleyip Tempo'ya yazar; trace'ten RED/service graph metriği üretir; native `:9091` metriklerini toplar; hepsini `:8889`'da yayınlar |
-| **Tempo** | `monitoring` | Trace deposu (WAL + bloklar); Grafana Explore'un trace kaynağı |
-| **Prometheus Agent** | `monitoring` | Collector `:8889`'u scrape eder, `remote_write` ile merkezi Prometheus'a iletir (yerelde TSDB tutmaz) |
+| **Tempo** | `monitoring` | Trace deposu — WAL (Write-Ahead Log) + bloklar; Grafana Explore'un trace kaynağı |
+| **Prometheus Agent** | `monitoring` | Collector `:8889`'u scrape eder, `remote_write` ile merkezi Prometheus'a iletir; yerelde TSDB (Time Series Database) tutmaz |
 | **Central Prometheus** | Merkezi/uzak | Metrik TSDB; `remote_write` alıcısı; Grafana'nın metrik kaynağı |
 | **Grafana** | Merkezi/uzak | Trace (Tempo) ve metrik (Prometheus) görselleştirme |
 
@@ -144,7 +144,7 @@ sequenceDiagram
   Note over JVM: JVM agent ile başlar,<br/>her HTTP/JDBC/cache çağrısı span üretir
 ```
 
-Peki tüm bu mekanizmayı tetikleyen ne? Deployment'ın pod template'ine eklenen tek bir annotation:
+Peki tüm bu mekanizmayı tetikleyen ne? Uygulamanızın deployment'ının pod template'ine eklemeniz gereken tek bir annotation:
 
 ```yaml
 metadata:
@@ -188,7 +188,7 @@ Traces pipeline'ındaki her processor'ın bir rolü var:
 
 | Processor | Ne yapar? | Apinizer'da neden gerekli? |
 | --- | --- | --- |
-| `memory_limiter` | Collector belleğini korur, OOM'u önler | Yük altında gateway saniyede binlerce span üretebilir |
+| `memory_limiter` | Collector belleğini korur, OOM'u (Out of Memory) önler | Yük altında gateway saniyede binlerce span üretebilir |
 | `filter/drop_mongo_polling` | MongoDB polling ve management endpoint span'lerini eler | Gürültüyü azaltır; gerçek API trafiğine odaklanırsınız |
 | `k8sattributes` | Pod, namespace, node, deployment etiketleri ekler | Hangi pod'un yavaş olduğunu trace'ten görürsünüz |
 | `resourcedetection` | Host/OS bilgisi ekler | Ortam bazlı filtreleme |
@@ -215,7 +215,7 @@ Kuruluma geçmeden elimizde şunların olması gerekiyor:
     `remote_write` alıcısı açık bir merkezi Prometheus ve ona bağlı bir Grafana.
   </Card>
   <Card title="Depolama" icon="database">
-    Tempo için statik PV/PVC veya bir StorageClass.
+    Tempo için statik PV/PVC (PersistentVolume/PersistentVolumeClaim) veya bir StorageClass.
   </Card>
 </CardGroup>
 
@@ -250,7 +250,7 @@ helm install opentelemetry-operator open-telemetry/opentelemetry-operator \
   --set admissionWebhooks.autoGenerateCert.recreate=true
 ```
 
-Operator pod'u `Running` olana ve CRD'ler gelene kadar bekleyelim:
+Operator pod'u `Running` olana ve CRD'ler (Custom Resource Definition) gelene kadar bekleyelim:
 
 ```bash
 kubectl get pods -n monitoring -l app.kubernetes.io/name=opentelemetry-operator
@@ -581,7 +581,7 @@ Annotation mutlaka `spec.template.metadata.annotations` altında olmalı; deploy
 
 Gateway metriklerini yerelde depolamadan merkezi Prometheus'a iletmek için Prometheus'u agent modunda çalıştırıyoruz. Hedef keşfini `scrape_configs` yerine declarative bir `ServiceMonitor` ile yapıyoruz; bu, Prometheus Operator'ün CRD'lerini gerektiriyor. Cluster'ınızda `kube-prometheus-stack` kuruluysa bu CRD'ler zaten mevcut; değilse Prometheus Operator'ü ayrıca kurmanız gerekiyor.
 
-Önce agent için servis hesabı ve RBAC:
+Önce agent için servis hesabı ve RBAC (Role-Based Access Control) tanımları:
 
 <Accordion title="prometheus-agent-rbac.yaml">
 
@@ -782,25 +782,6 @@ Metrics pipeline ise dört kaynaktan besleniyor:
 | `otlp` | Agent'tan gelen doğrudan metrikler (varsa) |
 
 Tüm metrikler `prometheus` exporter ile `:8889` portunda yayınlanıyor; Prometheus Agent bu portu ServiceMonitor üzerinden scrape ediyor.
-
-### Span'lere İş Bağlamı Katan Transform'lar
-
-`transform/apinizer-traces` processor'ı, ham span'lere Apinizer'a özgü anlam katıyor. Böylece trace araması, dashboard'lar ve service graph iş anlamlı hale geliyor:
-
-<AccordionGroup>
-  <Accordion title="Correlation ID nasıl belirleniyor?">
-    İlk üç ifade, bir `apinizer.correlation_id` değerini öncelik sırasıyla oluşturur: önce response header, yoksa request header, yoksa alt çizgili header varyantı. Böylece bir isteği iş kimliğiyle bulabilirsiniz.
-  </Accordion>
-  <Accordion title="API proxy adı ve yolu">
-    `apinizer.apiproxy.name` özel bir response header'dan, `apinizer.apiproxy.path` ise istek yolundan türetilir. Bu sayede metrikleri ve trace'leri API proxy bazında kırabilirsiniz.
-  </Accordion>
-  <Accordion title="Upstream adresi ve peer service">
-    Giden (CLIENT) span'lerde `apinizer.routing.address` tam hedef adresi, `peer.service` ise downstream servis düğümünü işaretler. `peer.service`, service graph ve span metriklerinde bağımlılık düğümü olarak kullanılır.
-  </Accordion>
-  <Accordion title="Span rolü (log mu, routing mi?)">
-    Elasticsearch'e giden çağrılar `elasticsearch-logging`, kalan tüm CLIENT çağrılar `upstream-routing` olarak etiketlenir. Böylece log yazma trafiğini gerçek backend trafiğinden ayırabilirsiniz.
-  </Accordion>
-</AccordionGroup>
 
 ## Yolda Karşılaştığımız Sorunlar (ve Çözümleri)
 

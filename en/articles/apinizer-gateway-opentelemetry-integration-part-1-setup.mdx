@@ -119,11 +119,11 @@ The data travels along two separate pipelines and meets in Grafana:
 
 | Component | Namespace | Role |
 | --- | --- | --- |
-| **OTel Operator** | `monitoring` | Reads the Instrumentation CR and injects a Java agent init container into the gateway deployment |
+| **OTel Operator** | `monitoring` | Reads the Instrumentation CR (Custom Resource) and injects a Java agent init container into the gateway deployment |
 | **OTel Java Agent** | `<worker-namespace>` (worker pod) | Turns HTTP/JDBC/cache calls into spans without changing gateway code |
 | **OTel Collector** | `monitoring` | Processes spans and writes them to Tempo; derives RED/service-graph metrics from traces; collects native `:9091` metrics; publishes all on `:8889` |
-| **Tempo** | `monitoring` | Trace store (WAL + blocks); the trace source for Grafana Explore |
-| **Prometheus Agent** | `monitoring` | Scrapes the Collector's `:8889` and forwards via `remote_write` to the central Prometheus (keeps no local TSDB) |
+| **Tempo** | `monitoring` | Trace store — WAL (Write-Ahead Log) + blocks; the trace source for Grafana Explore |
+| **Prometheus Agent** | `monitoring` | Scrapes the Collector's `:8889` and forwards via `remote_write` to the central Prometheus; keeps no local TSDB (Time Series Database) |
 | **Central Prometheus** | Central/remote | Metric TSDB; the `remote_write` receiver; Grafana's metric source |
 | **Grafana** | Central/remote | Visualizes traces (Tempo) and metrics (Prometheus) |
 
@@ -144,7 +144,7 @@ sequenceDiagram
   Note over JVM: JVM starts with the agent,<br/>every HTTP/JDBC/cache call produces spans
 ```
 
-So what triggers this whole mechanism? A single annotation on the deployment's pod template:
+So what triggers this whole mechanism? A single annotation you need to add to your application's deployment pod template:
 
 ```yaml
 metadata:
@@ -188,7 +188,7 @@ The role of each processor in the traces pipeline:
 
 | Processor | What does it do? | Why is it needed in Apinizer? |
 | --- | --- | --- |
-| `memory_limiter` | Protects Collector memory, prevents OOM | Under load the gateway can produce thousands of spans/second |
+| `memory_limiter` | Protects Collector memory, prevents OOM (Out of Memory) | Under load the gateway can produce thousands of spans/second |
 | `filter/drop_mongo_polling` | Drops MongoDB polling and management endpoint spans | Reduces noise; lets you focus on real API traffic |
 | `k8sattributes` | Adds pod, namespace, node, deployment labels | You can see which pod is slow from the trace |
 | `resourcedetection` | Adds host/OS info | Environment-based filtering |
@@ -215,7 +215,7 @@ Here's what we need in place before diving in:
     A central Prometheus with the remote-write receiver enabled, and a Grafana connected to it.
   </Card>
   <Card title="Storage" icon="database">
-    A static PV/PVC or a StorageClass for Tempo.
+    A static PV/PVC (PersistentVolume/PersistentVolumeClaim) or a StorageClass for Tempo.
   </Card>
 </CardGroup>
 
@@ -250,7 +250,7 @@ helm install opentelemetry-operator open-telemetry/opentelemetry-operator \
   --set admissionWebhooks.autoGenerateCert.recreate=true
 ```
 
-Then we wait until the operator pod is `Running` and the CRDs show up:
+Then we wait until the operator pod is `Running` and the CRDs (Custom Resource Definitions) show up:
 
 ```bash
 kubectl get pods -n monitoring -l app.kubernetes.io/name=opentelemetry-operator
@@ -581,7 +581,7 @@ The annotation must live under `spec.template.metadata.annotations`; if you plac
 
 To forward gateway metrics to a central Prometheus without storing them locally, we run Prometheus in agent mode. We do target discovery declaratively with a `ServiceMonitor` rather than `scrape_configs`; this requires the Prometheus Operator's CRDs. If `kube-prometheus-stack` is installed in your cluster, these CRDs already exist; otherwise you'll need to install the Prometheus Operator separately.
 
-First, the service account and RBAC for the agent:
+First, the service account and RBAC (Role-Based Access Control) definitions for the agent:
 
 <Accordion title="prometheus-agent-rbac.yaml">
 
@@ -782,25 +782,6 @@ The metrics pipeline gathers metrics from four sources:
 | `otlp` | Direct metrics from the agent (if any) |
 
 All metrics are published on port `:8889` via the `prometheus` exporter; the Prometheus Agent scrapes this port through the ServiceMonitor.
-
-### Transforms That Add Business Context
-
-The `transform/apinizer-traces` processor adds Apinizer-specific meaning to raw spans, so trace search, dashboards, and the service graph become business-aware:
-
-<AccordionGroup>
-  <Accordion title="How is the correlation ID resolved?">
-    The first three statements build an `apinizer.correlation_id` value by priority: first the response header, then the request header, then the underscore variant of the header. This lets you find a request by its business identifier.
-  </Accordion>
-  <Accordion title="API proxy name and path">
-    `apinizer.apiproxy.name` is derived from a custom response header, and `apinizer.apiproxy.path` from the request path. This lets you break down metrics and traces per API proxy.
-  </Accordion>
-  <Accordion title="Upstream address and peer service">
-    On outgoing (CLIENT) spans, `apinizer.routing.address` records the full target address and `peer.service` marks the downstream service node. `peer.service` is used as the dependency node in the service graph and span metrics.
-  </Accordion>
-  <Accordion title="Span role (logging or routing?)">
-    Calls to Elasticsearch are tagged `elasticsearch-logging`, and all remaining CLIENT calls `upstream-routing`. This lets you separate log-writing traffic from real backend traffic.
-  </Accordion>
-</AccordionGroup>
 
 ## The Problems We Hit Along the Way (and How We Fixed Them)
 
