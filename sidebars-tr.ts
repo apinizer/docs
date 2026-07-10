@@ -17,7 +17,11 @@ const sidebars: SidebarsConfig = {
         "ai-gateway/llm-saglayicilari",
         "ai-gateway/token-kotalari",
         "ai-gateway/maliyet-ayarlari",
-        "ai-gateway/raporlar"
+        "ai-gateway/raporlar",
+        "ai-gateway/a2a-gateway",
+        "ai-gateway/gelismis-korumalar",
+        "ai-gateway/coklu-modalite",
+        "ai-gateway/izleme-ve-tekrar-oynatma"
       ]
     }
   ],

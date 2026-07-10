@@ -17,7 +17,11 @@ const sidebars: SidebarsConfig = {
         "ai-gateway/llm-providers",
         "ai-gateway/token-quotas",
         "ai-gateway/cost-settings",
-        "ai-gateway/reports"
+        "ai-gateway/reports",
+        "ai-gateway/a2a-gateway",
+        "ai-gateway/advanced-guardrails",
+        "ai-gateway/multi-modal-endpoints",
+        "ai-gateway/tracing-and-replay"
       ]
     }
   ],
