@@ -937,6 +937,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
+            "operations/administrator-guides/clear-elasticsearch-index-data",
             "operations/administrator-guides/prometheus-zabbix-integration",
             {
               "type": "category",
