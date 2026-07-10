@@ -202,6 +202,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
+            "installation/elasticsearch/add-elasticsearch-node",
             "installation/elasticsearch/simple-authentication",
             "installation/elasticsearch/permission-requirements",
             "installation/elasticsearch/backup-policy",
