@@ -199,6 +199,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
+            "installation/elasticsearch/elastic-node-ekleme",
             "installation/elasticsearch/basit-kimlik-dogrulama",
             "installation/elasticsearch/yetki-gereksinimleri",
             "installation/elasticsearch/yedekleme-politikasi",

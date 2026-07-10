@@ -1,0 +1,272 @@
+---
+title: "Elasticsearch 8.17.10 Cluster'a Yeni Node Ekleme"
+description: "Mevcut ApinizerEsCluster kümesine yeni node ekleme; kapasite (yatay büyüme) ile High Availability (H.A.) ayrımı ve adım adım işlemler."
+---
+
+Bu doküman, yeni sunucularda Elasticsearch'ün [kurulum dokümanına](/tr/installation/elasticsearch/ubuntu-elasticsearch-8.17.10) göre **zaten kurulduğu** varsayımıyla, çalışan bir `ApinizerEsCluster` kümesine yeni node eklemek için yapılması gerekenleri anlatır.
+
+:::info[Önce Neden Node Eklediğinizi Belirleyin]
+
+Node eklemenin iki farklı amacı vardır; bunları karıştırmayın:
+
+**1. Kapasite (yatay büyüme):** Disk doldu, daha fazla depolama gerekiyor. Çözüm **data** node eklemektir (`node.roles: ["data"]`). Master eklemeye gerek yoktur. Disk her dolduğunda yeni data node ekleyerek büyürsünüz.
+
+**2. High Availability (arızaya dayanıklılık):** Cluster'ı yöneten aktif bir master node vardır; bu node çökerse ve yerine yenisi seçilemezse tüm cluster durur. H.A., master çökse bile geriye kalan node'ların otomatik olarak yeni master seçip cluster'ı ayakta tutmasıdır. Bunun için master-eligible node sayısı **tek ve en az 3** olmalıdır. Çözüm **master** node eklemektir. (Master node veri tutmaz, diski rahatlatmaz.)
+
+Buna göre iki tipik durum:
+
+- **Kurum henüz H.A. değil, H.A.'ya geçecek:** master sayısı 3'e çıkarılır (master eklenir). Küçük/orta cluster'da en pratik yol: 3 node, hepsi `["master","data"]`.
+- **Zaten H.A. var (3 master), yalnızca depolama gerekiyor:** yalnızca data node eklenir. Master sayısı **artırılmaz**; 3 yeterlidir ve tek sayı kalmalıdır.
+
+:::
+
+## 1) High Availability İçin Kaç Node Gerekir?
+
+Elasticsearch'te iki ayrı yüksek erişilebilirlik vardır ve **ikisi birlikte** sağlanmalıdır.
+
+**a) Master H.A. (cluster yönetiminin ayakta kalması)**
+
+Master seçimi çoğunluk (quorum) ile çalışır: `quorum = (master-eligible sayısı / 2) + 1`.
+
+| Topoloji | Master-eligible | H.A. |
+|---|---|---|
+| 1 node | 1 | ❌ Tek nokta arıza |
+| 1 master + 2 data | 1 | ❌ Master hâlâ tek nokta arıza |
+| 2 master | 2 | ❌ Biri düşerse cluster durur (split-brain riski) |
+| **3 node (hepsi master+data)** | **3** | ✅ Bir node kaybına dayanır — **minimum H.A.** |
+| 3 master + N data | 3 | ✅ Büyük cluster için |
+
+Kural: **master-eligible node sayısı tek ve en az 3 olmalıdır.** "1 master + 2 data" master tarafında H.A. sağlamaz.
+
+**b) Veri H.A. (bir data node düşse de verinin kaybolmaması)**
+
+Bunun için index'lerde **replica ≥ 1** ve **en az 2 data node** gerekir; böylece her shard'ın kopyası farklı bir node'da tutulur.
+
+:::info[Best Practice]
+
+- **Küçük/orta cluster:** 3 node, hepsi `["master","data"]`. Hem 3 master quorum'u hem veri yedeği tek seferde sağlanır. En pratik H.A. budur.
+- **Büyük cluster:** 3 ayrı (dedicated) master `["master"]` + ihtiyaç kadar data node `["data"]`. Böylece ağır sorgu/veri yükü master seçimini etkilemez.
+
+:::
+
+## 2) Uzak / Farklı Ağdaki Sunucular
+
+:::warning
+
+- **Uzak sunucuya master rolü verilmez.** Master seçimi gecikmeye çok duyarlıdır; uzak master gereksiz yeniden seçimlere ve kararsızlığa yol açar. Uzak node her zaman `node.roles: ["data"]` olmalıdır.
+- **Master node'ların hepsi ana site'ta**, aynı düşük gecikmeli ağda olmalıdır.
+- Sunucu **gerçekten uzak/yüksek gecikmeli** (WAN) ise, tek cluster'a katmak H.A. sağlamaz; bu durumda ayrı cluster + **Cross-Cluster Replication (CCR)** doğru yaklaşımdır (CCR, Platinum/Enterprise lisans gerektirir). Karar öncesi `ping` ile gecikmeyi ölçün.
+
+:::
+
+**Özet:** Ana site node'ları `["master","data"]` (veya ayrık: `["master"]` / `["data"]`), uzak node'lar yalnızca `["data"]`.
+
+---
+
+:::info[Kurulumdan Farklı 3 Nokta]
+
+Node ekleme bir **katılımdır**, ilk kurulum değildir. Bu yüzden yeni node'da kurulum dokümanındaki üç adım **atlanır**:
+
+1. Sertifika **üretilmez**, mevcut node'dan **kopyalanır** (`certutil` çalıştırılmaz).
+2. `elasticsearch-setup-passwords` **çalıştırılmaz** (built-in kullanıcılar cluster'da zaten mevcuttur).
+3. `cluster.initial_master_nodes` ve `discovery.type: single-node` yeni node'a **yazılmaz**.
+
+:::
+
+:::warning
+
+Yeni node'lar ile master node'lar arasında **9200** (HTTP) ve **9300** (transport) portları çift yönlü açık olmalıdır.
+
+:::
+
+## 3) Sertifikaların Kopyalanması
+
+:::warning[Sertifika üretilmez, kopyalanır]
+
+Kurulum dokümanındaki `elasticsearch-certutil` komutları **çalıştırılmaz**. Cluster'daki tüm node'lar aynı sertifikayı paylaşır. Mevcut node'daki sertifika dosyaları yeni node'a **aynı yola** kopyalanır.
+
+:::
+
+```bash
+# 1) Yeni node'da certs dizini oluşturulur
+mkdir -p /opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+```
+
+```bash
+# 2) Mevcut (primary) node üzerinde çalıştırılır; sertifikalar yeni node'a kopyalanır
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.p12 \
+    elasticsearch@<YENI_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-stack-ca.p12 \
+    elasticsearch@<YENI_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.crt \
+    elasticsearch@<YENI_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+```
+
+```bash
+# 3) Yeni node'da izinler düzenlenir
+sudo chown -Rf elasticsearch:elasticsearch /opt/elasticsearch/elasticsearch-8.17.10/config/certs
+sudo chmod -Rf 775 /opt/elasticsearch/elasticsearch-8.17.10/config/certs
+```
+
+## 4) Yeni Node'un elasticsearch.yml Ayarı
+
+Yalnızca **yeni node'da** aşağıdaki yapılandırma uygulanır.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/elasticsearch.yml
+```
+
+```yaml
+cluster.name: ApinizerEsCluster
+node.name: "<YENI_NODE_IP>"
+network.host: "0.0.0.0"
+http.port: 9200
+
+# Ana site master için:  node.roles: ["master","data"]  (veya ["master"])
+# Data / uzak node için:  node.roles: ["data"]
+node.roles: ["data"]
+
+# Cluster'daki master node'ların IP'leri yazılır
+discovery.seed_hosts: ["<MASTER_NODE_IP>:9300"]
+
+# cluster.initial_master_nodes ve discovery.type: single-node YAZILMAZ
+
+path.data: /data/elastic-data/
+path.repo: ["/data/elastic-snapdata"]
+
+# Security
+xpack.security.enabled: true
+xpack.security.enrollment.enabled: true
+
+# HTTP SSL
+xpack.security.http.ssl:
+  enabled: true
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+
+# Transport SSL
+xpack.security.transport.ssl:
+  enabled: true
+  verification_mode: certificate
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+
+# CORS ayarları
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers: X-Requested-With, X-Auth-Token, Content-Type, Content-Length
+```
+
+:::info[discovery.seed_hosts'a hangi IP'ler yazılır?]
+
+Bu liste, yeni node'un cluster'ı bulmak için ilk temas kuracağı adreslerdir. Keşif master-eligible node'lar üzerinden yürüdüğü için buraya **master node'ların IP'leri** yazılır, data node'ların değil.
+
+Cluster'da birden fazla master varsa **hepsi** listelenir; yalnızca tek master yazılırsa o node kapalıyken yeni node cluster'a katılamaz.
+
+Port belirtmek zorunlu değildir (varsayılan transport portu 9300'dür), ancak `"<IP>:9300"` biçiminde yazmak nettir.
+
+:::
+
+:::warning[network.host neden 0.0.0.0?]
+
+`network.host` alanına node'un kendi IP'si yazıldığında Elasticsearch **yalnızca o adreste dinlemeye** çalışır. Adres sunucuda tanımlı değilse veya trafik başka bir arayüzden geliyorsa, servis `BindException: Cannot assign requested address` hatasıyla başlamaz.
+
+`0.0.0.0` verildiğinde tüm arayüzlerde dinlenir ve bu sorun oluşmaz. Node'ların birbirine ilan ettiği adresi (publish address) sabitlemek isterseniz:
+
+```yaml
+network.bind_host: 0.0.0.0
+network.publish_host: "<YENI_NODE_IP>"
+```
+
+Başlangıç loglarında `publish_address {<IP>:9300}, bound_addresses {0.0.0.0:9300}` satırıyla doğrulayabilirsiniz.
+
+:::
+
+:::info
+
+`jvm.options` dosyasında heap değeri, sunucunun RAM'inin **yarısına** kadar çıkabilir ve **32 GB'ı aşmamalıdır**.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/jvm.options
+```
+```yaml
+-Xms16g
+-Xmx16g
+```
+
+:::
+
+## 5) Master Node'da Değişiklik Gerekmez
+
+:::info[Master node'a dokunulmaz, restart edilmez]
+
+Keşif **tek yönlü** çalışır: yeni node, `discovery.seed_hosts` üzerinden master'a ulaşır ve cluster'a katılma isteği gönderir. Master'ın yeni node'u önceden tanıması gerekmez.
+
+Bu nedenle yeni bir **data node** eklerken:
+
+- Master'ın `discovery.seed_hosts` listesine yeni data node **eklenmez** (gereksizdir).
+- Master node **yeniden başlatılmaz.**
+
+Master'ın `seed_hosts` listesi yalnızca **master node'ları** içermelidir.
+
+:::
+
+:::info[cluster.initial_master_nodes]
+
+Mevcut node'un config dosyasında `cluster.initial_master_nodes` satırı varsa, bu ayar çalışan cluster'da **yok sayılır** ve zarar vermez. Yine de ileride yanlışlıkla yeni bir cluster kurulmasını önlemek için, uygun bir bakım penceresinde silinmesi önerilir. Silmek için restart gerekmez; değişiklik bir sonraki başlatmada geçerli olur.
+
+:::
+
+## 6) Yeni Node'un Başlatılması
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start elasticsearch
+sudo systemctl enable elasticsearch
+sudo systemctl status elasticsearch
+```
+
+:::warning
+
+`elasticsearch-setup-passwords` **çalıştırılmaz.** Built-in kullanıcılar (elastic, kibana vb.) cluster'da zaten mevcuttur; bu komutu yeni node'da çalıştırmak mevcut şifreleri bozar.
+
+:::
+
+## 7) Doğrulama
+
+Yeni node başlatıldıktan sonra, **hiçbir node yeniden başlatılmadan** master üzerinden kontrol edilir:
+
+```bash
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/nodes?v"
+```
+
+Örnek çıktı (1 master+data, 2 data node):
+
+```text
+ip             heap.percent ram.percent cpu load_1m load_5m load_15m node.role master name
+<DATA_NODE_2_IP>         12          63   1    0.01    0.14     0.22 d         -      <DATA_NODE_2_IP>
+<DATA_NODE_1_IP>          6          98   1    0.06    0.07     0.26 d         -      <DATA_NODE_1_IP>
+<MASTER_NODE_IP>         53          30   2    0.16    0.09     0.07 dm        *      <MASTER_NODE_IP>
+```
+
+`node.role` sütununda `d` data, `m` master-eligible anlamına gelir. `master` sütunundaki `*` aktif master'ı gösterir.
+
+Yeni node listede görünmüyorsa logu inceleyin:
+
+```bash
+sudo journalctl -u elasticsearch -f
+```
+
+Bağlantı kurulamıyorsa `discovery.seed_hosts` IP'si, 9300 portu ve sertifika kontrol edilir.
+
+Data node eklendiğinde shard'lar yeni node'a taşınmaya başlar (rebalancing):
+
+```bash
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/recovery?v&active_only=true"
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cluster/health?pretty"
+```
+
+`relocating_shards` değeri sıfıra inip cluster durumu `green` olduğunda dağıtım tamamlanmıştır.
