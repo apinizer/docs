@@ -1,0 +1,669 @@
+---
+title: "Elasticsearch log Cleanup Script"
+description: "Describes the single-file cleanup script used for disk space management on Apinizer traffic indices. Based on the fields filled in the configuration section, the script either cleans specific fields or deletes documents; time range and proxy filters are optional."
+---
+
+This document describes the **single-file** `es_cleanup.sh` script used to reclaim disk space on Apinizer traffic indices (`apinizer_api_traffic_*`).
+
+The script is opened with `vi`, the **CONFIGURATION SECTION** at the top is filled in, and the script is run. The operation to be performed and its scope are determined automatically based on **which fields you fill in**.
+
+:::warning[Important - Irreversible Operations]
+
+The script performs **irreversible** operations. Before running it, make sure a **snapshot / backup** of the relevant index has been taken. It is recommended to review the plan first by running it with `DRY_RUN="true"`.
+
+The script never **deletes** the entire index; it only cleans fields or deletes documents.
+
+:::
+
+## 1) Prerequisites
+
+- Access to the Elasticsearch server (`IP:PORT`) and write/management privileges on the relevant index
+- `curl` and `jq` must be installed
+
+```bash
+# If jq is not installed
+sudo apt update
+sudo apt install -y jq
+```
+
+## 2) Determining the Operation
+
+Only **one of the two operation fields** in the configuration section is used:
+
+| Field that is set | Operation performed | Method |
+| --- | --- | --- |
+| `FIELDS="fcrb,tba"` | The selected **fields** are cleaned, documents remain | `_update_by_query` |
+| `DELETE_DOCS="true"` | The matching **documents** are deleted | `_delete_by_query` |
+
+If both are set, the script fails with an error and stops.
+
+## 3) Determining the Scope
+
+The scope fields are **optional**. A filter that is left empty is not applied:
+
+| Field(s) that are set | Scope |
+| --- | --- |
+| None | **All documents** in the index (`match_all`) |
+| `START_TS` + `END_TS` | Only documents within that **time range** |
+| `PROXY_VALUE` | Only documents belonging to that **proxy** |
+| Both | The intersection of the proxy **and** the time range |
+
+The filters that are set are combined inside a single `bool.filter`.
+
+:::info
+
+**Field Names and Filter Fields**
+
+- The **fields to be cleaned** must match the **key name** inside the document's `_source` exactly. The abbreviations from the Apinizer template are used (`fcrb`, `tba` …), **not** the description names. Most of the disk usage comes from the `text` type body fields:
+
+| Field | Description |
+| --- | --- |
+| `fcrb` | From Client Body |
+| `tba` | To Backend Body |
+| `fbarb` | From Backend Body |
+| `tcb` | To Client Body |
+
+- The **proxy filter** is applied on the `apn` (API Proxy Name) or `api` (API Proxy ID) field.
+- The **time filter** is applied on the `@timestamp` field. Format: `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` (e.g. `2025-01-01T00:00:00.000Z`). `START_TS` and `END_TS` must be set together.
+
+:::
+
+## 4) If You Are Using a Data Stream (indices starting with `.ds-`)
+
+Apinizer log indices may be configured as a **data stream**. In that case the actual data is stored in **backing indices** whose names start with `.ds-`:
+
+```bash
+.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025
+```
+
+:::warning[Enter the Backing Index Name, Not the Data Stream Name]
+
+Elasticsearch treats data streams as **append-only**; `_update_by_query` or `_delete_by_query` **cannot** be run directly against a data stream name. Therefore the `INDEX` setting must contain the **backing index name** (`.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025`), not the data stream name (`apinizer-log-apiproxy-qa8`).
+
+:::
+
+The backing indices of a data stream multiply through rollover. To clean an entire data stream, list the backing indices and run the script **separately for each one**:
+
+```bash
+# List of backing indices
+curl -s -u "elastic:PASSWORD" -k -X GET \
+  "https://ES_HOST:ES_PORT/_data_stream/apinizer-log-apiproxy-qa8?pretty" \
+  | jq -r '.data_streams[].indices[].index_name'
+```
+
+```bash
+# Alternative: with their sizes, via _cat
+curl -s -u "elastic:PASSWORD" -k -X GET \
+  "https://ES_HOST:ES_PORT/_cat/indices/.ds-apinizer-log-apiproxy-qa8-*?v&h=index,docs.count,store.size&s=index"
+```
+
+:::info
+
+**The Active Backing Index**
+
+The newest backing index of a data stream is the one being **written to**. Since new documents keep arriving during the cleanup, the document count after the operation may differ from what you expected. This is normal; thanks to `conflicts=proceed` the operation does not stop.
+
+If the ILM policy has moved the backing index to the `cold`/`frozen` phase, the index may be read-only. The script detects this, temporarily enables write, and **restores it to its previous state** at the end.
+
+:::
+
+## 5) Field Cleanup Method
+
+The `FIELD_MODE` setting accepts two values:
+
+| Value | Behavior |
+| --- | --- |
+| `remove` (default) | The field is **completely removed** from `_source` |
+| `empty` | The field remains, its content becomes an **empty string** (`""`) |
+
+Inside painless, the script guards the field with a `containsKey()` check. This way, documents that **do not already contain** the field are not processed needlessly.
+
+```groovy
+boolean changed = false;
+if (ctx._source.containsKey('fcrb')) { ctx._source.remove('fcrb'); changed = true; }
+if (!changed) { ctx.op = 'noop'; }
+```
+
+:::info
+
+**Why Is `ctx.op = 'noop'` There?**
+
+`_update_by_query` **rewrites every matching document** even when the painless script does not modify `_source` at all. This causes unnecessary `_version` increments, new segments, and wasted I/O.
+
+When no field has changed, the script sets `ctx.op = 'noop'`; Elasticsearch then does not touch those documents at all.
+
+Practical effect: when **the same cleanup is run a second time** (the fields are already removed), all documents are reported as `noops`, and no disk or CPU is wasted:
+
+```json
+{"total":1387,"updated":0,"noops":1387,"deleted":0,"failures":[]}
+```
+
+Without this guard, the same run would report `updated: 1387` and 1387 documents would be rewritten for nothing.
+
+:::
+
+:::warning[If You Want the Field to Remain in the Document]
+
+If you do **not** want the field deleted but only want its **content emptied** (so that the field still appears in the `_source` output and the document schema stays intact), use `FIELD_MODE="empty"`.
+
+Comparison of the two methods:
+
+| | `remove` (default) | `empty` |
+| --- | --- | --- |
+| Key inside `_source` | Completely removed | Remains as `"fcrb": ""` |
+| Disk gain | **Highest** | Limited |
+| API/dashboard output | The field is never returned | The field is returned with an empty string |
+| Does an `exists` query match? | No | **Yes** (an empty string is a value) |
+
+Since reclaiming disk space is the primary goal, **`remove` should be preferred.** `empty` should only be used in special cases where the field must remain visible in the output.
+
+:::
+
+## 6) Safety and Control Settings
+
+| Setting | Description |
+| --- | --- |
+| `ES_PASS` | If **left empty**, it is prompted at runtime. Not storing the password in the file is recommended. |
+| `ES_USER` | If security is disabled on the cluster (`xpack.security.enabled: false`), leave it **empty**; the `-u` parameter is never used. |
+| `DRY_RUN` | If `"true"`, no changes are made; the plan, the number of affected documents, and the query/painless script to be executed are printed. |
+| `SKIP_CONFIRM` | If `"true"`, no confirmation is asked. For automation only; must be used with care. |
+| `FORCE_MERGE` | If `"true"`, a force merge is run after the operation to reclaim disk space. |
+
+In addition, the script:
+
+- Prints every `curl` command it executes in the `>> curl ...` format, **masking the password** (`username:****`).
+- Shows the **number of affected documents** via `_count` before the operation and asks for a `yes` confirmation.
+- Temporarily enables the write block if the index is read-only, and restores it to its **previous state** at the end.
+- Automatically adds the `-k` parameter for self-signed certificates when `https` is selected.
+
+## 7) Script
+
+```bash
+#!/bin/bash
+# ============================================================================
+#  Apinizer - Elasticsearch Index Cleanup Script
+#  es_cleanup.sh
+# ----------------------------------------------------------------------------
+#  Combines all cleanup scenarios into a single file.
+#  Open the script with "vi es_cleanup.sh" and fill in the CONFIGURATION
+#  SECTION below. The operation and its scope are determined automatically
+#  based on which fields you fill in.
+#
+#  OPERATION (choose one):
+#     FIELDS is set         -> the selected FIELDS are cleaned (documents stay)
+#     DELETE_DOCS="true"    -> the matching DOCUMENTS are deleted
+#
+#  SCOPE (optional, empty values are not applied):
+#     START_TS + END_TS     -> only documents within this time range
+#     PROXY_VALUE           -> only documents belonging to this proxy
+#     both empty            -> ALL documents in the index
+#
+#  Note: This script never DELETES the entire index; it only cleans fields
+#        or deletes documents.
+#
+#  USAGE:
+#     vi es_cleanup.sh      # fill in the CONFIGURATION SECTION
+#     chmod +x es_cleanup.sh
+#     ./es_cleanup.sh
+# ============================================================================
+
+
+# ############################################################################
+# #                    CONFIGURATION SECTION  (FILL THIS IN)                 #
+# ############################################################################
+
+# ---- Connection (REQUIRED) -------------------------------------------------
+ES_HOST="10.10.10.10:9200"       # IP:PORT
+ES_PROTO="https"                 # http | https
+
+# ---- Authentication (OPTIONAL) ---------------------------------------------
+# If security is disabled on the cluster (xpack.security.enabled: false),
+# leave both EMPTY; the -u parameter is never used.
+# If ES_PASS is left empty it is prompted at runtime (recommended if you do
+# not want to store the password in the file).
+ES_USER="elastic"
+ES_PASS=""
+
+# ---- Index (REQUIRED) ------------------------------------------------------
+INDEX="apinizer_api_traffic_v2"
+
+# ############################################################################
+# #  OPERATION SELECTION - Use ONLY ONE of the following                     #
+# ############################################################################
+
+# ---- OPERATION A: Clean fields ---------------------------------------------
+# Comma separated. Must match the _source keys of the document exactly.
+# Apinizer body fields (the bulk of the disk usage):
+#     fcrb  = From Client Body
+#     tba   = To Backend Body
+#     fbarb = From Backend Body
+#     tcb   = To Client Body
+# If left EMPTY, no field cleanup is performed.
+FIELDS="fcrb,tba,fbarb,tcb"
+
+# Field cleanup method:
+#     "remove" -> the field is completely removed from _source
+#                 (default, highest disk gain)
+#     "empty"  -> the field remains, its content becomes ""
+#                 (limited disk gain)
+FIELD_MODE="remove"
+
+# ---- OPERATION B: Delete documents -----------------------------------------
+# If set to "true", the DOCUMENTS matching the scope below are DELETED.
+# Cannot be used together with FIELDS (clear FIELDS first).
+DELETE_DOCS="false"
+
+# ############################################################################
+# #  SCOPE (OPTIONAL) - An empty filter is not applied                       #
+# ############################################################################
+
+# ---- Time range ------------------------------------------------------------
+# Format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'
+# BOTH empty -> no time filter (all time)
+# One cannot be set while the other is left empty.
+START_TS=""                      # e.g. 2025-01-01T00:00:00.000Z
+END_TS=""                        # e.g. 2025-02-01T00:00:00.000Z
+
+# ---- Proxy -----------------------------------------------------------------
+# PROXY_VALUE empty -> no proxy filter (all proxies)
+# PROXY_FIELD: apn = API Proxy Name | api = API Proxy ID
+PROXY_FIELD="apn"
+PROXY_VALUE=""                   # e.g. MyProxy
+
+# ############################################################################
+# #  BEHAVIOR                                                                #
+# ############################################################################
+
+FORCE_MERGE="true"               # Reclaim disk space after the operation
+DRY_RUN="false"                  # "true" -> makes no changes, only shows the plan
+SKIP_CONFIRM="false"             # "true" -> no confirmation (automation; USE WITH CARE)
+
+# ############################################################################
+# #             END OF CONFIGURATION SECTION - DO NOT EDIT BELOW             #
+# ############################################################################
+
+
+set -o pipefail
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Configuration validation
+# ---------------------------------------------------------------------------
+command -v jq >/dev/null 2>&1 || die "'jq' is not installed. Install it: sudo apt install -y jq"
+
+[ -z "$ES_HOST" ] && die "ES_HOST cannot be empty."
+[ -z "$INDEX" ]   && die "INDEX cannot be empty."
+[[ "$ES_PROTO" != "http" && "$ES_PROTO" != "https" ]] && die "ES_PROTO must be 'http' or 'https'."
+[[ "$FIELD_MODE" != "remove" && "$FIELD_MODE" != "empty" ]] && die "FIELD_MODE must be 'remove' or 'empty'."
+[[ "$PROXY_FIELD" != "apn" && "$PROXY_FIELD" != "api" ]] && die "PROXY_FIELD must be 'apn' or 'api'."
+
+# Time range: either both set or both empty
+[ -n "$START_TS" ] && [ -z "$END_TS" ] && die "START_TS is set but END_TS is empty."
+[ -z "$START_TS" ] && [ -n "$END_TS" ] && die "END_TS is set but START_TS is empty."
+
+# Operation selection: exactly one
+if [ -n "$FIELDS" ] && [ "$DELETE_DOCS" == "true" ]; then
+    die "FIELDS and DELETE_DOCS cannot be used together. Either clean fields or delete documents."
+fi
+if [ -z "$FIELDS" ] && [ "$DELETE_DOCS" != "true" ]; then
+    die "No operation to perform. Set FIELDS or set DELETE_DOCS=\"true\"."
+fi
+
+# ---------------------------------------------------------------------------
+# Password: prompted at runtime if left empty in the file
+# ---------------------------------------------------------------------------
+if [ -n "$ES_USER" ] && [ -z "$ES_PASS" ]; then
+    read -s -p "Elasticsearch password ($ES_USER): " ES_PASS
+    echo ""
+fi
+
+BASE_URL="$ES_PROTO://$ES_HOST"
+CURL_OPTS=(-s)
+[ -n "$ES_USER" ] && CURL_OPTS+=(-u "$ES_USER:$ES_PASS")   # Basic Auth (if provided)
+[ "$ES_PROTO" == "https" ] && CURL_OPTS+=(-k)              # https + self-signed
+
+# Echoes the executed curl command (password masked)
+run_curl() {
+    local shown=() arg
+    for arg in "$@"; do
+        if [ -n "$ES_USER" ] && [[ "$arg" == "$ES_USER:$ES_PASS" ]]; then
+            shown+=("$ES_USER:****")
+        else
+            shown+=("$arg")
+        fi
+    done
+    echo ">> curl ${shown[*]}" >&2
+    curl "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Query generation: the filters that are set are combined inside bool.filter.
+# If no filter is set -> match_all -> all documents in the index.
+# ---------------------------------------------------------------------------
+build_query() {
+    local filters=()
+    [ -n "$PROXY_VALUE" ] && filters+=("{\"term\":{\"$PROXY_FIELD\":\"$PROXY_VALUE\"}}")
+    [ -n "$START_TS" ] && filters+=("{\"range\":{\"@timestamp\":{\"gte\":\"$START_TS\",\"lte\":\"$END_TS\"}}}")
+
+    if [ ${#filters[@]} -eq 0 ]; then
+        echo '{"match_all":{}}'
+    else
+        local joined
+        joined=$(IFS=,; echo "${filters[*]}")
+        echo "{\"bool\":{\"filter\":[$joined]}}"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Painless script generation
+#   FIELD_MODE="remove" -> the field is completely removed from _source
+#   FIELD_MODE="empty"  -> the field remains, its content becomes ""
+#
+# The containsKey check prevents work on documents that do not have the field.
+#
+# ctx.op = 'noop': If no field changed, Elasticsearch does not rewrite the
+# document at all. Without this, _update_by_query reindexes every matching
+# document even when the script does not modify _source (unnecessary _version
+# increments, segment garbage, I/O). This matters especially when the same
+# cleanup is run a second time; in that run all documents are reported as
+# "noops" and no disk/CPU is wasted.
+# ---------------------------------------------------------------------------
+build_field_script() {
+    local input="$1" IFS=',' fields s="" f
+    read -r -a fields <<< "$input"
+    s="boolean changed = false; "
+    for f in "${fields[@]}"; do
+        f=$(echo "$f" | xargs)
+        [ -z "$f" ] && continue
+        if [ "$FIELD_MODE" == "remove" ]; then
+            s+="if (ctx._source.containsKey('$f')) { ctx._source.remove('$f'); changed = true; } "
+        else
+            s+="if (ctx._source.containsKey('$f') && ctx._source.$f != '') { ctx._source.$f = ''; changed = true; } "
+        fi
+    done
+    s+="if (!changed) { ctx.op = 'noop'; }"
+    echo "$s"
+}
+
+QUERY=$(build_query)
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo "===================================================================="
+echo " OPERATION TO BE PERFORMED"
+echo "===================================================================="
+echo " Server    : $BASE_URL"
+echo " Identity  : ${ES_USER:-<no auth>}"
+echo " Index     : $INDEX"
+if [ -n "$FIELDS" ]; then
+    if [ "$FIELD_MODE" == "remove" ]; then
+        echo " Operation : FIELDS WILL BE COMPLETELY REMOVED FROM _source"
+    else
+        echo " Operation : FIELD CONTENTS WILL BE EMPTIED (\"\")"
+    fi
+    echo " Fields    : $FIELDS"
+else
+    echo " Operation : DOCUMENTS WILL BE DELETED"
+fi
+echo " Scope     :"
+if [ -n "$PROXY_VALUE" ]; then
+    echo "   proxy   : $PROXY_FIELD = $PROXY_VALUE"
+else
+    echo "   proxy   : (no filter, all proxies)"
+fi
+if [ -n "$START_TS" ]; then
+    echo "   time    : $START_TS  ->  $END_TS"
+else
+    echo "   time    : (no filter, all time)"
+fi
+if [ -z "$PROXY_VALUE" ] && [ -z "$START_TS" ]; then
+    echo "   ==> ALL documents in the index will be processed."
+fi
+echo " Force merge : $FORCE_MERGE"
+[ "$DRY_RUN" == "true" ] && echo " DRY_RUN     : true (no changes will be made)"
+echo "===================================================================="
+echo ""
+
+# ---------------------------------------------------------------------------
+# Number of affected documents
+# ---------------------------------------------------------------------------
+echo "Checking the number of affected documents..."
+COUNT=$(run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_count" \
+    -H 'Content-Type: application/json' -d "{\"query\":$QUERY}" | jq -r '.count')
+echo "Number of affected documents: $COUNT"
+echo ""
+
+if [ -z "$COUNT" ] || [ "$COUNT" == "null" ]; then
+    die "Could not retrieve the document count. Check the connection details and the index name."
+fi
+if [ "$COUNT" == "0" ]; then
+    echo "No matching documents. Nothing to do."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# DRY_RUN
+# ---------------------------------------------------------------------------
+if [ "$DRY_RUN" == "true" ]; then
+    echo "DRY_RUN - query to be executed:"
+    echo "  $QUERY"
+    if [ -n "$FIELDS" ]; then
+        echo "DRY_RUN - painless script to be executed:"
+        echo "  $(build_field_script "$FIELDS")"
+    fi
+    echo ""
+    echo "DRY_RUN is enabled, so no changes were made."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Confirmation
+# ---------------------------------------------------------------------------
+if [ "$SKIP_CONFIRM" != "true" ]; then
+    read -p "Type 'yes' to continue: " CONFIRM
+    [ "$CONFIRM" != "yes" ] && { echo "Operation cancelled."; exit 1; }
+    echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# Write block / force merge helpers
+# ---------------------------------------------------------------------------
+open_write() {
+    local wb
+    wb=$(run_curl "${CURL_OPTS[@]}" -X GET "$BASE_URL/$INDEX/_settings" \
+        | jq -r ".[\"$INDEX\"].settings.index.blocks.write")
+    if [ "$wb" == "true" ]; then
+        echo "Index is read-only, enabling write..."
+        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
+            -H 'Content-Type: application/json' -d '{"index.blocks.write": false}'
+        echo ""
+        RESTORE_READONLY="true"
+    else
+        RESTORE_READONLY="false"
+    fi
+}
+restore_write() {
+    if [ "$RESTORE_READONLY" == "true" ]; then
+        echo "Setting the index back to read-only..."
+        run_curl "${CURL_OPTS[@]}" -X PUT "$BASE_URL/$INDEX/_settings" \
+            -H 'Content-Type: application/json' -d '{"index.blocks.write": true}'
+        echo ""
+    fi
+}
+force_merge() {
+    [ "$FORCE_MERGE" != "true" ] && return
+    echo "Running force merge..."
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_forcemerge?only_expunge_deletes=true&pretty" \
+        | tee forcemerge_result.json
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Operation
+# ---------------------------------------------------------------------------
+open_write
+
+if [ -n "$FIELDS" ]; then
+    SCRIPT=$(build_field_script "$FIELDS")
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_update_by_query?conflicts=proceed&wait_for_completion=true" \
+        -H 'Content-Type: application/json' \
+        -d "{\"script\":{\"source\":\"$SCRIPT\",\"lang\":\"painless\"},\"query\":$QUERY}" \
+        | tee update_result.json
+else
+    run_curl "${CURL_OPTS[@]}" -X POST "$BASE_URL/$INDEX/_delete_by_query?conflicts=proceed&wait_for_completion=true" \
+        -H 'Content-Type: application/json' -d "{\"query\":$QUERY}" \
+        | tee delete_result.json
+fi
+echo ""
+
+force_merge
+restore_write
+
+# The hint command is generated with the same curl parameters used during the
+# run (-u if auth is set, -k if https).
+HINT_AUTH=""
+HINT_K=""
+[ -n "$ES_USER" ] && HINT_AUTH="-u \"$ES_USER:PASSWORD\" "
+[ "$ES_PROTO" == "https" ] && HINT_K="-k "
+
+echo "===================================================================="
+echo "Operation completed."
+echo "Note: It is normal for disk space not to be freed immediately on large indices."
+echo "To check the index size:"
+echo "  curl -s ${HINT_AUTH}${HINT_K}-X GET \"$BASE_URL/$INDEX/_stats/store?pretty\" | jq -r '._all.primaries.store.size_in_bytes'"
+echo "===================================================================="
+```
+
+## 8) Running the Script
+
+```bash
+vi es_cleanup.sh        # fill in the CONFIGURATION SECTION
+chmod +x es_cleanup.sh
+./es_cleanup.sh
+```
+
+### Example Configurations
+
+**Remove the body fields of a specific proxy within a specific date range** (on a data stream backing index):
+
+```bash
+INDEX=".ds-apinizer-log-apiproxy-qa8-2026.07.09-000025"
+FIELDS="tba,tcb"
+FIELD_MODE="remove"
+DELETE_DOCS="false"
+START_TS="2026-07-09T13:10:00.600Z"
+END_TS="2026-07-09T14:13:00.600Z"
+PROXY_FIELD="apn"
+PROXY_VALUE="testm"
+```
+
+**Remove the body fields of all documents in the index (no filter):**
+
+```bash
+INDEX="apinizer_api_traffic_v2"
+FIELDS="fcrb,tba,fbarb,tcb"
+DELETE_DOCS="false"
+START_TS=""
+END_TS=""
+PROXY_VALUE=""
+```
+
+**Delete all documents within a specific date range:**
+
+```bash
+INDEX="apinizer_api_traffic_v2"
+FIELDS=""
+DELETE_DOCS="true"
+START_TS="2025-01-01T00:00:00.000Z"
+END_TS="2025-02-01T00:00:00.000Z"
+PROXY_VALUE=""
+```
+
+## 9) Example Run Output
+
+The script first shows a summary of the operation and the number of affected documents:
+
+```bash
+====================================================================
+ OPERATION TO BE PERFORMED
+====================================================================
+ Server    : https://10.10.10.10:9200
+ Identity  : elastic
+ Index     : .ds-apinizer-log-apiproxy-qa8-2026.07.09-000025
+ Operation : FIELDS WILL BE COMPLETELY REMOVED FROM _source
+ Fields    : tba,tcb
+ Scope     :
+   proxy   : apn = testm
+   time    : 2026-07-09T13:10:00.600Z  ->  2026-07-09T14:13:00.600Z
+ Force merge : true
+====================================================================
+
+Checking the number of affected documents...
+>> curl -s -u elastic:**** -k -X POST https://10.10.10.10:9200/.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025/_count ...
+Number of affected documents: 1387
+
+Type 'yes' to continue: yes
+
+>> curl -s -u elastic:**** -k -X GET https://10.10.10.10:9200/.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025/_settings
+>> curl -s -u elastic:**** -k -X POST https://10.10.10.10:9200/.ds-apinizer-log-apiproxy-qa8-2026.07.09-000025/_update_by_query?...
+{"took":758,"timed_out":false,"total":1387,"updated":1387,"deleted":0,"batches":2,"version_conflicts":0,"noops":0,...,"failures":[]}
+
+Running force merge...
+{
+  "_shards" : {
+    "total" : 1,
+    "successful" : 1,
+    "failed" : 0
+  }
+}
+====================================================================
+Operation completed.
+====================================================================
+```
+
+When run with `DRY_RUN="true"`, no changes are made; only the plan is shown:
+
+```bash
+DRY_RUN - query to be executed:
+  {"bool":{"filter":[{"term":{"apn":"testm"}},{"range":{"@timestamp":{"gte":"2026-07-09T13:10:00.600Z","lte":"2026-07-09T14:13:00.600Z"}}}]}}
+DRY_RUN - painless script to be executed:
+  boolean changed = false; if (ctx._source.containsKey('tba')) { ctx._source.remove('tba'); changed = true; } ...
+
+DRY_RUN is enabled, so no changes were made.
+```
+
+:::info
+
+**Interpreting the Output**
+
+- `total` — number of documents matching the query
+- `updated` / `deleted` — number of documents actually updated / deleted
+- `noops` — number of documents left untouched because no change was needed (the expected value if the fields have already been cleaned)
+- `version_conflicts` — thanks to `conflicts=proceed` the operation does not stop; a value greater than zero means concurrent writes occurred
+- `failures` — should be an empty array; if it is not, the operation partially failed
+- `_shards.failed` — should be `0` in the force merge result
+
+:::
+
+## 10) Verification
+
+After the operation, check the index size:
+
+```bash
+curl -s -u "elastic:PASSWORD" -k -X GET "https://ES_HOST:ES_PORT/INDEX/_stats/store?pretty" \
+  | jq -r '._all.primaries.store.size_in_bytes'
+```
+
+:::warning[Disk Space Reclamation]
+
+It is **normal** for disk space not to be freed immediately on large indices. Since force merge creates a high I/O cost, it is recommended to run these operations **during off-peak hours**.
+
+:::
+
+:::info
+
+The script creates the `update_result.json`, `delete_result.json`, and `forcemerge_result.json` output files in the directory it is run from.
+
+:::
