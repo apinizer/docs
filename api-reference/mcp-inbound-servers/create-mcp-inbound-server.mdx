@@ -1,0 +1,232 @@
+---
+title: "Create MCP Inbound Server"
+description: "Creates an AI Gateway MCP inbound server in the specified project. If a server with the same name already exists, it is updated in place (upsert). The server is encrypted and deployed to the workers."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/mcp-inbound-servers/{serverName}/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+| serverName | string | Yes | MCP inbound server name (must match `name` in the body, case-insensitive) |
+
+### Request Body
+
+#### Full JSON Body Example
+
+```json
+{
+  "name": "customer-tools",
+  "description": "Exposes customer REST proxies as MCP tools",
+  "active": true,
+  "authType": "VIRTUAL_API_KEY",
+  "virtualApiKey": "sk-inbound-9f3c2a7b1e",
+  "exposedTools": [
+    {
+      "proxyId": "660aabbccddee00112233445",
+      "toolName": "get_customer",
+      "toolDescription": "Fetch a customer by id",
+      "overrideSchema": null,
+      "apiMethodHttpMethod": "GET",
+      "apiMethodPath": "/customers/{id}",
+      "requiredScopes": []
+    }
+  ]
+}
+```
+
+#### Full JSON Body Example - OAUTH2 with output filter
+
+```json
+{
+  "name": "customer-tools",
+  "description": "OAuth2-protected MCP server",
+  "active": true,
+  "authType": "OAUTH2",
+  "oauth2Settings": {
+    "jwksUrl": "https://idp.example.com/.well-known/jwks.json",
+    "issuer": "https://idp.example.com/",
+    "audience": "https://demo.apinizer.com/aimcp/customer-tools",
+    "requiredScopes": ["mcp.read"],
+    "clockSkewSeconds": 30
+  },
+  "toolOutputFilter": {
+    "enabled": true,
+    "maskPii": true,
+    "denyPatterns": ["(?i)password"]
+  },
+  "exposedTools": [
+    {
+      "proxyId": "660aabbccddee00112233445",
+      "toolName": "get_customer",
+      "toolDescription": "Fetch a customer by id",
+      "apiMethodHttpMethod": "GET",
+      "apiMethodPath": "/customers/{id}",
+      "requiredScopes": ["mcp.read"]
+    }
+  ]
+}
+```
+
+#### Request Body Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| name | string | Yes | - | Server name; must match the `serverName` path segment (case-insensitive) |
+| description | string | No | - | Optional description shown in the MCP manifest |
+| active | boolean | No | false | Whether to deploy the server and serve the `/aimcp/\{id\}/...` route |
+| authType | string | No | VIRTUAL_API_KEY | Inbound auth mechanism: `VIRTUAL_API_KEY`, `OAUTH2`, or `NONE` |
+| virtualApiKey | string | Conditional | - | Bearer key for `VIRTUAL_API_KEY` auth (write-only, stored encrypted). Required when `authType = VIRTUAL_API_KEY` |
+| oauth2Settings | object | Conditional | - | OAuth2/JWT validation settings. Required when `authType = OAUTH2` (fail-closed if missing) |
+| toolOutputFilter | object | No | null | Tool-call output filter (`null`/`enabled=false` = passthrough) |
+| exposedTools | array | No | [] | Proxies to expose as MCP tools |
+
+#### oauth2Settings Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| jwksUrl | string | Yes | Remote JWKS endpoint used to validate inbound Bearer JWTs |
+| issuer | string | Yes | Expected `iss` claim (exact match) |
+| audience | string | Yes | Expected `aud` claim (token's `aud` list must contain it) |
+| requiredScopes | array[string] | No | Server-level scope gate; token `scope` must contain ALL entries (empty = no gate) |
+| clockSkewSeconds | integer | No | Allowed clock skew for `exp`/`nbf` (null = 0, strict) |
+
+#### toolOutputFilter Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | boolean | No | Master switch (null/false = passthrough) |
+| maskPii | boolean | No | Mask the 5 built-in PII types in tool-call output |
+| denyPatterns | array[string] | No | Regex denylist; any match blocks the whole response |
+
+#### exposedTools Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| proxyId | string | Yes | ApiProxy ID reference resolved at tool-call time |
+| toolName | string | No | MCP tool name override (auto-generated from proxy name if null) |
+| toolDescription | string | No | Tool description override (proxy description if null) |
+| overrideSchema | string | No | Manual JSON-RPC `inputSchema` override (mainly for SOAP/WSDL proxies) |
+| apiMethodHttpMethod | string | No | HTTP method pinning the tool to one operation (paired with `apiMethodPath`) |
+| apiMethodPath | string | No | REST endpoint path pinning the tool to one operation |
+| requiredScopes | array[string] | No | Per-tool scope gate (enforced only when `authType = OAUTH2`) |
+
+### Notes
+
+- `serverName` in the path must match `name` in the body (case-insensitive); otherwise `400` is returned.
+- `POST` is an **upsert**: if a server with the same name exists in the project it is updated; otherwise it is created.
+- `virtualApiKey` is encrypted (`@SecretData`) before persisting and never echoed back.
+- The `projectId` is always taken from the path project — any value sent in the body is ignored.
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true
+  }
+}
+```
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "MCP inbound server name in path (customer-tools) does not match name in body (other-name)!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "MCP inbound server body can not be empty!"
+}
+```
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+#### Causes
+
+- Missing or invalid Authorization header
+- Token expired or revoked
+- User lacks `AI_DEVELOPMENT` + `MANAGE` permission in the project
+
+## cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/mcp-inbound-servers/customer-tools/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "customer-tools",
+    "description": "Exposes customer REST proxies as MCP tools",
+    "active": true,
+    "authType": "VIRTUAL_API_KEY",
+    "virtualApiKey": "sk-inbound-9f3c2a7b1e",
+    "exposedTools": [
+      {
+        "proxyId": "660aabbccddee00112233445",
+        "toolName": "get_customer",
+        "toolDescription": "Fetch a customer by id",
+        "apiMethodHttpMethod": "GET",
+        "apiMethodPath": "/customers/{id}"
+      }
+    ]
+  }'
+```
+
+## Notes and Warnings
+
+- **Upsert Semantics**: `POST /{serverName}/` creates the server, or updates it in place if the name already exists in the project.
+- **Name Match**: The path `serverName` must equal the body `name` (case-insensitive).
+- **Secret Handling**:
+  - `virtualApiKey` is stored encrypted and is never returned on read (INV-06).
+  - On update via upsert, sending a blank `virtualApiKey` preserves the previously stored value.
+- **OAuth2 Fail-Closed**: When `authType = OAUTH2`, a missing or incomplete `oauth2Settings` renders the server misconfigured and every inbound request is denied.
+- **Deploy on Save**: A successful save encrypts secrets and deploys the server to the workers; the response carries `deploymentResult.success`.
+
+## Related Documentation
+
+- [Update MCP Inbound Server](/api-reference/mcp-inbound-servers/update-mcp-inbound-server) - Update an existing server
+- [Delete MCP Inbound Server](/api-reference/mcp-inbound-servers/delete-mcp-inbound-server) - Delete a server
+- [MCP Inbound Servers API](/api-reference/mcp-inbound-servers) - Resource overview
+- [Authentication Guide](/api-reference/getting-started/authentication) - How to obtain and use API tokens

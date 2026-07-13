@@ -1,0 +1,201 @@
+---
+title: "Test VectorDB Connection"
+description: "Tests a Vector DB connection Manager-side (in-process) without persisting it. Unlike create/update, this does NOT preserve blank secrets — the body must carry the full, real transport credentials. Returns a deployment result."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/vector-dbs/{vectorDbName}/test-connection/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+| vectorDbName | string | Yes | Vector DB connection name (must equal `name` in the body when provided; falls back to the path value when blank) |
+
+### Query Parameters
+
+None
+
+### Request Body
+
+The body is the full connection entity — same shape as [Create](/api-reference/vector-dbs/create-vector-db): it **must** include `"_class": "vector-db"` and a nested `transport` object with its own `"family"` discriminator. Because the test runs against the values in the body (nothing is loaded from storage), you **must** supply the real secrets — a blank secret is NOT substituted from a stored connection.
+
+#### Full JSON Body Example - JDBC transport (pgvector)
+
+```json
+{
+  "_class": "vector-db",
+  "name": "pgvector-primary",
+  "dbType": "PGVECTOR",
+  "defaultCollectionName": "documents",
+  "embeddingDimension": 1536,
+  "distanceMetric": "COSINE",
+  "transport": {
+    "family": "jdbc",
+    "connectTimeoutMs": 5000,
+    "jdbcUrl": "jdbc:postgresql://db.internal:5432/vectors",
+    "username": "apinizer",
+    "password": "s3cr3t-db-pass"
+  }
+}
+```
+
+#### Full JSON Body Example - HTTP transport (Qdrant)
+
+```json
+{
+  "_class": "vector-db",
+  "name": "qdrant-cloud",
+  "dbType": "QDRANT",
+  "defaultCollectionName": "documents",
+  "embeddingDimension": 1536,
+  "distanceMetric": "COSINE",
+  "transport": {
+    "family": "http",
+    "endpoint": "https://xyz.eu-central.aws.cloud.qdrant.io:6333",
+    "apiVersion": "v1",
+    "authScheme": "API_KEY_HEADER",
+    "authHeaderName": "api-key",
+    "apiKey": "qdrant-api-key-value"
+  }
+}
+```
+
+#### Request Body Fields
+
+The fields are identical to [Create VectorDB Connection](/api-reference/vector-dbs/create-vector-db#request-body-fields) (top-level connection fields plus the polymorphic `transport` sub-document). The only difference is that secrets must be real, plaintext values — blank secrets are **not** preserved from any stored connection.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| _class | string | Yes | Connection subtype discriminator — must be `"vector-db"` |
+| name | string | No | Connection name — must match `vectorDbName` if provided; falls back to the path value when blank |
+| dbType | enum | Yes | Vector store type (`PGVECTOR`, `QDRANT`, `WEAVIATE`, `MILVUS`, `CHROMA`, `PINECONE`, `REDIS`, `OTHER`) |
+| transport | object | Yes | Polymorphic transport sub-document with the real credentials — see [Create](/api-reference/vector-dbs/create-vector-db#request-body-fields) for full transport field tables |
+
+## Response
+
+The test always returns `200 OK`; the outcome is carried in `deploymentResult.success`. A reachable, valid connection returns `success: true`; a connectivity/auth failure returns `success: false` with the failure reason in `detail`. `envName` is always `apimanager` (the test runs in-process on the Manager).
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "envName": "apimanager",
+    "detail": "Vector DB connection test successful"
+  }
+}
+```
+
+Failed connectivity (still `200 OK`, `status: SUCCESS`, but `deploymentResult.success: false`):
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": false,
+    "envName": "apimanager",
+    "detail": "Connection refused: db.internal:5432"
+  }
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | string | Envelope status — `SUCCESS` when the test was executed (`FAILURE` only for request errors) |
+| deploymentResult | object | Result of the in-process connectivity probe |
+| deploymentResult.success | boolean | `true` if the vector store was reachable and the probe passed |
+| deploymentResult.envName | string | Always `apimanager` — the test runs on the Manager, not the workers |
+| deploymentResult.detail | string | Human-readable result / failure reason (some vendor probes may return a verbatim "pending" guard message) |
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Vector DB connection body can not be empty!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Vector DB connection name in path (pgvector-primary) does not match name in body (pgvector-2)!"
+}
+```
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/vector-dbs/pgvector-primary/test-connection/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "_class": "vector-db",
+    "name": "pgvector-primary",
+    "dbType": "PGVECTOR",
+    "defaultCollectionName": "documents",
+    "embeddingDimension": 1536,
+    "distanceMetric": "COSINE",
+    "transport": {
+      "family": "jdbc",
+      "jdbcUrl": "jdbc:postgresql://db.internal:5432/vectors",
+      "username": "apinizer",
+      "password": "s3cr3t-db-pass"
+    }
+  }'
+```
+
+## Notes and Warnings
+
+- **No Persistence**: This endpoint validates connectivity in-process on the Manager and does **not** save the connection.
+- **Real Secrets Required**: Unlike create/update, a blank secret is **not** substituted from a stored connection — the body must carry the full, real transport credentials to test.
+- **Outcome in the Body**: A failed test still returns `200 OK` with `status: SUCCESS`; inspect `deploymentResult.success` and `deploymentResult.detail` to determine whether the connection is healthy.
+- **Read-only Probe**: The test performs a vendor-specific read-only probe (e.g. pgvector connect, Redis ping, Qdrant request); it does not write to the target store.
+- **Pending Guard**: Some vendor probes may return a deliberate "pending" detail rather than a hard connectivity result — this is surfaced verbatim in `detail`.
+
+## Related Documentation
+
+- [Create VectorDB Connection](/api-reference/vector-dbs/create-vector-db) - Persist a connection after a successful test
+- [Update VectorDB Connection](/api-reference/vector-dbs/update-vector-db) - Update an existing connection
+- [VectorDB Connections API](/api-reference/vector-dbs) - Resource overview
+- [AI Gateway API](/api-reference/ai-gateway) - Full AI Gateway APIops surface
