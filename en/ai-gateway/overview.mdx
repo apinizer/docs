@@ -1,52 +1,89 @@
 ---
 title: "AI Gateway Overview"
-description: "Apinizer AI Gateway exposes a single OpenAI-compatible client interface to connect to multiple LLM providers — including non-OpenAI ones like Anthropic, Gemini, and Bedrock, whose responses are normalized to OpenAI format — with built-in guardrails, caching, and rate limiting."
+description: "You can connect to multiple LLM providers — including non-OpenAI providers like Anthropic, Gemini, and Bedrock — through a single OpenAI-compatible endpoint, and rely on built-in guardrails, semantic caching, token quotas, and cost tracking without changing your client code."
 ---
 
-import {Card} from '@site/src/components/Card';
+import {Card, CardGroup} from '@site/src/components/Card';
 import {Steps, Step} from '@site/src/components/Steps';
 
-## What is Apinizer AI Gateway?
+## What Apinizer AI Gateway Gives You
 
-Apinizer AI Gateway is a unified, OpenAI-compatible proxy and gateway that sits between your applications and multiple large language model (LLM) providers. Instead of managing direct connections to each provider separately, you connect once to Apinizer and route requests to any supported LLM without changing your client code.
+<CardGroup cols={2}>
+  <Card title="Single, OpenAI-Compatible Endpoint" icon="plug">
+    Point any OpenAI SDK (or compatible client) at one `base_url` and reach every LLM provider you've connected — no per-provider integration code.
+  </Card>
+  <Card title="Multi-Provider Routing" icon="route">
+    Route requests to OpenAI, Anthropic, Google Vertex/Gemini, AWS Bedrock, and OpenAI-compatible self-hosted engines from the same interface. Non-OpenAI responses are normalized back to the OpenAI format automatically.
+  </Card>
+  <Card title="Built-in Guardrails and Cost Controls" icon="shield">
+    PII masking, prompt-injection guards, semantic caching, token quotas, and per-model cost tracking are available out of the box — no separate tooling to wire up.
+  </Card>
+  <Card title="Enterprise Visibility" icon="chart-bar">
+    Usage and cost reports broken down by person, team, project, model, and deployment type (cloud vs. on-premise) give you a single source of truth for AI spend.
+  </Card>
+</CardGroup>
 
-Key benefits:
-- **Single endpoint** — OpenAI SDK drop-in compatibility via configurable `base_url`
-- **Multi-provider support** — connect to OpenAI-compatible services (OpenAI, Azure, Groq, Mistral, vLLM, Ollama) as well as **non-OpenAI-format** providers (Anthropic, Google Vertex/Gemini, AWS Bedrock), whose responses are automatically normalized to OpenAI format
-- **True streaming** — per-chunk Server-Sent Events (SSE) with no buffering or artificial latency
-- **Built-in controls** — request filtering, PII masking, semantic caching, token quotas, and cost tracking
-- **Enterprise visibility** — detailed usage reports by user, team, model, and deployment type (cloud vs. on-premise)
+True streaming is supported end-to-end: responses are relayed to the client chunk-by-chunk as they arrive from the provider, with no artificial buffering.
+
+:::info
+New to LLM terms like tokens, embeddings, or RAG? See [AI Fundamentals](/en/concepts/core-concepts/ai-fundamentals) for a primer — this page focuses on what Apinizer AI Gateway does with them.
+:::
 
 ## Supported LLM Providers
 
-Apinizer AI Gateway works with:
-- **Cloud providers**: OpenAI, Anthropic (Claude), Azure OpenAI, Google Vertex AI, AWS Bedrock
+- **Cloud**: OpenAI, Anthropic (Claude), Azure OpenAI, Google Vertex AI (Gemini), AWS Bedrock
 - **Self-hosted**: vLLM, Ollama, Hugging Face TGI
-- **Custom**: Any OpenAI-compatible API endpoint
+- **Custom**: any OpenAI-compatible API endpoint
 
-Each provider is configured through a **connection** with encrypted API credentials and deployment metadata.
+Each provider is configured once as a **connection**, with encrypted credentials and a deployment type. See [LLM Providers and Connections](/en/ai-gateway/llm-providers) for the full list and setup steps.
 
-:::note Request and response format
-The client side **always uses the OpenAI format** — there is no native Anthropic Messages or Gemini inbound format; the single interface is OpenAI. Provider **responses** are normalized to the OpenAI canonical format, while the **request body** is largely forwarded as-is (passthrough). As a result, OpenAI-compatible providers get a full round-trip, while native-format providers such as Anthropic/Gemini are supported through the provider's OpenAI-compatible endpoint or response normalization. **AWS Bedrock (SigV4) and Google Vertex (OAuth2) authentication will be completed in Phase 2.**
-:::
+## Request Flow
 
-## How It Works
+Every request to the gateway flows through the same pipeline, whether it targets OpenAI or a self-hosted model:
 
-### Request Pipeline
+```mermaid
+sequenceDiagram
+    participant Client as 👤 Client (OpenAI SDK)
+    participant Gateway as 🚪 AI Gateway
+    participant Guardrails as 🛡️ Guardrails
+    participant Cache as 🧠 Semantic Cache
+    participant Quota as ⏳ Rate Limit & Quota
+    participant Router as 🔀 Routing
+    participant Provider as 🤖 LLM Provider
 
-Every request flows through:
+    Client->>Gateway: POST /api/ai/v1/chat/completions
+    Gateway->>Guardrails: PII mask, prompt guard, content filters
+    Guardrails->>Cache: Look up a similar prior request
 
-1. **Intake** — Request validated and parsed as OpenAI-format JSON
-2. **Guardrails** (optional) — PII masking, content filters, prompt inspection
-3. **Semantic Cache** (optional) — Similar requests reuse cached responses
-4. **Rate Limiting** — Token quota enforcement (per-minute, hour, day, month, or USD budget)
-5. **Routing** — Provider connection selected based on model ID
-6. **Inference** — Request forwarded to LLM provider
-7. **Response** — Streamed back (chunk-by-chunk) with usage metrics
+    alt Cache hit
+        Cache->>Gateway: Return cached response
+        Gateway->>Client: Response (from cache)
+    else Cache miss
+        Cache->>Quota: Continue
+        Quota->>Quota: Check token / USD quota for this scope
+        Quota->>Router: Quota OK → select provider connection
+        Router->>Provider: Forward request (translated to provider format)
+        Provider->>Router: Response (streamed or unary)
+        Router->>Gateway: Normalize to OpenAI format
+        Gateway->>Client: Response + usage metrics
+    end
+```
 
-### OpenAI SDK Integration
+1. **Intake** — the request is validated and parsed as OpenAI-format JSON
+2. **Guardrails** *(optional)* — PII masking, prompt-injection checks, content filters
+3. **Semantic cache** *(optional)* — a similar recent request short-circuits the call and returns a cached response
+4. **Rate limiting** — token and USD quotas are checked for the request's scope
+5. **Routing** — a provider connection is selected based on the requested model and your routing/failover configuration
+6. **Inference** — the request is translated to the provider's native format and forwarded
+7. **Response** — the provider's response is normalized back to OpenAI format and streamed to the client along with usage metrics
 
-Use Apinizer AI Gateway with the Python OpenAI SDK or any compatible client:
+## Deployment Type
+
+Every provider connection is tagged **Cloud** or **On-Premise**, so usage and cost reports can distinguish provider-hosted traffic from traffic served by infrastructure you run yourself. See [LLM Providers and Connections](/en/ai-gateway/llm-providers#deployment-type) for details.
+
+## Try It: OpenAI SDK Quickstart
+
+Use Apinizer AI Gateway with the Python OpenAI SDK or any compatible client — no client-side code changes beyond `base_url` and the API key:
 
 ```python
 from openai import OpenAI
@@ -66,46 +103,49 @@ for chunk in response:
     print(chunk.choices[0].delta.content, end="")
 ```
 
-No client-side code changes needed — just point `base_url` to your Apinizer gateway.
+:::note Request and response format
+The client interface is always OpenAI-format — there is no separate Anthropic Messages or Gemini inbound format to learn. Apinizer translates each request into the target provider's native format and normalizes the response back to the OpenAI canonical format, so the same client code works against OpenAI, Anthropic, Google Vertex/Gemini, AWS Bedrock, or any OpenAI-compatible endpoint.
+:::
 
-## Key Concepts
+For a full step-by-step walkthrough — connecting a provider, creating a virtual API key, and sending your first request — see the [AI Gateway Quickstart](/en/ai-gateway/quickstart).
 
-### Deployment Type
+## Next Steps
 
-Each LLM provider connection has a **deployment type**:
-- **Cloud** (default for OpenAI, Anthropic, Azure, Vertex, Bedrock) — hosted by the provider
-- **On-Premise** (default for vLLM, Ollama, custom endpoints) — self-hosted in your infrastructure
-
-Deployment type is tracked in logs and usage reports for cost attribution and capacity planning.
-
-### Credentials & Secrets
-
-All API keys and secrets are **encrypted at rest** and **never logged**. Credentials are managed through Apinizer's credential system.
-
-### Token Quotas
-
-Control costs and prevent runaway usage with per-model, per-scope quotas:
-- **Minute / Hour / Day / Month** — token buckets with configurable limits
-- **Monthly budget** — USD spending cap with automatic soft-limit or hard-block
-- **Per-model limits** — apply different quotas to GPT-4o vs. GPT-4 Turbo, etc.
-
-### Reports & Analytics
-
-Track usage across dimensions:
-- By person, team, organization, or application
-- By model and provider
-- By cloud vs. on-premise deployment
-- Cost breakdown with optional multi-currency display (USD or TRY)
-- Performance latency (guardrail time, inference time, overhead)
-
-## What's Next?
-
-- **[LLM Providers and Connections](/en/ai-gateway/llm-providers)** — Configure provider connections and deployment types
-- **[Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas)** — Set up quota rules and monitoring
-- **[AI Cost Settings](/en/ai-gateway/cost-settings)** — Configure pricing and multi-currency display
-- **[Reports and Analytics](/en/ai-gateway/reports)** — View usage and cost breakdowns
-- **[A2A Gateway](/en/ai-gateway/a2a-gateway)** — Configure inbound/outbound Agent2Agent communication
-- **[Advanced Guardrails](/en/ai-gateway/advanced-guardrails)** — Add DLP, loop, off-topic, and oversized guards
-- **[Multi-Modal Endpoints](/en/ai-gateway/multi-modal-endpoints)** — Use audio (STT/TTS) and image generation endpoints
-- **[Tracing and Replay](/en/ai-gateway/tracing-and-replay)** — Inspect the request chain in a timeline and re-execute it
-
+<CardGroup cols={2}>
+  <Card title="AI Gateway Quickstart" icon="rocket" href="/en/ai-gateway/quickstart">
+    Connect a provider and send your first request
+  </Card>
+  <Card title="LLM Providers and Connections" icon="plug" href="/en/ai-gateway/llm-providers">
+    Configure provider connections and deployment types
+  </Card>
+  <Card title="Model Catalog and Pricing" icon="database" href="/en/ai-gateway/model-catalog">
+    Bundled models, pricing, and cost tracking
+  </Card>
+  <Card title="Virtual API Keys" icon="key" href="/en/ai-gateway/virtual-api-keys">
+    Issue scoped keys that hide real provider credentials
+  </Card>
+  <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
+    Failover chains, cost- and latency-aware routing
+  </Card>
+  <Card title="Token Quotas and Rate Limiting" icon="gauge" href="/en/ai-gateway/token-quotas">
+    Set up quota rules and monitoring
+  </Card>
+  <Card title="AI Cost Settings" icon="dollar-sign" href="/en/ai-gateway/cost-settings">
+    Configure pricing and multi-currency display
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    View usage and cost breakdowns
+  </Card>
+  <Card title="A2A Gateway" icon="share-2" href="/en/ai-gateway/a2a-gateway">
+    Configure inbound/outbound Agent2Agent communication
+  </Card>
+  <Card title="Advanced Guardrails" icon="shield" href="/en/ai-gateway/advanced-guardrails">
+    Add DLP, loop, off-topic, and oversized guards
+  </Card>
+  <Card title="Multi-Modal Endpoints" icon="mic" href="/en/ai-gateway/multi-modal-endpoints">
+    Use audio (STT/TTS) and image generation endpoints
+  </Card>
+  <Card title="Tracing and Replay" icon="history" href="/en/ai-gateway/tracing-and-replay">
+    Inspect the request chain in a timeline and re-execute it
+  </Card>
+</CardGroup>

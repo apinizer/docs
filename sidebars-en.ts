@@ -9,19 +9,93 @@ const sidebars: SidebarsConfig = {
   "ai-gateway": [
     {
       "type": "category",
-      "label": "AI Gateway",
+      "label": "Getting Started",
       "collapsed": false,
       "collapsible": true,
       "items": [
         "ai-gateway/overview",
+        "ai-gateway/quickstart"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Providers and Routing",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/llm-providers",
+        "ai-gateway/model-catalog",
+        "ai-gateway/virtual-api-keys",
+        "ai-gateway/routing-and-failover"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Cost and Quota",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/token-quotas",
-        "ai-gateway/cost-settings",
+        "ai-gateway/cost-settings"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Security and Privacy",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/advanced-guardrails"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Knowledge and Retrieval (RAG)",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/knowledge-bases",
+        "ai-gateway/rag-injection",
+        "ai-gateway/vector-database"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Caching",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/semantic-cache"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Tool and Agent Integration",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/mcp-gateway",
+        "ai-gateway/a2a-gateway"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Multi-Modal Endpoints",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/multi-modal-endpoints"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Observability and Management",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/reports",
-        "ai-gateway/a2a-gateway",
-        "ai-gateway/advanced-guardrails",
-        "ai-gateway/multi-modal-endpoints",
-        "ai-gateway/tracing-and-replay"
+        "ai-gateway/tracing-and-replay",
+        "ai-gateway/access-control-rbac"
       ]
     }
   ],
@@ -87,7 +161,8 @@ const sidebars: SidebarsConfig = {
             "concepts/core-concepts/variable",
             "concepts/core-concepts/dynamic-variables",
             "concepts/core-concepts/environment-variable",
-            "concepts/core-concepts/api-proxy-group"
+            "concepts/core-concepts/api-proxy-group",
+            "concepts/core-concepts/ai-fundamentals"
           ]
         },
         {
@@ -105,7 +180,8 @@ const sidebars: SidebarsConfig = {
             "concepts/core-components/api-creator",
             "concepts/core-components/api-integrator",
             "concepts/core-components/cache-component",
-            "concepts/core-components/monitoring-component"
+            "concepts/core-components/monitoring-component",
+            "concepts/core-components/ai-gateway"
           ]
         },
         {
@@ -257,21 +333,19 @@ const sidebars: SidebarsConfig = {
   "managing-apis": [
     {
       "type": "category",
-      "label": "API Development",
+      "label": "Getting Started",
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "develop/quick-start",
-        {
-          "type": "category",
-          "label": "API Design",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "develop/api-design/spec-designer",
-            "develop/api-design/data-models"
-          ]
-        },
+        "develop/quick-start"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "develop/api-list-management",
         {
           "type": "category",
@@ -286,9 +360,6 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-creation/soap-rest-api-proxy-creation",
             "develop/api-proxy-creation/websocket-api-proxy-creation",
             "develop/api-proxy-creation/grpc-api-proxy-creation",
-            "develop/api-proxy-creation/api-creator-db-api-creation",
-            "develop/api-proxy-creation/api-creator-script-api-creation",
-            "develop/api-proxy-creation/api-creator-mock-api-creation",
             "develop/api-proxy-creation/connector-api-proxy-creation",
             "develop/api-proxy-creation/multiple-schema-port-wsdl"
           ]
@@ -311,6 +382,38 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-configuration/deployment-and-specification-information"
           ]
         }
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Creator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-proxy-creation/api-creator-db-api-creation",
+        "develop/api-proxy-creation/api-creator-script-api-creation",
+        "develop/api-proxy-creation/api-creator-mock-api-creation"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Integrator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "integrations/api-integrator-task-flow-builder/overview",
+        "integrations/api-integrator-task-flow-builder/task-flow-design",
+        "integrations/api-integrator-task-flow-builder/taskflow-monitor"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Designer",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-design/spec-designer",
+        "develop/api-design/data-models"
       ]
     },
     {
@@ -681,18 +784,7 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/logback",
         "integrations/connection-management/snmp",
         "integrations/connection-management/syslog",
-        "integrations/connection-management/webhook",
-        {
-          "type": "category",
-          "label": "API Integrator (Task Flow Builder)",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "integrations/api-integrator-task-flow-builder/overview",
-            "integrations/api-integrator-task-flow-builder/task-flow-design",
-            "integrations/api-integrator-task-flow-builder/taskflow-monitor"
-          ]
-        }
+        "integrations/connection-management/webhook"
       ]
     },
     {

@@ -9,19 +9,93 @@ const sidebars: SidebarsConfig = {
   "ai-gateway": [
     {
       "type": "category",
-      "label": "AI Gateway",
+      "label": "Başlangıç",
       "collapsed": false,
       "collapsible": true,
       "items": [
         "ai-gateway/genel-bakis",
+        "ai-gateway/hizli-baslangic"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Sağlayıcılar ve Yönlendirme",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/llm-saglayicilari",
+        "ai-gateway/model-katalogu",
+        "ai-gateway/sanal-api-anahtarlari",
+        "ai-gateway/yonlendirme-failover"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Maliyet ve Kota",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/token-kotalari",
-        "ai-gateway/maliyet-ayarlari",
+        "ai-gateway/maliyet-ayarlari"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Güvenlik ve Gizlilik",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/gelismis-korumalar"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Bilgi ve Erişim (RAG)",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/bilgi-tabanlari",
+        "ai-gateway/rag",
+        "ai-gateway/vektor-veritabani"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Önbellekleme",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/semantik-onbellek"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Araç ve Ajan Entegrasyonu",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/mcp-gateway",
+        "ai-gateway/a2a-gateway"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Çok-Modaliteli Uç Noktalar",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/coklu-modalite"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "İzleme ve Yönetim",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "ai-gateway/raporlar",
-        "ai-gateway/a2a-gateway",
-        "ai-gateway/gelismis-korumalar",
-        "ai-gateway/coklu-modalite",
-        "ai-gateway/izleme-ve-tekrar-oynatma"
+        "ai-gateway/izleme-ve-tekrar-oynatma",
+        "ai-gateway/erisim-kontrolu-rbac"
       ]
     }
   ],
@@ -88,7 +162,8 @@ const sidebars: SidebarsConfig = {
             "concepts/temel-kavramlar/variable",
             "concepts/temel-kavramlar/dinamik-degiskenler",
             "concepts/temel-kavramlar/environment-variable",
-            "concepts/temel-kavramlar/api-proxy-group"
+            "concepts/temel-kavramlar/api-proxy-group",
+            "concepts/temel-kavramlar/yapay-zeka-temel-kavramlari"
           ]
         },
         {
@@ -106,7 +181,8 @@ const sidebars: SidebarsConfig = {
             "concepts/temel-bilesenler/api-creator",
             "concepts/temel-bilesenler/api-integrator",
             "concepts/temel-bilesenler/onbellek-bileseni",
-            "concepts/temel-bilesenler/izleme-bileseni"
+            "concepts/temel-bilesenler/izleme-bileseni",
+            "concepts/temel-bilesenler/ai-gateway"
           ]
         },
         {
@@ -254,21 +330,19 @@ const sidebars: SidebarsConfig = {
   "api-leri-yonetme": [
     {
       "type": "category",
-      "label": "API Geliştirme",
+      "label": "Başlangıç",
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "develop/quick-start",
-        {
-          "type": "category",
-          "label": "API Tasarımı",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "develop/api-tasarimi/spec-designer",
-            "develop/api-tasarimi/data-models"
-          ]
-        },
+        "develop/quick-start"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "develop/api-listesi-yonetimi",
         {
           "type": "category",
@@ -283,9 +357,6 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-olusturma/soaprest-api-proxy-olusturma",
             "develop/api-proxy-olusturma/websocket-api-proxy-olusturma",
             "develop/api-proxy-olusturma/grpc-api-proxy-olusturma",
-            "develop/api-proxy-olusturma/api-creator-db-api-olusturma",
-            "develop/api-proxy-olusturma/api-creator-script-api-olusturma",
-            "develop/api-proxy-olusturma/api-creator-mock-api-olusturma",
             "develop/api-proxy-olusturma/connector-api-proxy-olusturma",
             "develop/api-proxy-olusturma/coklu-schema-port-wsdl"
           ]
@@ -308,6 +379,38 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-konfigurasyonu/client-route"
           ]
         }
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Creator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-proxy-olusturma/api-creator-db-api-olusturma",
+        "develop/api-proxy-olusturma/api-creator-script-api-olusturma",
+        "develop/api-proxy-olusturma/api-creator-mock-api-olusturma"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Integrator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "integrations/api-integrator-task-flow-builder/genel-bakis",
+        "integrations/api-integrator-task-flow-builder/task-flow-tasarimi",
+        "integrations/api-integrator-task-flow-builder/taskflow-monitor"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Designer",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-tasarimi/spec-designer",
+        "develop/api-tasarimi/data-models"
       ]
     },
     {
@@ -679,18 +782,7 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/logback",
         "integrations/baglanti-yonetimi/snmp",
         "integrations/baglanti-yonetimi/syslog",
-        "integrations/baglanti-yonetimi/webhook",
-        {
-          "type": "category",
-          "label": "API Integrator (Task Flow Builder)",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "integrations/api-integrator-task-flow-builder/genel-bakis",
-            "integrations/api-integrator-task-flow-builder/task-flow-tasarimi",
-            "integrations/api-integrator-task-flow-builder/taskflow-monitor"
-          ]
-        }
+        "integrations/baglanti-yonetimi/webhook"
       ]
     },
     {
