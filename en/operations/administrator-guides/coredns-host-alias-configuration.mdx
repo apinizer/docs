@@ -1,0 +1,153 @@
+---
+title: "Host Alias Configuration with CoreDNS"
+description: "Hostname-IP mappings for apimanager and worker pods are configured through the CoreDNS Corefile instead of hostAliases; pod restarts are not required when aliases change."
+---
+
+This document describes how hostname–IP mappings are defined through the CoreDNS ConfigMap (`Corefile`) instead of using `hostAliases`. With this method, pod restarts are not required when aliases change.
+
+Scope: **apimanager** and **worker**.
+
+:::info
+
+Cluster access with `kubectl` and write permission in the `kube-system` namespace are required.
+
+:::
+
+The current context is verified:
+
+```bash
+kubectl config current-context
+```
+
+## Taking a Backup
+
+A backup of the CoreDNS ConfigMap is taken:
+
+```bash
+mkdir -p ~/coredns-migration && cd ~/coredns-migration
+kubectl get configmap coredns -n kube-system -o yaml > coredns-backup.yaml
+```
+
+## Adding a Hosts Block to the Corefile
+
+The IP/hostname list for manager and worker is prepared. If the same hostname is mapped to more than one IP, a single mapping is selected. `localhost` is not added to the Corefile.
+
+```bash
+kubectl edit configmap coredns -n kube-system
+```
+
+The following block is added before the `kubernetes` line:
+
+```
+        hosts {
+            <IP> <hostname>
+            <IP> <hostname>
+            fallthrough
+        }
+```
+
+Example Corefile structure:
+
+```
+.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+
+    hosts {
+        <IP> <hostname>
+        <IP> <hostname>
+        fallthrough
+    }
+
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30 {
+       disable success cluster.local
+       disable denial cluster.local
+    }
+    loop
+    reload
+    loadbalance
+}
+```
+
+The file is saved. CoreDNS reloads within approximately 30 seconds; a pod restart is not required.
+
+## Verification
+
+```bash
+kubectl run dns-test --rm -it --restart=Never --image=alpine:3.19 -- getent hosts <hostname>
+```
+
+The expected IP must be returned. If no result is received, wait approximately 30 seconds and run the command again.
+
+:::note
+
+`nslookup <hostname>` without a trailing dot may return NXDOMAIN. This is not an issue; the `getent` output is the reference result.
+
+:::
+
+The `hostAliases` removal step is not started before verification is complete.
+
+## Removing hostAliases
+
+In this step, manager and worker pods are restarted once.
+
+```bash
+kubectl patch deployment apimanager -n apinizer --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/hostAliases"}]'
+
+kubectl patch deployment worker -n <environment-namespace> --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/hostAliases"}]'
+```
+
+Rollout status is checked:
+
+```bash
+kubectl rollout status deployment/apimanager -n apinizer
+kubectl rollout status deployment/worker -n <environment-namespace>
+```
+
+Hostname resolution is verified from inside the pods:
+
+```bash
+kubectl exec -n apinizer deploy/apimanager -- getent hosts <hostname>
+kubectl exec -n <environment-namespace> deploy/worker -- getent hosts <hostname>
+```
+
+## Adding and Removing Aliases
+
+Adding a new alias or removing an existing alias is performed through the CoreDNS ConfigMap:
+
+```bash
+kubectl edit configmap coredns -n kube-system
+```
+
+A line is added to or removed from the `hosts { }` block. After saving, wait approximately 30 seconds and verify with `getent`. A pod restart is not required for this operation.
+
+## Rollback
+
+To restore from backup:
+
+```bash
+kubectl apply -f ~/coredns-migration/coredns-backup.yaml
+```
+
+If needed, `hostAliases` definitions are added back to the related deployments.
+
+## Important Notes
+
+- The same hostname resolves to the same IP address across all namespaces.
+- `localhost` is not written to the Corefile.
+- Changes appear with a short delay due to `reload` and DNS cache.
+- If the Apimanager UI still writes `hostAliases`, alias management continues through the Corefile; pod patches are not applied through the UI.

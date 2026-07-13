@@ -3,7 +3,7 @@
  * Locale: en
  * Each key on the default export corresponds to one Mintlify tab.
  */
-import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   "ai-gateway": [
@@ -221,6 +221,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
+            "installation/elasticsearch/add-elasticsearch-node",
             "installation/elasticsearch/simple-authentication",
             "installation/elasticsearch/permission-requirements",
             "installation/elasticsearch/backup-policy",
@@ -942,11 +943,11 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/administrator-guides/kubernetes-ingress-apinizer-access",
+            "operations/administrator-guides/coredns-host-alias-configuration",
             "operations/administrator-guides/apinizer-pod-auto-scaling",
             "operations/administrator-guides/mongodb-automatic-backup",
             "operations/administrator-guides/pfx-to-jks-conversion",
-            "operations/administrator-guides/server-ip-change",
-            "operations/administrator-guides/kubernetes-cluster-ip-change",
+            "operations/administrator-guides/component-ip-change-impact-and-remediation",
             "operations/administrator-guides/pod-thread-count-periodic-monitoring",
             "operations/administrator-guides/jvm-garbage-collector-tuning",
             "operations/administrator-guides/multi-env-deployment-pipeline",
@@ -955,6 +956,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
+            "operations/administrator-guides/clear-elasticsearch-index-data",
             "operations/administrator-guides/prometheus-zabbix-integration",
             {
               "type": "category",
@@ -1007,6 +1009,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Container Registry",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "operations/container-registry/container-images-and-registry",
+        "operations/container-registry/nexus-usage",
+        "operations/container-registry/harbor-usage",
+        "operations/container-registry/private-registry-installation"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Troubleshooting",
       "collapsed": false,
       "collapsible": true,
@@ -1029,16 +1043,7 @@ const sidebars: SidebarsConfig = {
           "items": [
             "operations/troubleshooting/kubernetes-docker-containerd-troubleshooting",
             "operations/troubleshooting/kubernetes-certificate-check-renewal",
-            "operations/kubernetes/kubernetes-docker-containerd-commands",
-            {
-              "type": "category",
-              "label": "Private/Local Docker Registry Usage",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "operations/kubernetes/private-docker-registry-on-centos-7"
-              ]
-            }
+            "operations/kubernetes/kubernetes-docker-containerd-commands"
           ]
         },
         {
@@ -1320,8 +1325,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/how-to-guides/administrator-guides/apinizer-pod-auto-scaling",
             "tutorials/how-to-guides/administrator-guides/mongodb-automatic-backup",
             "tutorials/how-to-guides/administrator-guides/pfx-to-jks-conversion",
-            "tutorials/how-to-guides/administrator-guides/server-ip-change",
-            "tutorials/how-to-guides/administrator-guides/kubernetes-cluster-ip-change",
+            "operations/administrator-guides/component-ip-change-impact-and-remediation",
             "tutorials/how-to-guides/administrator-guides/pod-thread-count-periodic-monitoring",
             "tutorials/how-to-guides/administrator-guides/manual-monitoring",
             "tutorials/how-to-guides/administrator-guides/geolocation-city-based-access-control",
@@ -1390,6 +1394,7 @@ const sidebars: SidebarsConfig = {
       "collapsed": false,
       "collapsible": true,
       "items": [
+        "articles/apinizer-gateway-opentelemetry-integration-part-1-setup",
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-control-list-rlcl",
@@ -1403,7 +1408,9 @@ const sidebars: SidebarsConfig = {
         "articles/api-load-testing-performance-analysis-k6-jmeter",
         "articles/api-team-mantra",
         "articles/apinizer-active-active-architecture-eliminating-spof",
-        "articles/no-security-without-api-gateway-right-order-guide"
+        "articles/no-security-without-api-gateway-right-order-guide",
+        "articles/apinizer-rate-limit-mechanisms-comparison",
+        "articles/api-security-and-the-role-of-api-gateway-in-api-security"
       ]
     }
   ]

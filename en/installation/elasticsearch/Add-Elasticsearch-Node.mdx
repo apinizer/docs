@@ -1,0 +1,286 @@
+---
+title: "Adding a New Node to an Elasticsearch 8.17.10 Cluster"
+description: "Adding a new node to an existing ApinizerEsCluster; the distinction between capacity (horizontal scaling) and High Availability (H.A.), plus step-by-step instructions."
+---
+
+This document explains how to add a new node to a running `ApinizerEsCluster`, assuming Elasticsearch has **already been installed** on the new servers according to the [installation guide](/en/installation/elasticsearch/ubuntu-elasticsearch-8.17.10).
+
+:::info[First, Determine Why You Are Adding a Node]
+
+There are two distinct reasons for adding a node. Do not confuse them:
+
+**1. Capacity (horizontal scaling):** The disk is full and more storage is needed. The solution is to add a **data** node (`node.roles: ["data"]`). No master node is required. Whenever the disk fills up, you scale out by adding another data node.
+
+**2. High Availability (fault tolerance):** A cluster always has one active master node that manages it. If this node fails and no replacement can be elected, the entire cluster stops. H.A. means that even if the master fails, the remaining nodes automatically elect a new master and keep the cluster running. This requires the number of master-eligible nodes to be **odd and at least 3**. The solution is to add a **master** node. (A master node holds no data and does not relieve disk pressure.)
+
+Accordingly, there are two typical situations:
+
+- **The organization is not yet H.A. and wants to become H.A.:** increase the number of masters to 3 (add master nodes). For a small or medium cluster, the most practical approach is 3 nodes, all with `["master","data"]`.
+- **H.A. already exists (3 masters) and only storage is needed:** add data nodes only. Do **not** increase the number of masters; 3 is sufficient and the count must remain odd.
+
+:::
+
+## 1) How Many Nodes Are Required for High Availability?
+
+Elasticsearch has two separate forms of high availability, and **both** must be satisfied.
+
+**a) Master H.A. (keeping cluster management alive)**
+
+Master election works by majority (quorum): `quorum = (number of master-eligible nodes / 2) + 1`.
+
+| Topology | Master-eligible | H.A. |
+|---|---|---|
+| 1 node | 1 | ❌ Single point of failure |
+| 1 master + 2 data | 1 | ❌ Master is still a single point of failure |
+| 2 masters | 2 | ❌ Cluster stops if one fails (split-brain risk) |
+| **3 nodes (all master+data)** | **3** | ✅ Tolerates the loss of one node — **minimum H.A.** |
+| 3 masters + N data | 3 | ✅ For larger clusters |
+
+Rule: **the number of master-eligible nodes must be odd and at least 3.** A "1 master + 2 data" topology does not provide H.A. on the master side.
+
+**b) Data H.A. (no data loss if a data node fails)**
+
+This requires **replica ≥ 1** on your indices and **at least 2 data nodes**, so that a copy of each shard is held on a different node.
+
+:::info[Best Practice]
+
+- **Small/medium cluster:** 3 nodes, all with `["master","data"]`. This provides both the 3-master quorum and data redundancy in one step. This is the most practical H.A. setup.
+- **Large cluster:** 3 dedicated masters `["master"]` plus as many data nodes `["data"]` as needed. This prevents heavy query and indexing load from interfering with master election.
+
+:::
+
+## 2) Remote Servers / Servers on a Different Network
+
+:::warning
+
+- **Never assign the master role to a remote server.** Master election is highly sensitive to latency; a remote master causes unnecessary re-elections and instability. A remote node must always be `node.roles: ["data"]`.
+- **All master nodes must reside at the primary site**, on the same low-latency network.
+- If the server is **genuinely remote or high-latency** (WAN), adding it to a single cluster does not provide H.A. In that case the correct approach is a separate cluster with **Cross-Cluster Replication (CCR)** (CCR requires a Platinum/Enterprise license). Measure the latency with `ping` before deciding.
+
+:::
+
+**Summary:** Primary-site nodes use `["master","data"]` (or, when separated, `["master"]` / `["data"]`); remote nodes use `["data"]` only.
+
+---
+
+:::info[Three Differences from the Installation Guide]
+
+Adding a node is a **join operation**, not a fresh installation. For this reason, three steps from the installation guide are **skipped** on the new node:
+
+1. Certificates are **not generated**; they are **copied** from an existing node (`certutil` is not run).
+2. `elasticsearch-setup-passwords` is **not run** (built-in users already exist in the cluster).
+3. `cluster.initial_master_nodes` and `discovery.type: single-node` are **not set** on the new node.
+
+:::
+
+:::warning
+
+Ports **9200** (HTTP) and **9300** (transport) must be open bidirectionally between the new nodes and the master nodes.
+
+:::
+
+## 3) Copying the Certificates
+
+:::warning[Certificates are copied, not generated]
+
+The `elasticsearch-certutil` commands from the installation guide are **not run**. All nodes in the cluster share the same certificate. The certificate files from an existing node are copied to the new node, to **the same path**.
+
+:::
+
+```bash
+# 1) Create the certs directory on the new node
+mkdir -p /opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+```
+
+```bash
+# 2) Run on the existing (primary) node; copies the certificates to the new node
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.p12 \
+    elasticsearch@<NEW_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-stack-ca.p12 \
+    elasticsearch@<NEW_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+
+scp /opt/elasticsearch/elasticsearch-8.17.10/config/certs/elastic-certificates.crt \
+    elasticsearch@<NEW_NODE_IP>:/opt/elasticsearch/elasticsearch-8.17.10/config/certs/
+```
+
+```bash
+# 3) Fix permissions on the new node
+sudo chown -Rf elasticsearch:elasticsearch /opt/elasticsearch/elasticsearch-8.17.10/config/certs
+sudo chmod -Rf 775 /opt/elasticsearch/elasticsearch-8.17.10/config/certs
+```
+
+## 4) Configuring elasticsearch.yml on the New Node
+
+The following configuration is applied on the **new node only**.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/elasticsearch.yml
+```
+
+```yaml
+cluster.name: ApinizerEsCluster
+node.name: "<NEW_NODE_IP>"
+network.host: "0.0.0.0"
+http.port: 9200
+
+# For a primary-site master:  node.roles: ["master","data"]  (or ["master"])
+# For a data / remote node:    node.roles: ["data"]
+node.roles: ["data"]
+
+# List the IP addresses of the master nodes in the cluster
+discovery.seed_hosts: ["<MASTER_NODE_IP>:9300"]
+
+# Do NOT set cluster.initial_master_nodes or discovery.type: single-node
+
+path.data: /data/elastic-data/
+path.repo: ["/data/elastic-snapdata"]
+
+# Security
+xpack.security.enabled: true
+xpack.security.enrollment.enabled: true
+
+# HTTP SSL
+xpack.security.http.ssl:
+  enabled: true
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+
+# Transport SSL
+xpack.security.transport.ssl:
+  enabled: true
+  verification_mode: certificate
+  keystore.path: certs/elastic-certificates.p12
+  truststore.path: certs/elastic-certificates.p12
+
+# CORS settings
+http.cors.enabled: true
+http.cors.allow-origin: "*"
+http.cors.allow-methods: OPTIONS, HEAD, GET, POST, PUT, DELETE
+http.cors.allow-headers: X-Requested-With, X-Auth-Token, Content-Type, Content-Length
+```
+
+:::info[Which IP addresses belong in discovery.seed_hosts?]
+
+This list contains the addresses the new node contacts first in order to find the cluster. Because discovery proceeds through master-eligible nodes, you list the **IP addresses of the master nodes** here, not those of data nodes.
+
+If the cluster has more than one master, list **all of them**. If only a single master is listed and that node is down, the new node cannot join the cluster.
+
+Specifying the port is not mandatory (the default transport port is 9300), but writing it as `"<IP>:9300"` is clearer.
+
+:::
+
+:::warning[Why network.host: 0.0.0.0?]
+
+When `network.host` is set to the node's own IP address, Elasticsearch attempts to listen **only on that address**. If the address is not defined on the server, or if traffic arrives on a different interface, the service fails to start with `BindException: Cannot assign requested address`.
+
+Setting `0.0.0.0` makes Elasticsearch listen on all interfaces, avoiding this problem. If you want to pin the address that nodes advertise to each other (the publish address):
+
+```yaml
+network.bind_host: 0.0.0.0
+network.publish_host: "<NEW_NODE_IP>"
+```
+
+You can verify this in the startup logs via the line `publish_address {<IP>:9300}, bound_addresses {0.0.0.0:9300}`.
+
+:::
+
+:::info
+
+In `jvm.options`, the heap value may be set up to **half** of the server's RAM and **must not exceed 32 GB**.
+
+```bash
+sudo vi /opt/elasticsearch/elasticsearch-8.17.10/config/jvm.options
+```
+```yaml
+-Xms16g
+-Xmx16g
+```
+
+:::
+
+## 5) No Changes Required on the Master Node
+
+:::info[Do not modify or restart the master node]
+
+Discovery is **one-directional**: the new node reaches the master via `discovery.seed_hosts` and sends a join request. The master does not need to know about the new node in advance.
+
+Therefore, when adding a new **data node**:
+
+- Do **not** add the new data node to the master's `discovery.seed_hosts` list (it serves no purpose).
+- Do **not** restart the master node.
+
+The master's `seed_hosts` list should contain **master nodes only**.
+
+:::
+
+:::warning[Exception: when adding a new MASTER node]
+
+The rule above applies to data nodes. When adding a new **master-eligible** node to the cluster, the new master's IP must also be added to the `discovery.seed_hosts` list of the existing masters, so that the masters can discover one another. The affected master nodes must then be restarted one at a time for the change to take effect.
+
+:::
+
+:::info[Should cluster.initial_master_nodes be removed from the existing master?]
+
+This setting only takes effect when a cluster is bootstrapped **for the very first time**. Once the cluster has formed, Elasticsearch **ignores** this line and reads the voting configuration from the cluster state on disk. Leaving it in the configuration therefore causes no harm to a running cluster.
+
+Even so, **removing it is recommended.** The reason: if that node's `path.data` directory is ever deleted, or the node is rebuilt from scratch, and this line is still present, the node will **bootstrap a new, separate cluster** instead of joining the existing one.
+
+No restart is required to remove it; the change takes effect on the next startup.
+
+```yaml
+# cluster.initial_master_nodes: ["<MASTER_NODE_IP>"]   <-- remove this line
+```
+
+:::
+
+## 6) Starting the New Node
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start elasticsearch
+sudo systemctl enable elasticsearch
+sudo systemctl status elasticsearch
+```
+
+:::warning
+
+`elasticsearch-setup-passwords` is **not run.** The built-in users (elastic, kibana, etc.) already exist in the cluster; running this command on the new node would overwrite the existing passwords.
+
+:::
+
+## 7) Verification
+
+After starting the new node, check from the master **without restarting any node**:
+
+```bash
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/nodes?v"
+```
+
+Example output (1 master+data, 2 data nodes):
+
+```text
+ip             heap.percent ram.percent cpu load_1m load_5m load_15m node.role master name
+<DATA_NODE_2_IP>         12          63   1    0.01    0.14     0.22 d         -      <DATA_NODE_2_IP>
+<DATA_NODE_1_IP>          6          98   1    0.06    0.07     0.26 d         -      <DATA_NODE_1_IP>
+<MASTER_NODE_IP>         53          30   2    0.16    0.09     0.07 dm        *      <MASTER_NODE_IP>
+```
+
+In the `node.role` column, `d` means data and `m` means master-eligible. The `*` in the `master` column indicates the currently elected master.
+
+If the new node does not appear in the list, inspect its logs:
+
+```bash
+sudo journalctl -u elasticsearch -f
+```
+
+If a connection cannot be established, check the `discovery.seed_hosts` IP address, port 9300, and the certificates.
+
+When a data node is added, shards begin relocating to it (rebalancing):
+
+```bash
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/recovery?v&active_only=true"
+curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cluster/health?pretty"
+```
+
+Relocation is complete once `relocating_shards` drops to zero and the cluster status returns to `green`.

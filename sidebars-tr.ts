@@ -3,7 +3,7 @@
  * Locale: tr
  * Each key on the default export corresponds to one Mintlify tab.
  */
-import type {SidebarsConfig} from '@docusaurus/plugin-content-docs';
+import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
   "ai-gateway": [
@@ -218,6 +218,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
+            "installation/elasticsearch/elastic-node-ekleme",
             "installation/elasticsearch/basit-kimlik-dogrulama",
             "installation/elasticsearch/yetki-gereksinimleri",
             "installation/elasticsearch/yedekleme-politikasi",
@@ -940,11 +941,12 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
+            "operations/yonetici-kilavuzlari/elasticsearch-index-alan-temizleme",
+            "operations/yonetici-kilavuzlari/coredns-host-alias-yapilandirmasi",
             "operations/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
             "operations/yonetici-kilavuzlari/mongodb-otomatik-yedekleme",
             "operations/yonetici-kilavuzlari/pfx-jks-donusturme",
-            "operations/yonetici-kilavuzlari/sunucu-ip-degisikliginde-yapilacaklar",
-            "operations/yonetici-kilavuzlari/kubernetes-cluster-ip-degisikligi",
+            "operations/yonetici-kilavuzlari/bilesen-ip-degisiminde-etkiler-ve-mudahale",
             "operations/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme",
             "operations/yonetici-kilavuzlari/jvm-garbage-collector-ayarlama",
             "operations/yonetici-kilavuzlari/multi-env-deployment-pipeline",
@@ -1005,6 +1007,18 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Container Registry",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "operations/container-registry/container-imajlari-ve-registry",
+        "operations/container-registry/nexus-kullanimi",
+        "operations/container-registry/harbor-kullanimi",
+        "operations/container-registry/private-registry-kurulumu"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Sorun Giderme",
       "collapsed": false,
       "collapsible": true,
@@ -1025,19 +1039,9 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "operations/kubernetes/kubernetes-docker-containerd-sorunlari",
-            "operations/sorun-giderme/kubernetes-sertifika-kontrol-yenileme",
             "operations/sorun-giderme/kubernetes-docker-containerd-sorunlari",
-            "operations/kubernetes/ansible-ile-ubuntu-uzerinde-kubernetes",
-            {
-              "type": "category",
-              "label": "Private/Local Docker Registry Kullanımı",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "operations/kubernetes/centos-7-uzerine-private-docker-registry"
-              ]
-            }
+            "operations/sorun-giderme/kubernetes-sertifika-kontrol-yenileme",
+            "operations/kubernetes/ansible-ile-ubuntu-uzerinde-kubernetes"
           ]
         },
         {
@@ -1319,8 +1323,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/mongodb-otomatik-yedekleme",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/pfx-jks-donusturme",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/sunucu-ip-degisikliginde-yapilacaklar",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/kubernetes-cluster-ip-degisikligi",
+            "operations/yonetici-kilavuzlari/bilesen-ip-degisiminde-etkiler-ve-mudahale",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/manual-monitoring",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/geolocation-sehir-bazli-erisim-kontrolu",
@@ -1389,6 +1392,7 @@ const sidebars: SidebarsConfig = {
       "collapsed": false,
       "collapsible": true,
       "items": [
+        "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",
@@ -1402,7 +1406,9 @@ const sidebars: SidebarsConfig = {
         "articles/api-yuk-testi-performans-analizi-k6-jmeter",
         "articles/api-ekibi-mantrasi",
         "articles/apinizer-aktif-aktif-mimari-spof-riski",
-        "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi"
+        "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi",
+        "articles/apinizer-rate-limit-mekanizmalari-karsilastirmasi",
+        "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu"
       ]
     }
   ]
