@@ -162,7 +162,8 @@ const sidebars: SidebarsConfig = {
             "concepts/core-concepts/dynamic-variables",
             "concepts/core-concepts/environment-variable",
             "concepts/core-concepts/api-proxy-group",
-            "concepts/core-concepts/ai-fundamentals"
+            "concepts/core-concepts/ai-fundamentals",
+            "concepts/core-concepts/asset-lifecycle"
           ]
         },
         {
@@ -644,13 +645,16 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/credentials",
+            "admin/identity-management/portal-applications",
             "admin/identity-management/organizations",
             "admin/identity-management/ip-groups",
             "admin/identity-management/contracts-protocols",
             "admin/identity-management/credential-roles",
+            "admin/identity-management/access-control",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-group-acl",
-            "admin/identity-management/rate-limit-control-list"
+            "admin/identity-management/rate-limit-control-list",
+            "admin/identity-management/quota-usage-and-alerts"
           ]
         },
         {
@@ -661,7 +665,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "admin/identity-management/identity-providers/database-provider",
             "admin/identity-management/identity-providers/ldap-active-directory",
-            "admin/identity-management/identity-providers/api-authentication-provider"
+            "admin/identity-management/identity-providers/api-authentication-provider",
+            "admin/identity-management/identity-providers/credential-sync"
           ]
         },
         "admin/identity-management/acl-report"
@@ -902,6 +907,12 @@ const sidebars: SidebarsConfig = {
         "api-portal/approval-requests",
         "api-portal/application-management",
         "api-portal/jira-integration",
+        "api-portal/api-consumption-trend",
+        "api-portal/api-quota-plan-usage",
+        "api-portal/top-api-products",
+        "api-portal/api-error-block-analysis",
+        "api-portal/inactive-subscribers",
+        "api-portal/subscription-funnel",
         "api-portal/api-product-application-registrations",
         "api-portal/login-logs",
         "api-portal/api-product-view-history",

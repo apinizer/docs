@@ -65,7 +65,8 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/export-api-proxy",
                 "api-proxies/crud/import-api-proxy",
                 "api-proxies/crud/import-api-proxy-and-override",
-                "api-proxies/crud/import-api-proxy-without-override"
+                "api-proxies/crud/import-api-proxy-without-override",
+                "api-proxies/crud/get-invoke-info"
               ]
             },
             {
@@ -80,7 +81,9 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/deployment/list-deploy-history",
                 "api-proxies/deployment/get-deploy-history-detail",
                 "api-proxies/deployment/delete-deploy-history",
-                "api-proxies/deployment/rollback-deploy-history"
+                "api-proxies/deployment/rollback-deploy-history",
+                "api-proxies/deployment/get-deploy-status",
+                "api-proxies/deployment/get-route-health"
               ]
             },
             {

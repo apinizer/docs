@@ -163,7 +163,8 @@ const sidebars: SidebarsConfig = {
             "concepts/temel-kavramlar/dinamik-degiskenler",
             "concepts/temel-kavramlar/environment-variable",
             "concepts/temel-kavramlar/api-proxy-group",
-            "concepts/temel-kavramlar/yapay-zeka-temel-kavramlari"
+            "concepts/temel-kavramlar/yapay-zeka-temel-kavramlari",
+            "concepts/temel-kavramlar/varlik-yasam-dongusu"
           ]
         },
         {
@@ -641,13 +642,16 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/kimlik-bilgileri",
+            "admin/identity-management/portal-applications",
             "admin/identity-management/kurumlar",
             "admin/identity-management/sozlesmeler-protokoller",
             "admin/identity-management/ip-guruplari",
             "admin/identity-management/kimlik-bilgisi-rolleri",
+            "admin/identity-management/erisim-kontrolu",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-grup-acl",
-            "admin/identity-management/rate-limit-kontrol-listesi"
+            "admin/identity-management/rate-limit-kontrol-listesi",
+            "admin/identity-management/kota-kullanimi-ve-uyarilar"
           ]
         },
         {
@@ -658,7 +662,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "admin/identity-management/identity-providers/database-provider",
             "admin/identity-management/identity-providers/ldap-active-directory",
-            "admin/identity-management/identity-providers/api-authentication-provider"
+            "admin/identity-management/identity-providers/api-authentication-provider",
+            "admin/identity-management/identity-providers/credential-sync"
           ]
         },
         "admin/identity-management/acl-raporu"
@@ -900,6 +905,12 @@ const sidebars: SidebarsConfig = {
         "api-portal/onay-istekleri",
         "api-portal/uygulama-yonetimi",
         "api-portal/jira-entegrasyonu",
+        "api-portal/api-tuketim-trendi",
+        "api-portal/api-kota-plan-kullanimi",
+        "api-portal/en-cok-kullanilan-urunler",
+        "api-portal/api-hata-blok-analizi",
+        "api-portal/aktif-olmayan-aboneler",
+        "api-portal/abonelik-hunisi",
         "api-portal/api-urun-uygulama-kayitlari",
         "api-portal/giris-kayitlari",
         "api-portal/api-urun-goruntulenme-gecmisi",
