@@ -202,7 +202,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
-            "installation/elasticsearch/add-elasticsearch-node",
+            "installation/elasticsearch/Add-Elasticsearch-Node",
             "installation/elasticsearch/simple-authentication",
             "installation/elasticsearch/permission-requirements",
             "installation/elasticsearch/backup-policy",
@@ -937,7 +937,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
-            "operations/administrator-guides/clear-elasticsearch-index-data",
+            "operations/administrator-guides/Clear-Elasticsearch-Index-Data",
             "operations/administrator-guides/prometheus-zabbix-integration",
             {
               "type": "category",
