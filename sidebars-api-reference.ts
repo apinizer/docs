@@ -606,6 +606,15 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "AI Gateway",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "ai-gateway"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Reports",
           "collapsed": true,
           "collapsible": true,

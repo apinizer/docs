@@ -1,0 +1,123 @@
+---
+title: "AI Gateway API"
+description: "The AI Gateway APIops API provides name-based, token-authenticated endpoints for managing every AI Gateway configuration asset — LLM providers, MCP/A2A connections, VectorDB, Knowledge Bases, virtual keys, global AI policies, token budgets, reusable presets and gateway settings — so the full AI configuration surface can be driven from CI/CD."
+---
+
+## Overview
+
+Every AI Gateway configuration asset is manageable through APIops. Endpoints follow the standard
+APIops conventions:
+
+- **Name-based** references (project, asset). Runtime IDs are never required in the path.
+- **Secret masking on read** — `apiKey`/`apiSecret`/`bearerToken`/`virtualApiKey`/credential references
+  are returned as boolean presence flags only; plaintext/ciphertext secrets are never disclosed.
+- **Save = encrypt + deploy** — write operations encrypt `@SecretData` fields and push to the workers
+  through the owning service; delete undeploys.
+- **Upsert** — `POST /{name}/` creates the asset, or updates it in place if the name already exists.
+
+## Project-scoped resources
+
+Base path: `/apiops/projects/{projectName}/...` — authenticated with `AI_DEVELOPMENT`
+(VIEW for reads, MANAGE for writes), except AI Budgets which use `AI_BUDGETS`.
+
+### LLM Providers — `/llm-providers`
+`GET /` · `GET /{providerName}/` · `POST /{providerName}/` · `PUT /{providerName}/` · `DELETE /{providerName}/`
+
+### MCP Outbound Connections — `/mcp-connections`
+`GET /` · `GET /{connectionName}/` · `POST /{connectionName}/` · `PUT /{connectionName}/` · `DELETE /{connectionName}/`
+
+### Model Catalog — `/llm-models`
+`GET /` · `GET /{modelName}/` · `POST /{modelName}/` · `PUT /{modelName}/` · `DELETE /{modelName}/`
+
+### Virtual Keys — `/virtual-keys`
+`GET /` · `GET /{virtualKeyName}/` · `POST /{virtualKeyName}/` · `PUT /{virtualKeyName}/` · `DELETE /{virtualKeyName}/`
+- `POST /{virtualKeyName}/rotate/` — rotates the backing credential. Uses a grace window (Pattern-B):
+  a new active row is created as `<name>-rotated` while the previous row is retired but kept as a
+  rollback safety-net until `graceMinutes` elapse. Body: `{ "newCredentialRef": "...", "graceMinutes": 60 }`.
+
+### VectorDB Connections — `/vector-dbs`
+`GET /` · `GET /{vectorDbName}/` · `POST /{vectorDbName}/` · `PUT /{vectorDbName}/` · `DELETE /{vectorDbName}/`
+- `POST /{vectorDbName}/test-connection/` — validates connectivity against the target vector store
+  (in-process manager test), returns a deployment result.
+
+### Knowledge Bases — `/knowledge-bases`
+`GET /` · `GET /{name}/` · `POST /{name}/` · `PUT /{name}/` · `DELETE /{name}/`
+- `POST /{name}/reindex/` — rebuilds the vector index for the knowledge base.
+
+#### Knowledge Base Documents — `/knowledge-bases/{kbName}/documents`
+- `POST /` — upload a document (`multipart/form-data`, `file` part). Chunked + embedded on ingest.
+- `GET /` — list documents in the knowledge base.
+- `GET /{documentId}/` — get a single document. *(Documents are referenced by id — filenames are not unique.)*
+- `DELETE /{documentId}/` — remove a document and its vectors.
+
+### MCP Inbound Servers — `/mcp-inbound-servers`
+`GET /` · `GET /{serverName}/` · `POST /{serverName}/` · `PUT /{serverName}/` · `DELETE /{serverName}/`
+
+### A2A Outbound Connections — `/a2a-connections`
+`GET /` · `GET /{connectionName}/` · `POST /{connectionName}/` · `PUT /{connectionName}/` · `DELETE /{connectionName}/`
+- `POST /{connectionName}/test-connection/` — probes the remote agent.
+- `POST /{connectionName}/parse-skills/` — fetches and parses the remote AgentCard skills.
+
+### A2A Inbound Agents — `/a2a-inbound-agents`
+`GET /` · `GET /{agentName}/` · `POST /{agentName}/` · `PUT /{agentName}/` · `DELETE /{agentName}/`
+
+### AI Global Policies — `/ai-global-policies`
+- `GET /?type={policyType}` — list `global=true` AI policies (optionally filtered by policy type).
+- `GET /{policyName}/` — get a single global AI policy.
+- `DELETE /{policyName}/` — delete a global AI policy (fetch-then-verify project ownership + the
+  `global=true` invariant, then fan out the removal to every referencing proxy/group).
+- `GET /{policyName}/usage/` — list proxies/proxy-groups referencing the policy.
+
+> **Creating / updating** a global AI policy is done through the generic
+> [export/import pipeline](/api-reference/api-proxies), not through this resource — an AI global
+> policy is a plain `Policy` document, so it flows through the same path every other global policy
+> type uses. Reads are serialized through the typed policy DTOs, so AI connection references are
+> carried name-based.
+
+### AI Budgets / Quota — `/ai-budgets` *(permission: `AI_BUDGETS`)*
+- `GET /scope-rules/` — flat list of budget scope rules.
+- `GET /hierarchy/` — budget hierarchy tree rooted at the project.
+- `GET /hierarchy/{nodeType}/{nodeId}/effective-limit/` — effective limit preview for a node
+  (`nodeType`: `CREDENTIAL` | `CREDENTIAL_ORGANIZATION` | `API_PROXY` | `PROJECT`).
+- `PUT /` — update an owner token budget. The body `targetProjectId` is forced to the path project
+  (cross-tenant guard).
+
+## Admin (global) resources
+
+Base path: `/apiops/settings/...` — these are platform-level catalogs/settings and require an
+**ADMIN** API token (sysAdmin), matching the classic UI. A project-scoped `AI_DEVELOPMENT` token is
+NOT sufficient.
+
+### AI Gateway Settings — `/apiops/settings/ai-gateway`
+- `GET /` — read the singleton AI Gateway settings.
+- `PUT /` — update the settings (timeouts, retry, response-body caps, `maxToolTurns`, default trace mode).
+
+### AI Privacy (PII) Presets — `/apiops/settings/ai-privacy-presets`
+`GET /` · `GET /{presetName}/` · `POST /{presetName}/` · `PUT /{presetName}/` · `DELETE /{presetName}/`
+- Optional `?projectId=` selects the scope (default admin/global). Built-in presets are read-only.
+
+### AI Prompt-Guard Presets — `/apiops/settings/ai-prompt-guard-presets`
+`GET /` · `GET /{presetName}/` · `POST /{presetName}/` · `PUT /{presetName}/` · `DELETE /{presetName}/`
+- Same scope/immutability rules as privacy presets.
+
+## Authentication
+
+All endpoints require authentication using a Personal API Access Token
+(`Authorization: Bearer {token}` or `apinizer-token: {token}`). JHipster JWTs do not work on APIops.
+
+## Permissions
+
+| Resource group | Permission |
+| --- | --- |
+| LLM/MCP/Model/VirtualKey/VectorDB/KB/A2A/Global-Policy | `AI_DEVELOPMENT` (VIEW / MANAGE) |
+| AI Budgets / Quota | `AI_BUDGETS` (VIEW / MANAGE) |
+| Presets & Gateway Settings | **Admin only** (sysAdmin) |
+
+APIops never widens the privilege surface relative to the UI: presets and gateway settings require
+system-admin exactly as they do in the Manager UI; A2A private-network egress remains admin-gated.
+
+## Related Documentation
+
+- [Authentication Guide](/api-reference/getting-started/authentication) - How to obtain and use API tokens
+- [Error Handling](/api-reference/getting-started/error-handling) - Error response formats
+- [API Proxies](/api-reference/api-proxies) - Managing API proxies (including `type=AI` proxies) via APIops
