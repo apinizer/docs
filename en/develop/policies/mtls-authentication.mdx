@@ -1,6 +1,6 @@
 ---
 title: "mTLS Authentication"
-description: "You can provide secure mutual authentication by verifying client TLS certificates"
+description: "You can apply mutual authentication by requiring a client certificate, and match the identity resolved from the certificate with your Credentials so that only authorized clients reach your APIs"
 ---
 
 :::tip
@@ -13,58 +13,95 @@ This document explains the detailed usage of a specific policy. If you are using
 
 ### What is its Purpose?
 
-- Perform authentication by making client certificate mandatory in corporate API Proxy traffic and ensure only authorized clients have access.
-- Eliminate fake certificate risk by verifying that certificate hierarchy matches trusted Certificate Authority (CA) chains.
-- Create access strategy specific to certain organizations or devices by matching client certificate with predefined Issuer ACL lists.
-- Strengthen identity obtained from certificate with policy-dependent role controls by working together with authorization module.
+- Establish a strong authentication layer that carries no password or token, by requiring the certificate the client presents during the TLS handshake.
+- Bind the client to a known identity by matching the identity resolved from the certificate with a [Credential](/en/admin/identity-management/credentials) defined in Apinizer.
+- Reject forged or unauthorized certificates by validating the certificate chain presented by the client against the [Key Store](/en/admin/secrets-management/keystore-management) bound to the matched Credential.
+- Verify access permission, validity period and address restrictions after the identity is authenticated, and combine it with role-based authorization when needed.
+
+### Prerequisites
+
+This policy can only work when the client certificate reaches the gateway. Unless the following three conditions are met, the policy accepts no request:
+
+| Condition | Description |
+|-----------|-------------|
+| **Environment settings** | **HTTPS** must be enabled and the **mTLS** option must be checked in the environment where the policy is applied. When mTLS is off, the gateway does not request a certificate from the client and the policy finds none. |
+| **Where TLS terminates** | The TLS connection must terminate on the gateway. If a load balancer or ingress component in front terminates TLS, the client certificate does not reach the gateway; in that case the connection must be passed through to the gateway. |
+| **Proxy type** | The policy works only on **HTTP/HTTPS** API Proxies. It is not supported on gRPC API Proxies; if defined there, the request is rejected. |
+
+:::warning
+
+If HTTPS and mTLS are not enabled in the environment settings, requests are rejected on the grounds that no certificate was found, even when this policy is added. The policy works only in the environment where these settings are enabled.
+
+:::
 
 ### Working Principle
 
-1. **Request Arrival**: For each HTTP/HTTPS request arriving at the API Gateway, the source IP address of the request is identified.
-2. **Policy Check**: If the mTLS Authentication policy is active, the system checks in the following order:
-   - Is a Condition defined? If so, is the condition met?
-   - Is the policy active (active=true)?
-   - Is a Variable being used or is Apinizer default?
-3. **Certificate and Issuer Verification**: After mTLS handshake is completed, validity dates, signature, and defined issuer list of client certificate are verified; optionally, matching is sought with Issuer ACL records.
-4. **Decision Making**:
-   - **Match Found**: Certificate is accepted, identity information and roles are added to header fields if needed, request routing is allowed.
-   - **No Match**: Certificate or issuer verification fails, request routing is stopped and configured error response is returned.
-5. **Error Handling**: Customizable HTTP status code and error message are returned for requests that do not comply with the policy rule.
+1. **TLS handshake**: If mTLS is enabled in the environment, the gateway requests the client's certificate while the connection is established. The certificate presented by the client is validated against the trusted certificates in the environment's key store. A connection that fails this validation is closed before the policy runs at all.
+2. **Retrieving the certificate**: The policy reads the client certificate coming from the handshake. If no certificate was presented, the request is rejected.
+3. **Resolving the identity**: According to the **Identity Source** setting, a name is read from the certificate and an enabled Credential matching that name is searched for. If no match is found, the request is rejected.
+4. **Certificate validity**: If the **Validate Certificate** option is on, the certificate's validity dates are checked and it is verified that the certificate was issued for client authentication purposes. Expired certificates or those issued for a different purpose are rejected.
+5. **Trust validation**: If the **Validate Certificate's Issuer** option is on, the entire certificate chain presented by the client is validated against the trusted certificates in the key store bound to the matched Credential. If the chain cannot be anchored to that store, the request is rejected.
+6. **Access control**: If the **Validate ACL for Issuer** option is on, the matched Credential's access permission for this API, its validity period and any address/location restrictions are verified.
+7. **Result**: If all checks succeed, the resolved identity is written to the request, added to a header if requested, and role checks run when authorization is enabled. If any stage fails, the request is stopped and the configured error response is returned.
+
+:::info
+
+Trust validation (step 5) runs before access control (step 6). This way a client is not considered authenticated before the trustworthiness of its certificate is proven.
+
+:::
+
+### Identity Source
+
+A certificate carries two distinct names: the **subject** of the certificate (the client itself) and its **issuer** (the signing authority). The policy determines which of these names the identity is resolved from through the **Identity Source** setting.
+
+| Option | Where the identity is read from | When to use |
+|--------|--------------------------------|-------------|
+| **Certificate Subject (Subject CN)** | From the subject name of the client certificate itself | Setups where each client is defined as a separate Credential. The narrowest scope and the most precise distinction. |
+| **Certificate Issuer (Issuer CN)** | From the name of the authority that signed the certificate | Setups where all client certificates issued by an organization's own certificate authority are accepted as a **single organizational identity**. |
+| **Subject, then Issuer** | The subject name is tried first; if no match is found, the issuer name is tried | The default option. Supports setups where both naming approaches are used together. |
+
+:::note
+
+The identity is read only from the client's own certificate. The names of intermediate or root certificates in the chain sent by the client are not used as an identity. With the "Certificate Issuer" option, the issuer name is read from the information on the client certificate itself, so the identity can be resolved even when the client does not send the chain.
+
+:::
+
+The Identity Source selection must be consistent with the user name of the Credential you set up. For example, if your organization's certificate authority carries the name `MyRootCA` and you want to gather all clients issued by that authority under a single identity, the Credential's user name must be `MyRootCA` and the Identity Source must be set to **Certificate Issuer** (or left at the default). If you want to define each client separately, the Credential's user name must match the subject name of the client certificate and **Certificate Subject** must be selected.
 
 ## Features and Capabilities
 
 ### Basic Features
 
-- **Certificate Issuer Verification**: Compares issuer information of incoming client certificate with registered CA chains and Issuer ACL lists.
-- **Dynamic Certificate Validity Check**: Instantly rejects invalid certificates by checking certificate date and signature integrity for each request.
-- **ACL-Based Access**: Defines permissions specific to certain network segments by expanding issuer-based access controls with IP verification.
-- **Active/Passive Status Control**: Easily change the active or passive status of the policy (active/passive toggle). In passive mode, the policy is not applied but its configuration is preserved.
-- **Condition-Based Application**: Determine when the policy will be applied by creating complex conditions with Query Builder (e.g., only for specific endpoints or header values).
+- **Flexible Identity Resolution**: Choose whether the identity is resolved from the certificate's subject name or issuer name; recognize each client individually or all clients under one authority as a single identity.
+- **Certificate Validity Check**: Reject expired or out-of-purpose certificates by verifying validity dates and intended usage on every request.
+- **Chain-Based Trust Validation**: Validate the certificate chain presented by the client against the key store bound to the identity; support chains containing intermediate certificate authorities.
+- **Access Control**: Verify the identity's access permission for the API, its validity period and address/location restrictions.
+- **Active/Passive Status Control**: Change the active or passive status of the policy. In passive mode, the policy is not applied but its configuration is preserved.
+- **Condition-Based Application**: Determine when the policy will be applied by creating conditions with Query Builder (e.g., only for specific endpoints or header values).
 
 ### Advanced Features
 
-- **Header Injection Management**: Transfers to downstream services by writing user identity and roles extracted from certificate subject to custom header fields.
-- **Authorization Service Integration**: Combines mTLS authentication with role-based access by activating authorization flows from API, database, or Secret Manager sources.
-- **Method-Based Permission Restrictions**: Controls sensitive operations at granular level by defining access rules according to HTTP method.
-- **Export/Import Feature**: Export policy configuration as a ZIP file. Import to different environments (Development, Test, Production). Version control and backup capability.
-- **Policy Group and Proxy Group Support**: Manage multiple policies within Policy Group. Bulk policy assignment to Proxy Groups. Centralized update and deploy operations.
-- **Deploy and Versioning**: Deploy policy changes to live environment. See which API Proxies use it (Policy Usage). Proxy Group and Policy Group usage reports.
+- **Header Injection Management**: Transfer the identity resolved from the certificate to backend services by writing it into a custom header.
+- **Authorization Service Integration**: Combine authentication with role-based access; resolve roles from API, database or secret management sources.
+- **Method-Based Permission Restrictions**: Control sensitive operations at a granular level by defining access rules according to the HTTP method.
+- **Export/Import Feature**: Export the policy configuration and import it into different environments.
+- **Policy Group and Proxy Group Support**: Manage multiple policies within a group, assign policies to groups in bulk.
+- **Deploy and Versioning**: Deploy policy changes to the live environment, see which API Proxies use it.
 
 ## Usage Scenarios
 
 | Scenario | Status | Solution (Policy Application) | Expected Behavior / Result |
 |----------|--------|-------------------------------|---------------------------|
-| Financial Corporate Access | Financial services are only called from company laptops | Corporate CA certificate is added to Issuer ACL, `validateCertificatesIssuer` and `validateACLForIssuer` are activated | Requests from corporate devices are accepted, others return 403 |
-| IoT Device Identity | Edge gateways connect with certificate | `validateCertificate` open, device certificates are listed in ACL | Authorized device certificates are routed, expired certificates receive 401 |
-| Partner API Access | Limited endpoint access for external partners | Path condition in Query Builder, partner issuer certificate in ACL | If partner certificate matches, only defined endpoint access is provided |
-| Multiple Environment Management | Loose control for test environment, strict control in live | `validateACLForIssuer` passive in development environment, active in live | Development environment remains flexible, only defined certificates are accepted in Production environment |
-| Role-Based Authorization | Different service roles will be applied with same certificate | `enableAuthorization` active, roles are written to header | Downstream service grants authorization by reading role header |
-| IP Restriction | IP matching against certificate sharing risk | `checkClientIpAddress` enabled, IP matching is sought in ACL | Requests with non-matching certificate-IP are rejected |
-| Optional Scenario | *(optional)* | | |
+| Corporate Device Access | Financial services are only called from company devices | A Credential is defined with the organization's certificate authority name, the authority's certificate is added to that identity's key store, Identity Source is set to **Certificate Issuer** | Requests arriving with certificates issued by the corporate authority are accepted, others are rejected |
+| Device-Based Identity | Each edge device has its own certificate and must be tracked separately | A separate Credential is defined per device with the certificate's subject name, Identity Source is set to **Certificate Subject** | Each device is recognized by its own identity, appears separately in traffic logs, and a single device's access can be revoked independently |
+| Partner API Access | Limited endpoint access will be granted to external partners | A Credential is defined with the partner authority name, a path condition is set in Query Builder, and only the relevant API is added to that identity's access list | If the partner certificate matches, access is provided only to the defined endpoints |
+| Expired Certificate | Access of unrenewed client certificates must be cut | **Validate Certificate** is kept on | Requests arriving with expired certificates are rejected |
+| Role-Based Authorization | Different service roles will be applied with the same certificate | Authorization is enabled, roles are written to the header | The backend service grants authorization by reading the role header |
+| Address Restriction | Address matching against certificate sharing risk | **Validate Client Address** is enabled, allowed addresses are defined on the Credential | Requests arriving from outside the defined addresses are rejected |
 
 ## Configuring Policy Parameters
 
-In this step, users can **create a new policy** or **configure existing policy parameters** to define access rules. The defined parameters directly affect how the policy works (e.g., which IPs will be allowed, geographical restrictions, conditional activations, etc.). This allows the policy to be customized according to organization-specific requirements while being centrally manageable.
+In this step, users can **create a new policy** or **configure existing policy parameters** to define access rules. The defined parameters directly affect how the policy works. This allows the policy to be customized according to organization-specific requirements while being centrally manageable.
 
 ### Creating a New mTLS Authentication Policy
 
@@ -74,19 +111,22 @@ In this step, users can **create a new policy** or **configure existing policy p
 
 | Step | Description / Operation |
 |------|----------------------|
-| **Step 1: Go to Creation Page** | - Go to **Development → Global Settings → Global Policies → mTLS Authentication Policy** from the left menu.<br />- Click the **[+ Create]** button at the top right. |
-| **Step 2: Enter Basic Information** | **Policy Status:** Shows Active/Passive status. New policies are active by default.<br /><br />**Name (Required):** Example: `Production_mTLSAuth`<br />- Enter a unique name, does not start with space.<br />- System automatically checks. Green checkmark: available. Red X: existing name.<br /><br />**Description:** Example: "mTLS authentication for corporate clients"<br />- Max. 1000 characters.<br />- Explain the purpose of the policy. |
-| **Step 3: Variable Usage** | - In the action button area at the top of the page, you can use the **[&lt;&gt; Variable]** button to select dynamic values.<br />- Using context/global variable expressions, you can manage policy parameters with variable-based values instead of fixed values.<br />- This reduces manual update effort when values change and provides operational convenience.<br />- For detailed information, review [Dynamic Variables](/en/concepts/core-concepts/dynamic-variables). |
-| **Step 4: Certificate Verification Parameters** | - **Validate Certificates Issuer**: Makes matching of CA chain with defined issuer records mandatory.<br />- **Validate Certificate**: Checks validity dates and signature of certificate.<br />- **Validate ACL For Issuer**: Activates issuer-based ACL table; Warning: Policy may return 401 if Issuer list is empty. |
-| **Step 5: ACL and IP Matching** | - **Check Client IP Address**: Seeks matching of client IP registered with certificate.<br />- Define authorized IP blocks from Issuer ACL management screen.<br />- Keep IP control active against certificate sharing risk. |
-| **Step 6: Header and Authorization Settings** | - **Set Resolved Identity to Context:** Determines whether the identity resolved by this policy (username/key) is recorded as the request identity. When on (default), this identity appears in traffic logs and subsequent policies and scripts. When off, the identity is used only for the necessary internal authentication/authorization checks and is not persisted as the request identity.<br />- **Add User To Header**: Writes user identity extracted from certificate subject to `User Header Name` field.<br />- **User Header Name**: Default `X-Authenticated-UserId`, customize if needed.<br />- **Enable Authorization**: Activates role and method-based controls; resources and roles in Authorization tab must be defined. |
-| **Step 7: Define Condition (Optional)** | - Go to **Condition** tab.<br />- Conditions determine when the policy will be active.<br /><br />**Examples:**<br />- Environment-based: `Header = X-Environment, Operator = Equals, Value = production`<br />- API Key-based: `Header = X-API-Key, Starts With = PROD-`<br />- Endpoint-based: `Path = /api/admin/*`<br /><br />If you do not define condition, policy is always active |
-| **Step 8: Customize Error Message (Optional)** | - Go to **Error Message Customization** tab.<br />- Customize the message to be returned when access is denied.<br /><br />**Default:**<br />`{ "statusCode": 403, "message": "[Default error message]" }`<br /><br />**Custom:**<br />`{ "statusCode": 403, "errorCode": "[CUSTOM_ERROR_CODE]", "message": "[Custom message]" }` |
-| **Step 9: Save** | - Click the **[Save]** button at the top right.<br /><br />**Checklist:** Unique name. Required fields filled. At least one issuer or ACL entry exists.<br /><br />**Result:**<br />- Policy is added to the list.<br />- Can be connected to APIs.<br />- If global policy, automatically applied. |
+| **Step 1: Preparation** | - Make sure HTTPS and mTLS settings are enabled in the environment where you will use the policy.<br />- Load the certificate of the authority that signs the client's certificate into a key store.<br />- Bind this key store to the Credential that will represent the client, and add the relevant API to that Credential's access list. |
+| **Step 2: Go to Creation Page** | - Go to **Development → Global Settings → Global Policies → mTLS Authentication Policy** from the left menu.<br />- Click the **[+ Create]** button at the top right. |
+| **Step 3: Enter Basic Information** | **Policy Status:** Shows Active/Passive status. New policies are active by default.<br /><br />**Name (Required):** Example: `Production_mTLSAuth`<br />- Enter a unique name, does not start with space.<br />- System automatically checks. Green checkmark: available. Red X: existing name.<br /><br />**Description:** Example: "mTLS authentication for corporate clients"<br />- Max. 1000 characters. |
+| **Step 4: Identity Source Selection** | - **Identity Source**: Determines which name on the certificate the identity is resolved from.<br />- **Certificate Subject (Subject CN)**: When each client is a separate Credential.<br />- **Certificate Issuer (Issuer CN)**: When all clients issued by one authority form a single identity.<br />- **Subject, then Issuer**: Default; supports both approaches.<br />- Make sure your selection is consistent with the Credential's user name. |
+| **Step 5: Certificate Verification Parameters** | - **Validate Certificate**: Checks the certificate's validity dates and that it was issued for client authentication purposes.<br />- **Validate Certificate's Issuer**: Validates the certificate chain presented by the client against the key store bound to the Credential. If no key store is defined on the Credential, the request is rejected.<br />- **Validate ACL for Issuer**: Verifies the Credential's API access permission, validity period and address restrictions. |
+| **Step 6: Address Control** | - **Validate Client Address**: Seeks a match between the address the request comes from and the allowed address and location list defined on the Credential.<br />- Keeping this control enabled is recommended against certificate sharing risk. |
+| **Step 7: Header and Authorization Settings** | - **Set Resolved Identity to Context:** Determines whether the identity resolved by this policy is recorded as the request identity. When on (default), this identity appears in traffic logs, subsequent policies and scripts. When off, the identity is used only for the necessary internal checks.<br />- **Add Client Info to Header**: Writes the resolved identity into the specified header.<br />- **Authenticated User Header Name**: Default `X-Authenticated-UserId`, customize if needed.<br />- **Enable Authorization**: Activates role and method-based controls; resources and roles in the Authorization tab must be defined. |
+| **Step 8: Define Condition (Optional)** | - Go to **Condition** tab.<br />- Conditions determine when the policy will be active.<br /><br />**Examples:**<br />- Environment-based: `Header = X-Environment, Operator = Equals, Value = production`<br />- Endpoint-based: `Path = /api/admin/*`<br /><br />If you do not define a condition, the policy is always active |
+| **Step 9: Customize Error Message (Optional)** | - Go to **Error Message Customization** tab.<br />- Customize the message to be returned when access is denied. |
+| **Step 10: Save** | - Click the **[Save]** button at the top right.<br /><br />**Checklist:** Unique name. Identity Source selection consistent with the Credential user name. Key store bound to the Credential. The relevant API present in the Credential's access list.<br /><br />**Result:**<br />- Policy is added to the list.<br />- Can be connected to APIs.<br />- If global policy, automatically applied. |
 
 For descriptions of **Conditions** and **Error Message Customization** panels, you can review the [Conditions](/en/concepts/core-concepts/what-is-policy#conditions) and [Error Message Customization](/en/concepts/core-concepts/what-is-policy#error-message-customization) sections on the [What is Policy?](/en/concepts/core-concepts/what-is-policy) page.
 
 For a complete guide on all layers, priority order and scenario examples of the error message configuration system, see the [Error Message Configuration Guide](/en/concepts/core-concepts/error-message-configuration) page.
+
+For an end-to-end example covering certificate, key store and Credential preparation, see the [mTLS Authentication Scenario](/en/tutorials/api-proxy-scenarios/mtls-authentication) page.
 
 ## Deleting the Policy
 
@@ -100,69 +140,61 @@ For export (Export) and import (Import) steps of this policy, you can refer to t
 
 For the process of how this policy will be connected to APIs, you can refer to the [Connect Policy to API](/en/develop/api-proxy-configuration/policy-management#adding-policy-to-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
 
-## Advanced Features
-
-| Feature | Description and Steps |
-|---------|---------------------|
-| **Issuer ACL Management** | - Multiple Subject Alternative Name records can be made per issuer.<br />- Filter ACL records environment-based.<br />- Recommendation: Make test API call after ACL changes. |
-| **Authorization with Secret Manager** | - When `useSecretManagerForAuthorization` is selected, identity information is stored securely.<br />- Redeploy policy when Secret is updated.<br />- Delete old secrets after rotation. |
-| **Method-Based Authorization Policies** | - Define allow/deny rules according to HTTP method.<br />- Enter endpoint + method matching in `policyAuthorizationMethodDefList`.<br />- Postman collection validation is recommended after all changes. |
-
 ## Best Practices
 
 ### Things to Do and Best Practices
 
 | Category | Description / Recommendations |
 |----------|----------------------------|
-| **Certificate Management** | **Bad:** Forgetting to manually update CA lists<br />**Good:** Updating Issuer ACL when CA is renewed<br />**Best:** Setting up automatic CA synchronization pipeline |
-| **Authorization Integration** | **Bad:** Leaving role lists empty when `enableAuthorization` is open<br />**Good:** Applying minimum privilege principle for roles<br />**Best:** Running automatic tests in CI/CD when roles are changed |
-| **Header Usage** | **Bad:** Downstream services not validating `X-Authenticated-UserId` header<br />**Good:** Implementing header validation in services behind gateway<br />**Best:** Adding header signature mechanism |
-| **Condition Management** | **Bad:** Applying policy unconditionally to all endpoints<br />**Good:** Targeting sensitive endpoints with Query Builder<br />**Best:** Configuring conditions environment and version-based |
-| **Deployment Process** | **Bad:** Making direct changes in production environment<br />**Good:** Trying certificate scenarios in test environment<br />**Best:** Creating Blue/Green deployment plan. |
+| **Identity Source Selection** | **Bad:** Leaving the Identity Source inconsistent with the Credential user name<br />**Good:** Consciously choosing the option that fits the setup's naming approach<br />**Best:** Defining each client as a separate Credential and using **Certificate Subject**, so a single client's access can be revoked independently |
+| **Certificate Management** | **Bad:** Forgetting to update the key store when the authority certificate is renewed<br />**Good:** Updating the key store after renewal and redeploying the policy<br />**Best:** Tracking the certificate renewal schedule with automatic reminders |
+| **Trust Validation** | **Bad:** Turning off **Validate Certificate's Issuer** and relying on name matching alone<br />**Good:** Keeping the option on and binding its own key store to each identity<br />**Best:** Defining a narrowly scoped key store per identity that contains only its own authority's certificate |
+| **Authorization Integration** | **Bad:** Leaving role lists empty when authorization is on<br />**Good:** Applying the minimum privilege principle for roles<br />**Best:** Running automatic tests in CI/CD when roles change |
+| **Header Usage** | **Bad:** Backend services not validating the identity header<br />**Good:** Implementing header validation in services behind the gateway<br />**Best:** Additionally using a secure channel between the gateway and the backend |
+| **Deployment Process** | **Bad:** Making direct changes in the production environment<br />**Good:** Trying certificate scenarios in a test environment<br />**Best:** Creating a Blue/Green deployment plan |
 
 ### Security Best Practices
 
 | Security Area | Description / Warnings |
 |---------------|----------------------|
-| **Certificate Revocation List** | Update periodically if CRL/OCSP checks are done outside gateway. |
-| **Issuer ACL Hardness** | Leaving Issuer ACL empty weakens client verification. Definitely add authorized issuer. |
-| **Header Protection** | Use signature or secure communication after mTLS termination against header spoofing in downstream services. |
-| **IP Matching** | Keep whitelist current for clients using dynamic IP if `checkClientIpAddress` is active. |
-| **Logging** | Store certificate verification errors masked in secure logs, anonymize personal data. |
+| **Narrowly Scoped Key Store** | The broader the key store bound to an identity, the larger the set of certificates that can be accepted on behalf of that identity. Define a store per identity that contains only the required authority. |
+| **Identity Source Scope** | With the **Certificate Issuer** option, **all** certificates issued by that authority are accepted as the same identity. Use **Certificate Subject** if you need to distinguish clients individually. |
+| **Certificate Revocation List** | If revocation checks are done outside the gateway, update them periodically; remove the identity match of revoked certificates. |
+| **Header Protection** | Use signature or secure communication against header spoofing in backend services. |
+| **Address Matching** | Keep the allowed list current for clients using dynamic addresses if address control is active. |
+| **Logging** | Store certificate validation errors masked in secure logs, anonymize personal data. |
 
 ### Things to Avoid
 
 | Category | Description / Warnings |
 |----------|----------------------|
-| **Missing Issuer ACL** | **Why to avoid:** All certificates become acceptable.<br />**Alternative:** Add minimum trusted CA set to Issuer ACL. |
-| **Unauthorized Header Usage** | **Why to avoid:** Identity spoofing occurs in downstream services.<br />**Alternative:** Fix header names according to corporate standards. |
-| **Skipping Test Environment** | **Why to avoid:** Errors in certificate chain create interruption in live.<br />**Alternative:** Validate every change with automatic tests. |
-| **Unnecessarily Closing IP Control** | **Why to avoid:** Leaves door open to certificate sharing.<br />**Alternative:** Create separate ACL groups for dynamic IP management. |
+| **Turning Off Trust Validation** | **Why to avoid:** Only name matching is relied upon; the policy layer does not prove that the certificate genuinely came from a trusted authority.<br />**Alternative:** Keep the option on and bind a key store to the identity. |
+| **Broadly Scoped Identity** | **Why to avoid:** All certificates issued by an authority become a single identity; revoking a single client's access becomes impossible.<br />**Alternative:** Use **Certificate Subject** if client-level distinction is needed. |
+| **Skipping the Environment Setting** | **Why to avoid:** When HTTPS or mTLS is off, the policy cannot accept any request.<br />**Alternative:** Verify the environment settings before adding the policy. |
+| **Skipping Test Environment** | **Why to avoid:** Errors in the certificate chain create interruption in live.<br />**Alternative:** Validate every change in a test environment with the same chain. |
 
 ### Performance Tips
 
 | Criterion | Recommendation / Impact |
 |----------|----------------------|
 | **Handshake Optimization** | **Recommendation:** Enable TLS session resumption.<br />**Impact:** Handshake time decreases, latency drops. |
-| **Certificate Cache** | **Recommendation:** Keep verified certificates in short-term memory.<br />**Impact:** CPU load decreases in repeated calls. |
-| **Issuer ACL Lookup** | **Recommendation:** Manage ACL queries with in-memory data structures.<br />**Impact:** Query speed increases in large ACL lists. |
-| **Logging Level** | **Recommendation:** Activate debug logs only in Development environment.<br />**Impact:** I/O load and disk usage decrease in Production environment. |
+| **Key Store Scope** | **Recommendation:** Do not bloat key stores with unnecessary certificates.<br />**Impact:** Chain validation speeds up, and the security scope narrows as well. |
+| **Logging Level** | **Recommendation:** Activate verbose logs only in the Development environment.<br />**Impact:** I/O load and disk usage decrease in the Production environment. |
 | **Authorization Calls** | **Recommendation:** Add timeout and Circuit Breaker to authorization service calls.<br />**Impact:** External service slowdowns do not affect API response time. |
 
 ## Frequently Asked Questions (FAQ)
 
 | Category | Question | Answer |
 |----------|----------|--------|
-| **General** | What is mTLS authentication? | Mutual TLS (mTLS) is a bidirectional authentication mechanism where both client and server verify each other's certificates. |
-| **General** | What is Issuer ACL? | Issuer ACL is an access control list defining which Certificate Authority (CA) certificates will be accepted. |
-| **Technical** | How does certificate verification work? | Gateway receives client certificate during TLS handshake, checks validity dates, signature, and issuer information. |
-| **Technical** | Is IP control mandatory? | No, but recommended especially in production environments against certificate sharing risk. |
-| **Usage** | How are different certificate policies defined for different endpoints? | Create endpoint-based conditions in Query Builder and assign separate policy for each condition. |
-| **Usage** | How can I change default error message? | You can edit status code, error code, and message fields from Error Message Customization tab. |
-| **General** | When should mTLS Authentication Policy be used? | Should be used in all scenarios requiring certificate-based client verification (partner integrations, corporate device access, high-security APIs). |
-| **General** | What happens if I don't define Issuer ACL? | If Issuer ACL is closed, policy accepts all valid certificates; if ACL is open but empty, all requests are rejected. Therefore, manage ACL according to requirements. |
-| **Technical** | What does `Enable Authorization` provide? | Triggers role and method-based authorization controls after certificate verification; works integrated with Authorization services or Secret Manager. |
-| **Technical** | How does IP control work? | If `checkClientIpAddress` is enabled, client's connection IP is matched with ACL records; non-matching requests return 403. |
-| **Usage** | How should I test policy changes? | Try mTLS handshakes using same certificate chain in test environment, validate Query Builder conditions with Postman or automation tests. |
-| **Usage** | What information is in exported ZIP file? | Contains policy JSON content, dependent Issuer ACL and error message configurations, and metadata files; integrity check is performed during import. |
-
+| **General** | What is mTLS authentication? | Mutual TLS (mTLS) is a bidirectional authentication mechanism where both the client and the server verify each other's certificates. |
+| **General** | When should this policy be used? | It can be used in all scenarios requiring certificate-based client verification (partner integrations, corporate device access, high-security APIs). |
+| **Technical** | Where on the certificate is the identity resolved from? | According to the **Identity Source** setting, from the client certificate's subject name, its issuer name, or subject first then issuer. The names of intermediate and root certificates in the chain sent by the client are not used as an identity. |
+| **Technical** | What should the Credential's user name be? | It depends on your Identity Source selection: if you chose **Certificate Subject**, it must be the subject name of the client certificate; if you chose **Certificate Issuer**, it must be the name of the authority that signed the certificate. |
+| **Technical** | How does trust validation work? | The entire certificate chain presented by the client is validated against the trusted certificates in the key store bound to the matched Credential. Chains containing intermediate certificate authorities are supported. |
+| **Technical** | Does the policy work on gRPC API Proxies? | No. The policy works only on HTTP/HTTPS API Proxies; if defined on a gRPC proxy, the request is rejected. |
+| **Technical** | What happens when mTLS is off in the environment settings? | The gateway does not request a certificate from the client, the policy finds none and requests are rejected. Verify the environment settings before adding the policy. |
+| **Technical** | What happens if no key store is defined on the Credential? | While **Validate Certificate's Issuer** is on, the request is rejected. If you turn the option off, trust validation is not performed and only name matching is relied upon. |
+| **Technical** | My certificate is valid but is still rejected, why? | Common reasons: the Identity Source selection being inconsistent with the Credential user name, the signing authority not being present in the identity's key store, the relevant API missing from the Credential's access list, or the certificate not being issued for client authentication purposes. |
+| **Usage** | How are different certificate rules defined for different endpoints? | Create endpoint-based conditions in Query Builder and assign a separate policy for each condition. |
+| **Usage** | How can I change the default error message? | You can edit status code, error code, and message fields from the Error Message Customization tab. |
+| **Usage** | How should I test policy changes? | Try handshakes using the same certificate chain in a test environment, validate conditions with automation tests. |
