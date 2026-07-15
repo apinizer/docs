@@ -1375,7 +1375,16 @@ const sidebars: SidebarsConfig = {
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "articles/apinizer-gateway-opentelemetry-integration-part-1-setup",
+        {
+          "type": "category",
+          "label": "Apinizer OpenTelemetry Integration",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/apinizer-gateway-opentelemetry-integration-part-1-setup",
+            "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards"
+          ]
+        },
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-control-list-rlcl",
