@@ -45,6 +45,18 @@ Retrieval always stays within boundaries you control:
 If Apinizer cannot resolve which project a request belongs to, retrieval is **skipped entirely** rather than falling back to an unscoped search. This is the default and recommended behavior — keep it enabled so a request can never retrieve context across project boundaries. Only turn it off if you run a single-tenant setup and understand the trade-off.
 :::
 
+## Fail-Closed on Broken References
+
+RAG depends on a working [vector database connection](/en/ai-gateway/vector-database) and an embedding provider. If either becomes unavailable after the policy is deployed — the connection is deleted or undeployed, the embedding provider is removed, or the collection/knowledge base the policy points to no longer exists — RAG does **not** silently forward the request without context:
+
+:::danger Fail-Closed
+When the vector database connection or embedding provider cannot be reached, or the collection/knowledge base the policy references no longer exists, the RAG policy rejects every request with **HTTP 502 (ERR-268)**. This is deliberate: forwarding a request to the model without the retrieved context it depends on would silently produce a wrong or degraded response for any proxy that relies on RAG. The policy stays deployed, but requests through that proxy are blocked until the broken connection or reference is fixed.
+:::
+
+This matters most when you [delete a knowledge base](/en/ai-gateway/knowledge-bases): if its collection isn't shared with another knowledge base, the collection itself is removed along with it. Any deployed RAG policy still pointing at that collection or knowledge base then starts blocking every request on the proxy it's attached to, in the way described above. Update or remove a RAG policy before deleting a knowledge base it depends on.
+
+This is different from the **Secure by Default** behavior above, where an unresolved project scope makes RAG skip retrieval and continue **without** context rather than blocking the request — here, the policy cannot function at all, so the request is rejected outright. It's also different from the HTTP 403 (ERR-267) block produced by the **On No Match** field's **Block Request** option below — that only fires when no passage clears the similarity threshold, and it's a separate, opt-in configuration choice.
+
 ## Why RAG Matters
 
 <CardGroup cols={2}>
@@ -55,6 +67,47 @@ If Apinizer cannot resolve which project a request belongs to, retrieval is **sk
     Giving the model relevant, current context to work from reduces the chance it invents an answer that isn't backed by your data.
   </Card>
 </CardGroup>
+
+## Configuration
+
+RAG is enabled by adding the **AI RAG Injection** policy to an API proxy:
+
+1. Add the **AI RAG Injection** policy to the target API proxy's policy list
+2. Select the [knowledge base](/en/ai-gateway/knowledge-bases) to retrieve from
+3. Save and deploy
+
+### Configuration Fields
+
+| Field | Description | Required | Default |
+|---|---|---|---|
+| **Knowledge Base** | Selecting one auto-fills the Vector DB Connection, Embedding Provider, and Collection Name fields below; you can still edit them manually after selection. | No | — |
+| **Vector DB Connection** | The [vector database](/en/ai-gateway/vector-database) connection retrieval runs against. | Yes | — |
+| **Embedding Provider** | The provider used to embed the request. Only embedding-capable provider types (OpenAI-compatible, Voyage AI) can be selected — Anthropic/Bedrock/Vertex are not available here. | Yes | — |
+| **Collection Name** | The vector collection/index to search. Resolved only from an environment variable (`${env}`), never from request data — so a request can never target a different collection. | Yes | — |
+| **Embedding Model** | The model name sent to the embedding provider. Supports an environment variable (`${env}`). | No | `text-embedding-3-small` |
+| **Embedding Dimension** | The embedding vector's dimension; must match the selected Vector DB connection's configured dimension. | No | `1536` |
+| **Top K Results** | The maximum number of most-relevant passages (chunks) to retrieve; must be at least 1. | No | `4` |
+| **Similarity Threshold** | The minimum similarity score (cosine similarity) a passage must reach to be included in the context. | No | `0.7` |
+| **Max Context Characters** | Character cap on the total injected context (a token-budget guard); highest-scoring passages are added first, and the content is cut off once the cap is reached. | No | `4096` |
+| **On No Match** | Behavior when no passage clears the similarity threshold: **Pass Through** forwards the request without context; **Block Request** rejects it with HTTP 403 (ERR-267). | No | `Pass Through (no context)` |
+| **Injection Mode** | How the retrieved context is added to the request: prepended to the user message, prepended to the system message, or filled into the template below. | No | `Prepend to User Message` |
+| **Injection Template** | The text used when Injection Mode is set to **Inject via Template**; contains the `{{context}}` and `{{prompt}}` placeholders (see below). Supports both an environment variable (`${env}`) and a [context variable](/en/concepts/core-concepts/dynamic-variables) (`#{...}`). | No (used only in Template mode) | see below |
+| **Target Variable** | An optional variable the injected (context-augmented) request is also written to; if left empty, the value is only written to the request body. | No | — |
+| **Skip RAG when Project ID unresolved (fail-closed)** | Governs the safe default described in **Secure by Default** above. | No | On |
+
+Default Injection Template:
+
+```
+<CONTEXT>
+{{context}}
+</CONTEXT>
+
+{{prompt}}
+```
+
+:::warning Template resolves before placeholders are filled
+`${...}` / `#{...}` variables in the template are resolved **before** the `{{context}}` and `{{prompt}}` placeholders are filled in — never the other way around. This order is deliberate: if it were reversed, retrieved context text or the caller's own prompt (which could contain an attacker-crafted `#{...}` expression) would be evaluated by the template engine and could leak into the request sent to the third-party model provider — a template-injection (SSTI) and potential secret-exposure risk. Variable resolution is scoped strictly to the admin-authored template text; retrieved context and the caller's prompt are never re-evaluated as variables.
+:::
 
 ## Next Steps
 

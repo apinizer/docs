@@ -43,6 +43,18 @@ Bu iki katmanlı sınır, farklı projelerin veya farklı bilgi tabanlarının i
 İsteğin proje kapsamı net bir şekilde çözülemezse, RAG bağlam çekimini **tamamen atlar** — isteği filtresiz, kapsamsız bir sorguyla çalıştırmak yerine bağlamsız devam eder. Bu güvenli davranışı kapatmayın; yalnızca tek-kiracılı (tek proje) test kurulumlarında eski (fail-open) modu tercih edebilirsiniz.
 :::
 
+## Bağlantı veya Referans Hatalarında Davranış (Fail-Closed)
+
+RAG'in çalışması, bir [vektör veritabanı bağlantısına](/tr/ai-gateway/vektor-veritabani) ve bir embedding sağlayıcısına ihtiyaç duyar. Politika deploy edildikten sonra bu bağlantılardan biri kullanılamaz hale gelirse — bağlantı silinir veya deploy'dan kalkarsa, embedding sağlayıcısı kaldırılırsa, ya da politikanın atıfta bulunduğu koleksiyon/bilgi tabanı silinmişse — RAG isteği **sessizce bağlamsız geçirmez**:
+
+:::danger Fail-Closed
+Vektör veritabanı bağlantısı veya embedding sağlayıcısı kullanılamıyorsa, ya da politikanın atıfta bulunduğu koleksiyon/bilgi tabanı ortadan kalkmışsa, RAG politikası her istekte **HTTP 502 (ERR-268)** ile isteği reddeder. Bu davranış kasıtlıdır: bağlam araması başarısız olduğunda isteğin ham (zenginleştirilmemiş) haliyle modele iletilmesi, RAG'e dayanan bir proxy'de sessizce yanlış veya eksik yanıt riski taşır. Politika deploy'da kalmaya devam eder; ancak etkilenen bağlantı veya referans düzeltilene kadar bu proxy üzerinden yapılan istekler engellenir.
+:::
+
+Bu davranış özellikle bir [bilgi tabanını](/tr/ai-gateway/bilgi-tabanlari) silme senaryosunda önemlidir: silinen bilgi tabanının koleksiyonu başka bir bilgi tabanıyla paylaşılmıyorsa koleksiyon da birlikte kaldırılır; hâlâ o koleksiyona veya bilgi tabanına atıfta bulunan deploy edilmiş bir RAG politikası varsa, bu politika bağlı olduğu proxy'nin tüm isteklerini yukarıdaki şekilde engellemeye başlar. Bir bilgi tabanını silmeden önce onu kullanan politikaları güncelleyin veya kaldırın.
+
+Bu, yukarıdaki **Kapsam İzolasyonu** bölümünde anlatılan davranıştan farklıdır — orada istek bloke edilmez, sadece bağlamsız devam eder. Burada ise politika hiç çalışamaz durumda olduğu için istek doğrudan reddedilir. Bu iki senaryo, aşağıdaki **Eşleşme Bulunamadığında** alanının **İsteği Engelle** seçeneğiyle oluşan HTTP 403 (ERR-267) engellemesinden de farklıdır — o, benzerlik eşiğini geçen içerik bulunamadığında devreye giren, ayrı ve isteğe bağlı bir yapılandırma seçimidir.
+
 ## Yapılandırma
 
 RAG, bir API proxy'sine eklenen **AI RAG Injection** politikasıyla etkinleştirilir:
@@ -50,6 +62,39 @@ RAG, bir API proxy'sine eklenen **AI RAG Injection** politikasıyla etkinleştir
 1. İlgili API proxy'sinin politika listesine **AI RAG Injection** politikasını ekleyin
 2. Kullanılacak [bilgi tabanını](/tr/ai-gateway/bilgi-tabanlari) seçin
 3. Kaydedin ve deploy edin
+
+### Yapılandırma Alanları
+
+| Alan | Açıklama | Zorunlu | Varsayılan |
+|---|---|---|---|
+| **Knowledge Base** | Seçildiğinde Vector DB Bağlantısı, Embedding Sağlayıcı ve Koleksiyon Adı alanlarını otomatik doldurur; alanlar seçim sonrası yine elle düzenlenebilir. | Hayır | — |
+| **Vector DB Bağlantısı** | Bağlam aramasının çalıştığı [vektör veritabanı](/tr/ai-gateway/vektor-veritabani) bağlantısı. | Evet | — |
+| **Embedding Sağlayıcı** | İsteğin embedding'e çevrilmesinde kullanılacak sağlayıcı. Yalnız embedding destekleyen sağlayıcı tipleri (OpenAI-uyumlu, Voyage AI) seçilebilir — Anthropic/Bedrock/Vertex bu alanda kullanılamaz. | Evet | — |
+| **Koleksiyon Adı** | Aranacak vektör koleksiyonu/index adı. Yalnızca ortam değişkeni (`${env}`) ile çözülür; istek verisiyle çözülmez, böylece bir istek başka bir koleksiyonu hedefleyemez. | Evet | — |
+| **Embedding Model** | Embedding sağlayıcısına gönderilecek model adı. Ortam değişkeni (`${env}`) destekler. | Hayır | `text-embedding-3-small` |
+| **Embedding Boyutu** | Embedding vektörünün boyutu; seçilen Vector DB bağlantısının yapılandırılmış boyutuyla eşleşmelidir. | Hayır | `1536` |
+| **Üst K Sonuç (topK)** | Getirilecek en alakalı parça (chunk) sayısının üst sınırı; en az 1 olmalıdır. | Hayır | `4` |
+| **Benzerlik Eşiği** | Bir parçanın bağlama dahil edilmesi için gereken minimum benzerlik skoru (cosine benzerliği). | Hayır | `0.7` |
+| **Maks. Context Karakteri** | Enjekte edilecek toplam bağlam metninin karakter sınırı (token bütçesi koruması); en yüksek skorlu parçalar önce eklenir, sınıra ulaşılınca kesilir. | Hayır | `4096` |
+| **Eşleşme Bulunamadığında** | Benzerlik eşiğini geçen parça bulunamazsa izlenecek davranış: **Devam Et** isteği bağlamsız iletir; **İsteği Engelle** isteği HTTP 403 (ERR-267) ile reddeder. | Hayır | `Devam Et (context olmadan)` |
+| **Enjeksiyon Modu** | Bulunan bağlamın isteğe nasıl ekleneceği: kullanıcı mesajının başına, sistem mesajının başına veya aşağıdaki şablona doldurularak. | Hayır | `Kullanıcı Mesajına Ekle (Başa)` |
+| **Enjeksiyon Şablonu** | Enjeksiyon Modu **Şablon ile Enjekte Et** seçiliyken kullanılan metin; `{{context}}` ve `{{prompt}}` yer tutucularını içerir (aşağıya bakın). Hem ortam değişkeni (`${env}`) hem [bağlam değişkeni](/tr/concepts/temel-kavramlar/dinamik-degiskenler) (`#{...}`) destekler. | Hayır (yalnızca Şablon modunda kullanılır) | aşağıya bakın |
+| **Hedef Değişken** | Enjekte edilmiş (bağlamla zenginleştirilmiş) isteği isteğe bağlı olarak yazacağı bir değişken; boş bırakılırsa değer yalnızca istek gövdesine yazılır. | Hayır | — |
+| **Proje Kimliği Çözülemezse RAG'i Atla (fail-closed)** | Yukarıdaki **Kapsam İzolasyonu** bölümünde açıklanan güvenli varsayılanı yönetir. | Hayır | Açık |
+
+Varsayılan Enjeksiyon Şablonu:
+
+```
+<CONTEXT>
+{{context}}
+</CONTEXT>
+
+{{prompt}}
+```
+
+:::warning Şablon önce çözülür, sonra doldurulur
+`${...}` / `#{...}` değişkenleri şablonda çözüldükten SONRA `{{context}}` ve `{{prompt}}` yer tutucuları doldurulur — asla tersi değil. Bu sıralama kasıtlıdır: sıra tersine çevrilseydi, getirilen bağlam metni veya kullanıcının isteği içine gizlenmiş bir `#{...}` ifadesi şablon motoru tarafından değerlendirilip üçüncü taraf model sağlayıcısına giden isteğe karışabilirdi — şablon enjeksiyonu (SSTI) ve olası sır sızıntısı riski. Değişken çözümleme yalnızca yönetici tarafından yazılan şablon metniyle sınırlıdır; getirilen bağlam veya kullanıcı isteği hiçbir zaman değişken olarak yeniden değerlendirilmez.
+:::
 
 ## Sonraki Adımlar
 
