@@ -49,17 +49,18 @@ Bunun için index'lerde **replica ≥ 1** ve **en az 2 data node** gerekir; böy
 
 :::
 
-## 2) Uzak / Farklı Ağdaki Sunucular
+## 2) Farklı VLAN'da veya Arada Load Balancer / NAT Varsa
 
 :::warning
 
-- **Uzak sunucuya master rolü verilmez.** Master seçimi gecikmeye çok duyarlıdır; uzak master gereksiz yeniden seçimlere ve kararsızlığa yol açar. Uzak node her zaman `node.roles: ["data"]` olmalıdır.
-- **Master node'ların hepsi ana site'ta**, aynı düşük gecikmeli ağda olmalıdır.
-- Sunucu **gerçekten uzak/yüksek gecikmeli** (WAN) ise, tek cluster'a katmak H.A. sağlamaz; bu durumda ayrı cluster + **Cross-Cluster Replication (CCR)** doğru yaklaşımdır (CCR, Platinum/Enterprise lisans gerektirir). Karar öncesi `ping` ile gecikmeyi ölçün.
+- **Master node'ların hepsi ana site'ta, aynı VLAN'da (düşük gecikmeli ağda) olmalıdır.** Master seçimi gecikmeye çok duyarlıdır. Farklı VLAN'daki veya arada load balancer/NAT bulunan bir node'a **master rolü verilmez**; bu tür node'lar her zaman `node.roles: ["data"]` olmalıdır.
+- **Load balancer yalnızca HTTP (9200) istemci trafiği içindir.** Node'lar arası transport (9300) trafiği load balancer arkasına alınmaz; doğrudan node'ların gerçek IP'leri üzerinden gider. Bu yüzden `discovery.seed_hosts`'a VIP/LB adresi değil, master node'ların **gerçek IP'leri** yazılır.
+- **Farklı VLAN'da** güvenlik duvarı **9300 portunu çift yönlü** geçirmelidir; istemciler farklı ağdaysa **9200** de açık olmalıdır.
+- **NAT arkasındaysa** node, dışarıdan ulaşılabilen adresi ilan etmelidir: `transport.publish_host` / `transport.publish_port`. Aksi halde cluster'a katılsa bile diğer node'lar ona bağlanamaz.
 
 :::
 
-**Özet:** Ana site node'ları `["master","data"]` (veya ayrık: `["master"]` / `["data"]`), uzak node'lar yalnızca `["data"]`.
+**Özet:** Ana site'ta aynı VLAN'daki node'lar `["master","data"]` (veya ayrık) olabilir; farklı VLAN / LB / NAT arkasındaki node'lar yalnızca `["data"]`.
 
 ---
 
@@ -214,9 +215,31 @@ Master'ın `seed_hosts` listesi yalnızca **master node'ları** içermelidir.
 
 :::
 
-:::info[cluster.initial_master_nodes]
+:::warning[İstisna: Yeni bir MASTER node ekliyorsanız]
 
-Mevcut node'un config dosyasında `cluster.initial_master_nodes` satırı varsa, bu ayar çalışan cluster'da **yok sayılır** ve zarar vermez. Yine de ileride yanlışlıkla yeni bir cluster kurulmasını önlemek için, uygun bir bakım penceresinde silinmesi önerilir. Silmek için restart gerekmez; değişiklik bir sonraki başlatmada geçerli olur.
+Yukarıdaki kural yalnızca **data node** eklerken geçerlidir. Cluster'a yeni bir **master-eligible** node eklendiğinde, master'lar birbirini keşfedebilmelidir. Bu nedenle **tüm master node'ların** `discovery.seed_hosts` listesine **tüm master'ların IP'leri** yazılmalıdır (yeni master dahil).
+
+Örneğin 3 master'lı bir yapıda her master'ın `seed_hosts` listesi şöyle olur:
+
+```yaml
+discovery.seed_hosts: ["<MASTER_1_IP>:9300", "<MASTER_2_IP>:9300", "<MASTER_3_IP>:9300"]
+```
+
+Bu değişikliğin geçerli olması için ilgili master node'lar **sırayla** (biri tamamen ayağa kalkıp cluster'a katıldıktan sonra diğeri) yeniden başlatılır. Data node'lar bu listeye eklenmez.
+
+:::
+
+:::info[Mevcut master'daki cluster.initial_master_nodes silinmeli mi?]
+
+Bu ayar yalnızca cluster **ilk kez sıfırdan kurulurken** (bootstrap) devreye girer. Cluster oluştuktan sonra Elasticsearch bu satırı **yok sayar**; voting configuration bilgisini diskteki cluster state'ten okur. Dolayısıyla config'de kalması mevcut çalışan cluster'a zarar vermez.
+
+Yine de **silinmesi önerilir.** Sebebi: ileride o node'un `path.data` dizini silinir veya node sıfırdan kurulursa, bu satır hâlâ oradaysa node mevcut cluster'a katılmak yerine **yeni ve ayrı bir cluster bootstrap eder**.
+
+Silmek için restart gerekmez; değişiklik bir sonraki başlatmada geçerli olur.
+
+```yaml
+# cluster.initial_master_nodes: ["<MASTER_NODE_IP>"]   <-- silinir
+```
 
 :::
 
@@ -261,12 +284,3 @@ sudo journalctl -u elasticsearch -f
 ```
 
 Bağlantı kurulamıyorsa `discovery.seed_hosts` IP'si, 9300 portu ve sertifika kontrol edilir.
-
-Data node eklendiğinde shard'lar yeni node'a taşınmaya başlar (rebalancing):
-
-```bash
-curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/recovery?v&active_only=true"
-curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cluster/health?pretty"
-```
-
-`relocating_shards` değeri sıfıra inip cluster durumu `green` olduğunda dağıtım tamamlanmıştır.

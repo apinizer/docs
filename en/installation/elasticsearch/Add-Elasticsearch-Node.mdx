@@ -49,17 +49,18 @@ This requires **replica ≥ 1** on your indices and **at least 2 data nodes**, s
 
 :::
 
-## 2) Remote Servers / Servers on a Different Network
+## 2) Different VLAN, or a Load Balancer / NAT in Between
 
 :::warning
 
-- **Never assign the master role to a remote server.** Master election is highly sensitive to latency; a remote master causes unnecessary re-elections and instability. A remote node must always be `node.roles: ["data"]`.
-- **All master nodes must reside at the primary site**, on the same low-latency network.
-- If the server is **genuinely remote or high-latency** (WAN), adding it to a single cluster does not provide H.A. In that case the correct approach is a separate cluster with **Cross-Cluster Replication (CCR)** (CCR requires a Platinum/Enterprise license). Measure the latency with `ping` before deciding.
+- **All master nodes must reside at the primary site, on the same VLAN (a low-latency network).** Master election is highly sensitive to latency. A node on a different VLAN, or behind a load balancer/NAT, must **not** be given the master role; such nodes must always be `node.roles: ["data"]`.
+- **A load balancer is for HTTP (9200) client traffic only.** Inter-node transport (9300) traffic is never placed behind a load balancer; it goes directly over the nodes' real IP addresses. For this reason, `discovery.seed_hosts` must contain the master nodes' **real IPs**, not a VIP/LB address.
+- **On a different VLAN**, the firewall must allow port **9300 bidirectionally**; if clients are on a different network, port **9200** must also be open.
+- **If behind NAT**, the node must advertise an externally reachable address via `transport.publish_host` / `transport.publish_port`. Otherwise, even after joining, other nodes cannot connect to it.
 
 :::
 
-**Summary:** Primary-site nodes use `["master","data"]` (or, when separated, `["master"]` / `["data"]`); remote nodes use `["data"]` only.
+**Summary:** Nodes on the same VLAN at the primary site may be `["master","data"]` (or separated); nodes on a different VLAN, or behind an LB/NAT, must be `["data"]` only.
 
 ---
 
@@ -216,7 +217,15 @@ The master's `seed_hosts` list should contain **master nodes only**.
 
 :::warning[Exception: when adding a new MASTER node]
 
-The rule above applies to data nodes. When adding a new **master-eligible** node to the cluster, the new master's IP must also be added to the `discovery.seed_hosts` list of the existing masters, so that the masters can discover one another. The affected master nodes must then be restarted one at a time for the change to take effect.
+The rule above applies only when adding **data nodes**. When a new **master-eligible** node is added to the cluster, the masters must be able to discover one another. For this reason, the `discovery.seed_hosts` list of **every master node** must contain the **IP addresses of all masters** (including the new one).
+
+For example, in a 3-master setup, each master's `seed_hosts` list would be:
+
+```yaml
+discovery.seed_hosts: ["<MASTER_1_IP>:9300", "<MASTER_2_IP>:9300", "<MASTER_3_IP>:9300"]
+```
+
+For this change to take effect, the affected master nodes are restarted **one at a time** (each fully rejoining the cluster before the next is restarted). Data nodes are not added to this list.
 
 :::
 
@@ -275,12 +284,3 @@ sudo journalctl -u elasticsearch -f
 ```
 
 If a connection cannot be established, check the `discovery.seed_hosts` IP address, port 9300, and the certificates.
-
-When a data node is added, shards begin relocating to it (rebalancing):
-
-```bash
-curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cat/recovery?v&active_only=true"
-curl -k -u elastic "https://<MASTER_NODE_IP>:9200/_cluster/health?pretty"
-```
-
-Relocation is complete once `relocating_shards` drops to zero and the cluster status returns to `green`.
