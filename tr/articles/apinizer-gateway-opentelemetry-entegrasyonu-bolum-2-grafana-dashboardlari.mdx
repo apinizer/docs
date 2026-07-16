@@ -1,0 +1,527 @@
+---
+title: "Apinizer API Gateway'i OpenTelemetry ile İzlemek (Bölüm 2): APM/RED, Collector Health ve Tempo Ops Dashboard'ları"
+description: "Apinizer API Gateway telemetrisini Grafana'da üç dashboard ile görünür kılabilir; trace'lere API proxy adı ve correlation ID gibi iş bağlamı ekleyebilir; hata oranını status code sınıflarına göre ayrıştırabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+import {Frame} from '@site/src/components/Frame';
+
+:::info Seri Hakkında
+Bu yazı, Apinizer API Gateway ve OpenTelemetry üzerine dört bölümlük serinin ikinci bölümü. Bu bölümde Bölüm 1'de kurduğumuz altyapının ürettiği veriyi Grafana'da üç dashboard ile görünür kılıyoruz.
+
+1. **OpenTelemetry Apinizer API Gateway entegrasyonu:** mimari, kurulum, doğrulama
+2. **Grafana'da üç dashboard:** APM/RED, Collector Health, Tempo Ops (bu bölüm)
+3. **SLI/SLO tanımları:** error budget ve alert
+4. **Service graph:** trace/metric/log korelasyonu
+:::
+
+## Bölüm 1'de Nerede Kalmıştık?
+
+[Bölüm 1'in](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum) sonunda çalışan bir zincirimiz vardı: gateway kod değişikliği olmadan enstrümante oldu, her isteğin trace'i Tempo'ya akıyor, metrikler Prometheus Agent üzerinden merkezi Prometheus'a yazılıyor. Zinciri dört noktadan doğruladık; veri akıyor.
+
+Ama seriyi açan soruya dönelim: *API Gateway yavaşladığında "nerede?" sorusuna cevap verebiliyor musunuz?* Klasik monitoring sorunun *var* olduğunu söyler, *nerede* olduğunu değil. Bölüm 1'de bu cevabın ham maddesini topladık; ne var ki ham veri kendi başına konuşmuyor. Tempo'daki trace'leri tek tek açarak sistemin genel sağlığı hakkında fikir edinemeyiz; Prometheus'taki zaman serileri de sorgulanmadıkça diskte duran sayılardan ibaret.
+
+Üstelik bir kör noktamız daha var: Bölüm 1'de trafiği görünür kıldık, ama izleyen sistemin kendisini kimse izlemiyordu. Collector'ın export kuyruğu dolarsa span kaybederiz ve bunu ancak "bu isteğin trace'i neden yok?" diye sorduğumuzda fark ederiz. Tempo'nun diski dolarsa yeni trace yazılamaz. İzleme altyapısı da bir sistemdir ve o da izlenmek zorundadır.
+
+Bu bölümün sonunda elimizde şunlar olacak:
+
+<CardGroup cols={2}>
+  <Card title="APM/RED dashboard'u" icon="chart-line">
+    Gateway trafiğinin Rate/Errors/Duration özeti: proxy bazlı kırılım, gecikme yüzdelikleri ve status code sınıflarına inen hata analizi.
+  </Card>
+  <Card title="Trace'lerde iş bağlamı" icon="exchange-alt">
+    Her span'de API proxy adı ve Apinizer correlation ID. "Hangi API yavaş?" sorusu artık metrik düzeyinde cevaplanabilir.
+  </Card>
+  <Card title="Collector Health paneli" icon="server">
+    İzleyeni izleyen panel: span akışı, export kuyruğu, reddedilen veri, bellek. Fark edilmeden yaşanabilecek veri kaybı görünür hale gelir.
+  </Card>
+  <Card title="Tempo Ops paneli" icon="database">
+    Trace deposunun sağlığı: ingester flush'ları, blocklist, disk kullanımı ve retention'ın gerçekten çalıştığının kanıtı.
+  </Card>
+</CardGroup>
+
+Başlamadan, Bölüm 1'den devraldığımız üç metrik ailesini hatırlayalım:
+
+| Metrik ailesi | Kim üretiyor? | Ne anlatır? |
+| --- | --- | --- |
+| `apinizer_trace_*` | spanmetrics connector | Span'lerden türetilen RED metrikleri: istek sayısı, hata, süre histogramı |
+| `traces_service_graph_*` | servicegraph connector | CLIENT→SERVER span çiftlerinden servis bağımlılıkları |
+| `apinizer_api_traffic_*` | Gateway (native) | İş metrikleri: API bazlı trafik sayaçları, cache ve politika davranışı |
+
+Üçü de Collector'ın `:8889` portundan yayınlanıyor ve `remote_write` zinciri üzerinden merkezi Prometheus'a ulaşmış durumda. Bu bölümün odağı ilk iki aile; gateway'in native ürettiği `apinizer_api_traffic_*` iş metrikleri bu makalenin kapsamı dışında kalıyor, kurulumu ve panelleri için [Prometheus ve Grafana Entegrasyonu](/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/prometheus-grafana-entegrasyonu) kılavuzuna bakabilirsiniz. Şimdi bu veriyi konuşturalım.
+
+## RED Nedir, Neden RED?
+
+RED, Tom Wilkie'nin (Weaveworks) mikroservisler için önerdiği üç metriklik izleme modeli: **R**ate (istek hızı), **E**rrors (hata oranı), **D**uration (istek süresi). Model, "bir servisin sağlığını en az kaç soruyla özetleyebilirim?" sorusunun cevabı.
+
+<Frame caption="RED metodu: istek odaklı bir servisi özetleyen üç soru ve bu kurulumdaki metrik karşılıkları">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/red-method-tr.svg"
+    alt="RED metodunun üç bileşeni: Rate saniyedeki istek sayısını, Errors başarısız isteklerin oranını, Duration gecikme yüzdeliklerini ölçer"
+    width="1000"
+    height="400"
+  />
+</Frame>
+
+RED'in gücü sadeliğinde değil, hedef kitlesinde: model *istek odaklı* servisler için tasarlandı ve bir API Gateway, istek odaklı bir sistemin ta kendisi. Gateway'in yaptığı her iş bir istekle başlar ve bir yanıtla biter; dolayısıyla bu üç soru gateway'de kullanıcı deneyiminin tamamını kapsar. CPU ve bellek gibi kaynak metrikleri (USE modeli) elbette değerli, ama kullanıcınız CPU görmez; kullanıcınız yavaş yanıt ve hata görür. RED tam olarak kullanıcının gördüğünü ölçer.
+
+## Bu Metrikler Aslında Nereden Geliyor?
+
+Dashboard kurmaya geçmeden önce, panelleri okurken kafa karıştırabilecek bir noktayı baştan netleştirelim.
+
+:::warning `apinizer_trace_*` adındaki önek yanıltıcı
+Bu metrikler gateway'den *gelmiyor*. Addaki `apinizer_trace` öneki, Bölüm 1'de spanmetrics connector'a bizim verdiğimiz `namespace: apinizer.trace` ayarından geliyor. Metriği üreten Collector'ın kendisi: spanmetrics connector, gateway'in span'lerine bakıp onlardan sayaç ve histogram *türetiyor*. Gateway bu metriklerin varlığından habersiz.
+:::
+
+Bu ayrım önemli, çünkü dashboard'daki her panelin arkasında farklı bir üretici var ve bir panel boş kaldığında "nereye bakacağımız" bu üreticiye göre değişiyor:
+
+| Metrik | Kim üretiyor? | Kaynağı | Nereden yayınlanır? |
+| --- | --- | --- | --- |
+| `apinizer_api_traffic_*` | Gateway (uygulama kodu) | İş mantığı sayaçları | `:9091` → Collector → `:8889` |
+| `apinizer_trace_*` | Collector (spanmetrics connector) | Span'ler | `:8889` |
+| `traces_service_graph_*` | Collector (servicegraph connector) | CLIENT→SERVER span çiftleri | `:8889` |
+| `jvm_*`, `http_client_*` | OTel Java agent (OTLP metrik sinyali) | JVM runtime | `:8889` |
+| `otelcol_*` | Collector'ın kendi iç telemetrisi | Collector süreçleri | `:8888` |
+| `tempo_*`, `tempodb_*` | Tempo | Trace deposu operasyonları | `:3200` |
+
+Pratik sonucu şu: `apinizer_trace_*` olmadan RED dashboard'u yapamazsınız, çünkü span'lerden türeyen istek/hata/süre verisi orada. Gateway'in kendi sayaçları olan `apinizer_api_traffic_*` ise cache isabeti ve politika davranışı gibi span'de bulunmayan iş bilgilerini taşır; o ailenin detayları için yukarıda bağlantısını verdiğimiz entegrasyon kılavuzuna bakabilirsiniz.
+
+## İş Bağlamını Trace'e Taşımak
+
+Bu, bölümün en değerli kısmı; internette de doğru dürüst anlatılmayan kısım burası. spanmetrics bize istek hızını, hata oranını ve süre histogramını veriyor. Ama şu soruyu sorduğumuz anda tıkanıyoruz: "Hangi API proxy?"
+
+### Problem: Span'de Proxy Kimliği Yok
+
+OTel Java agent, gateway'i *HTTP sunucusu* olarak görüyor: span'de metod, path, status code var. Ama "bu istek Apinizer'daki hangi API proxy tanımına gitti?" bilgisi bir *iş bağlamı*; agent'ın bunu bilmesine imkân yok. Proxy kimliği olmadan RED metriklerini proxy bazında kıramayız; elimizde yalnızca gateway'in toplam trafiği kalır. "API'lerden biri hata fırlatıyor" ile "petstore proxy'si hata fırlatıyor" arasındaki fark, gece yarısı müdahalesinde saatlere denk gelir.
+
+İkinci ve daha sinsi bir sorun daha var: Kubernetes'in liveness/readiness probe'ları da gateway'e HTTP isteği atar ve onlar da SERVER span üretir. spanmetrics bu span'leri API trafiğinden ayırmaz. Panelde 0.2 req/s görüp sevinebilir, sonra hepsinin probe olduğunu fark edebilirsiniz; bu klasik bir tuzaktır.
+
+### İlk Yaklaşım: Proxy Adını Header'dan Okumak
+
+Bölüm 1'deki Collector manifest'inde bu iş için bir hazırlık zaten vardı:
+
+```yaml
+# Bölüm 1 manifest'inden: proxy adını yanıt header'ından okuma fikri
+- set(attributes["apinizer.apiproxy.name"], attributes["http.response.header.x-apinizer-apiproxy-name"][0]) where attributes["http.response.header.x-apinizer-apiproxy-name"] != nil
+```
+
+Fikir şuydu: proxy adını yanıttaki `x-apinizer-apiproxy-name` header'ından okumak. Bu bölümde dashboard'ları kurarken Tempo'daki ham span'lere bakınca, bu yaklaşımın çalışması için iki koşulun aynı anda sağlanması gerektiğini gördük:
+
+1. Header'ın gateway tarafından her yanıta eklenmesi gerekiyor; bu da sırf izleme için istek/yanıt akışına müdahale etmek demek.
+2. Header gönderilse bile agent onu kendiliğinden görmez: OTel Java agent, özel header'ları varsayılan olarak span'e yazmaz. Header yakalama, ilgili ortam değişkeniyle açıkça istenmelidir.
+
+Bu inceleme bize transform processor'ın önemli bir davranışını da öğretti: `error_mode: ignore` ile çalışırken girdisi olmayan statement sessizce atlanır. Hata da log da uyarı da üretmez; attribute yalnızca oluşmaz. Yani statement'ın manifest'te durması ile gerçekten değer üretmesi aynı şey değildir.
+
+:::warning Öğrendiğimiz ders: transform yazmadan önce girdiyi doğrulayın
+Bir transform statement'ı yazmadan önce, okuduğu attribute'un span'de *gerçekten var olduğunu* Tempo'da ham span'e bakarak doğrulayın. `error_mode: ignore` altında eksik girdi hata üretmez; statement yalnızca hiçbir şey yapmaz.
+:::
+
+Bu iki gözlemi alt alta koyunca karar netleşti: proxy adını header'da beklemek ya da bunun için istek akışına dokunmak yerine, zaten her SERVER span'inde hazır bulunan bir veriden türetmek.
+
+### Seçtiğimiz Yol: Proxy Adını url.path'ten Türetmek
+
+O veri `url.path`. Apinizer'ın path yapısı şöyle:
+
+```text
+/{api-gateway-root-context}/{project-path?}/{proxy-path}/{proxy-endpoint}
+                            ^^^^^^^^^^^^^^^ opsiyonel → segment sayısı sabit DEĞİL
+```
+
+İşte pürüz de burada: `{project-path}` opsiyonel olduğu için, URL'e bakarak project'in var olup olmadığı anlaşılamaz. `/apigateway/mirror/store/inventory` isteğinde `mirror` bir project mi yoksa proxy mi? Path tek başına söylemiyor. Bu belirsizlik karşısında bir uzlaşma seçtik: root context'ten (`/apigateway`) sonraki ilk iki segmenti proxy adı olarak alıyoruz:
+
+| Gelen istek | `apinizer.apiproxy.name` | Sonuç |
+| --- | --- | --- |
+| `/apigateway/apm-project/petstore-swagger/store/inventory` | `/apm-project/petstore-swagger` | Project'li proxy'lerde birebir doğru |
+| `/apigateway/mirror/store/inventory` | `/mirror/store` | Endpoint'in ilk segmenti ada karışır; ama değer kümesi sınırlı kalır |
+| `/metrics`, probe istekleri | `non-api` | API dışı trafik tek etikette toplanır, RED'den filtrelenebilir |
+
+Project'siz proxy'lerde adın sonuna endpoint'in ilk segmentinin karışması ideal değil; ama alternatifi (path'in tamamını etiket yapmak) cardinality patlaması demek. Her benzersiz path ayrı bir zaman serisi üretir ve Prometheus'u bununla boğmak, çözdüğümüz sorundan daha büyük bir sorun yaratır. İki segment, "proxy'leri ayırt etmeye yetecek kadar bilgi, seriyi patlatmayacak kadar sınır" dengesinin kendisi.
+
+Tam path'i de kaybetmiyoruz: `apinizer.request.path` adıyla span attribute'u olarak saklanıyor; ancak dimension değil. Metrik etiketi olarak değil, TraceQL sorgularında tek isteğe inerken kullanılıyor.
+
+:::note Proxy adı yalnızca SERVER span'inde anlamlı
+CLIENT span'lerde `url.path`, gateway'in *gittiği* backend'in adresini taşır; ondan proxy adı türetmek yanlış sonuç verir. Bu yüzden RED panelleri zaten `span_kind="SPAN_KIND_SERVER"` filtresiyle çalışıyor; probe trafiği de `apinizer.apiproxy.name` üzerinden ayrıştırılabiliyor.
+:::
+
+### Correlation ID: Trace ile Apinizer Kaydını Buluşturmak
+
+İş bağlamının ikinci parçası, Apinizer'ın kendi kimliği. Apinizer her yanıta `APINIZER-CORRELATION-ID` header'ı basar; aynı değer Apinizer'ın API trafik kayıtlarında da tutulur. Yani bu ID, aynı isteğin üç ayrı sistemdeki kaydını birleştiren anahtar: Apinizer'daki trafik kaydı, Tempo'daki trace ve Elasticsearch'teki log.
+
+<Frame caption="Apinizer'daki istek detayı: her isteğin Correlation Id değeri trafik kaydında hazır bekliyor">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/apinizer-correlation-id-detail.png"
+    alt="Apinizer istek detay ekranında Correlation Id alanı: 9cfc21f5 ile başlayan benzersiz istek kimliği"
+    width="1000"
+    height="512"
+  />
+</Frame>
+
+Header yaklaşımını incelerken öğrendiğimizi burada uyguluyoruz: önce agent'a bu header'ı *yakalamasını* söylüyoruz. Instrumentation CR'ına tek bir ortam değişkeni ekleniyor:
+
+```yaml
+# instrumentation.yaml: Bölüm 1'deki CR'a eklenen env
+spec:
+  env:
+    - name: OTEL_LOGS_EXPORTER
+      value: "none"
+    - name: OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_RESPONSE_HEADERS
+      value: "apinizer-correlation-id"
+```
+
+Bu ayarla agent, yanıttaki header'ı `http.response.header.apinizer-correlation-id` attribute'u olarak span'e yazıyor. Artık transform'un okuyacağı bir girdi *gerçekten var*; transform da onu daha kullanışlı bir ada taşıyor:
+
+```yaml
+# transform/apinizer-traces: correlation ID zinciri (ilk dolan kazanır)
+- set(attributes["apinizer.correlation_id"], attributes["http.response.header.apinizer-correlation-id"][0]) where attributes["http.response.header.apinizer-correlation-id"] != nil
+- set(attributes["apinizer.correlation_id"], attributes["http.response.header.apinizer_correlation_id"][0]) where attributes["apinizer.correlation_id"] == nil and attributes["http.response.header.apinizer_correlation_id"] != nil
+- set(attributes["apinizer.correlation_id"], attributes["http.request.header.apinizer-correlation-id"][0]) where attributes["apinizer.correlation_id"] == nil and attributes["http.request.header.apinizer-correlation-id"] != nil
+```
+
+Üç statement, aynı değerin üç olası taşıyıcısını sırayla dener (tireli yanıt header'ı → alt çizgili varyant → istek header'ı); ilk dolu bulunan kazanır.
+
+:::danger Correlation ID'yi asla spanmetrics dimension'ı yapmayın
+Her istekte benzersiz olan bir değeri metrik etiketi yaparsanız her istek ayrı bir zaman serisi üretir; bu, cardinality patlamasının ders kitabı tanımıdır. Correlation ID yalnızca trace attribute'u olarak kalmalı. Metrikte toplu resmi görürsünüz, correlation ID ile de TraceQL üzerinden tek isteğe inersiniz:
+
+```text
+{ .apinizer.correlation_id = "9cfc21f5-0a49-4706-bd0b-8a2ace9eb19a" }
+```
+
+Bu sorgunun canlı halini, grafikten trace'e geçişi anlattığımız bölümde göstereceğiz.
+:::
+
+### transform Pipeline'ının Son Hali
+
+Tüm bu kararların toplamı, `transform/apinizer-traces` processor'ında 11 statement'lık bir zincir. Sıra önemli, çünkü sonraki statement'lar öncekilerin sonucuna bakıyor:
+
+| Adım | Ne yapıyor? | Hangi span'de? |
+| --- | --- | --- |
+| 1–4 | CLIENT zenginleştirme: gidilen adres (`apinizer.routing.address`), hedef servis (`peer.service`) ve span rolü (hedef Elasticsearch ise `elasticsearch-logging`, değilse `upstream-routing`) | CLIENT |
+| 5 | Tam path'i `apinizer.request.path` olarak sakla (TraceQL için; dimension değil) | SERVER |
+| 6–8 | `apinizer.apiproxy.name` türet: önce iki segment, tek segment kalırsa onu al, hiçbiri yoksa `non-api` (sırayla, yalnızca önceki adım boş bıraktıysa) | SERVER |
+| 9–11 | `apinizer.correlation_id` zinciri: yanıt header'ı (tireli) → yanıt header'ı (alt çizgili) → istek header'ı | SERVER |
+
+1–4'teki `apinizer.span.role` attribute'una dikkat: bu küçük etiket, ilerideki "gecikme nerede?" sorusunun cevabını taşıyacak. Gateway'in giden çağrılarını *upstream'e routing* ve *Elasticsearch'e loglama* olarak ikiye ayırıyor; böylece yavaşlamanın backend'den mi log altyapısından mı geldiğini tek panelde göreceğiz.
+
+<Accordion title="transform/apinizer-traces (collector.yaml'da bu bloğun yeni hali)">
+
+```yaml
+# collector.yaml → processors altındaki transform bloğunun Bölüm 2 sonrası hali.
+# Manifest'in geri kalanı Bölüm 1'deki gibi; yalnızca bu blok değişti.
+transform/apinizer-traces:
+  error_mode: ignore
+  trace_statements:
+    - context: span
+      statements:
+        # ---------- CLIENT span'ler: upstream / elasticsearch ayrımı ----------
+        - >-
+          set(attributes["apinizer.routing.address"], attributes["url.full"])
+          where kind == SPAN_KIND_CLIENT and attributes["url.full"] != nil
+        - >-
+          set(attributes["peer.service"], attributes["server.address"])
+          where kind == SPAN_KIND_CLIENT and attributes["server.address"] != nil
+        - >-
+          set(attributes["apinizer.span.role"], "elasticsearch-logging")
+          where kind == SPAN_KIND_CLIENT and IsMatch(attributes["server.address"], ".*(elastic|9200).*")
+        - >-
+          set(attributes["apinizer.span.role"], "upstream-routing")
+          where kind == SPAN_KIND_CLIENT and attributes["apinizer.span.role"] == nil
+
+        # ---------- SERVER span'ler: proxy kimliği (url.path'ten) ----------
+        - >-
+          set(attributes["apinizer.request.path"], attributes["url.path"])
+          where attributes["url.path"] != nil
+        # project'li VE project'siz: /apigateway/{a}/{b} → "/a/b"
+        - >-
+          set(attributes["apinizer.apiproxy.name"],
+          Concat(["/", Split(attributes["url.path"], "/")[2], "/", Split(attributes["url.path"], "/")[3]], ""))
+          where attributes["url.path"] != nil and IsMatch(attributes["url.path"], "^/apigateway/[^/]+/[^/]+(/.*)?$")
+        # tek segment: /apigateway/{a} → "/a"
+        - >-
+          set(attributes["apinizer.apiproxy.name"],
+          Concat(["/", Split(attributes["url.path"], "/")[2]], ""))
+          where attributes["apinizer.apiproxy.name"] == nil and attributes["url.path"] != nil and IsMatch(attributes["url.path"], "^/apigateway/[^/]+/?$")
+        # API dışı (metrics, probe): non-api
+        - >-
+          set(attributes["apinizer.apiproxy.name"], "non-api")
+          where attributes["apinizer.apiproxy.name"] == nil and kind == SPAN_KIND_SERVER
+
+        # ---------- Correlation ID (yanıt tireli → yanıt alt çizgili → istek tireli) ----------
+        - >-
+          set(attributes["apinizer.correlation_id"], attributes["http.response.header.apinizer-correlation-id"][0])
+          where attributes["http.response.header.apinizer-correlation-id"] != nil
+        - >-
+          set(attributes["apinizer.correlation_id"], attributes["http.response.header.apinizer_correlation_id"][0])
+          where attributes["apinizer.correlation_id"] == nil and attributes["http.response.header.apinizer_correlation_id"] != nil
+        - >-
+          set(attributes["apinizer.correlation_id"], attributes["http.request.header.apinizer-correlation-id"][0])
+          where attributes["apinizer.correlation_id"] == nil and attributes["http.request.header.apinizer-correlation-id"] != nil
+```
+
+</Accordion>
+
+### Nihai spanmetrics Dimension Listesi
+
+Hangi attribute'ların metrik etiketi (dimension) olacağı, bu bölümdeki en bilinçli tasarım kararı. Nihai liste:
+
+```yaml
+spanmetrics:
+  dimensions:
+    - name: apinizer.apiproxy.name
+      default: unknown
+    - name: k8s.namespace.name
+    - name: apinizer.span.role
+    - name: server.address
+    - name: peer.service
+    - name: http.request.method
+    - name: http.response.status_code
+      default: "0"
+```
+
+İki bilinçli eksik var: `apinizer.request.path` ve `apinizer.correlation_id`. İkisi de yüksek cardinality taşıyor; span attribute'u olarak trace'te yaşıyorlar ama metrik etiketine asla dönüşmüyorlar. İki de bilinçli varsayılan var: proxy adı türetilemezse `unknown`, HTTP status kodu hiç oluşmamışsa `"0"`. Bu `"0"` değeri masum bir dolgu değil; hata analizinde başrol oynayacak, birazdan göreceğiz.
+
+### collector.yaml'da Ne Değişti?
+
+Bölüm 1 kurulumdu; bu bölüm o kurulumun genişletilmesi. Bu yüzden manifest'in tamamını tekrar basmıyoruz; Bölüm 1'deki `otel-collector.yaml`'a göre değişen yerlerin dökümü şu:
+
+**Eklenenler:**
+
+- `transform/apinizer-traces` bloğu yukarıdaki 11 statement'lık haline genişledi: proxy adını `url.path`'ten türeten üç statement ile tam path'i saklayan `apinizer.request.path` statement'ı yeni.
+- spanmetrics dimension listesine `k8s.namespace.name` ve `http.response.status_code` (varsayılanı `"0"`) eklendi; `apinizer.apiproxy.name` artık `default: unknown` ile geliyor.
+- Instrumentation CR'a `OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_RESPONSE_HEADERS` ortam değişkeni eklendi (correlation ID bölümünde gördük).
+
+**Çıkarılanlar:**
+
+- Proxy adını `x-apinizer-apiproxy-name` header'ından okuyan statement kaldırıldı; girdisi hiç oluşmuyordu ve `url.path` çözümü onu gereksiz kıldı.
+- `apinizer.apiproxy.path` statement'ı kaldırıldı; aynı bilgi zaten `apinizer.request.path`'te tutuluyor.
+- Correlation ID zinciri yeniden sıralandı: önce yanıt header'ının tireli varyantı, sonra alt çizgili varyantı, en son istek header'ı denenecek şekilde üç statement'a indirildi.
+
+## Dashboard: APM/RED
+
+Veri hazır, iş bağlamı yerinde; şimdi hepsini tek bir dashboard'da toplayalım. Kurduğumuz dashboard tek bir JSON dosyası: `uid` değeri `apinizer-otel-apm-red`, iki de değişkeni var. `cluster` hangi ortama baktığınızı seçer, `apiproxy` ise RED panellerini tek bir proxy'ye daraltmanızı sağlar. Aynı dashboard'da altı satır bulunuyor ve satırlar yukarıdan aşağıya "kullanıcı ne yaşıyor?" sorusundan "altyapı ne durumda?" sorusuna doğru iniyor:
+
+| Satır | Neyi anlatır? |
+| --- | --- |
+| RED Özeti | İstek hızı, hata analizi ve gecikme yüzdelikleri; dashboard'un kalbi |
+| Gecikme Nerede? | Gecikmeyi span rolüne göre ayırır: backend mi, log altyapısı mı, gateway'in kendisi mi? |
+| API Proxy Kırılımı | En yavaş 10 proxy, proxy bazlı hata oranı ve upstream bağımlılıkları |
+| Gateway JVM | OTel agent'ın ek maliyetsiz getirdiği heap ve GC panelleri |
+| Collector Health | İzleme altyapısının kendi sağlığı: span akışı, kuyruk, bellek |
+| Tempo Ops | Trace deposunun operasyonel durumu: flush, disk, retention |
+
+:::info Dashboard yayına hazırlanıyor
+Dashboard, Grafana Labs kütüphanesinde yayına hazırlanıyor; onaylandığında resmi bağlantısı bu bölüme eklenecek. Yayınlandığında Grafana'da Dashboards sayfasından New → Import adımlarıyla, Prometheus veri kaynağınızı seçerek içe aktarabilirsiniz.
+:::
+
+Panellere geçmeden, tüm RED sorgularının paylaştığı ortak kalıba bakalım; bunu bir kez anlayınca dashboard'daki sorguların tamamı okunur hale geliyor:
+
+```promql
+apinizer_trace_calls_total{
+  span_kind="SPAN_KIND_SERVER",
+  apinizer_apiproxy_name=~"$apiproxy",
+  apinizer_apiproxy_name!=""
+}
+```
+
+Üç filtrenin de bir görevi var:
+
+- `span_kind="SPAN_KIND_SERVER"`: yalnızca gateway'e gelen istekleri sayar. Bu filtre olmasa gateway'in backend'e yaptığı CLIENT çağrıları da sayıma karışır ve her istek iki kez görünürdü.
+- `apinizer_apiproxy_name=~"$apiproxy"`: dashboard değişkenine bağlanır; panelleri tek proxy'ye daraltmayı bu sağlar.
+- `apinizer_apiproxy_name!=""`: attribute'u hiç oluşmamış eski span'leri dışarıda tutar. Probe trafiği ise `non-api` etiketiyle ayrı durur; değişkenden `non-api` seçimini kaldırarak RED panellerini saf API trafiğine indirgeyebilirsiniz.
+
+Bir yazım detayı: Bölüm 1'de attribute'ları nokta ile adlandırmıştık (`apinizer.apiproxy.name`), Prometheus etiketlerinde ise noktalar alt çizgiye dönüşür (`apinizer_apiproxy_name`). Sorgu yazarken bu dönüşümü hatırlamak gerekiyor.
+
+Bu kalıbın üstüne Rate paneli tek satır:
+
+```promql
+sum(rate(apinizer_trace_calls_total{span_kind="SPAN_KIND_SERVER", apinizer_apiproxy_name=~"$apiproxy", apinizer_apiproxy_name!=""}[$__rate_interval]))
+```
+
+Duration panelleri de aynı filtrelerle histogram kovalarından yüzdelik hesaplıyor; p50, p95 ve p99 aynı grafikte:
+
+```promql
+histogram_quantile(0.95, sum by (le) (rate(apinizer_trace_duration_milliseconds_bucket{span_kind="SPAN_KIND_SERVER", apinizer_apiproxy_name=~"$apiproxy", apinizer_apiproxy_name!=""}[$__rate_interval])))
+```
+
+:::note PromQL'i Collector çıktısına göre yazın
+Collector, `:8889`'dan yayınlarken bazı metrik adlarını normalize eder; örneğin gateway'in kendi endpoint'inde `apinizer_api_traffic_total_count_total` olarak görünen sayaç, Collector çıktısında `apinizer_api_traffic_count_total` olur. Sebebi, prometheus receiver'ın `_total` gibi sonekleri soyup exporter'ın geri eklemesi; bu gidiş dönüş bazı adlarda kayıplı. Panele sorgu yazarken metrik adını uygulamanın endpoint'inden değil, Collector'ın `:8889` çıktısından doğrulayın.
+:::
+
+Bu bölümdeki ekran görüntülerinin boş panellere değil gerçek veriye dayandığını belirtelim: panelleri doldurmak için JMeter ile yaklaşık 100 thread'lik ve 300 saniyelik, başarılı ve kasıtlı hatalı istekleri karışık içeren bir trafiği tanımlanan dört farklı API proxy'ye gönderdik; dashboard'lar bu gerçekçi trafik altında test edildi. Bu trafik altında RED özeti şöyle görünüyor:
+
+<Frame caption="Test trafiği altında RED özeti: istek hızı yüksek, kasıtlı hataların ayrıştırdığı status sınıfı bantları ve gecikme yüzdelikleri gerçek veriyle dolu">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/red-dashboard-load.png"
+    alt="Grafana APM/RED dashboard'u test trafiği altında: istek hızı, 4xx ve 5xx bantlarının ayrıştığı status sınıfı dağılımı ve gecikme yüzdelikleri panelleri"
+    width="1000"
+    height="500"
+  />
+</Frame>
+
+## Error Rate'i Derinleştirmek: İki Hata Tanımı
+
+"Hata oranınız nedir?" sorusu tek sayıyla cevaplanabilecek bir soru gibi görünür; değildir. Bu dashboard'da hata analizi dört ayrı stat panelinden başlıyor: STATUS_CODE_ERROR oranı, 5xx oranı, 4xx oranı ve kodsuz hata. Dördünün ayrı ayrı durmasının sebebi, her birinin farklı bir soruya cevap vermesi.
+
+İlk ayrım OTel'in kendi hata tanımından geliyor. OTel semantic convention'a göre SERVER span'inde 4xx yanıtlar span'i hatalı yapmaz; istemcinin hatası, sunucunun arızası sayılmaz. `status_code="STATUS_CODE_ERROR"` etiketi bu yüzden 5xx yanıtları, exception'ları ve timeout'ları kapsar ama 4xx'leri kapsamaz. Yani OTel'in hata oranı ile HTTP 5xx oranı aynı şey değildir ve panelde ikisi ayrı izlenir:
+
+```promql
+sum(rate(apinizer_trace_calls_total{span_kind="SPAN_KIND_SERVER", apinizer_apiproxy_name=~"$apiproxy", apinizer_apiproxy_name!="", status_code="STATUS_CODE_ERROR"}[$__rate_interval]))
+```
+
+4xx'i ayrı izlemenin pratik bir gerekçesi var: bir login endpoint'i gün boyu 401 dönebilir ve bu bir arıza değildir. 4xx'i 5xx ile aynı "error %" altında toplarsanız, istemci kaynaklı gürültü gerçek arızaları gölgeler. Ters yönde de doğru: 4xx'teki ani bir sıçrama, backend sağlıklıyken bozulan bir istemci entegrasyonunun ilk işaretidir. Ayrı panel, iki sinyali de temiz tutar.
+
+Dördüncü stat ise bu bölümün en değerli paneli: kodsuz hata. spanmetrics dimension listesinde `http.response.status_code` için `default: "0"` vermiştik; işte o karar burada meyvesini veriyor. HTTP status kodu hiç oluşmadan biten istekler (bağlantı kopması, timeout, henüz yanıt yazılmadan kesilen istek) `status_code="0"` etiketiyle sayılıyor:
+
+```promql
+sum(rate(apinizer_trace_calls_total{span_kind="SPAN_KIND_SERVER", apinizer_apiproxy_name=~"$apiproxy", apinizer_apiproxy_name!="", http_response_status_code="0"}[$__rate_interval]))
+```
+
+Bu istekler 5xx sayaçlarına hiç yansımaz; yalnızca 5xx'e bakan bir alert bu sınıfın tamamına kördür. En sinsi hatalar genellikle burada birikir.
+
+Stat panellerinin altında iki grafik bu tanımları görselleştiriyor. Status code sınıfı dağılımı, trafiği 2xx/3xx/4xx/5xx/kodsuz bantlarına ayırıp üst üste yığıyor; test trafiğindeki kasıtlı 404 ve 400 istekleri bu bantlarda net biçimde ayrışıyor. İki hata tanımı grafiği ise STATUS_CODE_ERROR, HTTP 5xx ve kodsuz seriyi aynı eksene koyuyor; üç çizginin arasındaki mesafe, "hangi hata tanımına göre alarm kuracağız?" sorusunun görsel cevabı.
+
+Satırın sonunda üç tablo, hata analizini proxy düzeyine indiriyor: en çok 5xx veren proxy'ler, en çok 4xx veren proxy'ler ve proxy ile status kodunun canlı eşleşmesi. "Sistemde hata var" cümlesini "petstore proxy'sinde 500 artıyor" cümlesine bu tablolar çevirir.
+
+:::info Bölüm 3'e not
+SLI/SLO tanımlarına geldiğimizde error budget'ı bu ayrımın üstüne kuracağız: bütçeyi tüketen tanım genellikle 5xx artı STATUS_CODE_ERROR olur, 4xx ise ayrı bir kalite sinyali olarak dışarıda tutulur.
+:::
+
+## "Nerede?" Sorusunun Cevabı: Span Rolüne Göre Kırılım
+
+Serinin açılış sorusuna geri döndük: gateway yavaşladığında yavaşlık *nerede*? Transform pipeline'ında her CLIENT span'ine yazdığımız `apinizer.span.role` etiketi tam bu an için vardı. Gateway'in dışarıya yaptığı her çağrı iki roldan birine ayrılmıştı: backend'e giden `upstream-routing` ve log altyapısına giden `elasticsearch-logging`. Panel, p95 gecikmeyi bu role göre kırıyor:
+
+```promql
+histogram_quantile(0.95, sum by (le, apinizer_span_role) (rate(apinizer_trace_duration_milliseconds_bucket{span_kind="SPAN_KIND_CLIENT"}[$__rate_interval])))
+```
+
+Okuması basit: `upstream-routing` çizgisi tırmanıyorsa yavaşlık backend'de, `elasticsearch-logging` çizgisi tırmanıyorsa log altyapısında. İki çizgi de sakinken kullanıcı gecikmesi artıyorsa, aradaki fark gateway'in kendi işleme süresini işaret eder.
+
+Satırdaki ikinci panel bu farkı yaklaşık olarak hesaplıyor: SERVER span'lerinin ortalama süresinden upstream CLIENT span'lerinin ortalama süresini çıkarınca, kalan değer kabaca gateway pipeline'ının payı oluyor. Panelin adındaki "yaklaşık" ibaresi süs değil: hesap ortalamalar üzerinden yapılıyor ve loglama çağrıları asenkron çalıştığından süreler birebir toplanmıyor. Bu paneli kesin bir ölçüm gibi değil, bir trend göstergesi gibi okuyun; değerin kendisinden çok, değerin zamanla değişimi bilgi taşıyor.
+
+<Frame caption="Test trafiği altında span rolüne göre p95: upstream çağrıları tırmanırken loglama çağrıları sakin">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/latency-by-span-load.png"
+    alt="Gecikme Nerede panelleri test trafiği altında: upstream-routing p95 çizgisi tırmanıyor, elasticsearch-logging düz seyrediyor"
+    width="1000"
+    height="500"
+  />
+</Frame>
+
+Bu iki panelin değeri gece yarısı senaryosunda ortaya çıkıyor. Kullanıcı "API yavaş" diyor; RED özeti p95'in tırmandığını doğruluyor; bu satır ise tırmanışın backend'den geldiğini söylüyor. Üç panellik bir bakışta suçlu daraltıldı ve gateway'i yeniden başlatmak gibi refleks müdahalelerin gereksiz olduğu belli oldu. Nitekim yukarıdaki görüntü bu senaryonun gerçeğini gösteriyor: test trafiğinde hedef aldığımız public backend'ler artan istek hızı altında doğal olarak yavaşladı; panelde `upstream-routing` çizgisi tırmanırken `elasticsearch-logging` sakin kaldı. Yavaşlığın kaynağının gateway değil backend'lerin kendisi olduğu cümlesini, tek bir trace açmadan panele bakarak kurabildik.
+
+## Collector Health: İzleyeni Kim İzliyor?
+
+Bölümün başındaki kör noktaya geldik: izleme altyapısının kendisi de bir sistemdir ve arızalanabilir. Collector arızalandığında yaşanacak şey alarm değil, sessizliktir; span'ler kaybolur, paneller boşalır ve siz bunu ancak bir trace ararken fark edersiniz. Bu satırın varlık sebebi o sessizliği sese çevirmek.
+
+Ham madde, Collector'ın kendi iç telemetrisi: `otelcol_*` metrikleri, Bölüm 1'deki tablodan hatırlayacağınız gibi `:8888` portundan yayınlanıyor. Satırdaki sekiz panel şu soruları cevaplıyor:
+
+| Panel | Cevapladığı soru | Sağlıklı görünüm |
+| --- | --- | --- |
+| Span akışı | Kabul edilen, reddedilen ve Tempo'ya gönderilen span hızları dengede mi? | Kabul ve gönderim çizgileri üst üste, red sıfırda |
+| Export kuyruğu doluluğu | Tempo'ya yetişemiyor muyuz? | Sıfıra yakın; dolu kuyruk span kaybının ön habercisi |
+| Reddedilen span oranı | Collector kapıda veri çeviriyor mu? | Sıfır; memory_limiter devredeyse burada görünür |
+| Filtrelenen span | Bölüm 1'deki MongoDB/yönetim filtresi çalışıyor mu? | Sabit bir hız; filtrenin canlı olduğunun kanıtı |
+| Collector RAM | memory_limiter sınırına ne kadar yaklaştık? | Limitin belirgin altında yatay seyir |
+| Uptime | Collector sessizce yeniden mi başladı? | Kesintisiz artış; sıfırlanma restart demek |
+| Servicegraph sağlığı | CLIENT ve SERVER span'leri eşleşiyor mu? | Üretilen kenar akıyor, eşleşmeyen ve zaman aşımı düşük |
+| Batch davranışı | Span'ler verimli paketleniyor mu? | Batch boyutu ayarladığımız 1024 sınırının altında dalgalanır |
+
+Bu tablodaki en önemli okuma ilk satırda: kabul edilen ile gönderilen arasındaki fark. İki çizgi normalde üst üste gider; aralarının açılması, span'lerin Collector'ın içinde biriktiği (kuyruk doluyor) ya da kaybolduğu anlamına gelir. Örneğin bir Tempo yeniden başlatması sırasında bu iki çizgiye bakarak kesinti boyunca kaç span kaybettiğinizi sayabilirsiniz; izleyeni izlemek tam olarak bu.
+
+Servicegraph paneli ise Bölüm 4'ün temelini şimdiden atıyor: service graph, CLIENT ve SERVER span çiftlerinin eşleşmesinden doğuyor. Eşleşmeyen span ve zaman aşımına uğrayan kenar sayıları yükseliyorsa, connector çiftleri bekleme süresi içinde yakalayamıyor demektir ve `store.ttl` ayarını artırmak gerekir.
+
+İki pratik not: bu satırdaki hata sayaçları sağlıklı bir sistemde "No data" gösterebilir. Prometheus'ta bir counter ilk olayında doğar; hiç span reddedilmediyse red sayacı diye bir seri henüz yoktur. Boş panel burada çoğu zaman kötü değil, iyi haberdir. İkincisi, Collector sürümüne göre iç telemetri metrikleri `_total` soneksiz yayınlanabilir; dashboard sonekli adları kullanıyor, paneller beklenmedik şekilde boşsa `:8888` çıktısında adların `_total` içerip içermediğini kontrol edin.
+
+Collector Health satırının hemen üstünde iki panellik küçük bir satır daha var: Gateway JVM. Heap kullanımı ve GC duraklamaları, OTel Java agent'ın OTLP metrik sinyaliyle ek maliyetsiz getirdiği veriler. Gateway tarafında bir bellek sızıntısı ya da GC fırtınası, RED panellerindeki gecikme artışının kökü olabilir; iki satırın yan yana durması bu bağlantıyı tek bakışta kurdurur.
+
+<Frame caption="Test trafiği altında Gateway JVM ve Collector Health satırları: heap ve GC hareketli ama sağlıklı, span akışında kabul ile gönderim üst üste, export kuyruğu boş">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/gateway-jvm-collector-health-load.png"
+    alt="Gateway JVM heap ve GC panelleri ile Collector Health satırı test trafiği altında: span akışı artmış, kuyruk doluluğu sıfıra yakın, reddedilen span yok"
+    width="1000"
+    height="500"
+  />
+</Frame>
+
+## Tempo Ops: Trace Deposunun Sağlığı
+
+Zincirin son halkası trace deposu. Tempo dolarsa ya da flush'ları başarısız olursa, Collector sağlıklı görünse bile trace'ler kaybolmaya başlar. Bu satırın metrikleri Tempo'nun kendisinden geliyor: `tempo_*` ve `tempodb_*` aileleri, `:3200` portundan.
+
+Satırı okumanın en kolay yolu, bir span'in Tempo içindeki yolculuğunu takip etmek. Span önce distributor'a ulaşır, ingester'ın belleğinde canlı trace olarak tutulur, blok halinde diske flush edilir, bloklar compaction ile birleştirilir ve retention süresi dolunca silinir. Sekiz panel bu yolculuğun her durağına bir gözcü koyuyor:
+
+| Panel | Yolculuktaki durak | Neye dikkat? |
+| --- | --- | --- |
+| Distributor alımı | Kapı | Collector'ın gönderdiği hızla örtüşmeli; uçtan uca tutarlılık kontrolü |
+| Ingester flush sağlığı | Bellekten diske geçiş | Başarısız flush sıfır kalmalı, flush kuyruğu büyümemeli |
+| Canlı trace | Bellek | Trafikle orantılı; sürekli artış bellek baskısı demek |
+| Diskteki blok sayısı | Depo | Retention süresi dolunca plato yapmalı |
+| Disk kullanımı | Depo | Bölüm 1'deki 5Gi PV sınırına karşı izlenir |
+| Retention silme hızı | Çıkış | Silme akıyorsa retention canlı demektir |
+| Compaction aktivitesi | Bakım | Düzenli çalışmalı; durursa blok sayısı şişer |
+| API gecikmesi | Sorgu tarafı | Grafana'da trace açmak yavaşsa suçlu bazen Tempo'nun kendisidir |
+
+Buradaki kritik ikili, blok sayısı ile retention. Bölüm 1'de Tempo'ya 48 saatlik retention ve 5Gi disk vermiştik; sistem tasarlandığı gibi çalışıyorsa blok sayısı ilk 48 saat boyunca büyür, sonra yeni blok üretimi ile retention silmesi dengelenir ve çizgi plato yapar. Plato yerine kesintisiz artış görüyorsanız retention çalışmıyordur ve diskin dolması bir zaman meselesidir. Trace deposunda disk dolması sessiz bir arızadır: Tempo yeni trace kabul etmez, Collector'ın export kuyruğu şişer ve zincir geriye doğru tıkanır; bir üst satırdaki kuyruk paneliyle bu satırın disk paneli aynı hikayenin iki ucudur.
+
+Başarısız flush sayacı da aynı ailedendir: sıfırdan ayrıldığı an, ingester'ın belleğindeki trace'lerin diske inemediği anlamına gelir. Bu sayaç için "arada bir olur" diye bir seviye yok; sıfır olmalı, değilse disk ve depolama katmanına bakılmalı.
+
+<Frame caption="Test trafiği altında Tempo Ops satırı: distributor alımı Collector'ın gönderim hızıyla örtüşüyor, flush'lar sorunsuz, retention silmesi düzenli akıyor">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/tempo-ops-load.png"
+    alt="Tempo Ops panelleri test trafiği altında: artan span alımı, sorunsuz ingester flush'ları, blok sayısı, disk kullanımı ve retention silme hızı"
+    width="1000"
+    height="500"
+  />
+</Frame>
+
+Üç dashboard satır ailesinin tamamı artık ayakta: kullanıcının yaşadığını RED anlatıyor, izleme zincirinin sağlığını Collector Health, deponun sağlığını Tempo Ops. Sırada, toplu resimden tek isteğe inmemizi sağlayan köprüler var.
+
+## Grafikten Trace'e: Exemplar ve Correlation ID
+
+Dashboard'lar toplu resmi anlatıyor: hız arttı, p95 tırmandı, 5xx belirdi. Ama operasyonun bir noktasında soru hep aynı yere gelir: "şu tekil istekte ne oldu?" Metrikten tek isteğe inmek için elimizde iki köprü var; ikisini de bu kurulumda bilinçli olarak inşa ettik.
+
+Birinci köprü exemplar. Bölüm 1'de spanmetrics connector'da `exemplars: enabled: true` açmıştık; bu ayar sayesinde histogram kovalarına, o kovaya düşen gerçek isteklerin trace ID'leri iliştiriliyor. Grafana'da gecikme yüzdelikleri panelinde bu, çizgilerin etrafında beliren noktalar olarak görünür: her nokta gerçek bir istektir ve tıklandığında Grafana sizi Tempo'daki trace'in kendisine götürür. "p99'u yukarı çeken istek hangisi?" sorusu böylece grafikten tek tıkla cevaplanır.
+
+Exemplar'ın bir huyunu bilmekte fayda var: görünmesi, zincirdeki beş halkanın aynı anda çalışmasına bağlı. spanmetrics exemplar'ı üretecek, Collector'ın prometheus exporter'ı OpenMetrics formatıyla yayınlayacak (Bölüm 1'deki `enable_open_metrics: true` bunun için), Prometheus exemplar depolamasını açmış olacak, Grafana veri kaynağında exemplar sorgusu açık olacak ve panel de gösterecek. Halkalardan biri eksikse hata mesajı yoktur; noktalar yalnızca görünmez. Paneliniz exemplar göstermiyorsa bu beş halkayı sırayla kontrol edin.
+
+İkinci köprü, Bölüm 1'den beri taşıdığımız correlation ID. Gerçek hayattaki senaryo şöyle işliyor: bir tüketici "şu saatteki isteğim hata aldı" diye başvurur, Apinizer'daki trafik kaydında isteğin Correlation Id değeri hazırdır. Aynı değer artık her span'de `apinizer.correlation_id` attribute'u olarak durduğu için, Grafana Explore'da Tempo veri kaynağına tek satırlık bir TraceQL sorgusu yazmak yetiyor:
+
+```text
+{ .apinizer.correlation_id = "9cfc21f5-0a49-4706-bd0b-8a2ace9eb19a" }
+```
+
+<Frame caption="TraceQL ile correlation ID'den trace'e: Apinizer trafik kaydındaki kimlik, Tempo'daki isteğin tamamını tek sorguda buluyor">
+  <img
+    src="/images/articles/apinizer-gateway-opentelemetry/correlation-id-traceql.png"
+    alt="Grafana Explore ekranında apinizer.correlation_id attribute'u ile yapılan TraceQL sorgusu ve bulunan trace'in span detayları"
+    width="1000"
+    height="500"
+  />
+</Frame>
+
+Sorgunun sonucu, o isteğin uçtan uca hikayesi: gateway'e giriş, politika işleme, backend çağrısı, loglama. Apinizer'daki kayıt "ne döndü?" sorusunu, Tempo'daki trace "neden ve nerede?" sorusunu cevaplıyor. Bölüm 4'te bu üçgene Elasticsearch'teki logu da ekleyip trace, metrik ve log korelasyonunu tamamlayacağız.
+
+## Yolda Karşılaştığımız Sorunlar
+
+Bu bölümde öğrendiklerimizin bir kısmı konfigürasyon satırlarından değil, OTel'in çalışma biçiminden geliyor. Aşağıdaki beş davranış ortamımıza özgü değil; bu zinciri kuran herkesin karşısına çıkacak türden ve hiçbiri hata mesajıyla kendini tanıtmıyor:
+
+1. **Pipeline'a bağlanmayan bileşen çalışmaz, uyarı da vermez.** Bir receiver, processor ya da connector config'de tanımlı olabilir; `service.pipelines` altında referans edilmediyse hiç çalışmaz ve log'a tek satır düşmez. Collector Health panelinde bir bileşenin satırının hiç görünmemesi ile sıfır göstermesi bu yüzden farklı şeylerdir; ilki bileşenin yok sayıldığına işarettir.
+2. **transform, girdisi olmayan statement'ı atlar.** `error_mode: ignore` altında eksik girdi hata üretmez, statement yalnızca çalışmaz. Header bölümünde bunu yerinde görmüştük; kural aynı: transform'un okuyacağı attribute'un var olduğunu önce ham span'de doğrulayın.
+3. **Kubernetes probe'ları da SERVER span üretir.** Liveness ve readiness istekleri spanmetrics'e API trafiğiyle aynı kapıdan girer. İş bağlamı etiketi olmasaydı RED panellerine karışacaklardı; `non-api` etiketi bu yüzden var. Panelde düşük ama düzenli bir trafik görüyorsanız, önce onun probe olup olmadığını sorun.
+4. **SERVER span'inde 4xx hata değildir.** OTel semantiğinin bilinçli bir kararı bu; "hata oranınız" hangi metriğe baktığınıza göre değişir. İki hata tanımını ayrı panelde tutmamızın sebebi de bu davranışı görünür kılmak.
+5. **SOAP fault HTTP katmanında görünmeyebilir.** Fault 200 gövdesinde dönebilir ve HTTP koduna bakan hiçbir panel onu yakalayamaz. SOAP ağırlıklı ortamlarda hata tanımı iş metrikleriyle desteklenmeli.
+
+## Toparlayalım
+
+Bölüm 1'in sonunda veri akıyordu ama konuşmuyordu. Bu bölümün sonunda elimizdekiler:
+
+- Her span'de iş bağlamı var: API proxy adı `url.path`'ten türetiliyor, Apinizer correlation ID'si yanıt header'ından yakalanıyor. Bunu gateway koduna dokunmadan, yalnızca Collector konfigürasyonuyla yaptık.
+- Hata tek bir sayı değil: OTel'in hata tanımı, HTTP 5xx, ayrı izlenen 4xx ve en sinsileri yakalayan kodsuz hata artık ayrı panellerde.
+- Üç panel ailesi görev başında: RED kullanıcının yaşadığını, Collector Health izleme zincirinin sağlığını, Tempo Ops trace deposunun durumunu anlatıyor.
+- Grafikten tek isteğe inen iki köprü çalışıyor: exemplar ve correlation ID.
+- Ve paneller kurgu veriyle değil, JMeter ile üretilen başarılı ve hatalı istekleri karışık içeren gerçekçi trafik altında test edildi.
+
+Serinin açılış sorusuna dönersek: API Gateway yavaşladığında "nerede?" sorusunun cevabı artık bir panelde. Ama hâlâ bir eksik var: bu panellere birinin bakıyor olması gerekiyor. Gecikme gece 03:00'te tırmanırsa bunu sabah fark etmek istemeyiz; panelin kendisi haber vermeli. Bölüm 3'te tam bunu kuracağız: SLI tanımları, SLO hedefleri, error budget ve panellere "ne zaman haber ver" demeyi öğreten alert kuralları.
+
+:::tip Serinin diğer bölümleri
+[Bölüm 1: OpenTelemetry Apinizer API Gateway entegrasyonu](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum) yayında. Bölüm 3 (SLI/SLO ve alert) ve Bölüm 4 (service graph ile trace/metrik/log korelasyonu) yolda.
+:::

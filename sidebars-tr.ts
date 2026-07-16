@@ -1373,7 +1373,16 @@ const sidebars: SidebarsConfig = {
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum",
+        {
+          "type": "category",
+          "label": "Apinizer OpenTelemetry Entegrasyonu",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum",
+            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari"
+          ]
+        },
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",
