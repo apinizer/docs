@@ -25,7 +25,6 @@ const sidebars: SidebarsConfig = {
       "items": [
         "ai-gateway/llm-saglayicilari",
         "ai-gateway/model-katalogu",
-        "ai-gateway/sanal-api-anahtarlari",
         "ai-gateway/yonlendirme-failover"
       ]
     },

@@ -25,7 +25,6 @@ const sidebars: SidebarsConfig = {
       "items": [
         "ai-gateway/llm-providers",
         "ai-gateway/model-catalog",
-        "ai-gateway/virtual-api-keys",
         "ai-gateway/routing-and-failover"
       ]
     },
