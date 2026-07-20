@@ -651,11 +651,9 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/database",
         "integrations/connection-management/email",
         "integrations/connection-management/elasticsearch",
-        "integrations/connection-management/elasticsearch-monitor",
         "integrations/connection-management/ldap-active-directory",
         "integrations/connection-management/kafka",
         "integrations/connection-management/rabbitMQ",
-        "integrations/connection-management/elasticsearch-configuration",
         "integrations/connection-management/ftp",
         "integrations/connection-management/graylog",
         "integrations/connection-management/linux",
@@ -768,7 +766,8 @@ const sidebars: SidebarsConfig = {
         "monitor/overview",
         "monitor/api-health-check",
         "monitor/anomaly-detector",
-        "monitor/alarm"
+        "monitor/alarm",
+        "integrations/connection-management/elasticsearch-monitor"
       ]
     }
   ],

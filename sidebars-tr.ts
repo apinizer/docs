@@ -649,9 +649,7 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/database",
         "integrations/baglanti-yonetimi/email",
         "integrations/baglanti-yonetimi/elasticsearch",
-        "integrations/baglanti-yonetimi/elasticsearch-monitor",
         "integrations/baglanti-yonetimi/ldap-active-directory",
-        "integrations/baglanti-yonetimi/elasticsearch-configuration",
         "integrations/baglanti-yonetimi/kafka",
         "integrations/baglanti-yonetimi/rabbitMQ",
         "integrations/baglanti-yonetimi/ftp",
@@ -766,7 +764,8 @@ const sidebars: SidebarsConfig = {
         "monitor/izleme-genel-bakis",
         "monitor/api-saglik-kontrolu",
         "monitor/anomali-tespit-edici",
-        "monitor/alarm"
+        "monitor/alarm",
+        "integrations/baglanti-yonetimi/elasticsearch-monitor"
       ]
     }
   ],
