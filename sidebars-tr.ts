@@ -1100,6 +1100,17 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "AI Proxy Senaryoları",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "tutorials/ai-proxy-senaryolari/rag-embedding-provider-ve-vector-db",
+            "tutorials/ai-proxy-senaryolari/knowledge-base-olusturma-ve-indexleme",
+            "tutorials/ai-proxy-senaryolari/ai-rag-injection-politikasi"
+          ]
+        },
+        {
+          "type": "category",
           "label": "API Oluşturucu",
           "collapsed": true,
           "collapsible": true,
