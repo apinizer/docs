@@ -53,6 +53,7 @@ This document explains the detailed usage of a specific policy. If you are using
 - **Export/Import Feature**: Export policy configuration as a ZIP file. Import to different environments (Development, Test, Production). Version control and backup capability.
 - **Policy Group and Proxy Group Support**: Manage multiple policies within Policy Group. Bulk policy assignment to Proxy Groups. Centralized update and deploy operations.
 - **Deploy and Versioning**: Deploy policy changes to live environment. See which API Proxies use it (Policy Usage). Proxy Group and Policy Group usage reports.
+- **Sender-Constrained Verification with DPoP (RFC 9449)**: Ensures an access token can only be used by the client that obtained it; a stolen token cannot be used by another client. See the [DPoP Verification](#dpop-verification-sender-constrained-access) section below.
 
 ## Usage Scenarios
 
@@ -66,6 +67,7 @@ This document explains the detailed usage of a specific policy. If you are using
 | Authorization Integration | Role-based access control is required | `enableAuthorization=true`, configure method access in Authorization Configuration component | Request is stopped by policy if role match is not provided |
 | Remote Key Verification/Decryption | Key will be fetched from an HTTP endpoint | Key Source Mode = Dynamic HTTP, define HTTP Request and Key Extraction Variable, test with Try It | Key is fetched remotely at runtime and can be cached |
 | Policy Group Synchronization (optional) | Same rules will be used in multiple API Proxies | Create global policy, add to Policy Group | Policy is updated in all API Proxies with single change |
+| Sender-Constrained Token with DPoP | Prevent a stolen token from being used by another client | `enableDpop=true`, `dpopValidateCnfBinding=true` | Proof and token binding are validated; mismatched or replayed proofs return 401 |
 
 ## Configuring Policy Parameters
 
@@ -100,6 +102,41 @@ In this step, users can **create a new policy** or **configure existing policy p
 For descriptions of **Conditions** and **Error Message Customization** panels, you can review the [Conditions](/en/concepts/core-concepts/what-is-policy#conditions) and [Error Message Customization](/en/concepts/core-concepts/what-is-policy#error-message-customization) sections on the [What is Policy?](/en/concepts/core-concepts/what-is-policy) page.
 
 For a complete guide on all layers, priority order and scenario examples of the error message configuration system, see the [Error Message Configuration Guide](/en/concepts/core-concepts/error-message-configuration) page.
+
+## DPoP Proof Validation (RFC 9449)
+
+DPoP (Demonstrating Proof-of-Possession, RFC 9449) makes access tokens **sender-constrained**: on every request the client sends a proof signed with a private key only it holds, and the platform verifies that this proof is bound to the access token. As a result, even if a token is stolen, the attacker cannot use it because they cannot produce a matching proof.
+
+:::info
+DPoP proof validation does **not replace** the existing JWS/claim validation — it is layered on top. The access token still passes signature (Validate Sign) and claim (Validate Expiration Time, etc.) checks; DPoP additionally verifies the proof and binds it to the token. The Clock Skew Tolerance is shared by both layers.
+:::
+
+The **DPoP Proof Validation Settings** panel contains the following settings:
+
+| Setting | Description |
+|---------|-------------|
+| **Enable DPoP Validation** | Turns DPoP proof validation on or off. When off (default) no DPoP check runs and the policy behaves as before. |
+| **DPoP Proof Header Name** | The HTTP header carrying the proof (default: `DPoP`). |
+| **Maximum Proof Age** | The freshness window for the proof based on its `iat` value (default 60 seconds); the clock skew tolerance is added on top. Proofs that are too old or dated in the future are rejected. |
+| **Validate htm (HTTP Method)** | Requires the proof `htm` value to match the request HTTP method. |
+| **Validate htu (Request URI)** | Requires the proof `htu` value to match the request URI. |
+| **Expected htu Value** | Left blank, the address the platform sees is used. Behind a reverse proxy or load balancer that terminates TLS, enter the public address the client calls (variables are supported). |
+| **Validate Access Token Binding (cnf.jkt)** | The core DPoP protection: checks that the access token's `cnf.jkt` claim matches the SHA-256 thumbprint of the proof's key. Disabling it leaves a stolen token unprotected. This check runs against the access token read from the JOSE target (Body, Authorization Header, or Variable). |
+| **Validate Access Token Hash (ath)** | Checks that the proof `ath` value matches the access token hash, binding the proof to that specific token (default off). The proof is bound to the access token read from the JOSE target; it works with any target. |
+| **Enable Replay Protection (jti)** | Remembers seen proof identifiers (`jti`) in the distributed cache so the same proof cannot be used twice. |
+| **jti Retention** | Left blank, it is derived from the maximum proof age plus the clock skew tolerance. |
+| **Cache Connection Timeout** | Connection timeout to the replay-protection cache (seconds). |
+| **Action on Cache Connection Error** | When the cache is unreachable: **Continue** lets the request pass but replay protection is skipped for that request; **Reject** rejects the request. |
+
+:::warning
+**Cache Fail-Open Behavior:** When **Action on Cache Connection Error** is set to **Continue** and the cache becomes unreachable, replay protection (`jti`) is silently disabled for that request. The request is allowed to pass even if the same proof was previously used. This is a fail-open mechanism for availability. Consider the security risk in your environment: if backend cache availability is low, consider using **Reject** instead, or ensure the cache is highly available before production deployment.
+:::
+
+:::info
+DPoP proof validation binds the proof to the access token read from the **target to be validated (JOSE Target)** — the target may be Body, Authorization Header, or a Variable. In addition, **JWT validation and DPoP can run together**: keep Validate Sign and the claim rules on while enabling DPoP, or, for DPoP-only, turn Validate Sign off (no separate key configuration is needed because the DPoP proof self-verifies from its own embedded key).
+:::
+
+If proof validation fails, the request is rejected with **401** for one of two reasons: the proof is invalid (missing, malformed, or replayed), or the access token is not bound to the proof key. The returned messages can be customized from the Error Message Customization tab.
 
 ## Deleting the Policy
 
