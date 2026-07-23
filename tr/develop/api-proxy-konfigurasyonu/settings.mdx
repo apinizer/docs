@@ -84,6 +84,62 @@ Yalnızca başarılı yanıtlar önbelleğe alınır: durum kodu `400` ve üzeri
 | **TTL (saniye)** _(TTL - seconds)_ | Önbelleğe alınan yanıtın geçerli olacağı süre saniye olarak girilir. Bu alan zorunludur. |
 | **Null/Boş Değerleri Önbelleğe Al** _(Cache Null Value)_ | Boş değerlerin de önbelleğe alınması isteniyorsa işaretlenir. |
 
+## Idempotency Ayarları
+
+Idempotency (eş-etkinlik), bir istemcinin durum değiştiren bir isteği iki kez uygulanma riski olmadan güvenle yeniden denemesini sağlar. İstemci istekle birlikte benzersiz bir **`Idempotency-Key`** gönderir; Apinizer bu anahtarı dağıtık önbelleğe kaydeder, ilk isteği iletir, yanıtını saklar ve aynı anahtarı taşıyan sonraki istekler için Backend'e gitmek yerine saklanan yanıtı döndürür. Böylece ağ tekrarları, çift tıklama veya istemci-tarafı retry'lardan kaynaklanan mükerrer gönderimlere karşı koruma sağlanır.
+
+:::note
+Idempotency yalnızca yapılandırılan HTTP metotlarına uygulanır (varsayılan `POST`, `PUT`, `PATCH`, `DELETE`). Yalnızca başarılı yanıtlar (`2xx`–`3xx`) tamamlanmış olarak saklanır; `4xx`/`5xx` sonuç anahtarı serbest bırakır, böylece istek yeniden denenebilir.
+:::
+
+### Bir istek nasıl ele alınır
+
+```mermaid
+flowchart TD
+    A[İstek gelir] --> B{HTTP metodu kapsamda mı?<br/>POST / PUT / PATCH / DELETE}
+    B -- Hayır --> P[Normal işle — idempotency yok]
+    B -- Evet --> C{Idempotency-Key var mı?}
+    C -- Hayır --> D{Anahtar zorunlu mu?}
+    D -- Evet --> E[missingKeyHttpStatus — 400]
+    D -- Hayır --> P
+    C -- Evet --> F[Cache'te anahtarı claim et]
+    F --> G{Claim sonucu}
+    G -- Yeni --> H[In-flight kilitle → backend'e ilet]
+    H --> I{Yanıt 2xx-3xx mi?}
+    I -- Evet --> J[Yanıtı sakla — COMPLETED<br/>retentionInDays kadar] --> Z[Yanıtı döndür]
+    I -- Hayır --> Y[FAILED — kilit serbest, tekrar denenebilir] --> Z
+    G -- Eşzamanlı in-flight --> K[conflictHttpStatus — 409]
+    G -- Payload uyuşmuyor --> L[mismatchHttpStatus — 422]
+    G -- Tamamlanmış --> M{replayCompletedResponse açık mı?}
+    M -- Evet --> N[Saklanan yanıtı döndür — replay]
+    M -- Hayır --> K
+    F -. Cache hatası .-> O{handlingAction}
+    O -- STOP --> S[İsteği reddet]
+    O -- CONTINUE --> P
+```
+
+### Idempotency Ayarları Alanları
+
+| Alan | Açıklama |
+|---|---|
+| **Idempotency Aktif** _(Idempotency Active)_ | Ana anahtar. Kapalıyken (varsayılan) hiçbir idempotency işlemi çalışmaz. |
+| **Anahtar Tipi** _(Key Type)_ | Idempotency anahtarının kaynağı: **Header** (varsayılan, aşağıdaki başlıktan okunur) veya **Custom** (seçilen istek değişkenlerinden birleştirilerek üretilir). |
+| **Başlık Adı** _(Header Name)_ | Anahtar Tipi = Header iken anahtarı taşıyan istek başlığı. Varsayılan `Idempotency-Key`. |
+| **Değişken Listesi** _(Variable List)_ | Anahtar Tipi = Custom iken anahtarı oluşturan istek değişkenleri. |
+| **Anahtar Zorunlu** _(Key Required)_ | Açıkken anahtarsız istek *Eksik Anahtar HTTP Durumu* ile reddedilir. Kapalıyken anahtarsız istekler idempotency olmadan geçer. |
+| **Eksik Anahtar HTTP Durumu** _(Missing Key HTTP Status)_ | Anahtar zorunlu ama yokken dönen durum. Varsayılan `400`. |
+| **Kapsamdaki HTTP Metotları** _(Applicable HTTP Methods)_ | Idempotency'nin uygulandığı metotlar. Varsayılan `POST`, `PUT`, `PATCH`, `DELETE`. |
+| **Payload Hash** _(Payload Hash)_ | Açıkken (varsayılan) istek gövdesi hash'lenip anahtarla saklanır; aynı anahtarı **farklı** gövdeyle yeniden kullanan istek uyuşmazlık olarak reddedilir. |
+| **İşleme Zaman Aşımı (saniye)** _(Processing Timeout)_ | In-flight kilidinin terk edilmiş sayılmadan önce tutulma süresi. Varsayılan `60`. |
+| **Saklama Süresi (gün)** _(Retention in Days)_ | Tamamlanmış yanıtın replay için saklanma süresi (1–30, varsayılan `7`). |
+| **Depolama Tipi** _(Storage Type)_ | **Local** (yalnız bu Gateway node'u) veya **Distributed** (node'lar arası paylaşılır, varsayılan). |
+| **Cache Bağlantı Zaman Aşımı (saniye)** _(Cache Connection Timeout)_ | Idempotency önbelleğine bağlanma zaman aşımı. Varsayılan `3`. |
+| **Cache Hatası Aksiyonu** _(Cache Error Action)_ | Önbelleğe ulaşılamadığında: **Devam Et** isteği idempotency olmadan geçirir, **Dur** reddeder. |
+| **Conflict HTTP Durumu** _(Conflict HTTP Status)_ | Aynı anahtar hâlâ işlenirken (eşzamanlı mükerrer) dönen durum. Varsayılan `409`. |
+| **Mismatch HTTP Durumu** _(Mismatch HTTP Status)_ | Anahtar farklı payload ile yeniden kullanıldığında dönen durum. Varsayılan `422`. |
+| **Tamamlanan Yanıtı Replay Et** _(Replay Completed Response)_ | Açıkken (varsayılan) tamamlanmış bir isteğin mükerreri saklanan yanıtı alır. Kapalıyken mükerrer istek *Conflict HTTP Durumu* ile reddedilir. |
+| **Özel Hata Gövdeleri** _(Custom Error Bodies)_ | Eksik-anahtar, conflict ve mismatch durumları için yanıt gövdesi ve content type özelleştirilebilir; her gövde ayrıca kapatılıp yalnız durum kodu döndürülebilir. |
+
 ## XML Hata Yanıt Şablonunu Özelleştirme
 
 :::info

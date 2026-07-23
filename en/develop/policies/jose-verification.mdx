@@ -103,9 +103,13 @@ For descriptions of **Conditions** and **Error Message Customization** panels, y
 
 For a complete guide on all layers, priority order and scenario examples of the error message configuration system, see the [Error Message Configuration Guide](/en/concepts/core-concepts/error-message-configuration) page.
 
-## DPoP Proof Validation (RFC 9449)
+## DPoP Proof Validation (RFC 9449) {#dpop-verification-sender-constrained-access}
 
 DPoP (Demonstrating Proof-of-Possession, RFC 9449) makes access tokens **sender-constrained**: on every request the client sends a proof signed with a private key only it holds, and the platform verifies that this proof is bound to the access token. As a result, even if a token is stolen, the attacker cannot use it because they cannot produce a matching proof.
+
+:::info Where Apinizer sits: the resource-server role (RFC 9449)
+DPoP defines three roles: the **client** generates the proof, the **authorization server (IdP)** issues an access token bound to the client's key through the `cnf.jkt` claim, and the **resource server** validates the proof against that binding. This policy implements the **resource-server** role — Apinizer verifies the proof and checks the `cnf.jkt` binding, but it does **not** issue tokens or write `cnf.jkt`. That claim must be produced by your authorization server at token issuance, so **your IdP must support DPoP** (Keycloak, for example, does). If binding validation is on and the access token carries no `cnf.jkt`, the request is rejected (fail-closed). Apinizer does not act as a DPoP-issuing authorization server.
+:::
 
 :::info
 DPoP proof validation does **not replace** the existing JWS/claim validation — it is layered on top. The access token still passes signature (Validate Sign) and claim (Validate Expiration Time, etc.) checks; DPoP additionally verifies the proof and binds it to the token. The Clock Skew Tolerance is shared by both layers.
@@ -137,6 +141,40 @@ DPoP proof validation binds the proof to the access token read from the **target
 :::
 
 If proof validation fails, the request is rejected with **401** for one of two reasons: the proof is invalid (missing, malformed, or replayed), or the access token is not bound to the proof key. The returned messages can be customized from the Error Message Customization tab.
+
+### End-to-end scenario (with a DPoP-capable IdP)
+
+A typical sender-constrained flow with Keycloak as the authorization server:
+
+1. The client generates an ephemeral key pair and requests a token from **Keycloak**, presenting a DPoP proof. Keycloak issues an access token whose `cnf.jkt` claim is the SHA-256 thumbprint of the client's public key. **Only the authorization server writes `cnf.jkt`.**
+2. On each API call the client sends the access token **and** a fresh DPoP proof — a short-lived JWT signed with its private key, carrying `htm`, `htu`, `iat`, `jti` (and optionally `ath`).
+3. Apinizer (the resource server) runs the checks below and either forwards the request or rejects it with **401 (fail-closed)** — any single failed check blocks the request.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AS as Authorization Server (Keycloak)
+    participant APZ as Apinizer (Resource Server)
+    participant BE as Backend
+
+    C->>AS: Request token (with DPoP proof key)
+    AS-->>C: Access token (cnf.jkt = key thumbprint)
+    Note over C,AS: cnf.jkt is written by the AS only — never by Apinizer
+
+    C->>APZ: Request + access token + DPoP proof (signed for this request)
+    APZ->>APZ: 1. Proof signature valid? (jwk public key)
+    APZ->>APZ: 2. htm / htu match the request?
+    APZ->>APZ: 3. jti already seen? (replay cache, kept for the proof-age window)
+    APZ->>APZ: 4. token cnf.jkt == thumbprint of proof key?
+    alt All checks pass
+        APZ->>BE: Forward request
+        BE-->>C: Response
+    else Any check fails
+        APZ-->>C: 401 Reject (fail-closed)
+    end
+```
+
+The `htm`, `htu`, `ath`, replay (`jti`) and binding (`cnf.jkt`) checks are individually toggleable; the binding check is the core protection and should stay on in production.
 
 ## Deleting the Policy
 

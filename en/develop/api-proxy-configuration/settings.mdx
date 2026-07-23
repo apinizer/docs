@@ -84,6 +84,62 @@ Only successful responses are cached: error responses with a status code of `400
 | **TTL (seconds)** | The duration for which the cached response will be valid is entered in seconds. This field is required. |
 | **Cache Null Value** | Marked if empty values are also desired to be cached. |
 
+## Idempotency Settings
+
+Idempotency lets a client safely retry a state-changing request without the risk of it being applied twice. The client sends a unique **`Idempotency-Key`** with the request; Apinizer records the key in the distributed cache, forwards the first request, stores its response, and — for any later request carrying the same key — returns the stored response instead of hitting the Backend again. This protects against duplicate submissions from network retries, double-clicks, or client-side retries.
+
+:::note
+Idempotency applies only to the configured HTTP methods (by default `POST`, `PUT`, `PATCH`, `DELETE`). Only successful responses (`2xx`–`3xx`) are stored as completed; a `4xx`/`5xx` result releases the key so the request can be retried.
+:::
+
+### How a request is handled
+
+```mermaid
+flowchart TD
+    A[Request arrives] --> B{HTTP method in scope?<br/>POST / PUT / PATCH / DELETE}
+    B -- No --> P[Process normally — no idempotency]
+    B -- Yes --> C{Idempotency-Key present?}
+    C -- No --> D{Key required?}
+    D -- Yes --> E[missingKeyHttpStatus — 400]
+    D -- No --> P
+    C -- Yes --> F[Claim the key in cache]
+    F --> G{Claim result}
+    G -- New --> H[Lock in-flight → forward to backend]
+    H --> I{Response 2xx-3xx?}
+    I -- Yes --> J[Store response — COMPLETED<br/>for retentionInDays] --> Z[Return response]
+    I -- No --> Y[FAILED — lock released, retryable] --> Z
+    G -- Concurrent in-flight --> K[conflictHttpStatus — 409]
+    G -- Payload mismatch --> L[mismatchHttpStatus — 422]
+    G -- Completed --> M{replayCompletedResponse on?}
+    M -- Yes --> N[Return stored response — replay]
+    M -- No --> K
+    F -. Cache error .-> O{handlingAction}
+    O -- STOP --> S[Reject request]
+    O -- CONTINUE --> P
+```
+
+### Idempotency Settings Fields
+
+| Field | Description |
+|---|---|
+| **Idempotency Active** | Main switch. When off (default) no idempotency processing runs. |
+| **Key Type** | Where the idempotency key comes from: **Header** (default, read from the header below) or **Custom** (built from the selected request variables, joined together). |
+| **Header Name** | The request header carrying the key when Key Type = Header. Default `Idempotency-Key`. |
+| **Variable List** | The request variables that form the key when Key Type = Custom. |
+| **Key Required** | When on, a request without a key is rejected with the *Missing Key HTTP Status*. When off, keyless requests pass through without idempotency. |
+| **Missing Key HTTP Status** | Status returned when the key is required but absent. Default `400`. |
+| **Applicable HTTP Methods** | The methods idempotency applies to. Default `POST`, `PUT`, `PATCH`, `DELETE`. |
+| **Payload Hash** | When on (default), the request body is hashed and stored with the key; a later request that reuses the key with a **different** body is rejected as a mismatch. |
+| **Processing Timeout (seconds)** | How long the in-flight lock is held before it is considered abandoned. Default `60`. |
+| **Retention (days)** | How long a completed response is kept for replay (1–30, default `7`). |
+| **Storage Type** | **Local** (this Gateway node only) or **Distributed** (shared across nodes, default). |
+| **Cache Connection Timeout (seconds)** | Connection timeout to the idempotency cache. Default `3`. |
+| **Cache Error Action** | When the cache is unreachable: **Continue** lets the request pass without idempotency, **Stop** rejects it. |
+| **Conflict HTTP Status** | Returned when the same key is still being processed (concurrent duplicate). Default `409`. |
+| **Mismatch HTTP Status** | Returned when the key is reused with a different payload. Default `422`. |
+| **Replay Completed Response** | When on (default), a duplicate of a completed request receives the stored response. When off, the duplicate is rejected with the *Conflict HTTP Status*. |
+| **Custom Error Bodies** | The response body and content type for the missing-key, conflict, and mismatch cases can be customized; each body can also be disabled to return status-only. |
+
 ## Customizing XML Error Response Template
 
 :::info

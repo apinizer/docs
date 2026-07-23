@@ -266,6 +266,9 @@ POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyNa
 | roleMappings               | array   | No       | []      | Role mappings for authorization                  |
 | sessionCookieName           | string  | No       | "OIDC_SESSION" | Session cookie name                    |
 | sessionTimeoutMinutes      | integer | No       | 60      | Session timeout in minutes                      |
+| sessionStorageType         | string (enum) | No | CACHE (`null` resolves to CACHE) | Where the **authenticated** session is stored: `CACHE` (distributed cache; cookie carries only the session id) or `COOKIE` (session encrypted with AES-256-GCM and embedded directly in the cookie, stateless). See [EnumOIDCSessionStorageType](#enumoidcsessionstoragetype). |
+| tempSessionStorageType     | string (enum) | No | null (follows `sessionStorageType`) | Storage for the **temporary** login session (state / nonce / PKCE verifier / return URL) held only during the authorize→callback round trip. If `null`, follows `sessionStorageType` above; can be overridden independently (e.g. keep `sessionStorageType=CACHE` for authenticated sessions but set `tempSessionStorageType=COOKIE` for a stateless login round trip). See [EnumOIDCSessionStorageType](#enumoidcsessionstoragetype) and the Note below. |
+| loginFlowTimeoutSeconds    | integer | No       | 600     | Login flow completion window in seconds — TTL of the temporary login session (state/nonce/PKCE verifier). `null` or `<= 0` resolves to 600 at runtime. **Independent of `sessionAbsoluteTimeoutSeconds`** (the authenticated session's lifetime); too low a value causes callback failures (`state validation failed (CSRF protection): temporary session not found (expired or already consumed)`). |
 | enableStateValidation      | boolean | No       | true    | Enable state validation for CSRF protection    |
 | enableNonceValidation      | boolean | No       | true    | Enable nonce validation for replay attack protection |
 | introspectionEndpoint      | string  | No       | null    | Introspection endpoint URL (optional)           |
@@ -301,6 +304,13 @@ POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyNa
 - `INTERNAL_ONLY` - Internal Apinizer Credentials Only
 - `HYBRID` - Hybrid - External OIDC + Internal Credentials
 
+### EnumOIDCSessionStorageType
+
+Used by both `sessionStorageType` (authenticated session) and `tempSessionStorageType` (temporary login session).
+
+- `CACHE` - Store session data in the distributed cache; cookie holds only the session id (default, backward-compatible; allows server-side revocation)
+- `COOKIE` - Embed AES-256-GCM encrypted session data directly in the cookie (stateless, no cache call); bounded by the ~4 KB browser cookie limit and offers no server-side revocation
+
 ### JWT Signing Algorithms
 
 - `RS256`, `RS384`, `RS512` - RSA with SHA-256/384/512
@@ -314,6 +324,8 @@ POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyNa
 - `scopes` must contain at least "openid" for OIDC flows.
 - If `validateJwtSignature: true`, `jwksEndpoint` is required.
 - If `validateAudience: true`, `expectedAudience` must contain at least one value.
+- `sessionStorageType` covers the **authenticated** session only. The temporary login session — state/nonce/PKCE verifier — is governed by `tempSessionStorageType`, which defaults to `null` and then **follows** `sessionStorageType`. So with the default (`null`), setting `sessionStorageType: COOKIE` also moves the login flow off the cache. Set `tempSessionStorageType` explicitly only when you want the two to differ — for example `CACHE` to keep the login flow on the distributed cache while the authenticated session stays in a cookie.
+- `loginFlowTimeoutSeconds` is independent of `sessionAbsoluteTimeoutSeconds`. Shortening the authenticated session's absolute timeout does not shorten the login round-trip window, and vice versa.
 
 ##### roleMappings
 
@@ -601,7 +613,9 @@ DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policy
   - `validateAudience`: Validates audience claim matches expected audience (requires `expectedAudience`)
 
 - **Session Management**:
-  - Session data is encrypted and stored in cache
+  - Authenticated-session storage is controlled by `sessionStorageType`: `CACHE` (default) keeps session data in the distributed cache with only the session id in the cookie; `COOKIE` embeds the AES-256-GCM encrypted session directly in the cookie (stateless, no cache call, ~4 KB limit)
+  - The temporary login session (state/nonce/PKCE verifier) is controlled by `tempSessionStorageType`, which defaults to `null` and then follows `sessionStorageType` — so `COOKIE` on the authenticated session moves the login flow off the cache as well. Set `tempSessionStorageType` explicitly only to make the two differ (e.g. `CACHE` to keep the login flow on the distributed cache)
+  - `loginFlowTimeoutSeconds` (default 600) bounds how long the temporary login session stays valid, independently of `sessionAbsoluteTimeoutSeconds`
   - Session encryption key/IV are auto-generated from policy ID
   - Session cookie is secure by default (HTTPS only)
 
