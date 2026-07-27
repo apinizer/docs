@@ -1397,7 +1397,8 @@ const sidebars: SidebarsConfig = {
         "articles/apinizer-aktif-aktif-mimari-spof-riski",
         "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi",
         "articles/apinizer-rate-limit-mekanizmalari-karsilastirmasi",
-        "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu"
+        "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu",
+        "articles/gurultuden-icgoruye-kibanada-teshis-odakli-api-dashboard-mimarisi"
       ]
     }
   ]

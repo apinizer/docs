@@ -1399,7 +1399,8 @@ const sidebars: SidebarsConfig = {
         "articles/apinizer-active-active-architecture-eliminating-spof",
         "articles/no-security-without-api-gateway-right-order-guide",
         "articles/apinizer-rate-limit-mechanisms-comparison",
-        "articles/api-security-and-the-role-of-api-gateway-in-api-security"
+        "articles/api-security-and-the-role-of-api-gateway-in-api-security",
+        "articles/from-noise-to-insight-kibana-diagnostic-focused-api-dashboard-architecture"
       ]
     }
   ]
