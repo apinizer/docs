@@ -1374,6 +1374,15 @@ const sidebars: SidebarsConfig = {
       "items": [
         {
           "type": "category",
+          "label": "Apinizer AI Gateway Serisi",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Apinizer OpenTelemetry Entegrasyonu",
           "collapsed": true,
           "collapsible": true,
