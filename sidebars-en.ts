@@ -1376,6 +1376,15 @@ const sidebars: SidebarsConfig = {
       "items": [
         {
           "type": "category",
+          "label": "Apinizer AI Gateway Series",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Apinizer OpenTelemetry Integration",
           "collapsed": true,
           "collapsible": true,
