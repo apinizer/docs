@@ -1292,6 +1292,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-portal-scenarios/api-portal-on-api-developer-operations",
+            "tutorials/api-portal-scenarios/api-portal-on-api-manager-operations",
             "tutorials/api-portal-scenarios/api-portal-api-manager-operations"
           ]
         }
