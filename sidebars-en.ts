@@ -900,12 +900,19 @@ const sidebars: SidebarsConfig = {
         "api-portal/api-multi-portal-usage",
         "api-portal/appearance-theme",
         "api-portal/api-product",
+        "api-portal/api-catalog",
         "api-portal/api-product-categories",
         "api-portal/frequently-asked-questions",
         "api-portal/accounts-developers",
+        "api-portal/portal-organizations",
+        "api-portal/portal-membership-and-invitation",
         "api-portal/approval-requests",
         "api-portal/application-management",
+        "api-portal/application-promote",
+        "api-portal/support-tickets",
         "api-portal/jira-integration",
+        "api-portal/traffic-and-usage",
+        "api-portal/api-traffic-report",
         "api-portal/api-consumption-trend",
         "api-portal/api-quota-plan-usage",
         "api-portal/top-api-products",
@@ -1285,6 +1292,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-portal-scenarios/api-portal-on-api-developer-operations",
+            "tutorials/api-portal-scenarios/api-portal-on-api-manager-operations",
             "tutorials/api-portal-scenarios/api-portal-api-manager-operations"
           ]
         }
