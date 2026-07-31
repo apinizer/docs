@@ -777,11 +777,9 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/database",
         "integrations/connection-management/email",
         "integrations/connection-management/elasticsearch",
-        "integrations/connection-management/elasticsearch-monitor",
         "integrations/connection-management/ldap-active-directory",
         "integrations/connection-management/kafka",
         "integrations/connection-management/rabbitMQ",
-        "integrations/connection-management/elasticsearch-configuration",
         "integrations/connection-management/ftp",
         "integrations/connection-management/graylog",
         "integrations/connection-management/linux",
@@ -883,7 +881,8 @@ const sidebars: SidebarsConfig = {
         "monitor/overview",
         "monitor/api-health-check",
         "monitor/anomaly-detector",
-        "monitor/alarm"
+        "monitor/alarm",
+        "integrations/connection-management/elasticsearch-monitor"
       ]
     }
   ],
@@ -1506,6 +1505,15 @@ const sidebars: SidebarsConfig = {
       "items": [
         {
           "type": "category",
+          "label": "Apinizer AI Gateway Series",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Apinizer OpenTelemetry Integration",
           "collapsed": true,
           "collapsible": true,
@@ -1529,7 +1537,8 @@ const sidebars: SidebarsConfig = {
         "articles/apinizer-active-active-architecture-eliminating-spof",
         "articles/no-security-without-api-gateway-right-order-guide",
         "articles/apinizer-rate-limit-mechanisms-comparison",
-        "articles/api-security-and-the-role-of-api-gateway-in-api-security"
+        "articles/api-security-and-the-role-of-api-gateway-in-api-security",
+        "articles/from-noise-to-insight-kibana-diagnostic-focused-api-dashboard-architecture"
       ]
     }
   ]

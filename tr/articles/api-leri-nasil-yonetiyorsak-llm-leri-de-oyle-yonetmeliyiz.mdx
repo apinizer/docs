@@ -1,0 +1,169 @@
+---
+title: "API’leri Nasıl Yönetiyorsak, LLM’leri de Öyle Yönetmeliyiz"
+description: "Apinizer AI Gateway yazı serisi Bölüm 1: AI Gateway nedir, neden önemli ve klasik API Gateway’den nerede ayrılır?"
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info Seri Hakkında
+Bu yazı, **Apinizer AI Gateway yazı serisinin** ilk bölümüdür. Amaç kurulum tarif etmek değil; önce şunu netleştirmek:
+
+> AI Gateway neden var, neyi çözer ve klasik API Gateway’den nerede ayrılır?
+
+1. **AI Gateway nedir ve neden önemli?** (bu bölüm)
+2. **Apinizer’de AI Gateway:** yönetişim birliği, runtime ayrımı, bileşenler
+3. **Pratik senaryo:** RAG ile kendi verinizle cevap üretmek
+:::
+
+Kurumsal yazılımda API’leri tek kapıdan yönetmek uzun süredir API Gateway’in işi. Kimlik doğrulama, kota, log, routing, güvenlik politikaları… Hepsi bildik bir düzen.
+
+Sonra LLM’ler geldi. Uygulamalar artık sadece REST endpoint’ine değil; OpenAI’ye, Anthropic’e, Azure’a, Bedrock’a, Ollama’ya, vLLM’e konuşuyor. Aynı anda birden fazla model, streaming yanıtlar, token bazlı maliyet, prompt injection riski, şirket dokümanına dayalı cevap ihtiyacı…
+
+Bu noktada klasik API Gateway tek başına yetmiyor. Ortaya çıkan katmanın adı: **AI Gateway**.
+
+Sonraki bölümlerde Apinizer’deki yerini ve pratik RAG senaryosunu ele alacağız.
+
+<Frame caption="Apinizer AI Gateway yazı serisi — Bölüm 1">
+  <img
+    src="/images/articles/apinizer-ai-gateway-serisi/bolum-1-kapak.png"
+    alt="AI Gateway kapak görseli: uygulamalar ile LLM sağlayıcıları arasında kontrol katmanı"
+    width="1200"
+    height="675"
+  />
+</Frame>
+
+## Kısa cevap: AI Gateway nedir?
+
+**AI Gateway**, uygulamalarınız ile büyük dil modeli (LLM) sağlayıcıları arasında duran, LLM trafiğine özel kontrol katmanıdır.
+
+Pratikte çoğu AI Gateway — Apinizer dahil — istemciye **OpenAI-uyumlu bir arayüz** sunar. Siz aynı SDK / aynı istek formatıyla konuşursunuz; gateway arkada isteği doğru sağlayıcıya yönlendirir, yanıtı ortak formata normalize eder.
+
+Yani istemci tarafında her provider için ayrı entegrasyon yazmak zorunda değilsiniz. Tek `base_url`, tek kimlik modeli, arkada çoklu LLM.
+
+Ama AI Gateway yalnızca “LLM’e reverse proxy” değildir. Asıl değeri, LLM çağrısına özgü şu kontrolleri merkezi hale getirmesidir:
+
+- Model / sağlayıcı yönlendirme ve failover
+- Token kotası ve maliyet görünürlüğü
+- Prompt / PII / DLP gibi AI guardrail’ler
+- Semantic cache ile gereksiz tekrar çağrıları azaltma
+- RAG ile kurumsal bağlam enjeksiyonu
+- İzleme, trace ve kullanım analitiği
+
+Asıl kurumsal soru “AI Gateway diye bir şey var mı?” değil; **denetimin nereye bağlandığı**. Buna birazdan, Conway tartışmasıyla birlikte döneceğiz; Apinizer’deki somut karşılığını Bölüm 2’de açacağız.
+
+## Neden önemli? Çünkü LLM trafiği “normal API” değil
+
+### 1) Sağlayıcı ve model değişimi operasyonu kırar
+
+Sahne: Ekip GPT ile başlar. Maliyet artınca şirket içi Ollama’ya bakar; regülasyon gelince Azure’a geçmek ister. Her seferinde istemci kodu, key yönetimi ve hata handling yeniden yazılır.
+
+AI Gateway’de uygulama gateway’e bağlanır; hangi modele gideceği merkezi yönetilir. Sağlayıcı değişince entegrasyonu yeniden icat etmezsiniz — yönlendirme ve failover gateway tarafında kalır.
+
+### 2) Asıl fatura istek sayısı değil, token’dır
+
+Sahne: Ay sonunda “API çağrısı az” görünür ama fatura şişmiştir. Uzun prompt’lar, şişmiş context, streaming çıktı ve sessiz retry’ler token’ı yakmıştır. Hangi ekibin hangi modelde yaktığı Excel’de kayıptır.
+
+Klasik API’de TPS çoğu zaman yeter. LLM’de görünürlük token, model ve maliyete kayar. AI Gateway bu ekonomiyi kota, bütçe ve kullanım iziyle yönetilebilir kılar; “200 OK ama yanlış yerden / yanlış modelden geldi” senaryolarını da izlenebilir hale getirir.
+
+### 3) Güvenlik ve doğruluk, uygulama koduna bırakılamaz
+
+Sahne: Bir chatbot’a şirket prosedürü system prompt’una yapıştırılır. Başka bir ekip PII’yi maskelemeden modele yollar. Üçüncü ekip prompt injection’ı hiç düşünmez. Model bilmediği maddede uydurur; “çalışıyor” sanılır.
+
+LLM ile birlikte prompt injection, PII sızıntısı, konu dışı kullanım gibi yeni riskler gelir. Kurumsal doğruluk için de RAG gerekir: cevap üretilmeden önce kendi dokümanından bağlam bulunmalıdır. AI Gateway, guardrail ve RAG’i her uygulamada yeniden yazılan bir kütüphane olmaktan çıkarıp **yönetilen politika** haline getirir.
+
+## AI Gateway ≠ API Gateway (ama düşmanı da değil)
+
+Karşılaştırma şöyle düşünülebilir:
+
+| | API Gateway | AI Gateway |
+|---|-------------|------------|
+| Ana iş | API trafiğini yönetmek | LLM trafiğini yönetmek |
+| Tipik hedef | REST/SOAP/gRPC servisleri | LLM / embedding / agent protokolleri |
+| Birim | İstek, TPS, latency | Token, model, maliyet, context |
+| Güvenlik | AuthN/Z, threat protection | + prompt/PII/DLP/topic guardrail |
+| Zenginleştirme | Header/body transform | RAG, semantic cache |
+| Başarı kriteri | Doğru servise güvenli iletmek | Doğru modele, doğru bağlamla, kontrollü iletmek |
+
+Önemli nokta: iyi bir AI Gateway, API Gateway’i “çöpe atmaz”. Aksine çoğu kurumda AI trafiği de aynı yaşam döngüsüne (proje, deploy, policy, log, RBAC) oturmalıdır.
+
+Bu tartışma yeni değil. Nisan 2025’te [Gateway Hayvanat Bahçesi](/tr/articles/gateway-hayvanat-bahcesi-conway-yasasi) yazısında, API Gateway’lerin Event, Kafka, AI, Agent Gateway kavramlarıyla sürekli şişirilmesinin ESB tuzağını yeniden doğurabileceğini yazmıştık. Sonuç netti: büyük ve uzun ömürlü sistemlerde işlevler, iyi tanımlanmış arayüzlerle bağlanan ayrı bileşenler olmalı — ama her şey tek runtime’a yığılmamalı.
+
+AI Gateway bu ilkeyi ihlal etmez; doğru uygulandığında tam tersini yapar. **Ayrılması gereken** şey çalışma zamanı ve sorumluluk sınırıdır. **Birleşmesi gereken** şey yönetişimdir: kimlik, RBAC, politika, log, deploy. ESB tuzağı birincisinin çökmesidir — tek runtime, içine sızmış iş mantığı, değişemeyen monolit. Bugünkü tuzak ise ikincisinin parçalanmasıdır: her AI aracının kendi kullanıcı yönetimini, kendi log formatını, kendi anahtar deposunu getirmesi. Birine hantallık, ötekine gölge IT denir. Nisan yazısı birincisini uyarıyordu; bu yazı ikincisine bakıyor. Çelişki değil — aynı Conway geriliminin iki ucu.
+
+Bu kategori boş değil. Ama sahadaki çözümlerin çoğu ya yalnızca bulut aboneliği olarak geliyor ya da kurumun mevcut kimlik, politika ve denetim düzlemine bağlanmak yerine yanına **ikinci bir yönetişim adası** kuruyor. Ayrı bir çalışma zamanı kusur değildir; ikinci bir kullanıcı/yetki/log dünyası kurmak kusurdur. Asıl seçim budur.
+
+## Tipik bir AI Gateway isteği nasıl akar?
+
+Kavramsal akış şöyle:
+
+<Frame caption="AI Gateway kavramsal istek akışı">
+  <img
+    src="/images/articles/apinizer-ai-gateway-serisi/bolum-1-istek-akisi.png"
+    alt="İstemciden AI Gateway adımları üzerinden LLM Provider’a ve normalize yanıtla geri dönüş akışı"
+    width="1200"
+    height="675"
+  />
+</Frame>
+
+Bu listedeki her adımın ürün karşılığı (hangi policy, hangi ayar) Bölüm 2’nin konusu. Burada akışı tutmak için üç noktayı bilmek yeterli:
+
+- **RAG önce gelir.** Modele gidecek zenginleştirilmiş istek önce oluşur; guardrail ve cache anahtarı bu zengin içeriğe göre çalışır. Tersine sıra, zehirli bağlamın taramayı baypas etmesine veya yanlış cache eşleşmesine yol açabilir. İyi bir AI Gateway bunu çalışma zamanında da korur.
+- **Kota, “kaç istek” değil “kaç token / hangi bütçe” sorusunu sorar.** Aşımda istek kesilir veya daha ucuz modele düşülür — detay üründe.
+- **Failover, birincil provider düşünce zincirdeki bir sonrakine geçer.** İstemci aynı OpenAI formatıyla konuşmaya devam eder.
+
+## Chat modeli ile embedding modeli aynı şey değil
+
+Serinin ilerleyen senaryolarında sık karışacak bir ayrımı şimdiden koyalım:
+
+- **Chat / completion modeli** cevap üretir.
+- **Embedding modeli** metni sayısal vektöre çevirir.
+
+RAG’de ikisi birlikte çalışır:
+
+1. Doküman parçaları embedding ile vektöre çevrilir
+2. Vector DB’de saklanır
+3. Kullanıcı sorusu da embedding’e çevrilir
+4. Benzer parçalar bulunur
+5. Chat modeli bu bağlamla yanıt yazar
+
+Birini diğerinin yerine kullanmak, “AI çalışmıyor” şikayetlerinin en sık teknik sebeplerinden biridir.
+
+## AI Gateway olmadan ne olur?
+
+Kısa vadede her şey “çalışıyor” gibi görünebilir:
+
+- Uygulama doğrudan OpenAI’ye gider
+- API key frontend’de veya her serviste ayrı durur
+- Kota Excel’de takip edilir
+- Prompt kuralları her ekipte farklıdır
+- Şirket dokümanı bir chatbot’un system prompt’una yapıştırılır
+
+Orta vadede tablo şuna döner:
+
+- Key sızıntısı ve gölge IT
+- Kontrolsüz maliyet
+- Model değişiminde kırılan entegrasyonlar
+- Denetlenemeyen veri çıkışı
+- Aynı sorunun her uygulamada yeniden çözülmesi
+
+AI Gateway’in vaadi basit: **LLM erişimini kurumsal bir yetenek haline getirmek** — tıpkı API’leri API Gateway ile yönetmeye başladığımız gibi.
+
+## Bu seride nereye gideceğiz?
+
+Bir sonraki yazıda Apinizer özelinde şunu konuşacağız:
+
+- Çalışma zamanı ile yönetişim düzleminin nasıl ayrıldığı (ve neden bunun ESB tuzağından farklı olduğu)
+- LLM Provider, Vector DB, Knowledge Base, AI Routing
+- RAG Injection, semantic cache, token kota ve guardrail’lerin ürün içindeki yeri
+- Conway argümanının ürün mimarisindeki somut karşılığı
+
+## Kapanış
+
+AI Gateway, moda bir etiket değil; LLM’lerin kurumsal sistemlere girmesiyle doğan bir kontrol ihtiyacının adı.
+
+Klasik API Gateway “doğru servise güvenli git” der.  
+AI Gateway ise “doğru modele, doğru bağlamla, doğru kontrol altında git” der.
+
+Nisan 2025’teki yazıda Agent Gateway hâlâ bir olasılıktı. Yaklaşık on beş ay sonra kategori masada, gerçek. O yazı ESB tuzağına karşı uyarıyordu; bu seri aynı çizginin diğer ucunu — yönetişimin parçalanmamasını — izliyor.
+
+Serinin 2. bölümünde bu çerçeveyi Apinizer’in somut bileşenleriyle eşleştireceğiz.

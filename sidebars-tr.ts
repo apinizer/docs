@@ -775,9 +775,7 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/database",
         "integrations/baglanti-yonetimi/email",
         "integrations/baglanti-yonetimi/elasticsearch",
-        "integrations/baglanti-yonetimi/elasticsearch-monitor",
         "integrations/baglanti-yonetimi/ldap-active-directory",
-        "integrations/baglanti-yonetimi/elasticsearch-configuration",
         "integrations/baglanti-yonetimi/kafka",
         "integrations/baglanti-yonetimi/rabbitMQ",
         "integrations/baglanti-yonetimi/ftp",
@@ -881,7 +879,8 @@ const sidebars: SidebarsConfig = {
         "monitor/izleme-genel-bakis",
         "monitor/api-saglik-kontrolu",
         "monitor/anomali-tespit-edici",
-        "monitor/alarm"
+        "monitor/alarm",
+        "integrations/baglanti-yonetimi/elasticsearch-monitor"
       ]
     }
   ],
@@ -1503,6 +1502,15 @@ const sidebars: SidebarsConfig = {
       "items": [
         {
           "type": "category",
+          "label": "Apinizer AI Gateway Serisi",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Apinizer OpenTelemetry Entegrasyonu",
           "collapsed": true,
           "collapsible": true,
@@ -1526,7 +1534,8 @@ const sidebars: SidebarsConfig = {
         "articles/apinizer-aktif-aktif-mimari-spof-riski",
         "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi",
         "articles/apinizer-rate-limit-mekanizmalari-karsilastirmasi",
-        "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu"
+        "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu",
+        "articles/gurultuden-icgoruye-kibanada-teshis-odakli-api-dashboard-mimarisi"
       ]
     }
   ]
