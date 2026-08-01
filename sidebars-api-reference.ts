@@ -398,7 +398,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/parse-jwk-from-clipboard",
                 "keys-secrets/crud/parse-jwk-from-certificate",
                 "keys-secrets/crud/parse-jwk-from-key",
-                "keys-secrets/crud/parse-jwk-from-keystore"
+                "keys-secrets/crud/parse-jwk-from-keystore",
+                "keys-secrets/crud/export-jwk-file",
+                "keys-secrets/crud/import-jwk-file"
               ]
             },
             {
@@ -413,7 +415,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/update-keystore",
                 "keys-secrets/crud/delete-keystore",
                 "keys-secrets/crud/export-keystore",
-                "keys-secrets/crud/import-keystore"
+                "keys-secrets/crud/import-keystore",
+                "keys-secrets/crud/export-keystore-file",
+                "keys-secrets/crud/import-keystore-file"
               ]
             },
             {
@@ -428,7 +432,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/update-key",
                 "keys-secrets/crud/delete-key",
                 "keys-secrets/crud/export-key",
-                "keys-secrets/crud/import-key"
+                "keys-secrets/crud/import-key",
+                "keys-secrets/crud/export-key-file",
+                "keys-secrets/crud/import-key-file"
               ]
             },
             {
