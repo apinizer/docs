@@ -58,6 +58,7 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/get-api-proxy",
                 "api-proxies/crud/create-api-proxy-from-url",
                 "api-proxies/crud/create-api-proxy-from-file",
+                "api-proxies/crud/create-ai-api-proxy",
                 "api-proxies/crud/update-api-proxy",
                 "api-proxies/crud/update-api-proxy-from-url",
                 "api-proxies/crud/update-api-proxy-from-file",
@@ -247,6 +248,34 @@ const sidebars: SidebarsConfig = {
                 "policies/policies/policy-log"
               ]
             }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Global Policies",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "global-policies",
+            "global-policies/list-global-policies",
+            "global-policies/get-global-policy",
+            "global-policies/create-global-policy",
+            "global-policies/update-global-policy",
+            "global-policies/delete-global-policy"
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Policy Groups",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "policy-groups",
+            "policy-groups/list-policy-groups",
+            "policy-groups/get-policy-group",
+            "policy-groups/create-policy-group",
+            "policy-groups/update-policy-group",
+            "policy-groups/delete-policy-group"
           ]
         },
         {
@@ -634,17 +663,19 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "ai-gateway",
-            { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider"] },
+            { "type": "category", "label": "LLM Provider Definitions", "collapsed": true, "collapsible": true, "items": ["llm-provider-definitions", "llm-provider-definitions/list-llm-provider-definitions", "llm-provider-definitions/get-llm-provider-definition", "llm-provider-definitions/create-llm-provider-definition", "llm-provider-definitions/update-llm-provider-definition", "llm-provider-definitions/delete-llm-provider-definition"] },
+            { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/test-llm-provider-connection"] },
             { "type": "category", "label": "Model Catalog", "collapsed": true, "collapsible": true, "items": ["llm-models", "llm-models/list-llm-models", "llm-models/get-llm-model", "llm-models/create-llm-model", "llm-models/update-llm-model", "llm-models/delete-llm-model"] },
             { "type": "category", "label": "VectorDB Connections", "collapsed": true, "collapsible": true, "items": ["vector-dbs", "vector-dbs/list-vector-dbs", "vector-dbs/get-vector-db", "vector-dbs/create-vector-db", "vector-dbs/update-vector-db", "vector-dbs/delete-vector-db", "vector-dbs/test-vector-db-connection"] },
-            { "type": "category", "label": "Knowledge Bases", "collapsed": true, "collapsible": true, "items": ["knowledge-bases", "knowledge-bases/list-knowledge-bases", "knowledge-bases/get-knowledge-base", "knowledge-bases/create-knowledge-base", "knowledge-bases/update-knowledge-base", "knowledge-bases/delete-knowledge-base", "knowledge-bases/reindex-knowledge-base", { "type": "category", "label": "Documents", "collapsed": true, "collapsible": true, "items": ["knowledge-bases/documents/upload-document", "knowledge-bases/documents/list-documents", "knowledge-bases/documents/get-document", "knowledge-bases/documents/delete-document"] }] },
-            { "type": "category", "label": "MCP Outbound Connections", "collapsed": true, "collapsible": true, "items": ["mcp-connections", "mcp-connections/list-mcp-connections", "mcp-connections/get-mcp-connection", "mcp-connections/create-mcp-connection", "mcp-connections/update-mcp-connection", "mcp-connections/delete-mcp-connection"] },
+            { "type": "category", "label": "Knowledge Bases", "collapsed": true, "collapsible": true, "items": ["knowledge-bases", "knowledge-bases/list-knowledge-bases", "knowledge-bases/get-knowledge-base", "knowledge-bases/create-knowledge-base", "knowledge-bases/update-knowledge-base", "knowledge-bases/delete-knowledge-base", "knowledge-bases/reindex-knowledge-base", { "type": "category", "label": "Documents", "collapsed": true, "collapsible": true, "items": ["knowledge-bases/documents/upload-document", "knowledge-bases/documents/list-documents", "knowledge-bases/documents/get-document", "knowledge-bases/documents/delete-document", "knowledge-bases/reindex-knowledge-document"] }] },
+            { "type": "category", "label": "MCP Outbound Connections", "collapsed": true, "collapsible": true, "items": ["mcp-connections", "mcp-connections/list-mcp-connections", "mcp-connections/get-mcp-connection", "mcp-connections/create-mcp-connection", "mcp-connections/update-mcp-connection", "mcp-connections/delete-mcp-connection", "mcp-connections/test-mcp-connection", "mcp-connections/parse-mcp-tools", "mcp-connections/list-mcp-tools"] },
             { "type": "category", "label": "MCP Inbound Servers", "collapsed": true, "collapsible": true, "items": ["mcp-inbound-servers", "mcp-inbound-servers/list-mcp-inbound-servers", "mcp-inbound-servers/get-mcp-inbound-server", "mcp-inbound-servers/create-mcp-inbound-server", "mcp-inbound-servers/update-mcp-inbound-server", "mcp-inbound-servers/delete-mcp-inbound-server"] },
             { "type": "category", "label": "A2A Outbound Connections", "collapsed": true, "collapsible": true, "items": ["a2a-connections", "a2a-connections/list-a2a-connections", "a2a-connections/get-a2a-connection", "a2a-connections/create-a2a-connection", "a2a-connections/update-a2a-connection", "a2a-connections/delete-a2a-connection", "a2a-connections/test-a2a-connection", "a2a-connections/parse-a2a-skills"] },
             { "type": "category", "label": "A2A Inbound Agents", "collapsed": true, "collapsible": true, "items": ["a2a-inbound-agents", "a2a-inbound-agents/list-a2a-inbound-agents", "a2a-inbound-agents/get-a2a-inbound-agent", "a2a-inbound-agents/create-a2a-inbound-agent", "a2a-inbound-agents/update-a2a-inbound-agent", "a2a-inbound-agents/delete-a2a-inbound-agent"] },
             { "type": "category", "label": "AI Budgets", "collapsed": true, "collapsible": true, "items": ["ai-budgets", "ai-budgets/get-budget-scope-rules", "ai-budgets/get-budget-hierarchy", "ai-budgets/get-effective-limit", "ai-budgets/update-budget"] },
             { "type": "category", "label": "AI Privacy Presets", "collapsed": true, "collapsible": true, "items": ["ai-privacy-presets", "ai-privacy-presets/list-ai-privacy-presets", "ai-privacy-presets/get-ai-privacy-preset", "ai-privacy-presets/create-ai-privacy-preset", "ai-privacy-presets/update-ai-privacy-preset", "ai-privacy-presets/delete-ai-privacy-preset"] },
             { "type": "category", "label": "AI Prompt-Guard Presets", "collapsed": true, "collapsible": true, "items": ["ai-prompt-guard-presets", "ai-prompt-guard-presets/list-ai-prompt-guard-presets", "ai-prompt-guard-presets/get-ai-prompt-guard-preset", "ai-prompt-guard-presets/create-ai-prompt-guard-preset", "ai-prompt-guard-presets/update-ai-prompt-guard-preset", "ai-prompt-guard-presets/delete-ai-prompt-guard-preset"] },
+            { "type": "category", "label": "AI DLP Presets", "collapsed": true, "collapsible": true, "items": ["ai-dlp-presets", "ai-dlp-presets/list-ai-dlp-presets", "ai-dlp-presets/get-ai-dlp-preset", "ai-dlp-presets/create-ai-dlp-preset", "ai-dlp-presets/update-ai-dlp-preset", "ai-dlp-presets/delete-ai-dlp-preset"] },
             { "type": "category", "label": "AI Gateway Settings", "collapsed": true, "collapsible": true, "items": ["ai-gateway-settings", "ai-gateway-settings/get-ai-gateway-settings", "ai-gateway-settings/update-ai-gateway-settings"] }
           ]
         },
