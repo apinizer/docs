@@ -162,6 +162,19 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Export / Import",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "export-import",
+            "export-import/list-supported-types",
+            "export-import/list-objects",
+            "export-import/export-objects",
+            "export-import/import-objects"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Policies",
           "collapsed": true,
           "collapsible": true,
