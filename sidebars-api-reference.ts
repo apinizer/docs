@@ -478,7 +478,10 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/update-certificate",
                 "keys-secrets/crud/delete-certificate",
                 "keys-secrets/crud/export-certificate",
-                "keys-secrets/crud/get-truststore-certificates"
+                "keys-secrets/crud/import-certificate-file",
+                "keys-secrets/crud/get-truststore-certificates",
+                "keys-secrets/crud/export-truststore-file",
+                "keys-secrets/crud/import-truststore-file"
               ]
             }
           ]
