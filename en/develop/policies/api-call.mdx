@@ -176,6 +176,65 @@ Configuration:
 
 The cache will remain valid until the date in the `expireAt` field (minus 30-second offset).
 
+### Retry on Failure
+
+When the call to the target service fails with a transient error — a connection timeout, a DNS or TLS failure, or a momentary `502`/`503`/`504` from the other side — the request can be sent again automatically instead of failing the whole API request.
+
+Retry is **disabled by default**. Existing configurations keep behaving exactly as before until you enable it.
+
+#### Configuration Fields
+
+| **Field** | **Description** |
+|:----------|:----------------|
+| **Retry on failure** | Master toggle. When off, the call is attempted once, as before. |
+| **Retry Count** | Number of additional attempts after the first one. The total number of requests is one more than this value. |
+| **Delay Strategy** | `No Delay`, `Fixed Delay` or `Exponential Backoff`. |
+| **Fixed Delay (ms)** | Wait time before each retry. Shown when the strategy is Fixed Delay. |
+| **Initial Delay (ms)** | Wait time before the first retry. Shown when the strategy is Exponential Backoff. |
+| **Maximum Delay (ms)** | Upper bound for the growing wait time, so the delay cannot grow without limit. |
+| **Backoff Multiplier** | Growth factor applied at each step (must be greater than 1). |
+| **Status Codes To Retry** | Which HTTP status codes trigger a retry. When left empty, `502`, `503` and `504` are used. |
+| **Also retry POST/PATCH calls on server errors** | Off by default. See the warning below. |
+
+#### Which Failures Are Retried
+
+The decision is based on **how far the request got**, not only on the status code:
+
+| **Situation** | **Meaning** | **Retried?** |
+|:--------------|:------------|:-------------|
+| Connection was never established (connection refused, connect timeout, DNS failure, TLS handshake failure) | The request was **not sent** | Yes, for every HTTP method |
+| The request was sent but no response arrived (read timeout, connection reset) | The service **may have processed** the request | Only for idempotent methods |
+| The service responded with an error status in the retry list | The service **may have processed** the request | Only for idempotent methods |
+| Any other status (for example `400`, `401`, `404`) | Permanent error, retrying will not help | No |
+
+`GET`, `HEAD`, `OPTIONS`, `PUT` and `DELETE` are idempotent according to RFC 7231. `POST` and `PATCH` are not.
+
+:::warning
+
+Enable **Also retry POST/PATCH calls on server errors** only when the target service is safe against duplicate requests. If the service returned an error *after* processing the request, sending it again can create a duplicate record or a duplicate payment. When the connection could not be established at all, the request was never delivered, so it is retried regardless of this setting.
+
+:::
+
+#### Interaction with Cache
+
+Retry and the response cache work on separate axes and do not interfere with each other:
+
+- When the response is served **from cache**, no HTTP call is made at all, so retry never comes into play.
+- The cache is looked up **once**, before the attempts begin — retries do not repeat the cache lookup.
+- Only a **successful** response is written to the cache. If every attempt fails, nothing is cached and the policy fails as it does today.
+- With Dynamic TTL, the TTL is calculated from the **final, successful** response; failed attempts do not affect it.
+- Failures reaching the **cache service** are a different matter and are handled by the cache error action setting, not by retry.
+
+:::caution
+
+Each attempt can take up to the configured timeout, and the waits are added on top. With a 30-second timeout and 2 retries the call can occupy roughly 90 seconds. Keep this within the API proxy's overall timeout — the policy screen shows the calculated worst case as you change the values.
+
+:::
+
+#### Visibility in Trace
+
+When tracing is enabled, each attempt is recorded separately. The execution detail shows the total attempt count and, for every attempt, its result, failure class, duration and the delay waited before it — so a long-running request can be explained afterwards.
+
 ## Tips and Best Practices
 
 ### Things to Do and Best Practices

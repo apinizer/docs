@@ -178,6 +178,65 @@ Bu durumda yapılandırma:
 
 Cache, `expireAt` alanındaki tarihe kadar (eksi 30 saniye offset) geçerli olacaktır.
 
+### Hata Alınırsa Yeniden Deneme (Retry) {#retry}
+
+Hedef servise yapılan çağrı geçici bir hatayla düştüğünde — bağlantı zaman aşımı, DNS veya TLS hatası, ya da karşı tarafın anlık `502`/`503`/`504` yanıtı — isteğin tamamını hataya düşürmek yerine çağrı otomatik olarak yeniden gönderilebilir.
+
+Retry **varsayılan olarak kapalıdır**. Siz açana kadar mevcut yapılandırmalar bugünkü davranışını birebir korur.
+
+#### Yapılandırma Alanları
+
+| **Alan** | **Açıklama** |
+|:---------|:-------------|
+| **Hata alınırsa yeniden dene** | Ana anahtar. Kapalıyken çağrı eskisi gibi tek kez denenir. |
+| **Yeniden Deneme Sayısı** | İlk denemeden sonra yapılacak ek deneme sayısı. Toplam istek sayısı bu değerin bir fazlasıdır. |
+| **Bekleme Stratejisi** | `Gecikme Yok`, `Sabit Gecikme` veya `Üstel Bekleme`. |
+| **Sabit Bekleme (ms)** | Her yeniden denemeden önce beklenecek süre. Sabit Gecikme seçiliyken görünür. |
+| **İlk Bekleme (ms)** | İlk yeniden denemeden önceki bekleme. Üstel Bekleme seçiliyken görünür. |
+| **En Fazla Bekleme (ms)** | Artan bekleme süresinin üst sınırı; böylece gecikme sınırsız büyümez. |
+| **Artış Çarpanı** | Her adımda uygulanan büyüme katsayısı (1'den büyük olmalıdır). |
+| **Yeniden Denenecek Durum Kodları** | Hangi HTTP durum kodlarının yeniden denemeyi tetikleyeceği. Boş bırakılırsa `502`, `503` ve `504` kullanılır. |
+| **POST/PATCH çağrılarında sunucu hatasında da yeniden dene** | Varsayılan kapalı. Aşağıdaki uyarıya bakınız. |
+
+#### Hangi Hatalarda Yeniden Denenir
+
+Karar yalnızca durum koduna değil, **isteğin ne kadar ilerlediğine** göre verilir:
+
+| **Durum** | **Anlamı** | **Yeniden denenir mi?** |
+|:----------|:-----------|:------------------------|
+| Bağlantı hiç kurulamadı (bağlantı reddedildi, connect timeout, DNS hatası, TLS el sıkışma hatası) | İstek **gönderilmedi** | Evet, her HTTP metodunda |
+| İstek gönderildi ama yanıt alınamadı (read timeout, bağlantının kapanması) | Servis isteği **işlemiş olabilir** | Yalnızca idempotent metotlarda |
+| Servis, listedeki bir hata koduyla yanıt verdi | Servis isteği **işlemiş olabilir** | Yalnızca idempotent metotlarda |
+| Diğer durumlar (örneğin `400`, `401`, `404`) | Kalıcı hata, tekrar denemek çözmez | Hayır |
+
+RFC 7231'e göre `GET`, `HEAD`, `OPTIONS`, `PUT` ve `DELETE` idempotenttir; `POST` ve `PATCH` değildir.
+
+:::warning
+
+**POST/PATCH çağrılarında sunucu hatasında da yeniden dene** seçeneğini yalnızca hedef servis tekrarlanan isteklere karşı güvenliyse açın. Servis, isteği *işledikten sonra* hata döndürmüşse yeniden göndermek çift kayıt veya çift ödeme oluşturabilir. Bağlantı hiç kurulamadığında ise istek karşı tarafa ulaşmamıştır; bu durumda ayardan bağımsız olarak yeniden denenir.
+
+:::
+
+#### Cache ile Etkileşimi
+
+Retry ve yanıt cache'i birbirinden ayrı eksenlerde çalışır, birbirini bozmaz:
+
+- Yanıt **cache'ten** karşılandığında hiç HTTP çağrısı yapılmaz; dolayısıyla retry hiç devreye girmez.
+- Cache, denemeler başlamadan **bir kez** sorgulanır; yeniden denemeler cache sorgusunu tekrarlamaz.
+- Cache'e yalnızca **başarılı** yanıt yazılır. Tüm denemeler başarısız olursa hiçbir şey cache'lenmez ve politika bugünkü gibi hata verir.
+- Dinamik TTL kullanılıyorsa TTL, **son ve başarılı** yanıttan hesaplanır; başarısız denemeler TTL'yi etkilemez.
+- **Cache servisine** erişilememesi ayrı bir konudur ve retry ile değil, cache hata davranışı ayarıyla yönetilir.
+
+:::caution
+
+Her deneme, tanımlı zaman aşımı kadar sürebilir ve beklemeler bunun üzerine eklenir. 30 saniye zaman aşımı ve 2 yeniden deneme ile çağrı yaklaşık 90 saniye sürebilir. Bu sürenin API proxy'nin genel zaman aşımını aşmamasına dikkat edin — politika ekranı, değerleri değiştirdikçe hesaplanan en kötü durumu gösterir.
+
+:::
+
+#### Trace Üzerinde Görünürlüğü
+
+Trace açıkken her deneme ayrı ayrı kaydedilir. Yürütme detayında toplam deneme sayısı ve her deneme için sonucu, hata sınıfı, süresi ve öncesinde beklenen süre görünür; böylece uzun süren bir istek sonradan açıklanabilir.
+
 ## İpuçları ve En İyi Uygulamalar
 
 ### Yapılması Gerekenler ve En İyi Uygulamalar
