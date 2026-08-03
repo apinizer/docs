@@ -68,6 +68,16 @@ The existing `/apiops/settings/...` + `?projectId=` path remains fully backward 
 
 See [API Reference: AI Privacy Presets](/api-reference/ai-privacy-presets), [AI Prompt-Guard Presets](/api-reference/ai-prompt-guard-presets), and [AI DLP Presets](/api-reference/ai-dlp-presets) for full details.
 
+## Writing and Testing Patterns
+
+Patterns use **Java regular-expression** syntax (`java.util.regex.Pattern`) — that is the engine the gateway matches with. It is not identical to JavaScript or PCRE: lookbehind must be fixed-width, named groups are written `(?<name>...)`, and Unicode classes such as `\p{L}` are supported.
+
+The **Test the pattern** panel on the PII Patterns screen runs a pattern against sample text before you save it. The test executes **server-side**, on the same engine as the gateway, so the matches and masked output you see there are exactly what will happen at runtime.
+
+:::warning
+Patterns that can backtrack catastrophically are **skipped** at runtime. The gateway screens every pattern with a ReDoS check, and one that fails is never applied while a request is processed — the rule looks enabled but masks nothing. The test panel reports this as a "ReDoS risk" before you save.
+:::
+
 ## Actions
 
 Every guardrail applies one of three actions when it matches:
@@ -75,6 +85,48 @@ Every guardrail applies one of three actions when it matches:
 - **Block** — the request or response is rejected entirely
 - **Flag** — processing continues, but the match is recorded for review
 - **Mask** — the matched value is replaced before continuing
+
+### Mask Shapes
+
+For personal-data rules the mask shape is chosen per rule:
+
+| Shape | Input | Output |
+|-------|-------|--------|
+| **Replace entirely** (default) | `05321234567` | `***` |
+| **Keep first N characters** (N=4) | `05321234567` | `0532*******` |
+| **Keep last N characters** (N=4) | `05321234567` | `*******4567` |
+| **Mask first N characters** (N=4) | `05321234567` | `****1234567` |
+
+The default shape replaces the whole value with `***` and leaks nothing. Partial shapes preserve the output length and **deliberately** leave part of the value visible; since the remaining fragment can identify a person on its own (the last four digits of a phone number, say), choose one on purpose. The replacement text is configurable too — in partial shapes its first character is used as the mask character.
+
+If the number of characters to keep is greater than or equal to the value length nothing would be masked at all; in that case it falls back to the safe side and replaces the whole value.
+
+### Reading a Value Back
+
+Besides masking, a rule can **delete**, **hash**, **encrypt** or merely **detect** a match:
+
+- **Encrypt** — the value is encrypted with AES/GCM/NoPadding and written as Base64. The key is embedded in the Apinizer installation and is never supplied by the user, so the value can **only** be decrypted inside that same installation. The practical route is to call `UtilCommon.decryptWithDefaultAlgorithm(<base64value>)` from a Groovy script policy and print the output with `request_log()` / `response_log()`. Decrypting with an external tool (openssl and friends) is not possible — the key is not exported.
+- **Hash** — SHA-256 plus an installation-specific salt is applied, and it is **not reversible**. The same input always yields the same output, so it can be used for correlation, but the original value cannot be recovered.
+
+Choose encryption for data that may need to be read later, hashing or masking for data that will not.
+
+## Anonymous Requests
+
+The retry-storm (loop) guardrail keys its counter on the model, the API proxy and the **caller's identity**, so one caller's repeats never consume another caller's budget. On an API proxy without authentication a request carries no such identity, and the policy decides what to do:
+
+| Option | Behaviour |
+|--------|-----------|
+| **Do not apply the policy** (default) | The request passes and no repeat counter is kept |
+| **Consume from a shared pool** | All anonymous traffic is counted in a **single** bucket |
+| **Reject the request** | Anonymous requests are turned away with HTTP 401 |
+
+The default matches the behaviour before this setting existed: on an anonymous request the guardrail is silently inactive. With the shared pool, tenant isolation is **not expected** — one caller's consumption spends everyone else's budget; it is meant for installations that deliberately allow anonymous access but still want a ceiling.
+
+:::info
+This is distinct from the proxy-level **block anonymous requests** setting, which rejects such requests before they ever reach the policy. The choice here applies on a proxy where anonymous access is allowed.
+:::
+
+The semantic cache offers the same three options, for the same reason — see [Semantic Cache](/en/ai-gateway/semantic-cache).
 
 ## Execution Modes
 

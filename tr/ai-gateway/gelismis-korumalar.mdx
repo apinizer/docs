@@ -38,7 +38,39 @@ Hazır doğrulayıcılara ek olarak, kendi **özel regex** veya **alan adı bazl
 **Akış (streaming) yanıtlarda**: PII maskeleme, chunk sınırında bölünen bir kimlik numarasını da yakalayabilmek için bir tampon (carry) mekanizması kullanır — örn. bir kimlik numarasının ilk yarısı bir chunk'ta, ikinci yarısı sonraki chunk'ta gelse bile eşleşme kaçırılmaz.
 :::
 
-Eşleşen değer `[REDACTED]` ile değiştirilir ve işleme devam edilir.
+### Desen Yazma ve Deneme
+
+Desenler **Java düzenli ifade** sözdizimini kullanır (`java.util.regex.Pattern`) — gateway eşleştirmeyi bu motorla yapar. JavaScript veya PCRE ile birebir aynı değildir: lookbehind sabit genişlik ister, adlandırılmış grup `(?<ad>...)` biçiminde yazılır, `\p{L}` gibi Unicode sınıfları desteklenir.
+
+PII Patterns ekranındaki **Deseni Dene** paneli, deseni kaydetmeden önce örnek bir metin üzerinde çalıştırır. Test **sunucuda**, gateway ile aynı motorda koşar; dolayısıyla panelde gördüğünüz eşleşmeler ve maskelenmiş çıktı, çalışma anında olacak olanın birebir aynısıdır.
+
+:::warning
+Aşırı geri-izleme (catastrophic backtracking) üretebilen desenler çalışma anında **atlanır**. Gateway her deseni bir ReDoS kontrolünden geçirir; kontrolü geçemeyen desen istek işlenirken hiç uygulanmaz — kural açık görünür ama hiçbir şeyi maskelemez. Test paneli bu durumu kaydetmeden önce "ReDoS riski" olarak bildirir.
+:::
+
+### Eşleşen Değere Ne Olur
+
+Maskeleme biçimi kural bazında seçilir:
+
+| Biçim | Girdi | Çıktı |
+|-------|-------|-------|
+| **Tamamını değiştir** (varsayılan) | `05321234567` | `***` |
+| **İlk N karakteri koru** (N=4) | `05321234567` | `0532*******` |
+| **Son N karakteri koru** (N=4) | `05321234567` | `*******4567` |
+| **İlk N karakteri maskele** (N=4) | `05321234567` | `****1234567` |
+
+Varsayılan biçim değerin tamamını `***` ile değiştirir ve hiçbir şey sızdırmaz. Kısmî biçimler çıktının uzunluğunu korur ve değerin bir bölümünü **bilerek** açıkta bırakır; kalan parça tek başına bile kişiyi tanımlayabileceği için (örneğin telefonun son dört hanesi) bilinçli seçilmelidir. Değiştirme metni de yapılandırılabilir — kısmî biçimlerde metnin ilk karakteri maskeleme karakteri olarak kullanılır.
+
+Korunacak karakter sayısı değerin uzunluğuna eşit ya da büyükse hiçbir şey maskelenmemiş olurdu; böyle bir durumda güvenli tarafa düşülür ve değerin tamamı değiştirilir.
+
+### Maskeleme Dışındaki İşlemler ve Değeri Geri Okuma
+
+Maskeleme dışında **silme**, **hashleme**, **şifreleme** ve **tespit** işlemleri de seçilebilir:
+
+- **Şifreleme** — değer AES/GCM/NoPadding ile şifrelenir ve sonuç Base64 olarak yazılır. Anahtar Apinizer kurulumuna gömülüdür, kullanıcı tarafından verilmez; bu nedenle şifreli değer **yalnız aynı Apinizer kurulumu içinde** çözülebilir. Pratik yol, bir Groovy script politikasında `UtilCommon.decryptWithDefaultAlgorithm(<base64değer>)` çağırıp çıktıyı `request_log()` / `response_log()` ile yazdırmaktır. Dışarıdan bir araçla (openssl vb.) çözmek mümkün değildir — anahtar dışa verilmez.
+- **Hashleme** — SHA-256 + kuruluma özel salt uygulanır ve **geri döndürülemez**. Aynı girdi her zaman aynı çıktıyı ürettiği için korelasyon amacıyla kullanılabilir, ama özgün değere ulaşılamaz.
+
+Sonradan okunması gerekebilecek veriler için şifreleme, gerekmeyecekler için hashleme veya maskeleme seçin.
 
 ## İstem Koruması (Jailbreak / Enjeksiyon)
 
@@ -125,8 +157,26 @@ Aynı isteğin kısa bir zaman penceresinde **tekrar tekrar** gönderilmesini te
 - Yapılandırılabilir bir zaman penceresinde (N saniyede M istek) aynı özetin tekrar sayısı izlenir
 - Eşik aşılırsa istek **işaretlenir** veya **engellenir**
 
+Sayaç; model, API proxy ve **çağıranın kimliği** ile birlikte anahtarlanır. Böylece bir çağıranın tekrarı başka bir çağıranın hakkını tüketmez.
+
 :::tip
 Bu koruma, özellikle otonom ajan zincirlerinde beklenmeyen maliyet artışını erken tespit etmek için değerlidir.
+:::
+
+### Kimliği Olmayan (Anonim) İstekler
+
+Kimlik doğrulaması olmayan bir API proxy'de istek, sayacın anahtarlanacağı bir kimlik taşımaz. Bu durumda ne yapılacağı politikada seçilir:
+
+| Seçenek | Davranış |
+|---------|----------|
+| **Politikayı uygulama** (varsayılan) | İstek geçer, tekrar sayacı işletilmez |
+| **Ortak havuzdan tüket** | Tüm anonim trafik **tek** bir sayaçta toplanır |
+| **İsteği reddet** | Anonim istek HTTP 401 ile geri çevrilir |
+
+Varsayılan seçenek, bu ayar eklenmeden önceki davranışla birebir aynıdır: anonim istekte koruma sessizce devre dışı kalır. "Ortak havuzdan tüket" seçildiğinde kiracı izolasyonu **beklenmez** — bir çağıranın tüketimi diğerlerinin hakkını da harcar; anonim erişime bilinçli olarak izin verilmiş, ama yine de bir tavan konmak istenen kurulumlar içindir.
+
+:::info
+Bu seçim, API proxy düzeyindeki **anonim istekleri engelle** ayarından farklıdır. O ayar isteği bu politikaya hiç ulaştırmadan reddeder; buradaki seçim ise anonim erişime izin verilmiş bir proxy'de bu politikanın ne yapacağını belirler.
 :::
 
 ## Aşırı Boyut Koruması
