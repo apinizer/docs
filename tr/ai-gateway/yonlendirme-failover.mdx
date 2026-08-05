@@ -1,6 +1,6 @@
 ---
 title: "Yönlendirme ve Failover"
-description: "Birincil ve yedek LLM hedeflerini önceliklendirin, maliyet-duyarlı veya gecikme-duyarlı yönlendirme stratejileri seçin ve her failover adımı için maliyet sınırı tanımlayın."
+description: "Koşullu ve semantik rotalarla isteği doğru hedefe yönlendirebilir; birincil ve yedek LLM hedeflerini önceliklendirebilir, maliyet-duyarlı, gecikme-duyarlı veya sabit-önek-yakınlıklı yönlendirme stratejileri seçebilir ve her failover adımı için maliyet sınırı tanımlayabilirsiniz."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -8,6 +8,29 @@ import {Card, CardGroup} from '@site/src/components/Card';
 ## Genel Bakış
 
 Bir API proxy'sinde bir modele istek gönderildiğinde, Apinizer AI Gateway isteği önce **birincil hedefe** yönlendirir. Birincil hedef başarısız olursa (hata, zaman aşımı, kota aşımı vb.), istek önceden tanımlanan **yedek hedeflere** sırayla denenir.
+
+Bir AI proxy'nin **AI Routing** sekmesi, bir isteğin modele ulaşana kadar geçtiği kararları üç adımlı bir **karar zinciri** olarak gösterir: **Koşullu Kapı** (varsa koşullu/semantik rotalar) → **Hedef Seçimi** (birincil hedef veya yük dengelemeli havuz) → sağlayıcıya iletim. Zincirin üstündeki özet bandındaki her adım tıklanabilir ve sayfayı ilgili bölüme kaydırır; **Failover**, ana akışın bir parçası değil, hedef başarısız olduğunda devreye giren ayrı bir **hata yolu** olarak gösterilir. Her adımda seçilen sağlayıcı/model için aynı standart model bilgi paneli açılır (sağlayıcı adı, model kimliği, bağlam penceresi, katalog fiyatı) — kimlik bilgisi veya başka bir gizli veri bu panelde hiçbir zaman görünmez.
+
+## Koşullu Yönlendirme ve Semantik Rotalar
+
+Birincil hedefe geçmeden önce, isteğe bağlı olarak bir veya daha fazla **koşullu rota** değerlendirilir. Her koşullu rotanın bir **Route Adı**, bir hedefi (sağlayıcı/model) ve rotanın ne zaman devreye gireceğini belirleyen bir veya iki eşleşme mekanizması vardır:
+
+- **Kural tabanlı koşul** — istek içeriğine göre değerlendirilen klasik koşul ifadesi
+- **Semantik eşleşme** — isteğin, rota için tanımlanan örnek cümlelere (**utterances**) anlamsal olarak ne kadar yakın olduğuna bakan embedding-tabanlı eşleşme
+
+### Semantik Eşleşme
+
+Bir rotaya örnek cümleler ve bir **benzerlik eşiği** (varsayılan `0.75`) tanımlarsınız. İstek geldiğinde isteğin ilk mesajları tek seferde embedding'e çevrilir — bu embedding istek başına yalnızca **bir kez** hesaplanır ve o istekte değerlendirilen tüm semantik rotalar arasında paylaşılır. Elde edilen vektör her rotanın örnek cümle embedding'leriyle karşılaştırılır (kosinüs benzerliği); en yüksek benzerlik skoru rotanın eşiğini karşılıyorsa rota eşleşmiş sayılır. Embedding sağlayıcısı ve modeli, koşullu rotalar için proxy düzeyinde bir kez seçilir.
+
+:::note Kural + Semantik Birlikte Tanımlıysa
+Bir rotada hem kural hem semantik eşleşme tanımlıysa, rota yalnızca **ikisi birden** sağlandığında devreye girer. Yalnızca semantik eşleşme tanımlıysa (kural yok), tek başına semantik sonuç yeterlidir.
+:::
+
+:::warning Eşleşmeyen Rota İsteği Engellemez
+Embedding sağlayıcısına ulaşılamıyorsa veya bir hata oluşursa, ilgili rota basitçe "eşleşmedi" sayılır — istek reddedilmez, sıradaki koşullu rotaya, orada da eşleşme yoksa birincil hedef seçimine devam eder. Semantik eşleşme bir güvenlik koruması değil bir yönlendirme mekanizmasıdır; bu nedenle bir hata durumunda isteği durdurmak yerine akışı kesintisiz sürdürür.
+:::
+
+Hiçbir koşullu rota eşleşmezse istek doğrudan aşağıdaki [Birincil Havuz Seçim Stratejileri](#birincil-havuz-seçim-stratejileri) bölümünde açıklanan hedef seçimine geçer.
 
 ## Failover Zinciri
 
@@ -28,11 +51,20 @@ Aynı öncelik seviyesinde birden fazla birincil hedef tanımlıysa, hangisinin 
 | **Ağırlıklı** | Her hedefe atanan ağırlığa göre orantılı dağıtım yapar |
 | **Rastgele** | Hedef rastgele seçilir |
 | **En-az-kullanılan** | Son zamanda en az kullanılan hedef seçilir |
-| **En düşük maliyet** | Hedeflerin katalog birim fiyatına göre en ucuz olanı seçilir |
-| **En düşük gecikme** | Güncel sağlayıcı yanıt sürelerine göre en hızlı hedef seçilir |
+| **En düşük maliyet** | Hedeflerin katalog birim fiyatına göre en ucuz olanı seçilir; karşılaştırma girdi fiyatına çıktı fiyatının bir kısmını (varsayılan ağırlık: %25) ekleyerek yapılır — yalnızca girdi hacmine bakan düz toplamın aksine, çıktı ağırlıklı gerçek iş yüklerinde daha doğru sıralar |
+| **En düşük gecikme** | Öncelik sırasıyla seçilir: önce gerçek trafikten ölçülen ortalama yanıt hızı, o yoksa periyodik sağlık kontrolü ölçümü kullanılır |
+| **Sabit önek yakınlığı** | Aynı konuşmanın her zaman aynı havuz üyesine gitmesini sağlar — anahtar olarak önce `session_id` header'ı (özelleştirilebilir), o yoksa isteğin sistem ve ilk kullanıcı mesajının öneki kullanılır |
 
 :::note
-En düşük maliyet ve en düşük gecikme stratejileri, fiyatı veya sağlıklı gecikme ölçümü bulunmayan hedeflerde otomatik olarak sıralı dağıtıma düşer.
+En düşük maliyet, en düşük gecikme ve sabit önek yakınlığı stratejileri, ilgili sinyal (fiyat, gecikme ölçümü veya yakınlık anahtarı) üretilemeyen hedeflerde otomatik olarak sıralı dağıtıma düşer.
+:::
+
+:::tip Akış İçinde Ölçüm
+Akış (streaming) isteklerinde en düşük gecikme stratejisi ilk-token süresini esas alır; akış kullanılmayan isteklerde ilk-token anı ölçülemediğinden toplam yanıt süresi kullanılır.
+:::
+
+:::warning Sabit Önek Yakınlığını Önbellek-Farkında Katmanların Arkasında Kullanmayın
+Havuz üyeleriniz zaten kendi önbellek-farkında yönlendirme kararını veren bir katmanın (ör. KV-cache-farkında bir çıkarım ağ geçidi) arkasındaysa sabit önek yakınlığı stratejisini seçmeyin — iki katman birbirinden habersiz aynı kararı vermeye çalışır ve bu çakışma önbellek isabet oranını iyileştirmek yerine düşürebilir. Bir üyenin yükü havuz ortalamasının belirli bir katını (varsayılan 1,25) aşarsa istek otomatik olarak bir sonraki üyeye kaydırılır; tek bir üye aşırı yüklenmez.
 :::
 
 ## Maliyet Sınırlı Failover
@@ -69,7 +101,7 @@ Strateji alanı, failover zincirinin nasıl işleneceğini belirler:
 | **Round Robin** | Hata olmasa da istekler kayıtlar arasında dağıtılır |
 
 :::info
-Bu dört strateji, [Birincil Havuz Seçim Stratejileri](#birincil-havuz-seçim-stratejileri) bölümündeki altı stratejiden **farklı bir mekanizmadır**: oradaki tablo eş-öncelikli birden fazla birincil hedef arasından seçim yapar, buradaki strateji ise failover zincirinin adımları arasında **sırayla ilerleyiş biçimini** belirler.
+Bu dört strateji, [Birincil Havuz Seçim Stratejileri](#birincil-havuz-seçim-stratejileri) bölümündeki yedi stratejiden **farklı bir mekanizmadır**: oradaki tablo eş-öncelikli birden fazla birincil hedef arasından seçim yapar, buradaki strateji ise failover zincirinin adımları arasında **sırayla ilerleyiş biçimini** belirler.
 :::
 
 ### Bir AI Proxy'den Şablon Referanslama
