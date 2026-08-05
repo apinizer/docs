@@ -66,7 +66,6 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/export-api-proxy",
                 "api-proxies/crud/import-api-proxy",
                 "api-proxies/crud/import-api-proxy-and-override",
-                "api-proxies/crud/import-api-proxy-without-override",
                 "api-proxies/crud/get-invoke-info"
               ]
             },
