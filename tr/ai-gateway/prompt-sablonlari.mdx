@@ -1,0 +1,155 @@
+---
+title: "Prompt Şablonları"
+description: "İstemcilerin her istekte tam mesaj listesini göndermesi yerine kısa bir takma adla yeniden kullanılabilir bir prompta referans vermesini sağlayın; gateway isteği LLM sağlayıcısına ulaşmadan önce genişletir."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+**Prompt Şablonları**, tek bir kavramın iki parçasıdır:
+
+- **Şablon Kataloğu** — adlandırılmış, yeniden kullanılabilir prompt kayıtlarının tutulduğu merkezi liste
+- **Prompt Şablonu politikası** — bir AI proxy'sinin, istemcinin gönderdiği kısa bir takma adı (alias) kataloğun bir kaydına eşleyip isteği genişleten yapılandırması
+
+İstemci, isteğinde tüm `messages[]` dizisini yazmak yerine yalnızca bir takma ad (ve varsa parametre değerleri) gönderir; gateway bunu, isteği LLM sağlayıcısına iletmeden önce gerçek prompt'a genişletir.
+
+## Şablon Kataloğu
+
+Her katalog kaydı şu alanları taşır:
+
+| Alan | Açıklama |
+|------|----------|
+| Ad | İstemcinin (veya bir politikanın) bu kaydı seçmek için kullandığı referans anahtarı |
+| Açıklama | Serbest metin |
+| Mesajlar | Bir veya daha fazla `{rol, içerik}` çifti — rol `system`/`user`/`assistant`/`developer`/`tool` olabilir |
+| Parametreler | Mesaj içeriğinde kullanılan `{{parametreAdı}}` yer tutucularının tanımı — ad, zorunlu mu, varsayılan değer |
+| Kaynak | Built-in (salt okunur) veya özel (proje/kurulum tarafından oluşturulmuş) |
+
+### Kapsam
+
+Her katalog kaydı üç seviyeden birinde yaşar:
+
+- **Built-in** — kurulumla gelen, salt okunur kayıtlar
+- **Platform-paylaşımlı** — sistem yöneticisi tarafından oluşturulan, tüm projelerin görebildiği kayıtlar
+- **Proje-özel** — yalnızca ait olduğu projenin görebildiği kayıtlar
+
+Bir Prompt Şablonu politikası, bu üç seviyenin birleşiminden (kendi projesi + platform-paylaşımlı + built-in) bir kayıt seçebilir.
+
+### `{{parametre}}` Sözdizimi
+
+Mesaj içeriğinde `{{parametreAdı}}` yazdığınızda, bu bir **parametre yer tutucusu** olur — istemcinin istek gövdesinde gönderdiği değerle değiştirilir (aşağıya bakın). Parametreler listesinde ilgili adı **Zorunlu** olarak işaretleyebilir veya bir **Varsayılan değer** tanımlayabilirsiniz.
+
+:::warning Yeniden adlandırma kırıcı olabilir
+Bir Prompt Şablonu politikası, kataloğa eklendiği anda o kaydın mesaj/parametre içeriğini **kendi içine kopyalar** (anlık görüntü). Kataloğu sonradan düzenlemek veya silmek, onu daha önce kullanmış politikaları bozmaz — ama bu politikalar da yeniden seçilmeden sonraki bir düzenlemeyi yansıtmaz. Kaydı yeniden adlandırmak, yalnızca o ada göre referans veren istemci isteklerini etkiler.
+:::
+
+## Politika: İstemci İstek Formatı
+
+İstemci, bir şablonu kullanmak istediğinde istek gövdesine iki alan ekler:
+
+```json
+{
+  "template": "greeting",
+  "template_params": {"name": "Ada"}
+}
+```
+
+- **Şablon Alan Adı** (varsayılan `template`) — istemcinin takma adı gönderdiği alan
+- **Parametreler Alan Adı** (varsayılan `template_params`) — `{{parametre}}` değerlerini taşıyan nesne
+
+Gateway, `template` alanındaki takma adı politikadaki bağlamalarla eşleştirir, mesajları genişletir ve `{{parametre}}` yer tutucularını `template_params` içindeki değerlerle değiştirir:
+
+```json
+// Gateway, LLM sağlayıcısına iletmeden önce "greeting" bağlamasının
+// mesajlarını genişletir ve {{name}} yerine "Ada" koyar
+```
+
+Bir parametre değeri kendisi `{{...}}` içerse bile **olduğu gibi (literal)** yerleştirilir — asla ikinci kez genişletilmez. Bu, bilinçli bir prompt-injection savunmasıdır: bir parametre değeri yeni bir şablon referansı enjekte edemez.
+
+### Bilinmeyen Takma Ad Davranışı
+
+İstemcinin gönderdiği takma ad, politikadaki hiçbir bağlamayla eşleşmezse:
+
+| Seçenek | Davranış |
+|---------|----------|
+| **Olduğu Gibi Geçir** (varsayılan) | Gövde tamamen değiştirilmeden iletilir (`template`/`template_params` alanları dahil) |
+| **İsteği Engelle** | Çözümlenemeyen bir referansı iletmek yerine istek reddedilir (HTTP 400) |
+
+### Eksik Parametre Davranışı
+
+Eşleşen bağlamanın referans verdiği bir `{{parametre}}` için istemci değer göndermemişse:
+
+| Seçenek | Davranış |
+|---------|----------|
+| **İsteği Engelle** (varsayılan) | İstek reddedilir (HTTP 400) |
+| **Boş Metin Yerleştir** | Yer tutucu boş metinle değiştirilir |
+| **Varsayılan Değeri Kullan** | Parametre tanımındaki varsayılan değer kullanılır (o da yoksa boş metin) |
+
+### Birleştirme Modu
+
+Genişletilmiş şablon mesajlarının, istemcinin kendi gönderdiği `messages[]` ile nasıl birleşeceği:
+
+| Mod | Davranış |
+|-----|----------|
+| **Değiştir** (varsayılan) | İstemcinin kendi mesajları atılır, yalnızca genişletilmiş şablon mesajları kullanılır |
+| **Başa Ekle** | Önce şablon mesajları, sonra istemcinin kendi mesajları |
+| **Sona Ekle** | Önce istemcinin kendi mesajları, sonra şablon mesajları |
+
+### Şablon Alanlarını Temizleme
+
+**Genişletmeden Sonra Şablon Alanlarını Temizle** varsayılan olarak **açıktır**: genişletme tamamlandıktan sonra `template`/`template_params` alanları gövdeden kaldırılır. Bunun kapatılması önerilmez — çoğu LLM sağlayıcısı, tanımadığı bir üst-düzey gövde alanını görünce isteği HTTP 400 ile reddeder.
+
+### Genişletilmiş İçerik Bütçesi
+
+Genişletilmiş her mesajın toplam karakter sayısı, **Genişletilmiş İçerik Bütçesi** ile sınırlanır (varsayılan 32768 karakter).
+
+:::warning Aşım fail-closed'dır
+Bütçe aşıldığında istek **reddedilir** (HTTP 400) — genişletme kısmen uygulanıp geri kalanı sessizce kesilmez, aynı [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici)'nin enjeksiyon bütçesi disiplini.
+:::
+
+## Çalışma Sırası
+
+Bu politika, isteğin gateway'in diğer AI kontrollerine ([korumalar](/tr/ai-gateway/gelismis-korumalar), [RAG](/tr/ai-gateway/rag) bağlam ekleme, [semantik önbellek](/tr/ai-gateway/semantik-onbellek), [hız sınırlaması](/tr/ai-gateway/token-kotalari)) ulaşmasından **önce**, ve aynı proxy'de bir [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici) politikası varsa **ondan da önce** çalışır — süsleyici blokları, bu politikanın genişlettiği mesaj listesine eklenir.
+
+## Yapılandırma
+
+<Steps>
+  <Step title="Kataloğa Şablon Ekleyin">
+    **AI Gateway** → **Prompt Şablonları** ekranında yeni bir kayıt oluşturun: mesajları (rol + içerik) ve varsa `{{parametre}}` tanımlarını girin.
+  </Step>
+
+  <Step title="Politikayı Ekleyin">
+    İlgili AI proxy'sinin politika listesine **Prompt Şablonu** politikasını ekleyin.
+  </Step>
+
+  <Step title="Bağlama Ekleyin">
+    Kataloğdan bir veya daha fazla kayıt seçerek bir **Alias** (takma ad) atayın — mesajlar/parametreler bu anda politikaya kopyalanır.
+  </Step>
+
+  <Step title="Davranışları Seçin">
+    **Bilinmeyen Şablon Davranışı**, **Eksik Parametre Davranışı** ve **Birleştirme Modu**'nu ihtiyacınıza göre ayarlayın.
+  </Step>
+
+  <Step title="Dağıtın (Deploy)">
+    Politikayı kaydettikten sonra **Dağıt**'a tıklayın — kayıt ile dağıtım ayrık adımlardır, otomatik dağıtım yapılmaz.
+  </Step>
+</Steps>
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Prompt Süsleyici" icon="layers" href="/tr/ai-gateway/prompt-susleyici">
+    Şablonla birlikte çalışan, her isteğe eklenen sabit talimat bloklarını yapılandırın
+  </Card>
+  <Card title="RAG" icon="database" href="/tr/ai-gateway/rag">
+    Sabit şablonların ötesinde, isteğe özgü bağlam ekleme
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    Genişletilmiş prompt'un hangi koruma katmanlarından geçtiğini inceleyin
+  </Card>
+  <Card title="AI Gateway Genel Bakış" icon="rocket" href="/tr/ai-gateway/genel-bakis">
+    AI Gateway modülüne genel bakış
+  </Card>
+</CardGroup>

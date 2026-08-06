@@ -30,6 +30,16 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Prompt Yönetimi",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/prompt-susleyici",
+        "ai-gateway/prompt-sablonlari"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Maliyet ve Kota",
       "collapsed": false,
       "collapsible": true,

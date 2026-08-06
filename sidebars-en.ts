@@ -40,6 +40,16 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Prompt Engineering",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/prompt-decorator",
+        "ai-gateway/prompt-templates"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Security and Privacy",
       "collapsed": false,
       "collapsible": true,

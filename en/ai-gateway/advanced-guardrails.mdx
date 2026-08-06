@@ -32,6 +32,31 @@ import {Steps, Step} from '@site/src/components/Steps';
   </Card>
 </CardGroup>
 
+## Personal-Data Types
+
+Personal-data masking recognizes the following built-in types out of the box, and you can add your own custom patterns for anything installation-specific:
+
+| Type | Example | Validation |
+|------|---------|------------|
+| Turkish National ID (TCKN) | `12345678950` | Checksum |
+| IBAN (Turkey) | `TR330006100519786457841326` | Checksum (mod 97) |
+| Phone (Turkey) | `05321234567` | Structural |
+| Email | `user@example.com` | Structural |
+| Credit Card | `4111111111111111` | Checksum (Luhn) |
+| IP Address | `203.0.113.5` | Structural (IPv4/IPv6) |
+| URL | `https://example.com/path` | Structural |
+| Passport Number | `P1234567` | Structural only |
+| Social Security Number (US) | `123-45-6789` | Structural |
+| Driver License Number (Turkey) | `A12345678` | Structural only |
+| IBAN (Generic, any country) | `DE89370400440532013000` | Checksum (mod 97) |
+| Crypto Wallet Address | `0x71C7656EC7ab88b098defB751B7401B5f6d8976` | Checksum (Bitcoin / Ethereum) |
+
+The Turkish and checksum-validated types produce far fewer false positives than a plain regular expression, since a random string of digits has to actually satisfy the check-digit formula to match.
+
+:::warning Passport and Driver License Numbers Have No Checksum
+Unlike most of the other built-in types, passport numbers and Turkish driver's license numbers have no reliable check digit to validate against — these two match on structure only (a letter followed by digits, or a generic alphanumeric code), so they carry a materially higher false-positive rate. If you enable either broadly, pair it with a custom pattern that also requires a matching field name, rather than scanning free-form text for it.
+:::
+
 ## Data-Loss Protection Patterns
 
 Data-loss protection ships with ready-made patterns for common secret formats, and you can add your own custom patterns for your organization:
@@ -81,6 +106,27 @@ The default shape replaces the whole value with `***` and leaks nothing. Partial
 
 If the number of characters to keep is greater than or equal to the value length nothing would be masked at all; in that case it falls back to the safe side and replaces the whole value.
 
+### Anonymization: Sequential Placeholders and Synthetic Values
+
+Beyond the fixed and partial mask shapes above, two further shapes replace a matched value with something that reads naturally in the rest of the conversation, instead of a block of asterisks:
+
+| Shape | Input (a TCKN, for example) | Output |
+|-------|------------------------------|--------|
+| **Sequential placeholder** | `12345678950` | `<TCKN_1>` |
+| **Synthetic value** | `12345678950` | a different, checksum-valid TCKN, e.g. `98765432106` |
+
+**Sequential placeholder** replaces every match with a type-tagged token — `<TCKN_1>`, `<EMAIL_2>`, and so on — numbered in the order each distinct value was first seen. The token format is configurable (`{TYPE}` and `{N}` placeholders).
+
+**Synthetic value** replaces the match with a fake value of the same kind, generated so it still satisfies that type's own validation — a synthetic IBAN passes the mod-97 checksum, a synthetic credit card passes the Luhn check, and so on — using a reserved test range (card numbers use the `4111` test BIN, IP addresses use the documentation-reserved `203.0.113.0/24` block) so it's distinguishable from a real one on inspection.
+
+Both shapes are **consistent within one request/response cycle**: the same original value always maps to the same placeholder or synthetic value everywhere it appears in that exchange, including inside a tool call and its result. They are **not** consistent, and deliberately so, **across two different requests** — the same real value maps to a different placeholder or synthetic value each time, so a value observed in one conversation can't be correlated back to the same value in another.
+
+:::warning No Way Back
+Both shapes are one-directional. Apinizer never stores a mapping from the placeholder or synthetic value back to the original — there is no "reveal" action for these two shapes, unlike Encrypt below. Choose Mask or Anonymize only for data you don't need to reconstruct later.
+:::
+
+Each request tracks a bounded number of distinct values for this purpose; if that ceiling is reached, any further new value falls back to the default **Replace entirely** shape rather than failing the request — a value already assigned earlier in the same exchange keeps working normally.
+
 ### Reading a Value Back
 
 Besides masking, a rule can **delete**, **hash**, **encrypt** or merely **detect** a match:
@@ -121,6 +167,28 @@ The semantic cache offers the same three options, for the same reason — see [S
     The guardrail runs and reports matches without ever blocking or masking — useful for tuning thresholds before turning on enforcement.
   </Card>
 </CardGroup>
+
+## Off-Topic Protection: Allowed and Denied Topics
+
+Off-topic protection compares an incoming prompt's embedding against the topics you define, using cosine similarity — if the prompt's closest match falls below the similarity threshold, it's treated as off-topic and flagged or blocked before it reaches the model.
+
+Two independent topic lists exist, and you can configure either, both, or neither:
+
+- **Allowed Topics** — what this AI proxy is supposed to answer about. A prompt that falls below the threshold on every allowed topic is treated as off-topic.
+- **Denied Topics** — topics this AI proxy must never answer about, no matter how well the same prompt also matches an allowed topic. Useful for carving an exception out of an otherwise broad allowed scope — for example, denying "legal advice" on a banking assistant that allows broad financial questions.
+
+:::warning Denied Always Wins
+When a prompt matches both an allowed topic and a denied topic, the denied match takes precedence — the request is flagged or blocked as denied even though it would otherwise have passed the allowed-topics check. If a request is being blocked unexpectedly, check the denied list first.
+:::
+
+Denied topics have their own similarity threshold and action, each optional and falling back to the corresponding allowed-topics setting when left blank:
+
+| Denied-topic setting | Falls back to |
+|-----------------------|----------------|
+| Denied Similarity Threshold | Similarity Threshold |
+| Denied Topic Action | Action |
+
+Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
 
 ## Adding a Guardrail
 
