@@ -40,9 +40,50 @@ Her bağlantı, LLM'nin bulutta mı yoksa şirket içinde mi çalışıp çalı�
 
 Sağlayıcı ne olursa olsun (OpenAI-uyumlu veya native format), Apinizer AI Gateway yanıtları her zaman **OpenAI canonical formatına** normalize eder. Bu sayede istemci tarafında sağlayıcıya özel bir ayrıştırma mantığı yazmanıza gerek kalmaz — aynı istemci kodu OpenAI, Anthropic, Vertex veya Bedrock bağlantısı arkasında da değişmeden çalışır.
 
-:::note Bedrock Akış Yanıtları
-AWS Bedrock bağlantılarında akış (streaming) yanıtlar, sağlayıcının kendi ikili (binary) olay akışı yerine JSON tabanlı bir temsil üzerinden iletilir. Bu, chunk başına iletim davranışını işlevsel olarak etkilemez.
+:::warning AWS Bedrock sohbet akışı (streaming) henüz desteklenmiyor
+Bedrock'un `InvokeModelWithResponseStream` API'si, worker'ın ayrıştırmadığı ikili (binary) bir olay-akışı (event-stream) çerçevelemesi kullanır. Bedrock bağlantısına yönlendirilen bir akış (streaming) sohbet isteği, AWS'ye hiçbir çağrı yapılmadan bir yapılandırma hatasıyla reddedilir — hiçbir şey denenmez, hiçbir maliyet oluşmaz. Bu bacak için `streaming: false` ayarlayın veya akış trafiğini başka bir sağlayıcı üzerinden yönlendirin. Akışsız (unary) Bedrock sohbet istekleri bundan etkilenmez.
 :::
+
+## Sağlayıcı Uyumluluk Matrisi
+
+Her bağlantı türü her uç noktayı desteklemez ve her sağlayıcının isteği/yanıtı kendi ham (native) formatına tam çevrilmez — bir kısmı, sağlayıcı zaten (ya da beklenildiği üzere) OpenAI formatını konuştuğu için isteği olduğu gibi iletir (pass-through); daha küçük bir grup ise gerçekten çevrilir.
+
+| Sağlayıcı | Chat completions | Sohbet akışı (streaming) | Embedding | Ses / görsel (STT, TTS, görsel üretim) |
+|---|---|---|---|---|
+| OpenAI, Azure OpenAI, Özel OpenAI-Uyumlu, vLLM, Ollama | ✅ | ✅ | ✅ | ✅ |
+| Mistral, Zhipu (GLM), Qwen (DashScope) | ✅ | ✅ | ✅ | ❌ |
+| DeepSeek, Groq, Moonshot (Kimi) | ✅ | ✅ | ❌ (yalnız sohbet — birinci-taraf embedding uç noktası yok) | ❌ |
+| Cohere | ✅ | ✅ | ❌ (henüz yok — özel bir adapter gerekir) | ❌ |
+| Voyage AI | — (yalnız embedding sağlayıcısı) | — | ✅ | ❌ |
+| Anthropic | ✅ (native çeviri) | ✅ (native çeviri) | ❌ (embedding uç noktası hiç yok — bunun yerine bir Voyage AI bağlantısı kurun, aşağıdaki Hazır Şablonlar bölümüne bakın) | ❌ |
+| Google Vertex AI (Gemini) | ✅ (native çeviri) | ✅ (native çeviri, SSE) | ❌ (henüz yok) | ❌ |
+| AWS Bedrock — Anthropic modelleri | ✅ (native çeviri) | ❌ (yukarıdaki uyarıya bakın) | ❌ (henüz yok) | ❌ |
+| AWS Bedrock — Titan, Llama, Mistral, Nova | ✅ (OpenAI biçimli gövde olduğu gibi iletilir; bu aileler için native çeviri henüz yok) | ❌ | ❌ (henüz yok) | ❌ |
+
+Embedding veya Ses/Görsel sütununda ❌ görmek, Apinizer'ın isteği sağlayıcıya ulaşmadan reddettiği anlamına gelir — hiçbir şey denenmez, hiçbir maliyet oluşmaz.
+
+### Native Çeviri ile Pass-Through Arasındaki Fark
+
+Yalnızca üç bağlantı türü isteği/yanıtı gerçekten kendi şemasına çevirir: **Anthropic**, **Google Vertex AI (Gemini)** ve — yönlendirilen model bir Anthropic-on-Bedrock modeliyse — **AWS Bedrock** (model kimliği `anthropic.` içeren her model; `us.anthropic.*` gibi bölgeler-arası inference profilleri dahil). Diğer tüm sağlayıcılar — Bedrock'un Titan/Llama/Mistral/Nova modelleri ve Cohere dahil — istemcinin OpenAI biçimli isteğini değiştirmeden iletir.
+
+Native çevirisi yapılan bu üç sağlayıcı için bazı OpenAI istek alanlarının karşılığı yoktur ve sessizce düşürülür (worker'da `WARN` olarak loglanır, istemciye hiçbir zaman yansımaz):
+
+| OpenAI alanı | Anthropic | Google Vertex AI (Gemini) |
+|---|---|---|
+| `model` | gövdede kalır | gövdede yok — URL path'inde taşınır |
+| System / developer mesajı | üst-seviye `system` alanına eşlenir | `systemInstruction`'a eşlenir |
+| `max_tokens` / `max_completion_tokens` | **zorunlu** — istemci göndermezse model kataloğunun maksimum çıktı değerine, o da yoksa `4096`'ya düşer | isteğe bağlı — yalnızca istemci gönderdiyse ayarlanır |
+| `tools[].function` | `tools[].input_schema`'ya eşlenir | `functionDeclarations`'a eşlenir |
+| `tool_choice: "none"` | düşürülür (araç tanımları da düşürülür) | `mode: "NONE"`'a eşlenir (araç tanımları korunur) |
+| `temperature` | istemci 1.0'dan yüksek gönderirse 1.0'a sabitlenir (clamp) | olduğu gibi iletilir (0–2 aralığı) |
+| `stop` | `stop_sequences`'a eşlenir | `stopSequences`'a eşlenir (yalnız ilk 5 eleman) |
+| `user` | `metadata.user_id`'ye eşlenir | düşürülür |
+| `n`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `response_format`, `parallel_tool_calls` | düşürülür | düşürülür |
+| Metin-dışı mesaj içeriği (görsel, ses, …) | düşürülür — bugün yalnız metin destekleniyor | düşürülür — bugün yalnız metin destekleniyor |
+
+Kullanım (usage) muhasebesi de aileye göre farklıdır: Anthropic'in istemciye yansıyan `prompt_tokens`'ı, önbelleklenmiş token'ları taze girdi token'larının üstüne **ekler**; Gemini'nin `promptTokenCount`'u ise önbelleklenmiş token'ları zaten **içinde barındırır**. Apinizer bu farkı dahili olarak muhasebeleştirir, böylece hangi ailenin isteği karşıladığından bağımsız olarak maliyet takibi ve kotalar doğru kalır — bkz. [Raporlar ve Analitik](/tr/ai-gateway/raporlar) ve [Token Kotaları](/tr/ai-gateway/token-kotalari).
+
+Bir proxy farklı aileler arasında failover yaptığında — örneğin Anthropic birincil + OpenAI veya Gemini yedek — her bacağın isteği her zaman orijinal istemci isteğinizden yeniden kurulur; bir önceki bacağın zaten çevrilmiş native gövdesinden değil. Bkz. [Failover Zinciri](/tr/ai-gateway/yonlendirme-failover#failover-zinciri).
 
 ## Hazır Şablonlar
 

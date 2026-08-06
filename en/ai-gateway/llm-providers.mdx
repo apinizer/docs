@@ -53,9 +53,50 @@ All API keys and secrets are **encrypted at rest** and **never logged**. Connect
 
 Clients always talk to Apinizer in the OpenAI format — there's no separate Anthropic Messages or Gemini inbound format to integrate against. Apinizer translates each outbound request into the target provider's native format and normalizes the response (including streamed chunks) back to the OpenAI canonical format before it reaches your client.
 
-:::note
-For AWS Bedrock, streaming responses currently go through a JSON-based compatibility layer rather than the provider's native binary event stream. This doesn't change the response format your client receives or how usage is tracked.
+:::warning AWS Bedrock chat streaming isn't supported yet
+Bedrock's `InvokeModelWithResponseStream` API uses a binary event-stream framing the worker doesn't parse. A streaming chat request routed to a Bedrock connection is rejected with a configuration error before any call reaches AWS — nothing is attempted and nothing is billed. Set `streaming: false` for that leg, or route streaming traffic through a different provider. Non-streaming (unary) Bedrock chat requests are unaffected.
 :::
+
+## Provider Capability Matrix
+
+Not every connection type supports every endpoint, and not every provider gets a full request/response rewrite into its own wire format — some are forwarded in OpenAI's format as-is because the provider already speaks it (or is expected to); a smaller set is actively translated.
+
+| Provider | Chat completions | Chat streaming | Embeddings | Audio / image (STT, TTS, image generation) |
+|---|---|---|---|---|
+| OpenAI, Azure OpenAI, Custom OpenAI-Compatible, vLLM, Ollama | ✅ | ✅ | ✅ | ✅ |
+| Mistral, Zhipu (GLM), Qwen (DashScope) | ✅ | ✅ | ✅ | ❌ |
+| DeepSeek, Groq, Moonshot (Kimi) | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | ❌ |
+| Cohere | ✅ | ✅ | ❌ (not yet — needs a dedicated adapter) | ❌ |
+| Voyage AI | — (embedding-only provider) | — | ✅ | ❌ |
+| Anthropic | ✅ (native translation) | ✅ (native translation) | ❌ (no embeddings endpoint at all — connect a Voyage AI provider instead, see Built-in Templates below) | ❌ |
+| Google Vertex AI (Gemini) | ✅ (native translation) | ✅ (native translation, SSE) | ❌ (not yet) | ❌ |
+| AWS Bedrock — Anthropic models | ✅ (native translation) | ❌ (see warning above) | ❌ (not yet) | ❌ |
+| AWS Bedrock — Titan, Llama, Mistral, Nova | ✅ (forwarded as an OpenAI-shaped body; native translation isn't implemented for these families yet) | ❌ | ❌ (not yet) | ❌ |
+
+A ❌ on Embeddings or Audio/Image means Apinizer rejects the request before contacting the provider — nothing is attempted, and nothing is billed.
+
+### Native Translation vs. Pass-Through
+
+Only three connection types get an actual request/response rewrite into their own schema: **Anthropic**, **Google Vertex AI (Gemini)**, and **AWS Bedrock when the routed model is an Anthropic-on-Bedrock model** (any model ID containing `anthropic.`, including cross-region inference profiles like `us.anthropic.*`). Every other provider — including Bedrock's Titan/Llama/Mistral/Nova models and Cohere — receives the client's OpenAI-shaped request forwarded unchanged.
+
+For the three natively-translated providers, a handful of OpenAI request fields have no equivalent and are silently dropped (logged as a `WARN` on the worker, never surfaced to the client):
+
+| OpenAI field | Anthropic | Google Vertex AI (Gemini) |
+|---|---|---|
+| `model` | kept in the body | not in the body — carried in the URL path |
+| System / developer message | mapped to top-level `system` | mapped to `systemInstruction` |
+| `max_tokens` / `max_completion_tokens` | **required** — falls back to the model catalog's max output, then `4096`, if the client omits it | optional — set only when the client provides it |
+| `tools[].function` | mapped to `tools[].input_schema` | mapped to `functionDeclarations` |
+| `tool_choice: "none"` | dropped (tool definitions are dropped too) | mapped to `mode: "NONE"` (tool definitions are kept) |
+| `temperature` | clamped to `1.0` if the client sends higher | forwarded as-is (0–2 range) |
+| `stop` | mapped to `stop_sequences` | mapped to `stopSequences` (only the first 5 entries) |
+| `user` | mapped to `metadata.user_id` | dropped |
+| `n`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `response_format`, `parallel_tool_calls` | dropped | dropped |
+| Non-text message content (image, audio, …) | dropped — text-only today | dropped — text-only today |
+
+Usage accounting also differs by family: Anthropic's client-facing `prompt_tokens` **adds** cached tokens on top of fresh input tokens, while Gemini's `promptTokenCount` **already includes** them. Apinizer accounts for this difference internally, so cost tracking and quotas stay correct no matter which family served the request — see [Reports and Analytics](/en/ai-gateway/reports) and [Token Quotas](/en/ai-gateway/token-quotas).
+
+When a proxy fails over between providers in different families — for example, an Anthropic primary with an OpenAI or Gemini backup — each leg's request is always rebuilt from your original client request, never from a previous leg's already-translated native body. See [Failover Chains](/en/ai-gateway/routing-and-failover#failover-chains).
 
 ## Built-in Templates
 
