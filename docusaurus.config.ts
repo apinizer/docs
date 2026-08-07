@@ -37,8 +37,10 @@ const config: Config = {
       '@easyops-cn/docusaurus-search-local',
       {
         hashed: true,
-        // English-only language tables to keep the per-locale shard small.
-        language: ['en'],
+        // en+tr: lunr.tr trimmer/stemmer'ı Türkçe ek-formlarını birleştirerek TR shard'ını
+        // Cloudflare Pages'in 25 MiB tek-asset limitinin altında tutar (halil kararı 2026-08-07;
+        // kalıcı çözüm Pagefind'a geçiş — o merge olunca bu plugin bloğu tamamen kalkar).
+        language: ['en', 'tr'],
         indexDocs: true,
         indexPages: false,
         indexBlog: false,
