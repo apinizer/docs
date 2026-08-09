@@ -1,6 +1,6 @@
 ---
 title: "Update A2A Routing"
-description: "Replaces the A2aRouting configuration of an A2A-type API proxy — routing mode (AGENT_EXPOSE / PASSTHROUGH), agent card, backend A2A connection references (name-based), skill filtering, governance (identity ACL, call quota) and token-forward settings."
+description: "Replaces the A2aRouting configuration of an A2A-type API proxy — routing mode (AGENT_EXPOSE / PASSTHROUGH), agent card, one or more inline backend A2A agents, skill filtering, governance (identity ACL, call quota) and token-forward settings."
 ---
 
 ## Endpoint
@@ -10,7 +10,7 @@ PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/a2a-routing/
 ```
 
 :::warning
-This endpoint returns **HTTP 400** for API proxies whose `type` is not `A2A` — `a2aRouting` can only be set on A2A proxies. There is no dedicated APIops create endpoint for A2A proxies: create one through the generic API proxy creation flow with `type=A2A`, then configure it here.
+This endpoint returns **HTTP 400** for API proxies whose `type` is not `A2A` — `a2aRouting` can only be set on A2A proxies. To create a new A2A proxy in one call, use [Create A2A API Proxy](/api-reference/api-proxies/crud/create-a2a-api-proxy) — this endpoint only updates the routing config of a proxy that already exists.
 :::
 
 ## Authentication
@@ -73,12 +73,20 @@ The body is the full `A2aRouting` object — it **replaces** the proxy's current
 `AGENT_EXPOSE` additionally requires the proxy's `aiRouting` to be configured (the exposed agent is served by an LLM provider through AI routing) — enforced by validation.
 :::
 
-#### Full JSON Body Example (PASSTHROUGH, name-based)
+#### Full JSON Body Example (PASSTHROUGH, inline backend agent)
 
 ```json
 {
   "routingMode": "PASSTHROUGH",
-  "backendA2aRefName": "partner-agent",
+  "backendServers": [
+    {
+      "name": "partner-agent",
+      "endpoint": "https://agents.partner.example.com/a2a",
+      "authScheme": "BEARER",
+      "bearerToken": "raw-token-in-transit-only",
+      "driftPolicy": "WARN_ONLY"
+    }
+  ],
   "allowedSkillNames": ["translate", "summarize"],
   "identityAcl": [],
   "callQuota": null
@@ -89,12 +97,13 @@ The body is the full `A2aRouting` object — it **replaces** the proxy's current
 
 | Field | Type | Description |
 |-------|------|-------------|
-| routingMode | string | `AGENT_EXPOSE` (expose an Apinizer-hosted agent backed by `aiRouting`) or `PASSTHROUGH` (proxy an external backend A2A agent) |
+| routingMode | string | `AGENT_EXPOSE` (expose an Apinizer-hosted agent backed by `aiRouting`) or `PASSTHROUGH` (proxy one or more external backend A2A agents) |
 | protocolVersion | string | A2A protocol version |
 | agentCard | object | **AGENT_EXPOSE only.** AgentCard settings served at `/.well-known/agent-card.json` — `descriptionOverride`, `inputModes`, `outputModes`, `skills[]` (`id`, `name`, `description`, `tags`); the agent name comes from the proxy itself |
 | pushSettings | object | Push-notification (task update) settings |
-| backendA2aRef / backendA2aRefName | string | **PASSTHROUGH only.** Backend A2A connection reference. The `...Name` sidecar is resolved to the connection id inside the project; when the sidecar is blank the raw id is preserved |
-| backendA2aRefList / backendA2aRefNameList | array | **PASSTHROUGH multi-target aggregation.** Index-aligned id/name lists — on a size mismatch the whole list is left untouched (no partial resolution) |
+| backendServers | array | **PASSTHROUGH only, current field.** Inline backend agent definitions. Each entry is a full connection object: `name`, `endpoint`, authentication (`authScheme`/`bearerToken`, or OAuth2 client-credentials fields, or mTLS settings), `driftPolicy` (`WARN_ONLY` \| `FAIL_CLOSED`), `allowPrivateNetworkEgress`. Server-managed fields (`id`, `discoveredSkills`, health/drift state) are always read from the agent's own persisted state — a client-supplied value for any of them is ignored. Multiple entries aggregate behind one endpoint for discovery only (see [Multi-Target Aggregation](/en/ai-gateway/a2a-gateway#multi-target-aggregation)) — sending an actual task requires exactly one configured agent |
+| backendA2aRef / backendA2aRefName | string | **Deprecated legacy fallback.** Only consulted when `backendServers` is empty. `backendA2aRefName` resolves by name to a `ConnectionConfigA2a` id via the read-only compatibility surface still serving existing connections created before this release; it cannot create a new one — new integrations should use `backendServers` instead |
+| backendA2aRefList / backendA2aRefNameList | array | **Deprecated legacy fallback**, index-aligned id/name lists, same PASSTHROUGH-aggregation role `backendServers` now covers. Only consulted when `backendServers` is empty; on a size mismatch the whole list is left untouched (no partial resolution) |
 | allowedSkillNames | array | PASSTHROUGH skill filter — only listed backend skills are exposed |
 | identityAcl | array | Per-principal allow rules (`principalType`: `CREDENTIAL` \| `ROLE` \| `ORGANIZATION`) |
 | callQuota | object | Call quota config (scoped counters) |
@@ -103,6 +112,8 @@ The body is the full `A2aRouting` object — it **replaces** the proxy's current
 ## Behavior
 
 - The configuration is validated (`McpA2aRoutingValidator`) before save; invalid mode/field combinations (including `AGENT_EXPOSE` without `aiRouting`) return HTTP 400.
+- **Updating an existing `backendServers` entry**: to update rather than replace an agent, send back the `id` from a prior read unchanged — a matching `id` is treated as an update and its server-managed fields (discovered skills, health, drift) are preserved. An entry whose `id` is blank, or doesn't match anything currently persisted, is always treated as brand-new: a fresh id is minted server-side.
+- **Secret fields on `backendServers` entries** (`bearerToken`, `clientSecret`) follow the platform's standard blank-preserves-existing convention: omit the field to keep the currently stored secret, send a non-blank value to replace it.
 - Every environment the proxy is currently deployed to is marked **redeploy required** — redeploy to activate the new configuration.
 
 ## Response
@@ -127,6 +138,8 @@ The body is the full `A2aRouting` object — it **replaces** the proxy's current
 
 ## Related Documentation
 
+- [Create A2A API Proxy](/api-reference/api-proxies/crud/create-a2a-api-proxy)
 - [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing)
-- [A2A Outbound Connections](/api-reference/a2a-connections)
+- [Discover A2A Skills for a Policy](/api-reference/policies/crud/discover-a2a-policy-skills)
 - [API Proxies](/api-reference/api-proxies)
+- [A2A Gateway](/en/ai-gateway/a2a-gateway) — concepts, inline agent model, governance

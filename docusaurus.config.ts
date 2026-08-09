@@ -115,6 +115,26 @@ const config: Config = {
           {from: '/tr/upgrade/linux-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
           {from: '/en/upgrade/upgrading-on-docker', to: '/en/upgrade/apinizer-version-upgrade'},
           {from: '/en/upgrade/upgrading-on-linux', to: '/en/upgrade/apinizer-version-upgrade'},
+          // MCP/A2A outbound connections retired as a standalone resource — servers/agents are now
+          // configured inline (Passthrough proxy routing, or the owning policy). Point old API
+          // Reference URLs at the closest living equivalent instead of a dead link.
+          {from: '/api-reference/mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/list-mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/get-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/create-mcp-connection', to: '/api-reference/api-proxies/crud/create-mcp-api-proxy'},
+          {from: '/api-reference/mcp-connections/update-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/delete-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/test-mcp-connection', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/mcp-connections/parse-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/mcp-connections/list-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/list-a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/get-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/create-a2a-connection', to: '/api-reference/api-proxies/crud/create-a2a-api-proxy'},
+          {from: '/api-reference/a2a-connections/update-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
         ],
         createRedirects(existingPath) {
           if (existingPath === '/tr') {

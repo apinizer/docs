@@ -1,6 +1,6 @@
 ---
 title: "Update MCP Routing"
-description: "Replaces the McpRouting configuration of an MCP-type API proxy — routing mode (TOOL_EXPOSE / PASSTHROUGH), exposed tools, backend MCP connection references (name-based), governance (identity ACL, argument constraints, call quota) and token-forward settings."
+description: "Replaces the McpRouting configuration of an MCP-type API proxy — routing mode (TOOL_EXPOSE / PASSTHROUGH), exposed tools, one or more inline backend MCP servers, governance (identity ACL, argument constraints, call quota) and token-forward settings."
 ---
 
 ## Endpoint
@@ -10,7 +10,7 @@ PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/mcp-routing/
 ```
 
 :::warning
-This endpoint returns **HTTP 400** for API proxies whose `type` is not `MCP` — `mcpRouting` can only be set on MCP proxies. There is no dedicated APIops create endpoint for MCP proxies: create one through the generic API proxy creation flow with `type=MCP`, then configure it here.
+This endpoint returns **HTTP 400** for API proxies whose `type` is not `MCP` — `mcpRouting` can only be set on MCP proxies. To create a new MCP proxy in one call, use [Create MCP API Proxy](/api-reference/api-proxies/crud/create-mcp-api-proxy) — this endpoint only updates the routing config of a proxy that already exists.
 :::
 
 ## Authentication
@@ -69,12 +69,21 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 }
 ```
 
-#### Full JSON Body Example (PASSTHROUGH, name-based)
+#### Full JSON Body Example (PASSTHROUGH, inline backend server)
 
 ```json
 {
   "routingMode": "PASSTHROUGH",
-  "backendMcpRefName": "internal-mcp-server",
+  "backendServers": [
+    {
+      "name": "internal-mcp-server",
+      "endpoint": "https://mcp.example.com/mcp",
+      "transport": "HTTP_SSE",
+      "authScheme": "BEARER",
+      "bearerToken": "raw-token-in-transit-only",
+      "driftPolicy": "WARN_ONLY"
+    }
+  ],
   "allowedToolNames": ["search", "fetch_document"],
   "toolOutputFilter": null,
   "identityAcl": [],
@@ -86,11 +95,12 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 
 | Field | Type | Description |
 |-------|------|-------------|
-| routingMode | string | `TOOL_EXPOSE` (expose selected Apinizer proxies as MCP tools) or `PASSTHROUGH` (proxy an external backend MCP server) |
+| routingMode | string | `TOOL_EXPOSE` (expose selected Apinizer proxies as MCP tools) or `PASSTHROUGH` (proxy one or more external backend MCP servers) |
 | protocolVersion | string | MCP protocol version: `2024-11-05`, `2025-06-18` (default) or `2026-07-28` |
 | exposedTools | array | **TOOL_EXPOSE only.** Tool definitions — `proxyId` (target ApiProxy id), `toolName`, `toolDescription`, optional `overrideSchema`, `apiMethodHttpMethod`/`apiMethodPath` (pin to a specific method), `requiredScopes`, per-tool `argumentConstraints` |
-| backendMcpRef / backendMcpRefName | string | **PASSTHROUGH only.** Backend MCP connection reference. The `...Name` sidecar is resolved to the connection id inside the project; when the sidecar is blank the raw id is preserved |
-| backendMcpRefList / backendMcpRefNameList | array | **PASSTHROUGH multi-target aggregation.** Index-aligned id/name lists — on a size mismatch the whole list is left untouched (no partial resolution) |
+| backendServers | array | **PASSTHROUGH only, current field.** Inline MCP server definitions — up to 10. Each entry is a full connection object: `name`, `endpoint`, `transport` (`HTTP_SSE`), `authScheme` (`BEARER` \| `OAUTH2_CLIENT_CREDENTIALS` \| `MTLS` \| `NONE`) plus the matching credential fields (`bearerToken`, or `credentialRef`/`tokenEndpoint`/`clientId`/`clientSecret`/`scope`, or `mTLSSettings`), `driftPolicy` (`WARN_ONLY` \| `FAIL_CLOSED`), `allowPrivateNetworkEgress`. Server-managed fields (`id`, `discoveredTools`, `toolsParsedAt`, `healthStatus`, `lastHealthCheckAt`, `pinnedCatalogHash`, `driftDetected`) are always read from the server's own persisted state — a client-supplied value for any of them is ignored, never trusted. Multiple entries aggregate behind one endpoint (see [Multi-Target Aggregation](/en/ai-gateway/mcp-gateway#multi-target-aggregation)). |
+| backendMcpRef / backendMcpRefName | string | **Deprecated legacy fallback.** Only consulted when `backendServers` is empty. `backendMcpRefName` resolves by name to a `ConnectionConfigMcp` id via the read-only compatibility surface still serving existing connections created before this release; it cannot create a new one — new integrations should use `backendServers` instead |
+| backendMcpRefList / backendMcpRefNameList | array | **Deprecated legacy fallback**, index-aligned id/name lists, same PASSTHROUGH-aggregation role `backendServers` now covers. Only consulted when `backendServers` is empty; on a size mismatch the whole list is left untouched (no partial resolution) |
 | allowedToolNames | array | PASSTHROUGH tool filter — only listed backend tools are exposed |
 | toolOutputFilter | object | PASSTHROUGH tool output filtering rules |
 | identityAcl | array | Per-principal allow rules (`principalType`: `CREDENTIAL` \| `ROLE` \| `ORGANIZATION`). Enforced on the PASSTHROUGH dispatch path |
@@ -101,6 +111,8 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 ## Behavior
 
 - The configuration is validated (`McpA2aRoutingValidator`) before save; invalid mode/field combinations return HTTP 400.
+- **Updating an existing `backendServers` entry**: to update rather than replace a server, send back the `id` from a prior read (`GET`/`getApiProxy`) unchanged — a matching `id` is treated as an update and its server-managed fields (discovered catalog, health, drift) are preserved. An entry whose `id` is blank, or doesn't match anything currently persisted, is always treated as brand-new: a fresh id is minted server-side and any client-supplied `id` is discarded.
+- **Secret fields on `backendServers` entries** (`bearerToken`, `clientSecret`) follow the platform's standard blank-preserves-existing convention: omit the field (or send it unset) to keep the currently stored secret, send a non-blank value to replace it. There is no separate boolean presence flag on this write path — unlike a read, which never returns the secret's plaintext.
 - Every environment the proxy is currently deployed to is marked **redeploy required** — redeploy to activate the new configuration.
 
 ## Response
@@ -119,12 +131,14 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Blank `apiProxyName`, empty body, proxy not found, proxy is not an MCP proxy, or validation failure |
+| 400 | Blank `apiProxyName`, empty body, proxy not found, proxy is not an MCP proxy, `backendServers` exceeds 10 entries, or validation failure |
 | 401 | Invalid or missing token |
 | 500 | Unexpected server error |
 
 ## Related Documentation
 
+- [Create MCP API Proxy](/api-reference/api-proxies/crud/create-mcp-api-proxy)
 - [Update A2A Routing](/api-reference/api-proxies/settings/update-a2a-routing)
-- [MCP Outbound Connections](/api-reference/mcp-connections)
+- [Discover MCP Tools for a Policy](/api-reference/policies/crud/discover-mcp-policy-tools)
 - [API Proxies](/api-reference/api-proxies)
+- [MCP Gateway](/en/ai-gateway/mcp-gateway) — concepts, inline server model, governance
