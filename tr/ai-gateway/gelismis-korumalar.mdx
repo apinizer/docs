@@ -1,6 +1,6 @@
 ---
 title: "Gelişmiş Korumalar"
-description: "AI Gateway'e gelen ve giden içeriği kişisel veri sızıntısına, istem enjeksiyonuna, sır sızıntısına, konu dışı kullanıma, tekrar döngülerine, aşırı boyutlu isteklere ve yapısal enjeksiyona karşı koruyabilir; her koruma için satır içi engelleme, eşzamansız değerlendirme veya yalnız-gözlem modunu seçebilirsiniz."
+description: "AI Gateway'e gelen ve giden içeriği kişisel veri sızıntısına, istem enjeksiyonuna, sır sızıntısına, konu dışı kullanıma, tekrar döngülerine, aşırı boyutlu isteklere ve yapısal enjeksiyona karşı koruyabilir; her koruma için satır içi engelleme, eşzamansız değerlendirme veya yalnız-gözlem modunu seçebilir, İstem Koruması ve Konu-Dışı Koruması'nda ayrıca bir dış LLM'i hakem olarak devreye alabilirsiniz."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -186,6 +186,112 @@ Her iki liste de boşsa (ne izin verilen ne yasaklı konu tanımlanmışsa) koru
 Konu karşılaştırması için kullanılan embedding sağlayıcısına ulaşılamazsa varsayılan davranış **fail-closed**'dır — istek reddedilir, sağlayıcı toparlanana kadar geçirilmez. Bu davranış izin verilen ve yasaklı yön için **aynıdır**: doğrulanamayan bir istek, yasaklı bir konuya da uyuyor olabileceği için sessizce geçirilmez.
 :::
 
+## Dış Sağlayıcı Guardrail
+
+İstem Koruması ve Konu-Dışı Koruması, yerleşik (regex/embedding tabanlı) değerlendirmenin yanında **dış bir LLM'i hakem olarak da** kullanabilir (external provider). Bu genişletme yalnız bu iki korumaya özgüdür — PII Maskeleme, DLP, Tekrar-Fırtınası, Aşırı Boyut ve Bağlam Bütünlüğü Korumaları dış sağlayıcı motoru taşımaz.
+
+### Motor Seçimi
+
+Her iki politikada da bir dış sağlayıcı motoru seçilebilir:
+
+| Motor | Davranış |
+|-------|----------|
+| **Yerleşik** — varsayılan | Bugünkü davranış; yalnızca regex/embedding tabanlı değerlendirme çalışır, dış çağrı yapılmaz |
+| **Yerleşik + Dış Sağlayıcı** | İkisi de çalışır; yerleşik veya dış sağlayıcıdan **herhangi biri** güvensiz/uygunsuz sonucu verirse aksiyon uygulanır. Yerleşik değerlendirme engellerse dış çağrı hiç yapılmaz (kısa devre) — Yalnız-Gözlem modu bu kuralın dışındadır, bkz. aşağı |
+| **Yalnız Dış Sağlayıcı** | Yalnızca dış sağlayıcı değerlendirilir; regex/embedding tanımları dolu olsa bile yok sayılır |
+
+Dış çağrı **hata verir veya zaman aşımına uğrarsa** ne olacağı ayrı bir ayarla belirlenir — varsayılan **Kapalı-Güvenli**: istek engellenir. Bu bilinçli bir tercihtir — yanlış yapılandırılmış bir dış sağlayıcının korumayı sessizce devre dışı bırakmasındansa (fail-open sessizliği), yanlış konfigürasyonun **gürültülü** biçimde bloklaması tercih edilmiştir. Açık-Güvenli seçilirse istek devam eder, ama bu her zaman görünür bir uyarı ve işaretlemeyle birlikte olur — sessiz açık-geçiş yoktur.
+
+:::info
+Dış çağrı hiç yapılamayacak bir konfigürasyon tutarsızlığı (dış sağlayıcı seçili ama adaptör tanımsız veya LLM sağlayıcı referansı çözülemiyor) yukarıdaki hata/zaman-aşımı davranışından **ayrıdır**: bu bir çalışma-zamanı hatası değil bir kayıt/dağıtım hatasıdır — motor otomatik olarak Yerleşik'e düşer ve durum görünür biçimde işaretlenir/loglanır (sessiz geçiş yasak).
+:::
+
+Değerlendirme aşağıdaki [Çalışma Modları](#çalışma-modları)ndan biriyle yapılır:
+
+- **Satır İçi** — dış çağrı istek yoluna eklenir; sonuç beklenir. **Bu, isteğin p95 gecikmesini doğrudan artırır** — dış hakem modelinin kendi yanıt süresi kadar. Düşük gecikme kritikse Eşzamansız modu tercih edin.
+- **Eşzamansız** — yapılandırılabilir bir üst bekleme süresi içinde sonuç beklenir; süre aşılırsa yukarıdaki hata/zaman-aşımı kararı uygulanır.
+- **Yalnız-Gözlem** — dış sağlayıcı çağrılır ama sonuç **karara asla katılmaz**; yalnızca loglanır ve bir Prometheus uyum (agreement) metriğine yazılır. Yeni bir dış sağlayıcıyı üretime almadan önce yerleşik değerlendirmeyle ne kadar örtüştüğünü ölçmek (kalibrasyon) ve kademeli geçiş için kullanılır.
+
+### llm-judge Adaptörü
+
+Bugün desteklenen tek dış değerlendirici tipi **llm-judge**'dır — mevcut bir [LLM Provider](/tr/ai-gateway/llm-saglayicilari) tanımına referans verir. Yeni bir bağlantı tipi açılmaz; hâlihazırda tanımlı herhangi bir LLM sağlayıcısı hakem olarak kullanılabilir. Provider tipi aşağıdaki OpenAI-uyumlu liste ile sınırlıdır:
+
+`OpenAI`, `Azure OpenAI`, `vLLM`, `Ollama`, `Custom OpenAI-Compatible`, `DeepSeek`, `Groq`, `Moonshot`, `Mistral`, `Zhipu`, `Qwen (DashScope)`
+
+Bu listenin dışındaki bir provider tipi (örn. Anthropic, Cohere, Bedrock, Vertex — farklı bir kablo protokolü konuşur) hakem olarak seçilemez.
+
+Adaptörün kendi ayarları:
+
+| Ayar | Açıklama | Varsayılan |
+|------|----------|------------|
+| Hakem model adı | Değerlendirmeyi yapacak model kimliği (örn. `llama-guard3:1b`, `gpt-4o-mini`) | — (zorunlu) |
+| Yanıt bekleme süresi | Hakem çağrısının HTTP zaman aşımı | 2000 ms |
+| En fazla girdi karakteri | Hakeme gönderilecek metin bu uzunluğa kırpılır | 8000 karakter |
+| En fazla çıktı token'ı | Hakemin yanıtı için ayrılan token bütçesi | 64 |
+| JSON modu | Etkinse hakemden yapılandırılmış (safe/flagged alanlı) bir yanıt istenir; kapalıysa düz metin `safe`/`unsafe` satırı beklenir | Kapalı |
+
+### İki Değerlendirme Modu
+
+Hakem prompt'unun nasıl oluşturulacağı **tek bir alanla** belirlenir — değerlendirme şablonu boş mu, dolu mu:
+
+| Değerlendirme şablonu | Mod | Kullanım senaryosu |
+|---|---|---|
+| **Boş** | **NATIVE (doğrudan) geçiş** | Güvenlik için özel eğitilmiş bir model (örn. Llama Guard 3, ShieldGemma). Bu modeller taksonomi talimatını kendi sohbet şablonlarının içinde zaten taşır — üstüne ayrıca bir taksonomi metni eklemek modelin taksonomiyi *değerlendirilecek içerik* sanmasına ve sessizce yanlış bir karara (false-negative dahil) yol açabilir. Bu yüzden değerlendirme şablonu **bilinçli olarak boş bırakılır**. |
+| **Dolu** | **Şablon modu** | Genel amaçlı bir instruct model (örn. `gpt-4o-mini`) hakem olarak kullanılıyorsa, modele ne arayacağını anlatan bir taksonomi talimatı gerekir. Yapılandırma ekranındaki hazır şablon butonu S1-S13 güvenlik taksonomisini (şiddet, nefret söylemi, cinsel içerik, vb.) tek tıkla doldurur; kullanıcı metninin yerleştirileceği yer `<<<PROMPT>>>` yer tutucusuyla işaretlenir. |
+
+:::note
+NATIVE geçiş modunda hakeme gönderilen metin **olduğu gibi** iletilir; ekstra bir talimat sarmalanmaz. Guard-tuned olmayan bir modelle NATIVE modu kullanırsanız model taksonomiyi bilmez ve genel bir sohbet yanıtı üretir — NATIVE mod yalnız bu amaçla eğitilmiş modeller içindir.
+:::
+
+### Kendi Sunucunuzda Barındırma Örneği: Ollama ile Llama Guard 3
+
+<Steps>
+  <Step title="Modeli indirin">
+    Ollama çalıştıran sunucuda: `ollama pull llama-guard3`
+  </Step>
+  <Step title="LLM Provider tanımlayın">
+    [LLM Sağlayıcıları](/tr/ai-gateway/llm-saglayicilari) ekranında provider tipi **Ollama**, adres `http://<host>:11434/v1`, kimlik doğrulama **Yok** olacak şekilde yeni bir bağlantı ekleyin.
+  </Step>
+  <Step title="Politikayı yapılandırın">
+    İstem Koruması veya Konu-Dışı Koruması politikasında motoru **Yerleşik + Dış Sağlayıcı** veya **Yalnız Dış Sağlayıcı** seçin, dış değerlendirici olarak `llm-judge` adaptörünü ekleyin, yukarıda tanımladığınız provider'a referans verin ve **değerlendirme şablonunu boş bırakın** (bu model için doğru mod NATIVE geçiştir).
+  </Step>
+</Steps>
+
+Ollama'nın OpenAI-uyumlu `/v1/chat/completions` uç noktası, bu şekilde guard-tuned bir modelin kendi sohbet şablonunu otomatik uygular — bu davranış canlı bir testte doğrulanmıştır (`llama-guard3:1b` modeliyle, beklenen `safe`/`unsafe` biçiminde yanıt alınmıştır).
+
+vLLM üzerinde aynı yaklaşım (guard-tuned modeli vLLM'in OpenAI-uyumlu sunucusuyla servis edip elde edilen `/v1/chat/completions` uç noktasını LLM Provider olarak tanımlamak) vLLM'in kendi dokümantasyonundaki chat-template otomatik uygulama davranışına dayanır; bu adımı kendi vLLM kurulumunuzda ayrıca doğrulamanız önerilir.
+
+### Reasoning (Akıl Yürütme) Modelleri Hakem Olarak Kullanılırken
+
+:::warning
+qwen3 gibi "reasoning" modelleri hakem olarak seçildiğinde, modelin ürettiği akıl yürütme adımları da **en fazla çıktı token'ı** bütçesinden düşer. Bu bütçe düşük tutulursa (varsayılan 64), model asıl `safe`/`unsafe` yanıtına hiç ulaşamadan token bütçesi tükenir ve yanıt boş/eksik kalır — bu durumda değerlendirme başarısız sayılır ve yukarıdaki hata/zaman-aşımı kararı devreye girer.
+
+Bir reasoning modeli hakem olarak kullanmanız gerekiyorsa en fazla çıktı token'ını en az 1024'e çıkarın veya modelin akıl yürütme modunu kapatın. **Asıl önerilen yol**: mümkünse güvenlik için özel eğitilmiş (guard-tuned) bir model ile NATIVE geçiş modunu tercih etmektir — bu modeller kısa ve deterministik yanıt üretir, reasoning bütçesi sorunu hiç oluşmaz.
+:::
+
+### Güvenlik Notu
+
+Hakeme gönderilen metin **maskelenmemiş, ham** istem/yanıt içeriğidir. Zincirde PII Maskeleme politikası varsa, bu politikanın İstem Koruması / Konu-Dışı Koruması'ndan **önce mi sonra mı** çalıştığına dikkat edin — PII Maskeleme sonradan çalışıyorsa hakem hâlâ maskelenmemiş kişisel veriyi görür ve bu veri kullandığınız sağlayıcıya gönderilmiş olur.
+
+Hassas/gizli veri içeren trafikte, hakemi **kendi sunucunuzda veya kendi VPC'nizde** barındırmanız (self-hosted Ollama/vLLM) önerilir — dış bir buluta ham istem gönderilmesini tamamen ortadan kaldırır.
+
+### Konu-Dışı Koruması'ndaki Fark
+
+İstem Koruması'nda boş bir değerlendirme şablonu meşru ve desteklenen bir yapılandırmadır (NATIVE geçiş). **Konu-Dışı Koruması'nda ise dış sağlayıcı kullanılırken değerlendirme şablonu boş bırakılamaz** — bir güvenlik hakeminin ("bu içerik güvenli mi") verdiği yanıt, bir konu-uygunluk sorusunun ("bu istek izin verilen konu kapsamında mı") yanıtı değildir; boş şablonla genel bir güvenlik hakemi devreye girer ve yanıltıcı "konu-dışı" kararları üretebilir. Bu nedenle Konu-Dışı Koruması, dış sağlayıcı seçiliyken boş şablonu **kayıt sırasında reddeder**. Bu, iki koruma arasında bilinçli bir asimetridir.
+
+### Gözlemlenebilirlik
+
+Dış sağlayıcı çağrılarının sonucu (güvenli / güvensiz / zaman aşımı / hata) ve hangi sağlayıcının kaç kez tetiklendiği [Güvenlik ve Guardrail'ler raporunda](/tr/ai-gateway/raporlar) izlenebilir. Yalnız-Gözlem modundaki uyum oranı ise yalnız bir Prometheus metriğidir — bu oran için ayrı bir UI raporu yoktur; kalibrasyon/kademeli geçiş kararı sırasında Prometheus/Grafana üzerinden izlenmelidir.
+
+### APIops
+
+Dış sağlayıcı yapılandırması, politika JSON'unda `externalGuardrail` bloğu ile taşınır:
+
+- `externalGuardrail` bloğu gönderiliyorsa `"type": "llm-judge"` alanı **zorunludur** — eksik veya tanınmayan bir `type` ile gönderilen istek (boş bir `{}` blok dahil) `engine` değeri ne olursa olsun (Yerleşik dahil) reddedilir.
+- `engine` alanı `BUILTIN` ise `externalGuardrail` bloğunu **hiç göndermeyin** (alanı boş/null bırakın).
+- LLM sağlayıcı referansı **ada göre** (`llmProviderName`) taşınır — iç kimlik (ObjectId) APIops yüzeyine hiç çıkmaz, projeye özgü sağlayıcı adı yeterlidir.
+- `GET /api/ai-catalog/guardrail-defaults` uç noktası, hazır taksonomi şablonunun ve `<<<PROMPT>>>` yer tutucusunun güncel varsayılan değerlerini döner — UI'daki hazır şablon butonuyla aynı kaynağı kullanır.
+
 ## Tekrar-Fırtınası (Loop) Koruması
 
 Aynı isteğin kısa bir zaman penceresinde **tekrar tekrar** gönderilmesini tespit eder (örn. istemci tarafı hatalı bir yeniden deneme döngüsü veya kendi kendine tekrar üreten bir ajan zinciri):
@@ -249,6 +355,8 @@ Her koruma için üç değerlendirme modundan biri seçilebilir:
 :::note
 Çoğu koruma için varsayılan mod **satır içi**dir; Konu-Dışı Koruması varsayılan olarak **eşzamansız** çalışır. Her koruma için mod ayrı ayrı değiştirilebilir.
 :::
+
+[Dış Sağlayıcı Guardrail](#dış-sağlayıcı-guardrail) kullanan İstem Koruması ve Konu-Dışı Koruması'nda **Yalnız-Gözlem** modu özellikle bir dış sağlayıcıyı üretime almadan önce kalibrasyon ve kademeli geçiş amacıyla kullanılır. Bu mod, dış çağrının **hata verme/zaman aşımı** davranışını belirleyen ayrı bir ayardan (Kapalı-Güvenli / Açık-Güvenli) bağımsızdır — çalışma modu *ne zaman* değerlendirileceğini, hata davranışı ise dış çağrı *başarısız olduğunda* ne olacağını belirler.
 
 ## Merkezi Yönetim
 

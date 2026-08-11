@@ -1,6 +1,6 @@
 ---
 title: "Advanced Guardrails"
-description: "You can protect AI, MCP, and A2A traffic with masking for personal data and secrets, protection against prompt attacks, and controls against off-topic use and request loops — plus structural-injection and oversized-request protection on AI Gateways."
+description: "You can protect AI, MCP, and A2A traffic with masking for personal data and secrets, protection against prompt attacks, and controls against off-topic use and request loops — plus structural-injection and oversized-request protection on AI Gateways, and you can pair the prompt and off-topic checks with a second opinion from your own external LLM judge."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -13,13 +13,13 @@ import {Steps, Step} from '@site/src/components/Steps';
     Detects and masks personal data — such as Turkish national ID numbers, IBANs, and phone numbers — in both regular requests and streamed responses.
   </Card>
   <Card title="Prompt Protection" icon="shield-alert">
-    Detects jailbreak and injection attempts in incoming prompts before they reach the model.
+    Detects jailbreak and injection attempts in incoming prompts before they reach the model. Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
   </Card>
   <Card title="Data-Loss Protection (DLP)" icon="shield-check">
     Detects and masks secrets — such as API keys, certificates, and JWTs — that could otherwise leak through a request or response.
   </Card>
   <Card title="Off-Topic Protection" icon="compass">
-    Flags or blocks requests that fall outside the topics you define for a gateway, such as a support bot being used for unrelated chit-chat.
+    Flags or blocks requests that fall outside the topics you define for a gateway, such as a support bot being used for unrelated chit-chat. Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
   </Card>
   <Card title="Retry-Storm (Loop) Protection" icon="repeat">
     Detects the same request being sent repeatedly within a short time window, such as a client or agent stuck retrying.
@@ -177,6 +177,8 @@ The semantic cache offers the same three options, for the same reason — see [S
   </Card>
 </CardGroup>
 
+When an external provider is attached to Prompt Protection or Off-Topic Protection, Asynchronous mode's wait budget and Observe-Only mode's comparison behavior both extend to the external call as well — see [External Provider Guardrails](#external-provider-guardrails).
+
 ## Off-Topic Protection: Allowed and Denied Topics
 
 Off-topic protection compares an incoming prompt's embedding against the topics you define, using cosine similarity — if the prompt's closest match falls below the similarity threshold, it's treated as off-topic and flagged or blocked before the request is forwarded (to the model on an AI Gateway, or to the tool/agent on an MCP or A2A Gateway).
@@ -198,6 +200,103 @@ Denied topics have their own similarity threshold and action, each optional and 
 | Denied Topic Action | Action |
 
 Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
+
+## External Provider Guardrails
+
+Two of the seven guardrails — **Prompt Protection** and **Off-Topic Protection** — can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. The other five guardrails (Personal Data Masking, Data-Loss Protection, Retry-Storm Protection, Oversized Protection, Context-Integrity Protection) do not have this option.
+
+Today, the only supported external judge is an **LLM judge** — an existing [LLM Provider](/en/ai-gateway/llm-providers) connection you already use elsewhere in the AI Gateway, called with a chat-completion request and asked for a safety (or topic-relevance) verdict. This uses your existing connection; there's no separate credential or connection type to set up.
+
+### Evaluation Engine
+
+| Evaluation Engine | Behavior |
+|---|---|
+| **Built-in only** (default) | Only the built-in check runs — today's behavior, unchanged. |
+| **Built-in + External provider** | Both run. Either one judging the content unsafe (or, for Off-Topic Protection, denied) is enough for the guardrail to act. |
+| **External provider only** | The built-in check is skipped entirely; the external judge's verdict is the only one that counts. |
+
+In Inline and Asynchronous mode, when both checks run, a **Block** verdict from the built-in check short-circuits — the external provider is never called, saving the round-trip cost and latency. In Observe-Only mode both always run, since the comparison described below needs both results.
+
+### Adding an External Judge
+
+<Steps>
+  <Step title="Pick the connection">
+    Choose an existing [LLM Provider](/en/ai-gateway/llm-providers) connection. Only OpenAI-compatible chat providers are accepted for this purpose: OpenAI, Azure OpenAI, vLLM, Ollama, Custom OpenAI-Compatible, DeepSeek, Groq, Moonshot (Kimi), Mistral, Zhipu (GLM), or Qwen (DashScope). A connection of any other provider type is rejected before any call is attempted.
+  </Step>
+  <Step title="Set the model">
+    Enter the judge model's name (for example `llama-guard3` or `gpt-4o-mini`). Unlike some other AI Gateway fields, there is no fallback to a provider default here — leaving it empty makes every judge call fail, which (under the default failure setting below) blocks every request until you fill it in.
+  </Step>
+  <Step title="Tune the optional settings">
+    **Timeout** bounds the judge's own HTTP call (default 2000 ms). **Max Input Characters** truncates an overly long prompt before it reaches the judge (default 8000). **Max Output Tokens** caps the judge's reply (default 64 — see the reasoning-model warning below). **JSON Mode** asks the judge to reply with a structured verdict instead of a line of text, for providers that support it.
+  </Step>
+</Steps>
+
+### Judge Prompt: Native vs. Template Mode
+
+The **Judge Prompt Template** field controls how the reviewed text is presented to the judge, and it behaves differently depending on which of the two guardrails you're configuring.
+
+Leaving it **blank** is a deliberate, supported configuration for **Prompt Protection**: the (truncated) text is sent to the judge exactly as-is, with no wrapping instructions. This is the right choice for a model trained specifically for safety judging — Llama Guard 3 or ShieldGemma, for example — which already carries its own safety taxonomy inside its own chat template. Wrapping the text in another set of instructions on top of that confuses the model into treating your instructions as content to evaluate rather than as its task, and can silently produce the wrong verdict.
+
+For a general-purpose instruct model with no safety-judging behavior of its own — `gpt-4o-mini`, for instance — fill in a template that tells the model what to look for and how to answer. Apinizer ships a ready-made safety template (13 numbered categories, from violent crime to election-related content) that the **Fill default taxonomy** button drops in with a single click; edit it or write your own from scratch. Every template must contain the `<<<PROMPT>>>` placeholder — this is where the (neutralized) reviewed text is substituted in at evaluation time.
+
+:::warning Off-Topic Protection Always Requires a Template
+For **Off-Topic Protection**, an empty Judge Prompt Template is not accepted — saving is rejected. A generic safety template answers "is this content safe," not "does this content belong to one of my allowed topics," so a blank template would silently produce meaningless off-topic verdicts. Describe your allowed and denied topics directly in the template instead.
+:::
+
+### Reasoning Models as the Judge
+
+:::warning
+If the judge is a reasoning model — one that "thinks" before answering — its reasoning tokens are deducted from the same Max Output Tokens budget as the final verdict. With the default of 64, the model can spend its entire budget thinking and never emit the safe/unsafe line, which the guardrail then treats as a parse failure (and, under the default failure setting, a blocked request). Raise Max Output Tokens to 1024 or higher, or turn off the model's reasoning mode if it offers that option. The more reliable fix is to use a guard-tuned model in Native mode instead of a reasoning model in Template mode.
+:::
+
+### Self-Hosted Example
+
+A self-hosted, guard-tuned model is a good starting point: no data leaves your infrastructure, and Native mode needs no prompt engineering.
+
+<Steps>
+  <Step title="Run the model">
+    With **Ollama**: `ollama pull llama-guard3`, then start Ollama normally. With **vLLM**: serve `llama-guard3` (or another guard-tuned model) behind its OpenAI-compatible endpoint. Both platforms apply the model's own chat template automatically when called through `/v1/chat/completions` — that automatic template handling is exactly what Native mode relies on.
+  </Step>
+  <Step title="Add an LLM Provider connection">
+    Provider type Ollama or vLLM, endpoint pointing at your running instance (for example `http://<host>:11434/v1` for Ollama), authentication set to none for a local or otherwise trusted network.
+  </Step>
+  <Step title="Configure the guardrail">
+    On Prompt Protection or Off-Topic Protection, set Evaluation Engine to Built-in + External provider (or External provider only), pick the connection you just created, set Model to the model name you pulled, and leave Judge Prompt Template blank for Native mode (Prompt Protection) — or filled in with your topic description for Off-Topic Protection, where a template is required.
+  </Step>
+</Steps>
+
+### Comparing Verdicts in Observe-Only Mode
+
+When an external provider is configured, Observe-Only mode does more than record its own matches: it also computes the built-in decision and compares it against the external judge's verdict, without ever applying either one. This comparison is recorded only as a metric, for calibrating a new judge or a gradual rollout before switching to a mode that actually enforces it — it is not part of the Guardrail Hits report described below in [Observability](#observability).
+
+### Call Timing and Failure Handling
+
+The judge's own HTTP call timeout (the **Timeout** setting above, default 2000 ms) is enforced by the judge connection itself no matter which execution mode you pick. On top of that, Asynchronous mode bounds how long the guardrail waits for a result using the guardrail's **Max Wait** setting — for the built-in check this defaults to 500 ms; for an external provider call it defaults independently to 2000 ms when left blank. In Inline mode without Max Wait set, the request thread waits directly on the judge's own Timeout value — a slow provider adds directly to request latency, so consider Asynchronous or Observe-Only when attaching an external provider (Apinizer surfaces this same warning next to the setting).
+
+| External Failure Mode | Behavior |
+|---|---|
+| **Block on failure** (default) | If the external provider call itself errors out or times out, the request is blocked. |
+| **Allow on failure** | The request continues, unguarded by the external judge for that call, and the failure is still recorded visibly rather than passing silently. |
+
+:::info
+This setting only governs an actual call failure or timeout — not what the judge decides. If the evaluation engine is set to use an external provider but no usable connection is actually configured (for example, a gap reached through APIops or export/import that bypasses the UI's own checks), Apinizer degrades to the built-in check instead of failing the request outright, and records the degradation visibly for troubleshooting. The external failure mode above never applies to this case.
+:::
+
+### Configuring via APIops
+
+The external-provider settings on Prompt Protection and Off-Topic Protection travel through the APIops surface the same way the rest of each policy does: the LLM provider is referenced by **name**, never by its internal ID, resolved against your project's connections on import. When Evaluation Engine is left at its default (built-in only), omit the external-provider block entirely — supplying one, even an empty one, still requires a valid, supported adapter type and is rejected on import.
+
+### Security Considerations
+
+:::warning
+The judge receives the (truncated) reviewed text as-is — the same text your model would otherwise see. If a personal-data masking guardrail runs earlier in the same policy chain, the judge sees the masked version; if it runs later, or isn't configured at all, the judge sees the raw value. Check the ordering of your guardrails if that matters for your data-handling requirements. For sensitive traffic, prefer a judge you host yourself — on-premises or inside your own VPC — over a third-party cloud judge.
+:::
+
+Apinizer never writes the judge's raw response, the rendered prompt, or the underlying failure detail to the trace or to logs — only sanitized safety-category labels and, when the judge provides one, a numeric score are recorded.
+
+### Observability
+
+The [Guardrail Hits report](/en/ai-gateway/reports#security-and-guardrails-tab) breaks results down by provider (the built-in check or the external judge) and by verdict (blocked, timed out, errored, or skipped due to misconfiguration) — safe verdicts aren't included, since the report exists to surface what triggered, not every evaluation that passed. The Observe-Only comparison described above is metric-only and is not part of this report.
 
 ## Adding a Guardrail
 

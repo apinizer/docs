@@ -132,8 +132,11 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/settings/update-circuit-breaker-settings",
                 "api-proxies/settings/update-proxy-server-settings",
                 "api-proxies/settings/update-mtls-settings",
+                "api-proxies/settings/update-ai-routing",
                 "api-proxies/settings/update-mcp-routing",
                 "api-proxies/settings/update-a2a-routing",
+                "api-proxies/settings/update-idempotency-settings",
+                "api-proxies/settings/update-spec-access-type",
                 "api-proxies/settings/update-ntlm-settings",
                 "api-proxies/settings/update-traffic-log-settings",
                 "api-proxies/settings/update-maintenance-mode",
@@ -405,6 +408,28 @@ const sidebars: SidebarsConfig = {
                 "credentials/token-settings",
                 "credentials/token-settings/reset-token-settings",
                 "credentials/token-settings/set-token-settings"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Credential Organizations",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "credential-organizations/credential-organizations",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "credential-organizations/crud/crud",
+                "credential-organizations/crud/create-credential-organization",
+                "credential-organizations/crud/get-credential-organization",
+                "credential-organizations/crud/update-credential-organization",
+                "credential-organizations/crud/delete-credential-organization"
               ]
             }
           ]
