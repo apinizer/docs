@@ -1,0 +1,188 @@
+---
+title: "OpenTelemetry"
+description: "Configure Apinizer's product-native OpenTelemetry (OTLP) export — W3C trace propagation and a retrospective span tree for all traffic, plus a GenAI semantic-convention layer for AI Gateway — without installing a javaagent."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+## Overview
+
+Apinizer exports [OpenTelemetry](https://opentelemetry.io/) (OTLP) traces and metrics directly from the product — no javaagent, no sidecar. Every request (REST/SOAP, and WebSocket/gRPC on the server side) carries W3C `traceparent` propagation and produces a retrospective span tree; AI Gateway traffic additionally carries a [GenAI semantic-conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attribute and metric layer so token usage, cost, and latency show up in your APM tool using the same field names the rest of the OpenTelemetry ecosystem uses.
+
+This page covers **native product export**. If you already run the OpenTelemetry Java agent against the gateway JVM (the approach covered in the [Apinizer Gateway OpenTelemetry Integration](/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup) article series), see [javaagent vs. native](#javaagent-vs-native) below before enabling both — Apinizer refuses to double-export.
+
+:::note Semantic conventions are pinned to a specific registry snapshot
+Attribute and metric names below follow the OpenTelemetry semantic-conventions registry as of **2026-08**, which is still in **Development** status for GenAI — names can change in upstream OpenTelemetry before it reaches Stable. Apinizer will follow the registry forward; if a future upgrade renames an attribute, it will be called out in the release notes.
+:::
+
+## What's Exported
+
+Native export has two layers. The first is always on the moment you turn export on; the second requires [Live Trace](/en/ai-gateway/tracing-and-replay) to be active for that request, because it reuses the same in-flight trace-collection machinery. Content capture is a separate, opt-in gate on top of either layer.
+
+| Layer | What you get | Requires |
+| --- | --- | --- |
+| **Always-on** | SERVER span per request, one CLIENT span per backend attempt (retry/failover legs included), request/response pipeline spans, and — for AI traffic — the GenAI inference span plus per-attempt failover legs and usage/cost/latency attributes and metrics | Export mode = `NATIVE` |
+| **Live Trace-gated** | Policy/guardrail execution spans as INTERNAL children of the request span (semantic cache, guardrails, RAG steps, etc.) | Export mode = `NATIVE` **and** Live Trace active for that request |
+| **Content capture (opt-in)** | Prompt/response text as span attributes | Export mode = `NATIVE` **and** the content-capture setting explicitly enabled |
+
+Treat the two gated layers as **features to turn on deliberately**, not limitations — always-on gives you full RED (rate/errors/duration) visibility and cost/latency accounting with zero configuration beyond turning export on; Live Trace and content capture add progressively more detail for the requests you're actively debugging.
+
+## Attribute Reference
+
+### GenAI Standard Attributes (`gen_ai.*`)
+
+Set on the root AI inference span (kind `CLIENT`, named `{operation} {model}`).
+
+| Attribute | Meaning |
+| --- | --- |
+| `gen_ai.operation.name` | `chat`, `embeddings`, `generate_content`, `execute_tool`, `invoke_agent` |
+| `gen_ai.provider.name` | Well-known provider name (see [provider name mapping](#provider-name-mapping) below) |
+| `gen_ai.request.model` | The model that was **requested** (load-balancer target) |
+| `gen_ai.response.model` | The model that actually **served** the request — differs from the requested model on failover |
+| `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token counts |
+| `gen_ai.response.finish_reasons` | Finish reason, as a single-element array |
+| `gen_ai.input.messages` / `gen_ai.output.messages` | Prompt/response text — **only when content capture is enabled**, and never for streaming responses (see [Known Limits](#known-limits)) |
+
+#### Provider Name Mapping
+
+`gen_ai.provider.name` normalizes Apinizer's internal provider code to the OTel well-known value where one exists; providers without a registry entry pass through unchanged so a future provider never silently loses its identity.
+
+| Apinizer provider | `gen_ai.provider.name` |
+| --- | --- |
+| `openai`, `anthropic`, `cohere`, `deepseek`, `groq` | unchanged (identical to the well-known value) |
+| `azure-openai` | `azure.ai.openai` |
+| `bedrock` | `aws.bedrock` |
+| `vertex` | `gcp.vertex_ai` |
+| `mistral` | `mistral_ai` |
+| everything else (self-hosted, custom, moonshot, zhipu, qwen-dashscope, voyage, …) | passed through as-is |
+
+:::warning Don't reuse the same value across the Prometheus and OTLP metric families
+The Prometheus `apinizer_ai_*` family (see [Metrics](#metrics)) tags requests with the **raw** provider code (`bedrock`); the OTLP family uses the **normalized** name (`aws.bedrock`). A dashboard variable built against one family's label values will not match the other's — see the downloadable [Grafana dashboard](#grafana-dashboard) for a worked example.
+:::
+
+### Apinizer Vendor Attributes (`apinizer.ai.*`)
+
+Vendor-specific attributes live under Apinizer's own namespace rather than nested inside `gen_ai.*`, per the OpenTelemetry well-known-vendor-namespace convention.
+
+| Attribute | Meaning |
+| --- | --- |
+| `apinizer.ai.usage.cached_tokens` | Provider-side prompt-cache tokens |
+| `apinizer.ai.cost.total_micro_usd` / `.input_micro_usd` / `.output_micro_usd` / `.cached_micro_usd` | Cost breakdown, in micro-USD |
+| `apinizer.ai.latency.ttft_ms` / `.tpot_ms` / `.total_ms` | Time-to-first-token, time-per-output-token, total latency |
+| `apinizer.ai.latency.guardrail_ms` / `.inference_ms` / `.overhead_ms` | Latency stage breakdown |
+| `apinizer.ai.streaming` | Whether the response streamed |
+| `apinizer.ai.cache.hit` | Semantic-cache hit for this request (see the [dashboard's cache note](#grafana-dashboard) — this is span-only, there is no matching metric yet) |
+| `apinizer.ai.failover.from` | Present only when failover occurred — the model/provider that was tried first |
+| `apinizer.ai.agentic.turns` | Number of agentic tool-call turns, when more than one |
+| `apinizer.ai.trace_id` | Cross-reference to the AI Trace record (see [Correlation](#correlation)) |
+| `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | Identity fields shared with every span kind below |
+
+### Generic Traffic Attributes
+
+Set on the SERVER span (every proxy type) and per-attempt CLIENT spans (REST/SOAP backend calls; the AI CLIENT legs above carry their own attribute set instead).
+
+| Attribute | Span kind | Meaning |
+| --- | --- | --- |
+| `http.request.method` | SERVER, CLIENT | HTTP method |
+| `http.response.status_code` | SERVER, CLIENT | Status code |
+| `url.path` | SERVER | Request path only — query string is never captured |
+| `network.peer.address` | CLIENT | Upstream address actually connected to |
+| `http.request.resend_count` | CLIENT | Set only on retried attempts |
+| `error.type` | SERVER, CLIENT | Failure classification |
+| `apinizer.routing.dns_ns` / `.tcp_connect_ns` / `.tls_handshake_ns` / `.ttfb_ns` / `.body_read_ns` / `.pool_wait_ns` | CLIENT | Per-phase network timing, only when actually measured |
+| `apinizer.cache_hit` | SERVER | Response-cache hit for this request |
+| `apinizer.result_type` | SERVER | Success/error/blocked classification |
+
+Header values, request/response bodies, query strings, and credentials are **never** placed on spans outside the explicit content-capture path above — span names use the API proxy's templated path, never the raw URI, to keep cardinality bounded.
+
+## Metrics
+
+| Metric | Type | Unit | Family |
+| --- | --- | --- | --- |
+| `gen_ai.client.token.usage` | Histogram | `{token}` | OTLP (native export only) |
+| `gen_ai.client.operation.duration` | Histogram | `s` | OTLP |
+| `apinizer.ai.client.cost` | Counter | `{microusd}` | OTLP |
+| `apinizer.ai.client.ttft` / `apinizer.ai.client.tpot` | Histogram | `s` (streaming requests only) | OTLP |
+
+These are deliberately **separate** from the existing `apinizer_ai_*` Prometheus counters/timers on the gateway's Prometheus endpoint (tagged by provider/model/project/status) — that family is untouched by any of this and keeps working whether or not native OTLP export is enabled. The two families exist for different reasons: Prometheus is always-on and zero-config; the OTLP histograms carry true bucketed distributions (real p50/p95/p99), which the Prometheus timers do not expose. Use whichever your stack already scrapes, or both — see the [Grafana dashboard](#grafana-dashboard) below for panels built on each.
+
+## Configuration
+
+<Steps>
+  <Step title="Create an OTLP Collector connector">
+    Under connection management, create a new **OTLP Collector** connector. Set **Endpoint** to your collector's **base URL** (for example `http://collector:4318`) — Apinizer appends the signal path (`/v1/traces`, `/v1/metrics`) itself, so do not include it. Configure **Protocol** (HTTP/protobuf or gRPC), optional **Gzip Compression**, **Timeout**, an optional **Auth Header Name**/**Auth Header Value** pair (stored encrypted), and any **Additional Headers**. The **Batch / Export Tuning** section (max queue size, max export batch size, schedule delay, metric export interval) controls the exporter's batching behavior — the defaults are reasonable for most collectors.
+  </Step>
+  <Step title="Test the connection">
+    Use **Test Connection** on the connector. This is not a TCP ping — Apinizer builds a temporary exporter from the saved settings and sends one real synthetic span to the collector, proving the collector actually accepts Apinizer's OTLP payload (auth, TLS, and path included) before you deploy it.
+  </Step>
+  <Step title="Enable export on the environment">
+    In the target environment's **OpenTelemetry Export** section, set **Export Mode** to `NATIVE` and select the connector you just created as the **OTLP Collector**. Mode stays `OFF` by default (zero cost) until you opt in here — this is a per-environment setting, so you can pilot it on staging before touching production.
+  </Step>
+  <Step title="Tune sampling">
+    **Sampling Ratio** controls parent-based `traceIdRatio` sampling for requests that start a new trace (a request arriving with an existing sampled `traceparent` always inherits the parent's decision, regardless of this ratio). Start conservative on high-traffic proxies and raise it once you've confirmed collector capacity.
+  </Step>
+  <Step title="Decide on content capture">
+    **Capture AI Prompt/Response Content** is off by default. Turning it on sends prompt/response text (already PII-masked, if masking is configured — content capture only ever reads the same post-mask body the client/backend actually saw) to your OTLP collector as span attributes, subject to **Content Capture Max Characters**. Only enable this if the collector itself is inside your compliance boundary — see [Known Limits](#known-limits) for what content capture does *not* cover.
+  </Step>
+</Steps>
+
+## javaagent vs. Native
+
+| | javaagent | Native (this page) |
+| --- | --- | --- |
+| Install | Attach `-javaagent` to the worker JVM | Nothing to install — configure a connector + an environment setting |
+| Scope | Full JVM auto-instrumentation (HTTP client/server, JDBC, …) | Apinizer's own request lifecycle + AI GenAI layer |
+| Content awareness | Generic HTTP spans, no GenAI semantics unless separately configured | GenAI attributes/metrics and Apinizer business context (correlation ID, project, proxy) built in |
+| Double-export | N/A | **Automatically detected and disabled.** If Apinizer detects an OpenTelemetry javaagent attached to the JVM while an environment's export mode is `NATIVE`, it forces native export off and logs a warning rather than sending every span twice. Set mode to `AGENT` explicitly to silence the warning once you've chosen the javaagent path. |
+
+Pick native for the fastest path to GenAI-aware traces and metrics with no deployment change; pick the javaagent when you need full-stack JVM instrumentation beyond what the gateway emits natively (see the [OpenTelemetry Integration article series](/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup) for that setup). Running both against the same environment is not supported — Apinizer's veto exists specifically to stop that from happening silently.
+
+## Correlation
+
+`apinizer.correlation_id` is stamped on every span kind and matches the `APINIZER-CORRELATION-ID` you already see on API traffic logs — it is the one identifier that ties together the traffic record, the trace, and (for AI traffic) the AI Trace record.
+
+For AI Gateway traffic specifically, the correlation is bidirectional: each [AI Trace](/en/ai-gateway/tracing-and-replay) record stores the OTel trace ID and root span ID it produced, and the root span carries `apinizer.ai.trace_id` pointing back at the AI Trace record. From either side you can jump to the other — start in your APM tool and pull up the full request/response detail in AI Trace, or start in AI Trace and pull up the distributed trace in your OTLP backend.
+
+## Grafana Dashboard
+
+A ready-to-import Grafana dashboard combining the Prometheus `apinizer_ai_*` family with the OTLP `gen_ai.*`/`apinizer.ai.client.*` histograms is available here:
+
+<Card title="apinizer-ai-gateway-grafana-dashboard.json" icon="download" href="/files/apinizer-ai-gateway-grafana-dashboard.json">
+  Download the dashboard JSON — Overview, Tokens, Cost, Streaming, Guardrail, Cache, and Reliability rows
+</Card>
+
+<AccordionGroup>
+  <Accordion title="How to import">
+    In Grafana: **Dashboards → New → Import**, upload the downloaded JSON (or paste its contents), then map the two datasource variables it asks for — one pointing at your existing gateway Prometheus scrape target, one at whatever Prometheus-compatible store your OTLP collector writes `gen_ai.*` metrics into (for example Grafana Mimir, or Prometheus behind a collector's remote-write exporter). It is not a Tempo/trace datasource — these are metric panels.
+  </Accordion>
+  <Accordion title="What the Cache and Reliability rows actually show">
+    Two rows in the dashboard include a text panel calling out signals that are currently **span/trace-only**, with no backing Prometheus or OTLP metric to query: semantic-cache hit-rate and cost-avoided (`apinizer.ai.cache.hit` is a span attribute; see the in-product Reports for a cache-efficiency view), and failover from→to plus VectorDB-skip visibility (`apinizer.ai.failover.from` and policy spans, both trace-level). The dashboard is intentionally honest about this rather than shipping a panel with no data behind it — inspect those via the AI Trace timeline or a TraceQL query on the attribute instead.
+  </Accordion>
+</AccordionGroup>
+
+## Known Limits
+
+- **Streaming responses are never content-captured.** Streaming output arrives as a sequence of chunks with no single "response body" to attach to a span — `gen_ai.output.messages` is simply not set for streaming requests, even with content capture enabled.
+- **Policy/guardrail spans require Live Trace.** The INTERNAL child spans for semantic cache, guardrails, and RAG steps only exist when Live Trace is active for that request — always-on export alone does not produce them.
+- **WebSocket/gRPC get server-side spans, not W3C propagation.** A SERVER span is produced for WS/gRPC traffic like any other request, but incoming `traceparent` extraction and outgoing propagation to the backend are currently HTTP/SOAP-only; a WS/gRPC request always starts a new trace rather than continuing one from the caller.
+- **GenAI semantic conventions are pinned to a specific registry snapshot** (2026-08), which is still Development status upstream — expect possible attribute renames in a future Apinizer release as the registry stabilizes.
+- **The Prometheus and OTLP metric families use different provider-name spelling** — see [Provider Name Mapping](#provider-name-mapping).
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tracing and Replay" icon="route" href="/en/ai-gateway/tracing-and-replay">
+    See how the trace group (DAG) and Timeline View work in the UI
+  </Card>
+  <Card title="Advanced Guardrails" icon="shield" href="/en/ai-gateway/advanced-guardrails">
+    Understand what shows up as a policy span under Live Trace
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    Cost, cache-efficiency, and guardrail reports that don't require an external APM tool
+  </Card>
+  <Card title="Apinizer Gateway OpenTelemetry Integration" icon="book-open" href="/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup">
+    The javaagent-based full-stack instrumentation path, if you need JVM-wide auto-instrumentation
+  </Card>
+</CardGroup>

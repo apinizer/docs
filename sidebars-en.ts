@@ -104,6 +104,7 @@ const sidebars: SidebarsConfig = {
       "items": [
         "ai-gateway/reports",
         "ai-gateway/tracing-and-replay",
+        "ai-gateway/opentelemetry",
         "ai-gateway/access-control-rbac"
       ]
     }
