@@ -1,6 +1,6 @@
 ---
 title: "Create MCP API Proxy"
-description: "Creates an MCP (Model Context Protocol) API proxy in a single call. Routing mode is required — TOOL_EXPOSE to publish existing proxies as tools, or PASSTHROUGH to forward to an external MCP server."
+description: "Creates an MCP (Model Context Protocol) API proxy in a single call. Routing mode is required — TOOL_EXPOSE to publish existing proxies as tools; a PASSTHROUGH backend server is added afterward through the routing-update endpoint."
 ---
 
 ## Endpoint
@@ -48,7 +48,6 @@ Permission: `API_MANAGEMENT` × `MANAGE`.
 | description | string | No | Free-text description |
 | routingMode | string | **Yes** | `TOOL_EXPOSE` or `PASSTHROUGH`. Unlike the AI proxy create endpoint, there is **no implicit default** — the same fail-closed contract [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing) uses |
 | protocolVersion | string | No | MCP protocol version (`2024-11-05`, `2025-06-18`, `2026-07-28`); blank keeps the null-safe default |
-| backendMcpRefName | string | No | **Legacy, PASSTHROUGH only.** Name of an existing standalone MCP connection, resolved to its id within the project through the read-only compatibility surface. New integrations should leave this blank and configure an inline `backendServers` entry afterward through [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing) instead |
 
 #### Full JSON Body Example (TOOL_EXPOSE)
 
@@ -60,19 +59,48 @@ Permission: `API_MANAGEMENT` × `MANAGE`.
 }
 ```
 
-#### Minimal Body Example (PASSTHROUGH)
+`exposedTools` isn't part of this create call — add tool definitions afterward with
+[Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing), the same
+"create first, route afterward" pattern [Create AI API Proxy](/api-reference/api-proxies/crud/create-ai-api-proxy)
+uses for `aiRouting`.
+
+:::warning
+This endpoint has no `backendServers` field, and `PASSTHROUGH` mode requires at least one inline
+backend server entry — sending `"routingMode": "PASSTHROUGH"` here always fails with **HTTP 400**
+(`mcpRouting.backendServersRequired`). There is no name-based reference that can satisfy this
+requirement instead. To end up with a PASSTHROUGH proxy, create it with `TOOL_EXPOSE` first (an
+empty `exposedTools` list is valid), then switch it over in a single
+[Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing) call that carries
+`routingMode: "PASSTHROUGH"` and `backendServers` together.
+:::
+
+#### Two-Step PASSTHROUGH Setup
+
+**1. Create the proxy** (`POST /apiops/projects/{projectName}/apiProxies/mcp/{apiProxyName}/`):
 
 ```json
 {
   "relativePath": "/mcp/github",
-  "routingMode": "PASSTHROUGH"
+  "routingMode": "TOOL_EXPOSE"
 }
 ```
 
-`exposedTools` (TOOL_EXPOSE) and the inline `backendServers` list (PASSTHROUGH) aren't part of this
-create call — configure them afterward with [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing),
-the same "create first, route afterward" pattern [Create AI API Proxy](/api-reference/api-proxies/crud/create-ai-api-proxy)
-uses for `aiRouting`.
+**2. Switch it to PASSTHROUGH with an inline backend server** (`PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/mcp-routing/`):
+
+```json
+{
+  "routingMode": "PASSTHROUGH",
+  "backendServers": [
+    {
+      "name": "github-mcp",
+      "endpoint": "https://mcp.github.example.com/mcp",
+      "transport": "HTTP_SSE",
+      "authScheme": "BEARER",
+      "bearerToken": "raw-token-in-transit-only"
+    }
+  ]
+}
+```
 
 ## Response
 
@@ -95,7 +123,7 @@ Creation does not deploy the proxy. Deploy it separately with
 
 | HTTP Code | Condition |
 |-----------|-----------|
-| 400 | `apiProxyName` is empty, request body is missing, `relativePath` is empty, `routingMode` is missing, an API proxy with the same name already exists in the project, or `backendMcpRefName` does not match any connection in the project |
+| 400 | `apiProxyName` is empty, request body is missing, `relativePath` is empty, `routingMode` is missing, an API proxy with the same name already exists in the project, or `routingMode` is `PASSTHROUGH` (this endpoint carries no `backendServers`, so the required-backend check always fails) |
 | 401 | Token is missing or invalid |
 | 500 | Unexpected server error |
 
@@ -110,11 +138,11 @@ Creation does not deploy the proxy. Deploy it separately with
 
 - **`routingMode` is required, with no default.** This mirrors the routing-update endpoint's
   fail-closed contract — there's no implicit mode to fall back to.
-- **Servers are configured inline, not by reference.** A fresh PASSTHROUGH integration doesn't need
-  `backendMcpRefName` at all: create the proxy, then add one or more inline MCP servers through
+- **Servers are configured inline, not by reference — there is no reference option.** This create
+  call has no `backendServers` field, so a PASSTHROUGH target can't be set in one step: create the
+  proxy (with `TOOL_EXPOSE`), then add one or more inline MCP servers through
   [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing)'s `backendServers`
-  field. `backendMcpRefName` only exists to point a new proxy at a connection created before this
-  release, through the read-only legacy compatibility surface.
+  field, in the same call that switches `routingMode` to `PASSTHROUGH`.
 - **Proxy-level settings apply the same as any other proxy type** — CORS, cache, error templates,
   client route, trace and traffic-log settings.
 - Policies (including MCP Call (LLM) / MCP Call (Fixed) on other proxies) are attached the same way as
