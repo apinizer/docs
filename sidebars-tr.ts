@@ -1528,7 +1528,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum",
-            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari"
+            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari",
+            "articles/apinizer-gateway-native-opentelemetry-disa-aktarim"
           ]
         },
         "articles/apinizer-api-portal-mcp-entegrasyonu",

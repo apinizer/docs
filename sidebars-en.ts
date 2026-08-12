@@ -1531,7 +1531,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "articles/apinizer-gateway-opentelemetry-integration-part-1-setup",
-            "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards"
+            "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards",
+            "articles/apinizer-gateway-native-opentelemetry-export"
           ]
         },
         "articles/apinizer-api-portal-mcp-integration",

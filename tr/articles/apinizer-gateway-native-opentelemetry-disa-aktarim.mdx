@@ -1,0 +1,176 @@
+---
+title: "Apinizer API Gateway'den Native OpenTelemetry Dışa Aktarımı — Agent'sız ve GenAI-Farkında"
+description: "OpenTelemetry trace ve metriklerini javaagent olmadan doğrudan Apinizer gateway'inden dışa aktarın; gelen W3C trace'lerine katılın, GenAI semantik kurallarıyla AI token kullanımı ve maliyetini izleyin, hazır bir Grafana dashboard'unu içe aktarın."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+:::info OpenTelemetry serisinin tamamlayıcısı
+[Apinizer Gateway OpenTelemetry Entegrasyonu](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum) serisi **agent-tabanlı** yolu izler: gateway pod'una enjekte edilen bir Java agent, bir Collector, Tempo ve Kubernetes üzerinde bir Prometheus Agent. Bu makale ise **diğer** yolu izler — ürüne yerleşik olan, hiçbir şey kurmayı gerektirmeyen yol. Bir javaagent ekleyebiliyor ve tam-yığın JVM enstrümantasyonu istiyorsanız seri sizin içindir. Bir konnektör ve tek bir ayarla gateway-farkında trace'ler ve AI token/maliyet telemetrisi istiyorsanız — özellikle de Kubernetes dışında çalışıyorsanız — okumaya devam edin.
+:::
+
+## Aynı Trace'e İki Yol
+
+Bir API Gateway'den geçen her istek bir hikâyedir: gelir, kontrol edilir, bir backend'e yönlendirilir (ilki başarısız olursa belki ikisine), ve geri döner. OpenTelemetry bu hikâyeyi okuyabileceğiniz bir trace'e dönüştürür. Tek soru, gateway'in bu hikâyeyi *nasıl* anlattığıdır.
+
+Agent yolu, hikâyeyi uygulamanın **dışından** kurar: bir javaagent JVM'i izler ve her HTTP, JDBC ve önbellek çağrısını bir span'e dönüştürür. Güçlü ve geniştir, ama agent'ı ekleyecek bir yer ister — genellikle kontrol ettiğiniz bir Kubernetes pod'u.
+
+Native yol ise hikâyeyi ürünün **içinden** anlatır. Apinizer, kendi trafik günlüğü için, her isteğin tam olarak ne zaman geldiğini, her backend denemesinin ne kadar sürdüğünü ve — AI trafiği için — kaç token harcandığını ve bunun maliyetini zaten kaydeder. Native dışa aktarım, aynı veriyi alıp OpenTelemetry olarak, doğrudan toplayıcınıza konuşur. Agent yok, sidecar yok, deployment değişikliği yok.
+
+<CardGroup cols={2}>
+  <Card title="Kurulacak bir şey yok" icon="magic">
+    Bir konnektör artı ortam-başına tek bir ayar. Javaagent yok, init container yok, pod annotation'ı yok — dolayısıyla çıplak bir VM'de veya standalone bir kurulumda da Kubernetes'teki kadar iyi çalışır.
+  </Card>
+  <Card title="Kutudan çıktığı gibi GenAI-farkında" icon="robot">
+    AI Gateway trafiği, genel bir HTTP agent'ının bilmesine imkân olmayan GenAI semantik-kural öznitelik ve metriklerini taşır — sağlayıcı, model, token kullanımı, maliyet, ilk-token-süresi.
+  </Card>
+  <Card title="İş bağlamı yerleşik" icon="id-card">
+    Her span zaten Apinizer korelasyon kimliğini, projeyi ve API proxy adını taşır; böylece bir trace, ek pipeline yapılandırması olmadan doğrudan trafik günlüğüne bağlanır.
+  </Card>
+  <Card title="Çift dışa aktarıma karşı güvenli" icon="shield">
+    Javaagent'i ve native dışa aktarımı aynı anda çalıştırırsanız Apinizer fark eder — her span'i iki kez göndermek yerine native'i zorla kapatır ve bir uyarı loglar.
+  </Card>
+</CardGroup>
+
+:::note Native ve javaagent katman değil, alternatiftir
+Bu "seri artı biraz daha" değildir. Aynı trace'leri gateway'den almanın farklı bir yoludur. Ortam başına birini seçin. [OpenTelemetry Dışa Aktarımı referansı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi) yan-yana karşılaştırmayı içerir; kısa hâli bu makalenin sonundadır.
+:::
+
+## Native Yolun Size Verdikleri
+
+Dışa aktarımı açın ve gateway'in işlediği **her** istek için — REST, SOAP ve WebSocket/gRPC'nin sunucu tarafı — isteğin gerçekte nasıl işlendiğini yansıtan küçük bir span ağacı elde edersiniz:
+
+| Span | Tür | Temsil ettiği adım |
+| --- | --- | --- |
+| İstek span'i | SERVER | Tüm istek yaşam döngüsü, gateway girişinden gateway çıkışına |
+| Backend deneme span'i | CLIENT | **Deneme başına** bir span — bir retry veya ikinci bir hedefe failover kendi span'idir |
+| Pipeline span'leri | INTERNAL | İstek- ve yanıt-işleme fazları |
+
+Bu span'ler, gateway'in zaten sahip olduğu zamanlamalardan **olay sonrasında** kurulur; dolayısıyla dışa aktarımı açmak istek başına yeni bir ölçüm maliyeti getirmez. Ve Apinizer gelen W3C `traceparent`'ı okuyup backend'e taze bir çocuk bağlam ilettiği için, daha büyük bir dağıtık trace'in parçası olarak gelen bir istek onun parçası **olarak kalır** — çağıranın trace'i, gateway'in span'leri ve enstrümante edilmiş bir backend'in span'leri tek bir trace kimliği altında buluşur.
+
+Bunun üzerine, AI Gateway trafiği genel yolun üretemeyeceği ek bir katman taşır: GenAI inference span'i ve deneme-başına failover adımları, model, token sayıları, maliyet ve gecikme kırılımıyla etiketli. Native dışa aktarımın asıl değerini kanıtladığı yer bu katmandır ve bu makalenin ikinci yarısıdır.
+
+## Açmak
+
+Burada uygulanacak bir manifest yok — hepsi ürünün içinde. Dört hamle ve dışa aktarıyorsunuz.
+
+<Steps>
+  <Step title="Bir OTLP Collector konnektörü oluşturun">
+    Bağlantı yönetimi altında bir **OTLP Collector** konnektörü ekleyin. **Endpoint**'i toplayıcınızın **temel URL**'ine yönlendirin — tam `/v1/traces` yoluna değil, `http://collector:4318`'e; sinyal yolunu Apinizer kendisi ekler. **Protokol**'ü (HTTP/protobuf veya gRPC) seçin ve toplayıcınız kimlik doğrulama istiyorsa bir **Kimlik Doğrulama Başlığı** ekleyin — herhangi bir Apinizer secret'ı gibi şifreli saklanır. Toplu-işleme ayarı varsayılanları makuldür; aksini gerektiren bir nedeniniz olana kadar oldukları gibi kalabilir.
+    {/* TODO(ekran görüntüsü): OTLP Collector konnektör formu — ertelendi, yazım sırasında paylaşımlı stack meşgul */}
+  </Step>
+  <Step title="Toplayıcının sizi gerçekten kabul ettiğini kanıtlayın">
+    **Test Connection**'a basın. İnsanların atlayıp sonra pişman olduğu adım budur. Bir TCP ping **değildir** — Apinizer kaydettiğiniz ayarlardan gerçek bir dışa aktarıcı kurar ve toplayıcıya tek bir gerçek sentetik span gönderir. Kimlik doğrulama başlığı yanlışsa, TLS zinciri doğrulanmıyorsa ya da yol hatalıysa, üç gün sonra toplayıcınızın neden boş olduğunu merak etmek yerine burada, bir butonda öğrenirsiniz.
+  </Step>
+  <Step title="Ortamı NATIVE'e alın">
+    Hedef ortamın **OpenTelemetry Dışa Aktarım** bölümünde **Dışa Aktarım Modu**'nu `NATIVE` yapın ve az önce test ettiğiniz konnektörü seçin. Mod varsayılan olarak `OFF`'tur ve siz onay verene kadar hiçbir maliyeti yoktur — ve ortam-başınadır, yani hazırlık ortamında açıp bir gün izleyebilir, ancak ondan sonra üretime dokunabilirsiniz.
+  </Step>
+  <Step title="Karşılayabileceğiniz bir örnekleme oranı belirleyin">
+    **Örnekleme Oranı**, kaç yeni trace tutacağınıza karar verir. Zaten örneklenmiş bir `traceparent` ile gelen bir istek daima o kararı devralır — dolayısıyla bu oran yalnız gateway'in *başlattığı* trace'leri yönetir. Yüksek trafikli bir proxy'de düşük başlayın, toplayıcınızın alımını izleyin ve bilinçli olarak artırın.
+  </Step>
+</Steps>
+
+Platform kurulumunun tamamı budur. Bir ayar daha var ama yalnız AI trafiği için anlamlı — içerik yakalama — ve aşağıda, ne gönderip ne göndermediğinin yanında kendi başlığını hak ediyor.
+
+## Gerçekten Çalışıyor mu?
+
+Native yolun rahatlatıcı yanı, doğrulanacak ne kadar az şey olduğudur; çünkü **Test Connection** adımı zaten zor kısmı — toplayıcınızın Apinizer'ın yükünü uçtan uca kabul ettiğini — kanıtladı. Ondan sonra gerçek trafiği görmek, bir istek gönderip bakma meselesidir.
+
+Etkin ortamdaki bir proxy'den birkaç istek gönderin, sonra toplayıcınızın trace görünümünü açın (yerelde pilot yapıyorsanız debug/dosya dışa aktarıcısını). Düz bir REST proxy için yukarıda anlatılan şekli görürsünüz: bir SERVER span, backend denemesi başına bir CLIENT span ve altlarına yerleşmiş iki pipeline span'i — backend ister ilk denemede ister üçüncüde yanıt vermiş olsun aynı ağaç.
+
+O ilk trace'te kontrol etmeye değer iki şey var, çünkü bunlar en sık duyulan iki endişe:
+
+- **Sorgu dizesi yok.** `url.path` yolu taşır ve `?`'ten sonrasını taşımaz. Başlık değerleri, istek ve yanıt gövdeleri ve kimlik bilgileri bir span'e hiç ulaşmaz. Span adları ham URI'yi değil proxy'nin şablon yolunu kullanır; böylece bir milyon farklı URL, bir milyon farklı span adına dönüşmez.
+- **Gelen bir trace değiştirildi değil, katıldı.** Bir `traceparent` taşıyan bir istek gönderirseniz, gateway'in SERVER span'i *o* trace'in çocuğu olarak görünür ve backend'e yaptığı çağrı taze bir çocuk `traceparent`'ı ileriye taşır. Yayılımın tüm amacı budur: uçtan uca tek bir trace.
+
+:::tip Bir trace hiç görünmüyorsa
+Olağan neden, **Test Connection**'ın hiç çalıştırılmamış ya da kaydedilenden farklı bir endpoint'e karşı çalıştırılmış olmasıdır. Native dışa aktarım sessizce gönderir ve güvenli-başarısız olur — bozuk bir toplayıcı trafiğinizi asla bozmaz — dolayısıyla konnektör testi sizin erken-uyarı sisteminizdir. Aynı kaydedilmiş ayarlara karşı testi yeniden çalıştırın.
+:::
+
+## Bir AI İsteği Neye Benzer?
+
+Native dışa aktarımın, genel bir HTTP agent'ının basitçe yapamayacağı bir şeyi yaptığı yer burasıdır. İstek bir AI çağrısı olduğunda, çıkarımın kendisi işlem ve model adıyla adlandırılan bir CLIENT span'ine dönüşür — örneğin `chat gpt-4o-mini` — ve OpenTelemetry ekosisteminin geri kalanının zaten anladığı GenAI semantik-kural özniteliklerini taşır:
+
+| Öznitelik | Size ne anlatır |
+| --- | --- |
+| `gen_ai.operation.name` | `chat`, `embeddings`, `execute_tool`, `invoke_agent`, … |
+| `gen_ai.provider.name` | Bilinen sağlayıcı adı (`anthropic`, `aws.bedrock`, …) |
+| `gen_ai.request.model` / `gen_ai.response.model` | İstediğiniz ile gerçekte yanıtlayan — failover'da farklılaşır |
+| `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Sağlayıcı yanıtından doğrudan gelen token sayıları |
+
+`gen_ai.*` namespace'inde yeri olmayan vendor'a özgü ayrıntı ise `apinizer.ai.*` altında durur — mikro-USD cinsinden maliyet kırılımı, gecikme ayrımı (ilk-token-süresi, çıktı-token-başı-süre), semantik-önbellek isabet bayrağı ve ikinci bir sağlayıcı devreye girmek zorunda kaldığında `apinizer.ai.failover.from`. Tam liste [AI Gateway OpenTelemetry referansı](/tr/ai-gateway/acik-telemetri)ndedir.
+
+Bir istek failover yaptığında hikâyeyi kaybetmezsiniz — span *kazanırsınız*: deneme başına bir CLIENT adımı, böylece trace önce hangi sağlayıcının denendiğini, vazgeçmesinin ne kadar sürdüğünü ve sonunda hangisinin yanıtladığını tam olarak gösterir. Bir semantik-önbellek isabeti de görünür: sıfır token, `apinizer.ai.cache.hit=true` ve hiç backend adımı yok.
+
+### Yalnız Trace Değil, Metrikler de
+
+Span'lerin yanında AI trafiği, OTLP üzerinden GenAI metrik histogramları üretir — `gen_ai.client.token.usage`, `gen_ai.client.operation.duration` ve Apinizer'ın maliyet ile ilk-token-süresi histogramları. Bunlar, native dışa aktarım açık olsun olmasın dokunulmadan çalışmaya devam eden gateway'in mevcut `apinizer_ai_*` Prometheus metriklerinin **yanında** durur. İki aile farklı nedenlerle vardır: Prometheus her zaman açık ve sıfır-yapılandırmadır; OTLP histogramları gerçek bucket'lanmış dağılımlar taşır, böylece önceden hesaplanmış bir ortalama yerine gerçek p50/p95/p99 elde edersiniz. Stack'inizin zaten sahip olduğu hangisiyse onu kazıyın — ya da ikisini birden.
+
+:::warning Tek isim, iki farklı yazım
+Prometheus ailesi bir sağlayıcıyı ham koduyla (`bedrock`) etiketler; OTLP ailesi normalize edilmiş adı (`aws.bedrock`) kullanır. Birine göre kurulan bir dashboard değişkeni diğeriyle eşleşmez. İlk panel kurarken açık tutulacak tablo [sağlayıcı-adı eşlemesi](/tr/ai-gateway/acik-telemetri#sağlayıcı-adı-eşlemesi)dir.
+:::
+
+### İçerik Yakalama — Bilinçli Olarak Kapalı
+
+Tek AI'a özgü ayar olan **AI Prompt/Yanıt İçeriğini Yakala** varsayılan olarak kapalıdır ve gerçekten kastetmedikçe kapalı kalmalıdır. Açtığınızda prompt ve yanıt metni span özniteliği olarak birlikte gider — ama yalnız client ve backend'in fiilen gördüğü metin, PII maskeleme çalıştıktan *sonra*, sizin belirlediğiniz karakter sınırıyla. Ham maske-öncesi gövdeyi asla okumaz. Yine de bu, toplayıcınıza gerçek konuşma içeriğinin çıkması demektir; bu yüzden bunu yalnız toplayıcının kendisi uyumluluk sınırınızın içindeyse etkinleştirin. Ve dürüst boşluğu unutmayın: streaming yanıtlar hiçbir zaman içerik-yakalanmaz, çünkü span'e eklenecek tek bir yanıt gövdesi yoktur.
+
+## Dashboard
+
+Panelleri sıfırdan kurmak zorunda değilsiniz. Dokümanlarla birlikte, Prometheus `apinizer_ai_*` ailesini OTLP `gen_ai.*` histogramlarıyla birleştiren, içe aktarmaya hazır bir Grafana dashboard'u gelir:
+
+<Card title="apinizer-ai-gateway-grafana-dashboard.json" icon="download" href="/files/apinizer-ai-gateway-grafana-dashboard.json">
+  Dashboard JSON'unu indirin — Overview, Tokens, Cost, Streaming, Guardrail, Cache ve Reliability satırları
+</Card>
+
+**Dashboards → New → Import** altında içe aktarın, sonra iki datasource değişkenini Prometheus scrape hedefinize ve toplayıcınızın `gen_ai.*` metriklerini yazdığı Prometheus-uyumlu depoya yönlendirin. Bu bir trace değil, metrik dashboard'udur.
+
+İki satırı bir söze değer, çünkü kendi sınırları konusunda dürüsttürler. Cache ve Reliability satırları, bugün yalnız span/trace seviyesinde var olan sinyalleri işaret eden bir metin paneli içerir — semantik-önbellek isabet oranı ve önlenen maliyet, ve failover kimden/kime ayrıntısı — arkasında sorgulanacak bir metrik henüz yok. Dashboard, boş bir panel göndermek yerine, bunları AI Trace zaman çizelgesinde ya da öznitelik üzerinde bir TraceQL sorgusuyla incelemenizi söyler. Küçük bir şey, ama eksiklikle yanıltan bir dashboard ile güvenebileceğiniz bir dashboard arasındaki fark budur.
+
+{/* TODO(ekran görüntüsü): içe aktarılmış Grafana dashboard — Overview + Tokens + Cost satırları. Ertelendi; yazım sırasında paylaşımlı stack meşgul. */}
+
+## javaagent mı, Native mi?
+
+Biri hangi yolu seçeceğini sorduğunda kısa hâli:
+
+| | javaagent (seri) | Native (bu makale) |
+| --- | --- | --- |
+| Kurulacak | Java agent, Kubernetes'te OTel Operator ile | Hiçbir şey — bir konnektör ve tek bir ayar |
+| Gördüğü | Tüm JVM: HTTP, JDBC, önbellek, her şey | Apinizer'ın istek yaşam döngüsü, artı GenAI katmanı |
+| AI farkındalığı | Genel HTTP span'leri, GenAI semantiği yok | Token, maliyet, model ve gecikme öznitelikleri yerleşik |
+| K8s dışında çalışır | Eklenecek bir pod ister | Evet — çıplak bir VM ya da standalone kurulum uygundur |
+| Aynı anda ikisi | — | Otomatik tespit edilir ve devre dışı bırakılır |
+
+Hiçbiri "daha iyi" değildir. Javaagent JVM'in daha fazlasını görür; native, AI trafiğinin *anlamının* daha fazlasını görür ve hiçbir altyapı gerektirmez. Birçok ekip, Kubernetes makinesine zaten sahip olduğu yerde javaagent'i, başka her yerde native'i çalıştırır. Yapmamanız gereken tek şey, ikisini aynı ortama karşı çalıştırmaktır — ve Apinizer'ın vetosu, bunu kazara yapamayacağınızdan emin olmak için oradadır.
+
+## Bilinen Sınırlar
+
+Native dışa aktarım, sonradan şaşırmayasınız diye kenarları konusunda dürüsttür:
+
+- **Streaming yanıtlar hiçbir zaman içerik-yakalanmaz** — eklenecek tek bir gövde yoktur.
+- **Politika ve koruma span'leri Live Trace ister** — politika-başına INTERNAL çocuk span'ler yalnız o istek için Live Trace aktifken görünür; tek başına her-zaman-açık dışa aktarım bunları üretmez.
+- **WebSocket ve gRPC yayılım değil, sunucu-tarafı span alır** — bir SERVER span üretilir, ama gelen bir `traceparent`'a katılmak ve birini iletmek şimdilik yalnız HTTP/SOAP'tadır; dolayısıyla WS/gRPC daima taze bir trace başlatır.
+- **GenAI semantik kuralları 2026-08 anlık görüntüsüne pinlidir** — yukarı akışta hâlâ Development statüsünde, dolayısıyla ara sıra öznitelik yeniden-adlandırması beklenebilir, her zaman release notes'ta belirtilir.
+
+## Toparlarken
+
+Agent-tabanlı seri, Apinizer gateway'ini gözlemlemenin bir yolunu gösterdi: bir javaagent ekle, bir Collector ve Tempo çalıştır, JVM'i dışarıdan oku. Native dışa aktarım diğer yoldur — gateway kendi hikâyesini, kurulacak bir agent olmadan ve genel bir agent'ın göremeyeceği AI token, maliyet ve gecikme telemetrisiyle, doğrudan toplayıcınıza anlatır. Bir konnektör, bir **Test Connection** tıklaması ve tek bir ortam ayarı, ve her istek — REST, SOAP ya da iki kez failover yapmış bir AI çağrısı — okuyabileceğiniz bir trace olarak görünür.
+
+Ayrıntılı öznitelik ve metrik tabloları, kurulum referansı ve tam javaagent-native karşılaştırması için bu iki sayfayı yakın tutun:
+
+<CardGroup cols={2}>
+  <Card title="OpenTelemetry Dışa Aktarımı (platform referansı)" icon="radio" href="/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi">
+    Kurulum, genel-trafik span'leri ve öznitelikleri, ve javaagent karşılaştırması
+  </Card>
+  <Card title="AI Gateway OpenTelemetry (referans)" icon="robot" href="/tr/ai-gateway/acik-telemetri">
+    Tam GenAI öznitelik ve metrik referansı, sağlayıcı eşlemesi ve içerik yakalama
+  </Card>
+</CardGroup>
+
+## Kaynaklar
+
+- [OpenTelemetry GenAI semantik kuralları](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- [W3C Trace Context](https://www.w3.org/TR/trace-context/)
+- [OpenTelemetry Protokolü (OTLP)](https://opentelemetry.io/docs/specs/otlp/)
+- [Apinizer Gateway OpenTelemetry Entegrasyonu — Bölüm 1 (agent yolu)](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum)
