@@ -1,9 +1,20 @@
 ---
 title: "Client Route Raporu"
-description: "Apinizer'da client route'larınızın çakışma durumlarını analiz edebilirsiniz. API Proxy ve Proxy Group'larınızın route yapılandırmalarını inceleyebilirsiniz, çakışan route'ları tespit edebilirsiniz ve deployment durumlarını görüntüleyebilirsiniz."
+description: "Apinizer'da client route'larınızın çakışma durumlarını analiz edebilirsiniz. API Proxy ve Proxy Group'larınızın route yapılandırmalarını inceleyebilirsiniz, çakışan route'ları tespit edebilirsiniz, deployment durumlarını görüntüleyebilirsiniz ve Route Trace ile bir isteğin hangi API Proxy'ye yönleneceğini worker üzerinde doğrulayabilirsiniz."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
+
+Ekran iki sekmeden oluşur:
+
+<CardGroup cols={2}>
+  <Card title="Route Çakışmaları" icon="table">
+    Veritabanındaki yapılandırmanın statik analizi. Route'ların birbiriyle çakışıp çakışmadığını gösterir.
+  </Card>
+  <Card title="Route Trace" icon="directions">
+    Çalışan worker'lara "bu isteği alsan ne yapardın" sorusunu sorar. Yapılandırmanın değil, gateway'in o anki davranışının kaydıdır.
+  </Card>
+</CardGroup>
 
 ## Genel Bakış
 
@@ -95,4 +106,72 @@ Rapor tablosunda **Proje**, **Tip** ve **İsim** kolonlarına göre artan veya a
 Bu rapor tüm route'ları analiz etmek için tasarlanmıştır. Pagination olmadan tüm sonuçlar gösterilir.
 
 :::
+
+## Route Trace
+
+Route Trace sekmesi, tarif ettiğiniz bir isteğin **hangi API Proxy'ye yönleneceğini** çalışan her worker pod'una ayrı ayrı sorar.
+
+Çakışma raporu veritabanındaki yapılandırmayı inceler; yani route tablosunun *nasıl görünmesi gerektiğini* söyler. Route Trace ise worker'ın bellekteki route tablosuna bakar; yani *o an ne yaptığını* söyler. İkisi ayrıldığında sorun yapılandırmada değil, worker'ın belleğindedir — ve bu boşluk iki görünümün hiçbirinden tek başına fark edilmez.
+
+:::info
+
+**Backend'e istek gönderilmez.** Cevap, pod'un bellekteki route tablosundan üretilir. Arkadaki servise hiçbir çağrı yapılmaz; trafik logu, kota ve rate limit sayaçları etkilenmez. Bu nedenle canlı ortamda güvenle çalıştırılabilir.
+
+:::
+
+### İsteğin Tarif Edilmesi
+
+| Alan | Açıklama |
+|------|----------|
+| Ortamlar (*Environments*) | Sorgulanacak ortamlar. Boş bırakılırsa yayınlanmış tüm ortamlar sorgulanır. |
+| HTTP Method | İsteğin method'u. Yapılandırma joker değeri olan `ALL` listede yer almaz; gönderilebilir bir method değildir. |
+| Path | İstenen adres. `/` ile başlamalıdır. |
+| Host | Host tabanlı route'lar için. **Boş bırakılırsa host kriteri boş kabul edilir** — host'a göre ayrışan route'ları test ederken bu alanı doldurun. |
+| Header'lar | Header tabanlı route'lar için ad/değer çiftleri. *Host Header Ekle* kısayolu Host değerini header olarak da gönderir. |
+| Body (SOAP) | Yalnızca SOAP proxy'lerinde gerekir; method adı envelope içinden çözülür. REST için boş bırakın. |
+
+İki seçenek daha vardır:
+
+* **Rakip route'ları getir** — eşleşmeyi kaybeden route'ları ve her birinin neden elendiğini listeler. Yanlış bir proxy'ye gidildiğinde açıklama buradadır.
+* **Index tutarsızlık denetimi yap** — worker'ın bellekteki route index'ini tarar. Eşleşme imkânsız göründüğünde açın; tüm kategorileri gezdiği için maliyetlidir.
+
+### Sonucun Okunması
+
+Sonuç, pod listesiyle değil **pod'lar arası uzlaşı** ile başlar. Bir gateway ancak her pod aynı path'i aynı proxy'ye çözüyorsa doğrudur; çözmüyorsa istek, load balancer'ın seçtiği pod'a göre başarılı ya da 404 olur.
+
+<CardGroup cols={2}>
+  <Card title="Tüm pod'lar aynı sonucu verdi" icon="check-circle">
+    Route tablosu pod'lar arasında tutarlı. Sonucu yapılandırma belirliyor.
+  </Card>
+  <Card title="Bazı pod'lar route bulamadı" icon="exclamation-triangle">
+    Aynı istek bazı pod'larda çözülüyor, bazılarında çözülmüyor. Dışarıdan **aralıklı 404** olarak görünür.
+  </Card>
+  <Card title="Pod'lar farklı API Proxy'lere yönlendiriyor" icon="exclamation-circle">
+    Aynı istek pod'lara göre farklı hedeflere gidiyor. Worker'ların bellekteki route tabloları birbirinden ayrışmış demektir; yapılandırma tek başına bunu açıklamaz.
+  </Card>
+  <Card title="Cevaplar uyumlu, kapsam eksik" icon="info-circle">
+    Cevap veren pod'lar hemfikir, ancak en az bir pod'a ulaşılamadı. Ulaşılamayan pod'un durumu bilinmiyor.
+  </Card>
+</CardGroup>
+
+Uzlaşı bandının altında aynı cevabı veren pod'lar tek kartta toplanır; pod'lar ayrıştığında küçük grup ayrıca işaretlenir — incelenmesi gereken pod'lar onlardır. En altta ise kanıt olarak pod tablosu yer alır. Bir satır açıldığında şunlar görünür:
+
+* **İsteğin yorumlanması** — worker'ın path'i nasıl okuduğu. Root context'in path'ten çıkarılması sık şaşırtan bir adımdır ve burada açıkça gösterilir. Hiçbir kategori eşleşmediyse bu da belirtilir; route tablosunda o istek biçiminde hiç kayıt yok demektir.
+* **Rakip route'lar** — her biri için host/header/URI/method kuralının ayrı ayrı sonucu. Elenme sebebinin yanındaki soru işareti, o sebebin doğrudan gözlemlenmediğini, mevcut route verisinden çıkarıldığını belirtir.
+* **Index bulguları** — denetim açıksa, route tablosunun kendi içinde tutarsız olduğu noktalar.
+* **Grup üyeleri** — eşleşme bir Proxy Group üzerinden geldiyse, worker'ın değerlendireceği sıradaki üyeler.
+
+:::note
+
+Bir pod'un hata vermesi raporun tamamının başarısız olduğu anlamına gelmez; diğer pod'lar cevap vermiş olabilir. Kaç pod'un cevap verdiği üst bantta yazar.
+
+:::
+
+:::warning
+
+**Eşleşti ancak ulaşılamadı** sebebiyle listelenen bir rakip route özel olarak dikkate değerdir. Route eşleşiyor ve kategorisi taranmış olmasına rağmen çözümleme onu bulamamış demektir; bu kombinasyon normalde mümkün değildir ve yapılandırmayı değil worker'ın bellekteki index'ini işaret eder. Aynı şekilde index denetiminin ürettiği bulgular da yapılandırmayla değil, çalışan worker'ın durumuyla ilgilidir — bu durumda ilgili worker'ın yeniden başlatılması gerekebilir.
+
+:::
+
+Sonuçlar, isteğin tarifiyle birlikte JSON olarak panoya kopyalanabilir. **Header değerleri kopyalanan içeriğe dahil edilmez** (yalnızca header adları), böylece `Authorization` veya `Cookie` gibi bilgiler destek kaydına düşmez.
 

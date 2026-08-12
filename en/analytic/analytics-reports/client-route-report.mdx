@@ -1,9 +1,20 @@
 ---
 title: "Client Route Report"
-description: "You can analyze conflict statuses of your client routes in Apinizer. You can examine route configurations of your API Proxies and Proxy Groups, detect conflicting routes, and view deployment statuses."
+description: "You can analyze conflict statuses of your client routes in Apinizer. You can examine route configurations of your API Proxies and Proxy Groups, detect conflicting routes, view deployment statuses, and use Route Trace to verify on the workers which API Proxy a request would actually reach."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
+
+The screen has two tabs:
+
+<CardGroup cols={2}>
+  <Card title="Route Conflicts" icon="table">
+    Static analysis of the stored configuration. Shows whether routes conflict with one another.
+  </Card>
+  <Card title="Route Trace" icon="directions">
+    Asks the running workers what they would do with a given request. A record of the gateway's current behaviour rather than of its configuration.
+  </Card>
+</CardGroup>
 
 ## Overview
 
@@ -95,4 +106,72 @@ You can sort the report table in ascending or descending order by **Project**, *
 This report is designed to analyze all routes. All results are displayed without pagination.
 
 :::
+
+## Route Trace
+
+The Route Trace tab asks every running worker pod, separately, **which API Proxy would serve** the request you describe.
+
+The conflict report examines the stored configuration — it tells you what the routing table *should* look like. Route Trace looks at the worker's in-memory routing table — it tells you what the worker is *actually doing*. When the two disagree, the problem is not in the configuration but in the worker's memory, and that gap is invisible from either view alone.
+
+:::info
+
+**No request is sent to the backend.** The answer comes from the pod's in-memory routing table. No call reaches the backend service, and traffic logs, quota and rate limit counters are unaffected. It is therefore safe to run against a live environment.
+
+:::
+
+### Describing the Request
+
+| Field | Description |
+|------|----------|
+| Environments | Environments to probe. Leave empty to probe every published environment. |
+| HTTP Method | The request's method. `ALL` is absent from the list: it is a configuration wildcard, not a method a client can send. |
+| Path | The requested address. Must start with `/`. |
+| Host | For host based routes. **If left empty the host criterion is treated as empty** — fill it in when testing routes that differ by host. |
+| Headers | Name/value pairs for header based routes. The *Add Host Header* shortcut also sends the Host value as a header. |
+| Body (SOAP) | Only needed for SOAP proxies, where the method name is resolved from the envelope. Leave empty for REST. |
+
+Two further options are available:
+
+* **Include competing routes** — lists the routes that lost the match and why each one was eliminated. When a request reaches the wrong proxy, the explanation is here.
+* **Run index consistency audit** — scans the worker's in-memory route index. Enable it when a match looks impossible; it walks every category, so it is not free.
+
+### Reading the Result
+
+The result leads with **agreement across pods**, not with the pod list. A gateway is only correct if every pod resolves a path to the same proxy; if it does not, the request succeeds or returns 404 depending on which pod the load balancer picked.
+
+<CardGroup cols={2}>
+  <Card title="All pods returned the same result" icon="check-circle">
+    The routing table is consistent across pods. Configuration is what decides the outcome.
+  </Card>
+  <Card title="Some pods found no route" icon="exclamation-triangle">
+    The same request resolves on some pods and not on others. From outside this looks like an **intermittent 404**.
+  </Card>
+  <Card title="Pods route to different API Proxies" icon="exclamation-circle">
+    The same request reaches different destinations depending on the pod. The workers' in-memory routing tables have drifted apart; configuration alone does not explain this.
+  </Card>
+  <Card title="Answers agree, coverage is incomplete" icon="info-circle">
+    The pods that answered agree, but at least one pod could not be reached. The state of that pod is unknown.
+  </Card>
+</CardGroup>
+
+Below the agreement banner, pods that answered identically are collapsed into a single card; when pods disagree the smaller group is flagged separately — those are the pods to investigate. At the bottom sits the pod table as evidence. Expanding a row shows:
+
+* **How the request was read** — the way the worker interpreted the path. Stripping the root context is a frequent source of surprise and is shown explicitly. If no category matched at all, that is stated too: the routing table holds nothing shaped like this request.
+* **Competing routes** — the separate outcome of the host, header, URI and method rule for each one. The question mark beside an elimination reason means the reason was derived from the available route data rather than observed directly.
+* **Index findings** — when the audit is enabled, the points at which the routing table is inconsistent with itself.
+* **Group members** — when the match came through a Proxy Group, the members in the order the worker would consider them.
+
+:::note
+
+A pod reporting an error does not mean the whole report failed; the other pods may well have answered. The banner states how many pods responded.
+
+:::
+
+:::warning
+
+A competing route listed as **Matched but not reached** deserves particular attention. It means the route matches and its category was searched, yet resolution did not find it — a combination that should not be possible, and one that points at the worker's in-memory index rather than at configuration. Index audit findings are likewise about the running worker's state rather than about configuration; in that case the affected worker may need to be restarted.
+
+:::
+
+Results can be copied to the clipboard as JSON together with the request description. **Header values are excluded from the copied content** (header names are kept), so credentials such as `Authorization` or `Cookie` do not end up in a support ticket.
 
