@@ -555,6 +555,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "develop/monitoring-analysis/step-by-step-tracing",
+        "develop/monitoring-analysis/opentelemetry-export",
         "develop/monitoring-analysis/api-traffic",
         "develop/monitoring-analysis/analytics",
         "develop/monitoring-analysis/audit-records",

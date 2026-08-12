@@ -11,7 +11,7 @@ import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
 
 Apinizer, [OpenTelemetry](https://opentelemetry.io/) (OTLP) trace ve metriklerini doğrudan üründen dışa aktarır — javaagent yok, sidecar yok. Her istek (REST/SOAP ve sunucu tarafında WebSocket/gRPC) W3C `traceparent` yayılımı taşır ve retrospektif bir span ağacı üretir; AI Gateway trafiği ayrıca bir [GenAI semantik-kural kümesi](https://opentelemetry.io/docs/specs/semconv/gen-ai/) öznitelik ve metrik katmanı taşır — böylece token kullanımı, maliyet ve gecikme, OpenTelemetry ekosisteminin geri kalanının kullandığı aynı alan adlarıyla APM aracınızda görünür.
 
-Bu sayfa **ürün-native dışa aktarımı** kapsar. Gateway JVM'ine karşı zaten OpenTelemetry Java agent'ı çalıştırıyorsanız ([Apinizer Gateway OpenTelemetry Entegrasyonu](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum) makale serisinde anlatılan yaklaşım), ikisini birden etkinleştirmeden önce aşağıdaki [javaagent'e karşı native](#javaagente-karşı-native) bölümüne bakın — Apinizer çift dışa aktarımı reddeder.
+Bu sayfa **AI'a özgü katmanı** kapsar — AI Gateway trafiğinin native dışa aktarımın üstüne eklediği GenAI öznitelikleri, metrikler, içerik yakalama ve dashboard. Native OTLP dışa aktarımın kendisi platform-geneldir (her proxy tipini kapsar); kurulum adımları, genel-trafik span/öznitelik referansı ve javaagent'e-karşı-native karşılaştırması için bkz. **[OpenTelemetry Dışa Aktarımı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi)**.
 
 :::note Semantik kurallar belirli bir registry anlık görüntüsüne pinlidir
 Aşağıdaki öznitelik ve metrik adları OpenTelemetry semantic-conventions registry'sinin **2026-08** anlık görüntüsünü izler; GenAI için bu registry hâlâ **Development** statüsündedir — adlar OpenTelemetry Stable'a ulaşmadan önce değişebilir. Apinizer registry'yi ileriye doğru takip edecektir; gelecekteki bir yükseltme bir özniteliği yeniden adlandırırsa bu, release notes'ta belirtilir.
@@ -81,19 +81,7 @@ Vendor'a özgü öznitelikler, OpenTelemetry'nin bilinen-vendor-namespace kural�
 
 ### Genel Trafik Öznitelikleri
 
-SERVER span'inde (her proxy tipi) ve deneme-başına CLIENT span'lerinde (REST/SOAP backend çağrıları; yukarıdaki AI CLIENT adımları kendi öznitelik kümesini taşır) ayarlanır.
-
-| Öznitelik | Span tipi | Anlamı |
-| --- | --- | --- |
-| `http.request.method` | SERVER, CLIENT | HTTP metodu |
-| `http.response.status_code` | SERVER, CLIENT | Durum kodu |
-| `url.path` | SERVER | Yalnız istek yolu — query string asla yakalanmaz |
-| `network.peer.address` | CLIENT | Fiilen bağlanılan upstream adresi |
-| `http.request.resend_count` | CLIENT | Yalnız tekrar denenen adımlarda ayarlanır |
-| `error.type` | SERVER, CLIENT | Hata sınıflandırması |
-| `apinizer.routing.dns_ns` / `.tcp_connect_ns` / `.tls_handshake_ns` / `.ttfb_ns` / `.body_read_ns` / `.pool_wait_ns` | CLIENT | Aşama-başına ağ zamanlaması, yalnız fiilen ölçülmüşse |
-| `apinizer.cache_hit` | SERVER | Bu istek için yanıt-önbelleği isabeti |
-| `apinizer.result_type` | SERVER | Başarı/hata/blok sınıflandırması |
+SERVER ve deneme-başına CLIENT span'leri ayrıca her proxy tipinin paylaştığı genel HTTP/routing özniteliklerini (metod, durum, `url.path`, faz-başına ağ zamanlaması vb.) taşır — bunlar platform referansında tek yerde belgelenmiştir: [OpenTelemetry Dışa Aktarımı: Öznitelik Referansı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi#öznitelik-referansı).
 
 Header değerleri, istek/yanıt gövdeleri, query string'ler ve kimlik bilgileri yukarıdaki açık içerik-yakalama yolu dışında span'lere **asla** konmaz — span adları, kardinaliteyi sınırlı tutmak için API proxy'nin şablon yolunu kullanır, ham URI'yi değil.
 
@@ -110,34 +98,13 @@ Bunlar, gateway'in Prometheus endpoint'indeki mevcut `apinizer_ai_*` sayaç/zama
 
 ## Yapılandırma
 
+Native dışa aktarımı açmak platform-genel bir kurulumdur — bir OTLP Collector konnektörü oluşturun, ortamın dışa aktarım modunu `NATIVE` yapın ve örneklemeyi ayarlayın. Bu adımlar tek yerde [OpenTelemetry Dışa Aktarımı: Yapılandırma](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi#yapılandırma) altında anlatılmıştır. Bir ayar AI trafiğine özgüdür:
+
 <Steps>
-  <Step title="Bir OTLP Collector konnektörü oluşturun">
-    Bağlantı yönetimi altında yeni bir **OTLP Collector** konnektörü oluşturun. **Endpoint**'i collector'ınızın **BASE URL**'sine ayarlayın (örn. `http://collector:4318`) — sinyal yolunu (`/v1/traces`, `/v1/metrics`) Apinizer kendisi ekler, siz eklemeyin. **Protocol** (HTTP/protobuf veya gRPC), opsiyonel **Gzip Compression**, **Timeout**, opsiyonel bir **Auth Header Name**/**Auth Header Value** çifti (şifreli saklanır) ve varsa **Additional Headers**'ı yapılandırın. **Batch / Export Tuning** bölümü (max queue size, max export batch size, schedule delay, metric export interval) exporter'ın batch davranışını kontrol eder — varsayılanlar çoğu collector için makuldür.
-  </Step>
-  <Step title="Bağlantıyı test edin">
-    Konnektörde **Test Connection**'ı kullanın. Bu bir TCP ping değildir — Apinizer kaydedilen ayarlardan geçici bir exporter kurar ve collector'a gerçek bir sentetik span gönderir; böylece deploy etmeden önce collector'ın Apinizer'ın OTLP payload'unu (auth, TLS ve yol dahil) fiilen kabul ettiğini kanıtlar.
-  </Step>
-  <Step title="Environment'ta dışa aktarımı etkinleştirin">
-    Hedef environment'ın **OpenTelemetry Export** bölümünde **Export Modu**'nu `NATIVE` yapın ve az önce oluşturduğunuz konnektörü **OTLP Collector** olarak seçin. Mod varsayılan olarak `OFF`'tur (sıfır maliyet) siz burada opt-in edene kadar — bu environment-başına bir ayardır, yani production'a dokunmadan önce staging'de pilot yapabilirsiniz.
-  </Step>
-  <Step title="Örneklemeyi ayarlayın">
-    **Örnekleme Oranı**, yeni bir trace başlatan istekler için parent-based `traceIdRatio` örneklemesini kontrol eder (zaten örneklenmiş bir `traceparent` ile gelen bir istek, bu orandan bağımsız olarak parent'ın kararını miras alır). Yüksek trafikli proxy'lerde muhafazakâr başlayın, collector kapasitesini doğruladıktan sonra artırın.
-  </Step>
   <Step title="İçerik yakalamaya karar verin">
     **AI Prompt/Yanıt İçeriğini Yakala** varsayılan olarak kapalıdır. Açmak, prompt/yanıt metnini (maskeleme yapılandırılmışsa zaten PII-maskelenmiş — içerik yakalama yalnızca client/backend'in fiilen gördüğü aynı post-mask gövdeyi okur) **İçerik Yakalama Azami Karakter**'e tabi olarak OTLP collector'ınıza span özniteliği olarak gönderir. Bunu yalnızca collector'ın kendisi uyumluluk sınırınızın içindeyse etkinleştirin — içerik yakalamanın *kapsamadığı* şeyler için [Bilinen Sınırlar](#bilinen-sınırlar)a bakın.
   </Step>
 </Steps>
-
-## javaagent'e Karşı Native
-
-| | javaagent | Native (bu sayfa) |
-| --- | --- | --- |
-| Kurulum | Worker JVM'ine `-javaagent` ekle | Kurulacak bir şey yok — bir konnektör + bir environment ayarı yapılandırın |
-| Kapsam | Tam JVM auto-instrumentation (HTTP client/server, JDBC, …) | Apinizer'ın kendi istek yaşam döngüsü + AI GenAI katmanı |
-| İçerik farkındalığı | Genel HTTP span'leri, ayrıca yapılandırılmadıkça GenAI semantiği yok | GenAI öznitelik/metrikleri ve Apinizer iş bağlamı (correlation ID, proje, proxy) yerleşik |
-| Çift dışa aktarım | Yok | **Otomatik tespit edilir ve devre dışı bırakılır.** Bir environment'ın export modu `NATIVE` iken Apinizer, JVM'e ekli bir OpenTelemetry javaagent'ı tespit ederse native dışa aktarımı zorla kapatır ve her span'i iki kez göndermek yerine bir uyarı loglar. javaagent yolunu seçtiyseniz uyarıyı susturmak için modu açıkça `AGENT` yapın. |
-
-Hiçbir deployment değişikliği olmadan GenAI-farkında trace ve metriklere en hızlı yol için native'i seçin; gateway'in native olarak ürettiğinin ötesinde tam JVM instrumentation'a ihtiyacınız varsa javaagent'i seçin (bu kurulum için [OpenTelemetry Entegrasyonu makale serisi](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum)ne bakın). Aynı environment'a karşı ikisini birden çalıştırmak desteklenmez — Apinizer'ın vetosu tam olarak bunun sessizce olmasını önlemek için vardır.
 
 ## Korelasyon
 
@@ -173,6 +140,9 @@ Prometheus `apinizer_ai_*` ailesini OTLP `gen_ai.*`/`apinizer.ai.client.*` histo
 ## Sonraki Adımlar
 
 <CardGroup cols={2}>
+  <Card title="OpenTelemetry Dışa Aktarımı" icon="radio" href="/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi">
+    Platform-genel native dışa aktarım — kurulum, genel-trafik span'leri ve javaagent'e karşı native
+  </Card>
   <Card title="İzleme ve Tekrar Oynatma" icon="route" href="/tr/ai-gateway/izleme-ve-tekrar-oynatma">
     Trace grubunun (DAG) ve Zaman Çizelgesi Görünümü'nün UI'da nasıl çalıştığını görün
   </Card>

@@ -11,7 +11,7 @@ import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
 
 Apinizer exports [OpenTelemetry](https://opentelemetry.io/) (OTLP) traces and metrics directly from the product — no javaagent, no sidecar. Every request (REST/SOAP, and WebSocket/gRPC on the server side) carries W3C `traceparent` propagation and produces a retrospective span tree; AI Gateway traffic additionally carries a [GenAI semantic-conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attribute and metric layer so token usage, cost, and latency show up in your APM tool using the same field names the rest of the OpenTelemetry ecosystem uses.
 
-This page covers **native product export**. If you already run the OpenTelemetry Java agent against the gateway JVM (the approach covered in the [Apinizer Gateway OpenTelemetry Integration](/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup) article series), see [javaagent vs. native](#javaagent-vs-native) below before enabling both — Apinizer refuses to double-export.
+This page covers the **AI-specific layer** — the GenAI attributes, metrics, content capture, and dashboard that AI Gateway traffic adds on top of native export. Native OTLP export itself is platform-wide (it covers every proxy type); for the setup steps, the generic-traffic span/attribute reference, and the javaagent-vs-native comparison, see **[OpenTelemetry Export](/en/develop/monitoring-analysis/opentelemetry-export)**.
 
 :::note Semantic conventions are pinned to a specific registry snapshot
 Attribute and metric names below follow the OpenTelemetry semantic-conventions registry as of **2026-08**, which is still in **Development** status for GenAI — names can change in upstream OpenTelemetry before it reaches Stable. Apinizer will follow the registry forward; if a future upgrade renames an attribute, it will be called out in the release notes.
@@ -81,19 +81,7 @@ Vendor-specific attributes live under Apinizer's own namespace rather than neste
 
 ### Generic Traffic Attributes
 
-Set on the SERVER span (every proxy type) and per-attempt CLIENT spans (REST/SOAP backend calls; the AI CLIENT legs above carry their own attribute set instead).
-
-| Attribute | Span kind | Meaning |
-| --- | --- | --- |
-| `http.request.method` | SERVER, CLIENT | HTTP method |
-| `http.response.status_code` | SERVER, CLIENT | Status code |
-| `url.path` | SERVER | Request path only — query string is never captured |
-| `network.peer.address` | CLIENT | Upstream address actually connected to |
-| `http.request.resend_count` | CLIENT | Set only on retried attempts |
-| `error.type` | SERVER, CLIENT | Failure classification |
-| `apinizer.routing.dns_ns` / `.tcp_connect_ns` / `.tls_handshake_ns` / `.ttfb_ns` / `.body_read_ns` / `.pool_wait_ns` | CLIENT | Per-phase network timing, only when actually measured |
-| `apinizer.cache_hit` | SERVER | Response-cache hit for this request |
-| `apinizer.result_type` | SERVER | Success/error/blocked classification |
+The SERVER and per-attempt CLIENT spans also carry the generic HTTP/routing attributes (method, status, `url.path`, per-phase network timing, and so on) shared by every proxy type — documented once in the platform reference, [OpenTelemetry Export: Attribute Reference](/en/develop/monitoring-analysis/opentelemetry-export#attribute-reference).
 
 Header values, request/response bodies, query strings, and credentials are **never** placed on spans outside the explicit content-capture path above — span names use the API proxy's templated path, never the raw URI, to keep cardinality bounded.
 
@@ -110,34 +98,13 @@ These are deliberately **separate** from the existing `apinizer_ai_*` Prometheus
 
 ## Configuration
 
+Turning native export on is platform-wide setup — create an OTLP Collector connector, set the environment's export mode to `NATIVE`, and tune sampling. Those steps are covered once in [OpenTelemetry Export: Configuration](/en/develop/monitoring-analysis/opentelemetry-export#configuration). One setting is specific to AI traffic:
+
 <Steps>
-  <Step title="Create an OTLP Collector connector">
-    Under connection management, create a new **OTLP Collector** connector. Set **Endpoint** to your collector's **base URL** (for example `http://collector:4318`) — Apinizer appends the signal path (`/v1/traces`, `/v1/metrics`) itself, so do not include it. Configure **Protocol** (HTTP/protobuf or gRPC), optional **Gzip Compression**, **Timeout**, an optional **Auth Header Name**/**Auth Header Value** pair (stored encrypted), and any **Additional Headers**. The **Batch / Export Tuning** section (max queue size, max export batch size, schedule delay, metric export interval) controls the exporter's batching behavior — the defaults are reasonable for most collectors.
-  </Step>
-  <Step title="Test the connection">
-    Use **Test Connection** on the connector. This is not a TCP ping — Apinizer builds a temporary exporter from the saved settings and sends one real synthetic span to the collector, proving the collector actually accepts Apinizer's OTLP payload (auth, TLS, and path included) before you deploy it.
-  </Step>
-  <Step title="Enable export on the environment">
-    In the target environment's **OpenTelemetry Export** section, set **Export Mode** to `NATIVE` and select the connector you just created as the **OTLP Collector**. Mode stays `OFF` by default (zero cost) until you opt in here — this is a per-environment setting, so you can pilot it on staging before touching production.
-  </Step>
-  <Step title="Tune sampling">
-    **Sampling Ratio** controls parent-based `traceIdRatio` sampling for requests that start a new trace (a request arriving with an existing sampled `traceparent` always inherits the parent's decision, regardless of this ratio). Start conservative on high-traffic proxies and raise it once you've confirmed collector capacity.
-  </Step>
   <Step title="Decide on content capture">
     **Capture AI Prompt/Response Content** is off by default. Turning it on sends prompt/response text (already PII-masked, if masking is configured — content capture only ever reads the same post-mask body the client/backend actually saw) to your OTLP collector as span attributes, subject to **Content Capture Max Characters**. Only enable this if the collector itself is inside your compliance boundary — see [Known Limits](#known-limits) for what content capture does *not* cover.
   </Step>
 </Steps>
-
-## javaagent vs. Native
-
-| | javaagent | Native (this page) |
-| --- | --- | --- |
-| Install | Attach `-javaagent` to the worker JVM | Nothing to install — configure a connector + an environment setting |
-| Scope | Full JVM auto-instrumentation (HTTP client/server, JDBC, …) | Apinizer's own request lifecycle + AI GenAI layer |
-| Content awareness | Generic HTTP spans, no GenAI semantics unless separately configured | GenAI attributes/metrics and Apinizer business context (correlation ID, project, proxy) built in |
-| Double-export | N/A | **Automatically detected and disabled.** If Apinizer detects an OpenTelemetry javaagent attached to the JVM while an environment's export mode is `NATIVE`, it forces native export off and logs a warning rather than sending every span twice. Set mode to `AGENT` explicitly to silence the warning once you've chosen the javaagent path. |
-
-Pick native for the fastest path to GenAI-aware traces and metrics with no deployment change; pick the javaagent when you need full-stack JVM instrumentation beyond what the gateway emits natively (see the [OpenTelemetry Integration article series](/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup) for that setup). Running both against the same environment is not supported — Apinizer's veto exists specifically to stop that from happening silently.
 
 ## Correlation
 
@@ -173,6 +140,9 @@ A ready-to-import Grafana dashboard combining the Prometheus `apinizer_ai_*` fam
 ## Next Steps
 
 <CardGroup cols={2}>
+  <Card title="OpenTelemetry Export" icon="radio" href="/en/develop/monitoring-analysis/opentelemetry-export">
+    Platform-wide native export — setup, generic-traffic spans, and javaagent vs. native
+  </Card>
   <Card title="Tracing and Replay" icon="route" href="/en/ai-gateway/tracing-and-replay">
     See how the trace group (DAG) and Timeline View work in the UI
   </Card>

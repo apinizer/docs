@@ -552,6 +552,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "develop/izleme-analiz/adim-adim-izleme",
+        "develop/izleme-analiz/opentelemetry-disa-aktarimi",
         "develop/izleme-analiz/api-trafigi",
         "develop/izleme-analiz/analitik",
         "develop/izleme-analiz/islem-kayitlari",
