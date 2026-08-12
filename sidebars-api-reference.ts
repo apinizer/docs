@@ -209,6 +209,8 @@ const sidebars: SidebarsConfig = {
               "collapsible": true,
               "items": [
                 "policies/policies",
+                "policies/policies/policy-ai-a2a-call",
+                "policies/policies/policy-ai-mcp-call",
                 "policies/policies/policy-api-authentication",
                 "policies/policies/policy-api-based-quota",
                 "policies/policies/policy-api-based-throttling",
