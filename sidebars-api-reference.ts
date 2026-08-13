@@ -605,6 +605,8 @@ const sidebars: SidebarsConfig = {
                 "ip-groups/crud",
                 "ip-groups/crud/create-ip-group",
                 "ip-groups/crud/delete-ip-group",
+                "ip-groups/crud/get-ip-group",
+                "ip-groups/crud/list-ip-groups",
                 "ip-groups/crud/update-ip-group"
               ]
             },
@@ -638,6 +640,8 @@ const sidebars: SidebarsConfig = {
                 "rlcl/crud",
                 "rlcl/crud/create-rlcl",
                 "rlcl/crud/delete-rlcl",
+                "rlcl/crud/get-rlcl",
+                "rlcl/crud/list-rlcls",
                 "rlcl/crud/update-rlcl"
               ]
             },
@@ -686,6 +690,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "geolocation",
+            "geolocation/get-geolocation-status",
             "geolocation/enable-geolocation",
             "geolocation/disable-geolocation",
             "geolocation/upload-mmdb-file"
