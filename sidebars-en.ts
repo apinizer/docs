@@ -953,6 +953,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
+                    "operations/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]
@@ -1325,6 +1326,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
+                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]

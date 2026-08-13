@@ -951,6 +951,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1323,6 +1324,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
