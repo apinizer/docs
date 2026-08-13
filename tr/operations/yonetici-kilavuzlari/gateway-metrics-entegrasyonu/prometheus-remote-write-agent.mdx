@@ -1,0 +1,476 @@
+---
+title: "Hedef Prometheus'a remote_write ile Metrik Gönderimi"
+description: "Apinizer metriklerini Apinizer cluster'ı dışında çalışan Prometheus'a Prometheus Agent ve remote_write ile aktarmak için adım adım yapılandırma kılavuzu."
+---
+
+Bu kılavuz, Apinizer metriklerinin **Apinizer Kubernetes cluster'ı içinde ayrı bir Prometheus kurulmadan**, kuruluşunuzda zaten çalışan bir Prometheus instance'ına aktarılması için gerekli adımları açıklar.
+
+Hedef Prometheus'un nerede çalıştığı (farklı bir Kubernetes cluster'ı, sanal sunucu, yönetilen servis vb.) önemli değildir; Apinizer cluster'ındaki agent'ın hedefe **`/api/v1/write`** endpoint'i üzerinden erişebilmesi yeterlidir.
+
+[Prometheus Kurulumu ve Scraping Yapılandırması](./gateway-prometheus-scraping) sayfasında anlatıldığı gibi Apinizer Gateway ve Cache bileşenleri metriklerini **9091** portu üzerinden yayınlar. Prometheus Apinizer ile aynı cluster içindeyse scraping doğrudan yapılabilir. Hedef Prometheus Apinizer cluster'ının dışındaysa **Prometheus Agent mode** ve **`remote_write`** kullanılması önerilen yöntemdir.
+
+## Mimari Özeti
+
+Akış aşağıdaki gibidir:
+
+1. Apinizer cluster içinde **Prometheus Agent** deploy edilir.
+2. Agent, Apinizer metrik endpoint'lerini (`9091`) cluster içinden scrape eder.
+3. Agent yerel TSDB tutmaz; veriyi **`remote_write`** ile hedef Prometheus'a gönderir.
+4. Hedef Prometheus'ta **`--web.enable-remote-write-receiver`** flag'i aktif olmalıdır.
+
+```text
+Apinizer Pod (9091)
+        ↓ scrape
+Prometheus Agent (Apinizer cluster)
+        ↓ remote_write
+Hedef Prometheus (Apinizer dışında)
+        ↓
+Grafana / Alertmanager
+```
+
+:::info
+
+Prometheus Agent mode (`--enable-feature=agent`) yalnızca scrape ve remote_write yapar. Bu instance üzerinde `/api/v1/query` gibi sorgu API'leri çalışmaz. Sorgular hedef Prometheus üzerinden yapılır.
+
+:::
+
+## Ön Koşullar
+
+Aşağıdaki koşullar sağlanmalıdır:
+
+| Koşul | Açıklama |
+|-------|----------|
+| Metrik endpoint'i | Cache ve Worker pod'larında `METRICS_ENABLED=true` tanımlı olmalı |
+| Ağ erişimi | Apinizer cluster'ından hedef Prometheus'un `/api/v1/write` endpoint'ine erişim olmalı |
+| Hedef Prometheus | `--web.enable-remote-write-receiver` flag'i ile çalışmalı |
+| Ortam ayrımı | `external_labels.cluster` değeri her Apinizer ortamı için benzersiz olmalı |
+
+:::info
+
+Apinizer üzerinden Kubernetes yönetimi yapılıyorsa `METRICS_ENABLED=true` değişkeni **Gateway Ortamları (Gateway Environments)** sayfasında **Deployments & Services** bölümünden Worker ve Cache için **Edit deployment** ile eklenebilir. Kubernetes manifest'leri doğrudan yönetiliyorsa aynı değişken deployment YAML'ına veya `kubectl set env` komutuyla tanımlanır.
+
+:::
+
+## Adım 1 — Metrik Endpoint'lerinin Doğrulanması
+
+Cache ve Worker deployment'larında `METRICS_ENABLED` değerini kontrol edin:
+
+```bash
+kubectl get deploy cache -n <CACHE_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i METRICS
+
+kubectl get deploy worker -n <WORKER_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i METRICS
+```
+
+Değer yoksa veya `false` ise aşağıdaki komutla etkinleştirin:
+
+```bash
+kubectl set env deploy/cache -n <CACHE_NAMESPACE> METRICS_ENABLED=true
+kubectl set env deploy/worker -n <WORKER_NAMESPACE> METRICS_ENABLED=true
+```
+
+Metrik endpoint'inin pod içinde yanıt verdiğini doğrulayın. Prometheus varsayılan olarak `/metrics` yolunu scrape eder; ortamınızda farklı bir yol kullanılıyorsa agent yapılandırmasındaki `metrics_path` ile aynı adresi test edin.
+
+Container içinde `curl` yoksa geçici bir debug pod kullanın:
+
+```bash
+# Pod IP'lerini alın
+kubectl get pod -n <CACHE_NAMESPACE> -l app=cache -o jsonpath='{.items[0].status.podIP}'
+kubectl get pod -n <WORKER_NAMESPACE> -l app=worker -o jsonpath='{.items[0].status.podIP}'
+
+# Debug pod ile test (varsayılan metrics yolu)
+kubectl run debug-curl --image=curlimages/curl -n <WORKER_NAMESPACE> --restart=Never -- \
+  curl -s -o /dev/null -w '%{http_code}\n' http://<POD_IP>:9091/metrics
+
+sleep 3
+kubectl logs debug-curl -n <WORKER_NAMESPACE>
+kubectl delete pod debug-curl -n <WORKER_NAMESPACE>
+```
+
+`200` dönmesi beklenir. `/metrics` yanıt vermiyorsa ortamınıza göre `/actuator/prometheus` yolunu da deneyin; bu durumda agent `scrape_configs` içine `metrics_path` eklemeniz gerekir.
+
+:::tip
+
+Cache pod'unda `wget` varsa doğrudan test edilebilir:
+
+```bash
+kubectl exec -n <CACHE_NAMESPACE> deploy/cache -- \
+  wget -qO- http://localhost:9091/metrics | head -5
+```
+
+:::
+
+## Adım 2 — Metrik Servislerinin Oluşturulması
+
+Pod IP adresleri restart sonrası değişir. Prometheus Agent'ın sabit hedeflere scrape yapabilmesi için **9091** portunu expose eden ClusterIP servisleri oluşturulmalıdır.
+
+### Cache metrik servisi
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-metrics
+  namespace: <CACHE_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: cache
+  type: ClusterIP
+```
+
+### Worker metrik servisi
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-metrics
+  namespace: <WORKER_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: worker
+  type: ClusterIP
+```
+
+Servisleri uygulayın:
+
+```bash
+kubectl apply -f apinizer-metrics-services.yaml
+```
+
+Endpoint'lerin dolduğunu doğrulayın:
+
+```bash
+kubectl get endpoints cache-metrics -n <CACHE_NAMESPACE>
+kubectl get endpoints worker-metrics -n <WORKER_NAMESPACE>
+```
+
+:::warning
+
+`ENDPOINTS` sütunu boşsa `selector` değeri pod label'larıyla eşleşmiyor demektir. Gerçek label'ları kontrol edin:
+
+```bash
+kubectl get pod -n <CACHE_NAMESPACE> -l app=cache --show-labels
+kubectl get pod -n <WORKER_NAMESPACE> -l app=worker --show-labels
+```
+
+:::
+
+Bu servisler, agent yapılandırmasında aşağıdaki DNS adresleriyle referans verilir:
+
+```text
+cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091
+worker-metrics.<WORKER_NAMESPACE>.svc.cluster.local:9091
+```
+
+## Adım 3 — Hedef Prometheus'ta remote_write Receiver'ın Etkinleştirilmesi
+
+Hedef Prometheus, Apinizer ile aynı Kubernetes cluster'ında olmak zorunda değildir. Kuruluşunuzda farklı bir ortamda, sanal sunucuda veya servis olarak çalışıyor olabilir. Bu adımda yalnızca **hedef Prometheus instance'ında** receiver'ın açık olması gerekir.
+
+`remote_write` receiver, `prometheus.yml` içine değil Prometheus'un **başlangıç flag'ine** eklenir:
+
+```text
+--web.enable-remote-write-receiver
+```
+
+Bu flag olmadan `/api/v1/write` endpoint'i **404** veya **405** döner.
+
+Hedef Prometheus Kubernetes üzerinde çalışıyorsa flag'in tanımlı olup olmadığını kontrol edebilirsiniz. Aşağıdaki komutlarda `prometheus` deployment adı ve `monitoring` namespace değerleri örnektir; ortamınızdaki gerçek adlarla değiştirin:
+
+```bash
+kubectl get deploy prometheus -n <MONITORING_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].args}'
+```
+
+Flag yoksa örnek ekleme:
+
+```bash
+kubectl patch deploy prometheus -n <MONITORING_NAMESPACE> --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--web.enable-remote-write-receiver"}]'
+```
+
+Kubernetes dışında çalışan Prometheus için aynı flag'i systemd, Docker veya kullandığınız dağıtım yöntemine göre eklemeniz yeterlidir.
+
+Agent yapılandırmasında kullanılacak tam URL, hedef Prometheus'un kuruluşunuzdaki erişim adresine göre belirlenir:
+
+```text
+http(s)://<HOST>:<PORT>/api/v1/write
+```
+
+`<HOST>` DNS adı, IP adresi, load balancer veya reverse proxy adresi olabilir. `<PORT>` ortamınıza göre değişir.
+
+Apinizer cluster'ından bu adrese erişimi doğrulayın:
+
+```bash
+curl -sv telnet://<HOST>:<PORT> --max-time 5
+```
+
+## Adım 4 — Apinizer Cluster'ına Prometheus Agent Deploy Edilmesi
+
+Apinizer cluster'ında `monitoring` namespace'i altında agent mode Prometheus deploy edilir.
+
+### ConfigMap
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-agent-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      external_labels:
+        cluster: <CLUSTER_NAME>
+        env: <ENVIRONMENT_NAME>
+
+    scrape_configs:
+      - job_name: 'apinizer-cache'
+        static_configs:
+          - targets:
+              - 'cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091'
+
+      - job_name: 'apinizer-worker'
+        static_configs:
+          - targets:
+              - 'worker-metrics.<WORKER_NAMESPACE>.svc.cluster.local:9091'
+
+    remote_write:
+      - url: "http://<HOST>:<PORT>/api/v1/write"
+        write_relabel_configs:
+          - source_labels: [__name__]
+            regex: 'go_.*|process_.*'
+            action: drop
+```
+
+:::note
+
+Yukarıdaki scrape yapılandırması [Prometheus Kurulumu ve Scraping Yapılandırması](./gateway-prometheus-scraping) sayfasındaki sabit scraping örneğiyle aynı varsayılan `/metrics` yolunu kullanır. Metrikler farklı bir path'te yayınlanıyorsa ilgili job'a `metrics_path` ekleyin (örneğin `metrics_path: /actuator/prometheus`).
+
+:::
+
+| Alan | Açıklama | Örnek |
+|------|----------|--------|
+| `external_labels.cluster` | Hedef Prometheus'ta ortamları ayırmak için zorunlu label | `qadev`, `prod-istanbul` |
+| `external_labels.env` | İsteğe bağlı ortam etiketi | `qa`, `production` |
+| `remote_write.url` | Hedef Prometheus write endpoint'i | `https://prometheus.example.com/api/v1/write` |
+| `write_relabel_configs` | İsteğe bağlı; agent'ın kendi runtime metriklerini filtrelemek için kullanılabilir | `go_.*`, `process_.*` |
+
+:::info
+
+Birden fazla Apinizer ortamından aynı hedef Prometheus'a veri gönderiliyorsa `external_labels.cluster` değeri **mutlaka** her ortam için farklı olmalıdır. Aksi halde zaman serileri birbirine karışır.
+
+:::
+
+### Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-agent
+  template:
+    metadata:
+      labels:
+        app: prometheus-agent
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.53.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--enable-feature=agent"
+            - "--storage.agent.path=/prometheus"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: agent-storage
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-agent-config
+        - name: agent-storage
+          emptyDir: {}
+```
+
+Manifest'i uygulayın:
+
+```bash
+kubectl apply -f prometheus-agent.yaml
+```
+
+Pod durumunu kontrol edin:
+
+```bash
+kubectl get pods -n monitoring -l app=prometheus-agent
+kubectl logs -n monitoring -l app=prometheus-agent -f
+```
+
+Log'da aşağıdaki satırlar görülmelidir:
+
+```text
+msg="Starting WAL watcher"
+msg="Completed loading of configuration file"
+msg="Server is ready to receive web requests."
+```
+
+`connection refused`, `403` veya `500` hatası varsa Adım 3'teki receiver flag'i ve ağ erişimini tekrar kontrol edin.
+
+## Adım 5 — TLS ve Kimlik Doğrulama (Production)
+
+Production ortamlarında `remote_write` trafiği TLS ile korunmalıdır. Örnek yapılandırma:
+
+```yaml
+remote_write:
+  - url: "https://<HOST>:<PORT>/api/v1/write"
+    basic_auth:
+      username: apinizer-agent
+      password_file: /etc/secrets/remote-write-password
+    tls_config:
+      insecure_skip_verify: false
+      ca_file: /etc/secrets/remote-ca.crt
+    queue_config:
+      capacity: 10000
+      max_shards: 30
+      min_shards: 1
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      min_backoff: 30ms
+      max_backoff: 5s
+```
+
+Secret oluşturma:
+
+```bash
+kubectl create secret generic remote-write-creds \
+  -n monitoring \
+  --from-literal=password=<PASSWORD>
+```
+
+Deployment'a secret mount ekleyin:
+
+```yaml
+volumeMounts:
+  - name: secrets
+    mountPath: /etc/secrets
+    readOnly: true
+volumes:
+  - name: secrets
+    secret:
+      secretName: remote-write-creds
+      items:
+        - key: password
+          path: remote-write-password
+```
+
+:::warning
+
+Production ortamında `tls_config.insecure_skip_verify: true` kullanılmamalıdır. Self-signed sertifika kullanılıyorsa CA sertifikası `ca_file` ile mount edilmelidir.
+
+:::
+
+## Adım 6 — Doğrulama
+
+### Agent tarafında scrape durumu
+
+Agent pod'unda `wget` veya `curl` yoksa port-forward ile kontrol edin:
+
+```bash
+kubectl port-forward -n monitoring deploy/prometheus-agent 9090:9090
+```
+
+Başka bir terminalde:
+
+```bash
+curl -s 'http://localhost:9090/api/v1/targets' | grep -o '"health":"[a-z]*"'
+```
+
+Her job için `"health":"up"` beklenir.
+
+### Hedef Prometheus tarafında veri kontrolü
+
+Hedef Prometheus'un erişilebilir adresi üzerinden sorgu çalıştırın. `remote_write` yapılandırmasında `https` kullanıyorsanız aşağıdaki örnekte de `https` tercih edin:
+
+```bash
+curl -s 'http://<HOST>:<PORT>/api/v1/query?query=up%7Bcluster%3D%22<CLUSTER_NAME>%22%7D' \
+  | python3 -m json.tool
+```
+
+Başarılı yanıtta `apinizer-cache` ve `apinizer-worker` job'ları `up=1` olarak görünür:
+
+```json
+{
+  "metric": {
+    "__name__": "up",
+    "cluster": "<CLUSTER_NAME>",
+    "instance": "cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091",
+    "job": "apinizer-cache"
+  },
+  "value": [1786544236.762, "1"]
+}
+```
+
+Grafana Explore ekranında:
+
+```promql
+up{cluster="<CLUSTER_NAME>"}
+```
+
+:::tip
+
+Sorguyu Prometheus UI, Grafana Explore veya kuruluşunuzda tanımlı erişim adresi üzerinden çalıştırabilirsiniz. Kullandığınız adres, agent'ın `remote_write` için bağlandığı host/port ile aynı Prometheus instance'ına ait olmalıdır.
+
+:::
+
+## Sorun Giderme
+
+| Belirti | Olası neden | Çözüm |
+|---------|-------------|--------|
+| Worker veya Cache 9091'e bağlanılamıyor | `METRICS_ENABLED` tanımlı değil | Deployment'a `METRICS_ENABLED=true` ekleyin |
+| Agent scrape `down` | Yanlış `metrics_path` veya servis hedefi hatalı | Adım 1'deki endpoint testini ve `metrics_path` değerini kontrol edin |
+| `ENDPOINTS` boş | Service selector pod label'ıyla eşleşmiyor | `kubectl get pod --show-labels` ile selector düzeltin |
+| remote_write 404/405 | Receiver flag eksik | `--web.enable-remote-write-receiver` ekleyin |
+| Veri gelmiyor | Ağ / firewall engeli | Apinizer cluster'ından hedef `<HOST>:<PORT>` adresine erişimi doğrulayın |
+| Ortamlar karışıyor | `external_labels.cluster` eksik veya aynı | Her Apinizer ortamına benzersiz cluster adı verin |
+| Grafana'da yeni ortam görünmüyor | Panelde sabit `cluster` filtresi var | Dashboard/panel filtrelerine yeni `cluster` değerini ekleyin |
+
+## İsteğe Bağlı: Ek Bileşenler
+
+Bu kılavuzun varsayılan kapsamı **Cache** ve **Worker** bileşenleridir. Başka bir bileşenin de 9091 portunda metrik endpoint'i varsa, Adım 2'deki gibi bir ClusterIP servis oluşturup agent `scrape_configs` bölümüne yeni bir job eklemeniz yeterlidir.
+
+Pod annotation tabanlı keşif kullanmak isterseniz agent yapılandırmasına `kubernetes_sd_configs` eklenebilir. Bu yöntem [Prometheus Kurulumu ve Scraping Yapılandırması](./gateway-prometheus-scraping) sayfasındaki **Dinamik Scraping** bölümünde anlatılmaktadır.
+
+## Özet Kontrol Listesi
+
+1. Cache ve Worker'da `METRICS_ENABLED=true`
+2. Cache ve Worker pod'ları 9091 portunda metrik endpoint'i `200` dönüyor
+3. `cache-metrics` ve `worker-metrics` servisleri oluşturuldu, endpoint'ler dolu
+4. Apinizer cluster'ından hedef Prometheus `/api/v1/write` adresine erişim var
+5. Hedef Prometheus'ta `--web.enable-remote-write-receiver` aktif
+6. Apinizer cluster'ında Prometheus Agent deploy edildi
+7. `external_labels.cluster` benzersiz tanımlandı
+8. Hedef Prometheus'ta `up{cluster="<CLUSTER_NAME>"}` sorgusu sonuç veriyor

@@ -951,6 +951,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1095,7 +1096,8 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-senaryolari/api-based-throttling-sabit-zaman",
             "tutorials/api-proxy-senaryolari/api-based-quota-sabit-zaman",
             "tutorials/api-proxy-senaryolari/custom-variable-map-business-rule",
-            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu"
+            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu",
+            "tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi"
           ]
         },
         {
@@ -1323,6 +1325,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]

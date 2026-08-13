@@ -953,6 +953,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
+                    "operations/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]
@@ -1097,7 +1098,8 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-scenarios/api-based-throttling-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/api-based-quota-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/custom-variable-map-business-rule",
-            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition"
+            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition",
+            "tutorials/api-proxy-scenarios/apicall-get-jwt-token-from-backend-with-cache"
           ]
         },
         {
@@ -1325,6 +1327,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
+                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]
