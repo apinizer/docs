@@ -1532,6 +1532,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-disa-aktarim"
           ]
         },
+        "articles/mtlsten-dpopa-retrydan-idempotencyye",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",
