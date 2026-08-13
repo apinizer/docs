@@ -1215,8 +1215,7 @@ const sidebars: SidebarsConfig = {
                 "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/dinamik-xml-2-json-scripti",
                 "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/base64-pdf-decode-tarayici",
                 "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/ntlm-ile-token-alma",
-                "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/jwt-den-username-alma",
-                "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/groovy-ile-jsonpath-kullanimi"
+                "tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/jwt-den-username-alma"
               ]
             },
             {
