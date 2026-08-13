@@ -1096,7 +1096,8 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-senaryolari/api-based-throttling-sabit-zaman",
             "tutorials/api-proxy-senaryolari/api-based-quota-sabit-zaman",
             "tutorials/api-proxy-senaryolari/custom-variable-map-business-rule",
-            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu"
+            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu",
+            "tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi"
           ]
         },
         {
