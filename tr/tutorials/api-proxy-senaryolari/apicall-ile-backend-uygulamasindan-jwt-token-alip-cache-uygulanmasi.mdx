@@ -1,0 +1,421 @@
+---
+title: "API Call ile Backend Uygulamasından JWT Token Alıp Cache Uygulanması"
+description: "Backend uygulamasının token uç noktasından API Call politikası ile JWT alınması, dönen token'ın Authorization header'ına eklenmesi ve Dynamic TTL ile cache'lenmesi. Adım adım API Proxy yapılandırması ve test."
+---
+
+Bu senaryoda **Swagger PetStore** isimli **REST** mimaride oluşturulmuş bir **API Proxy** üzerinden, backend uygulamasının beklediği **JWT token**'ın **API Call** politikası ile token uç noktasından alınması ve **cache** mekanizması ile yeniden kullanılacak şekilde yapılandırılması anlatılacaktır.
+
+**Örnek Senaryo:**
+
+- Backend API, her istekte `Authorization: Bearer <jwt>` header'ı beklemektedir.
+- Token, backend uygulamasına ait bir **token (authentication) uç noktasından** alınır.
+- Her istemci isteğinde token servisine gidilmesi hem gecikme hem de token servisi üzerindeki yük açısından istenmez.
+- Bu nedenle token, **API Call** politikası ile alınır; alınan yanıt **cache**'lenir ve token süresi dolana kadar aynı token yeniden kullanılır.
+
+**Çözüm:**
+
+Apinizer'da request hattına eklenen **API Call** politikası ile token uç noktasına senkron çağrı yapılır. Yanıttaki `access_token` değeri, backend'e gidecek isteğin **Authorization** header'ına eklenir. Cache sekmesinde **Dynamic TTL** açılarak TTL, JWT içindeki `exp` claim'inden (veya yanıttaki `expires_in` alanından) hesaplanır; böylece süresi dolmuş token cache'te tutulmaz.
+
+Bahsi geçen senaryonun uygulanma adımları **şu şekildedir;**
+
+- **API Client**, **Apinizer'a** istekte bulunur.
+- **Apinizer**, cache'te geçerli bir token var mı diye bakar.
+  - **Cache miss:** **API Call** ile backend token uç noktasına istek atılır, dönen JWT cache'e yazılır.
+  - **Cache hit:** Token servisine gidilmez; cache'teki JWT kullanılır.
+- Alınan JWT, backend'e gidecek isteğin **Authorization** header'ına eklenir.
+- **Apinizer, Backend API'ye** istekte bulunur.
+- **Backend API, Apinizer'a** yanıt verir.
+- **Apinizer, API Client'a** yanıt verir.
+
+:::info
+
+Bu senaryoda token uç noktası örneği olarak `https://auth.ornek.com/oauth/token` adresi kullanılacaktır. Kendi ortamınızda backend uygulamanızın gerçek token URL'sini, client kimlik bilgilerini ve grant tipini kullanmanız gerekir. API Call politikasının alan detayları için [API Çağrısı](/tr/develop/politikalar/api-cagrisi) sayfasına bakabilirsiniz.
+
+:::
+
+## 1) API Proxy'nin Oluşturulması
+
+Bu senaryoda Swagger Petstore ([https://petstore.swagger.io](https://petstore.swagger.io/)) isimli REST API kullanılacaktır.
+
+İlk olarak bu adresin **API Proxy** olarak tanımlanması gereklidir.
+
+Bunun için **API Gateway** menüsü altında yer alan **API Proxies** seçeneğine tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-proxies.png" alt="API Proxies Menüsü" width="200" />
+
+Açılan sayfada daha önceden herhangi bir **proxy** tanımı yapılmadığı için **No records found!** yazısı yer alır.
+
+Burada sağ üst köşede yer almakta olan **Add API Proxy** butonuna tıklanır ve yeni bir **API Proxy** oluşturulmaya başlanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-proxy-create.png" alt="Create Butonu" width="1000" />
+
+Bu kısımda oluşturulacak olan **API Proxy'nin** hangi tipte olduğunun seçilmesi gerekmektedir.
+
+Bu senaryoda kullanılacak olan API'nin türü **Swagger 2.X** olacağı için bu tür seçilir.
+
+**Enter URL** ifadesine tıklanarak kullanılacak olan API'nin adresinin girileceği ekrana geçiş yapılır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/choose-api-spec-type.png" alt="API Spec Türü Seçimi" width="1000" />
+
+Aşağıdaki görselde de görüldüğü üzere **URL kısmına erişim sağlanacak adres girilerek Parse** butonuna tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/swagger-parse.png" alt="URL Girme Ekranı" width="1000" />
+
+Parse işlemi yapıldıktan sonra ise aşağıdaki görselde yer alan ekran gelmektedir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/swagger-api-proxy-creation-parse.png" alt="Parse Sonrası Ekran" width="1000" />
+
+Bu ekran üzerinden API Proxy'ye ait ayarlar yapılabilmektedir. Bu ayarlar hakkında detaylı bilgi almak için [API Proxy Oluşturma](/tr/develop/api-proxy-olusturma) dokümanını ziyaret edebilirsiniz.
+
+Senaryomuzda kullanılacak olan API Proxy'nin ayarları aşağıdaki gibidir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/swagger-api-proxy-creation-parse.png" alt="API Proxy Ayarları" width="1000" />
+
+Kaydetme işleminden sonra açılan sayfada **Develop** sekmesine tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-proxy-main-page.png" alt="Develop Sekmesi" width="1000" />
+
+Burada **REST API'ye** ait **endpoint'ler** listelenmektedir.
+
+:::info
+
+Bu endpoint'lerin üstünde yer alan **All** ifadesiyle eklenecek olan poliçeler **tüm endpoint'lere** uygulanabilmektedir. Bu senaryoda **API Call** politikası **All** üzerinden request hattına eklenecektir.
+
+:::
+
+Oluşturulan API Proxy deploy edilir. Bunun için yukarıda sağ üst kısımda yer alan **Deploy** butonuna tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-proxy-deploy.png" alt="Deploy Butonu" width="1000" />
+
+## 2) Token Değerini Taşıyacak Değişkenlerin Oluşturulması
+
+Token yanıtından `access_token` alanını okuyabilmek ve bu değeri backend isteğinin header'ına yazabilmek için değişken tanımları gerekir.
+
+Bunun için Bunun için navbar'da yer alan **API Gateway** altında bulunan **Variables** seçeneğine tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/navbar-variables.png" alt="Variables Menüsü" width="300" />
+
+Açılan ekranda sağ üst köşede yer alan **Create** butonuna tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/variable-create.png" alt="Variables Menüsü" width="1000" />
+
+Bu senaryoda aşağıdaki değişkenler oluşturulacaktır:
+
+| Değişken Adı | Tip | Kullanım |
+| --- | --- | --- |
+| **jwtAccessToken** | Body | Token yanıt gövdesinden `$.access_token` değerini okur |
+| **jwtExpiresIn** | Body | (Opsiyonel) Token yanıt gövdesinden `$.expires_in` değerini okur |
+| **backendAuthToken** | Custom Variable | Token değerinin politika zincirinde taşınması için kullanılır |
+
+**jwtAccessToken** değişkeni için **Tip** olarak **Body** seçilir ve **JSON Path** alanına şu değer yazılır:
+
+```text
+$.access_token
+```
+
+**jwtExpiresIn** değişkeni için yine **Body** tipi seçilir ve **JSON Path** alanına şu değer yazılır:
+
+```text
+$.expires_in
+```
+
+**backendAuthToken** için **Custom Variable** tipi seçilir. Bu değişken, API Call yanıtından okunan token'ın After Call aşamasında Authorization header'ına yazılmasında kullanılır.
+
+
+İlgili değişken tanımlamaları gerçekleştirildikten sonra variables listesi aşağıdaki şekilde gözükecektir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/created-variables.png" alt="Variables Menüsü" width="1000"/>
+
+:::info
+
+Değişken kavramı ve tipleri hakkında ayrıntılı bilgi için [Değişkenler (Variables)](/tr/concepts/temel-kavramlar/variable) sayfasına bakabilirsiniz.
+
+:::
+
+## 3) API Call Politikasının Eklenmesi
+
+Artık **API Call** politikası eklenebilir durumdadır.
+
+API Proxy'lerin listelendiği sayfaya gidilir ve buradan önceki adımlarda oluşturulmuş olan **Swagger Petstore** isimli proxy seçilir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-proxy-selection.png" alt="Variables Menüsü" width="1000"/>
+
+
+Daha sonra **Develop** sekmesine gelinir, request hattında **All** satırındaki **Add Policy** butonuna tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/open-policy-selection-popup.png" alt="Variables Menüsü" width="1000"/>
+
+Açılan sayfada **API Call** (REST API Call) politikası seçilir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/select-api-call-policy.png" alt="API Call Poliçesi Seçimi" width="1000" />
+
+### 3.1) Temel Çağrı Ayarları
+
+Bu ekran üzerinde yer alan ifadeler tek tek incelenecek olursa:
+
+- **Call Type** alanı **Two-Way-Call (Process Response)** seçilir. İstek atıldıktan sonra istek sonucunda response olarak dönecek olan token'ın alınıp işlenmesi söz konusu olduğu için sadece isteğin gidişi değil dönecek olan response da önemlidir.
+- **HTTP Method** alanı **POST** seçilir.
+- **Base URL** alanına token uç noktasının adresi yazılır. Bu senaryoda örnek adres:
+
+```text
+https://auth.ornek.com/oauth/token
+```
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-settings-1.png" alt="API Call Temel Ayarlar" width="1000" />
+
+### 3.2) Request — Token İsteğinin Hazırlanması
+
+Token uç noktasına gidecek istek, istemciden gelen orijinal body'nin iletilerek gerçekleştirilebileceği gibi istemciden gelecek olan istek body'si silinerek API CALL Politikası içerisinde API CALL için bir istek body'si de yaratılabilir.
+
+- **Clear Body Before Call** aktif edilir. (Client'dan gelen request body yerine istek atılacak API için özel request body tanımlaması gerçekleştirebilmek için.)
+- **Use Message Template** aktif edilir.
+- API'ın request body'de beklediği istek body'sinin türü seçilir **XML**, **JSON**, **x-www-form-urlencoded**
+- Body içeriğine token almak için gerekli alanlar yazılır.
+
+```text
+Bizim örneğimizde token servisi x-www-form-urlencoded olarak request body beklediği için örnek üzerinde x-www-form-urlencoded kullanılacaktır.
+```
+
+| Key | Value |
+| --- | --- |
+| `grant_type` | `client_credentials` |
+| `client_id` | `<CLIENT_ID>` |
+| `client_secret` | `<CLIENT_SECRET>` |
+| `scope` | `api.read` |
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-settings-2.png" alt="API Call Temel Ayarlar" width="1000" />
+
+:::warning
+
+`client_id` ve `client_secret` gibi hassas bilgileri politika içinde düz metin olarak tutmak yerine **Variable** / ortam değişkeni kullanmanız önerilir. Production ortamlarında credential'ların vault veya şifreli değişken üzerinden çözülmesi tercih edilmelidir.
+
+:::
+
+:::info
+  Ayrıca yazılacak farklı bir script ile, token alımı esnasında kullanılan parametreler kullanıcının gönderdiği değerlere göre dinamik hale getirilebilir. 
+  Böylece token alma işlemi kullanıcı bazlı özelleştirilerek, her kullanıcının kendine ait ve kendi verileriyle örtüşen bir token almasını sağlanabilir.
+:::
+
+**HEADER sekmesi:**
+
+- Token servisi `Content-Type` bekliyorsa ilgili header eklenir.
+- Gerekmiyorsa istemciden gelen gereksiz header'ların token servisine gitmemesi için **Remove All Headers Before Call** aktif edilebilir; ardından yalnızca gerekli header'lar **New Headers** ile eklenir.
+
+Örnek yeni header:
+
+| Name | Value |
+| --- | --- |
+| `Content-Type` | `application/x-www-form-urlencoded` |
+| `Accept` | `application/json` |
+
+### 3.3) Cache — JWT'nin Önbelleğe Alınması
+
+Her istekte token servisine gitmemek için **CACHE** sekmesi yapılandırılır.
+
+Bu senaryoda kullanılacak ayarlar:
+
+| Alan | Değer | Açıklama |
+| --- | --- | --- |
+| **Enable Cache** | Açık | Token yanıtı cache'lensin |
+| **Apply By (Cache By)** | Sabit bir değişken veya sabit anahtar | `client_credentials` senaryosunda gateway'in kullandığı tek token için sabit key yeterlidir. Örnek: `backend-jwt-token` |
+| **Capacity** | `100` | Bu senaryoda tek/az sayıda key tutulacağı için düşük kapasite yeterlidir |
+| **Cache Storage Type** | **DISTRIBUTED** | Cluster ortamında tüm Worker'ların aynı token'ı paylaşması için dağıtık cache tercih edilir |
+| **Cache Null Responses** | Kapalı | Boş/hatalı token yanıtları cache'lenmesin |
+
+:::info
+`Apply By` özelliği ile seçilen variable'ın değerine göre ayrı cache'leme yapılabilir. 
+Bu sayede, gelen isteklerde ilgili variable'ın değeri farklılaştığında sistem cache'deki veriyi değil, doğrudan backend'den dönen güncel veriyi kullanarak yeni bir cache kaydı oluşturur. 
+Böylece her istek, ait olduğu değere göre unique şekilde cache'lenir ve istekler birbirinden ayırt edilebilir.
+:::
+
+:::info
+  Eğer token bazında bir ayrım yapılmasına gerek yoksa Apinizer ilgili backend'in tek yetkili kullanıcısı konumundaysa, cache sayısının 1 olarak ayarlanması önerilir.
+:::
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/default-cache-settings.png" alt="API Call Cache Temel Ayarlar" width="1000" />
+
+** Varsayılan olarak API Call içerisinde cache ayarlaması yukarıdaki ekran görüntüsünde görüldüğü üzere oldukça basittir. Ancak bazı durumlar için sabit TTL yerine dinamik TTL ile token'ımızı cache'lemek isteyebiliriz. 
+
+Bunun için API Call politikası içerisinde sunulan `Enable Dynamic TTL` seçeneğini aktif etmemiz gerekmektedir.
+
+### Dynamic TTL ile JWT süresine göre cache
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-settings-3.png" alt="API Call Cache Ayarları" width="1000" />
+
+
+:::info
+  Sabit TTL yerine token'ın gerçek geçerlilik süresine göre cache tutulması önerilir.
+:::
+
+**Dinamik TTL yapılandıması için iki yaygın yöntem vardır:**
+
+**Yöntem A — JWT `exp` claim'i (önerilen):**
+
+1. **Dinamik TTL Etkinleştir** açılır.
+2. **TTL Kaynak Değişkeni** olarak token yanıtındaki `access_token` alanını okuyan değişken seçilir (`jwtAccessToken` / `$.access_token`).
+3. **Değer JWT Token İçinde** seçeneği işaretlenir.
+4. **JWT Claim Adı** alanına `exp` yazılır.
+5. **Değer Formatı** olarak **Unix Epoch (saniye)** kullanılır (`exp` claim Unix epoch saniyesidir).
+6. **Offset** alanına `30` yazılır (token bitmeden 30 saniye önce cache expire olsun).
+7. **Yedek TTL** alanına `300` yazılır (TTL parse edilemezse 5 dakika).
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-cache-settings-1.png" alt="Dynamic TTL JWT exp Ayarları" width="1000" />
+
+**Yöntem B — `expires_in` alanı:**
+
+Token yanıtı aşağıdaki gibiyse:
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 3600
+}
+```
+
+1. **Dinamik TTL Etkinleştir** açılır.
+2. **TTL Kaynak Değişkeni** olarak `jwtExpiresIn` (`$.expires_in`) seçilir.
+3. **Değer Formatı** olarak **Expires In (saniye)** seçilir.
+4. **Offset** yine `30` saniye verilir.
+
+:::info
+
+Dynamic TTL alanlarının ayrıntılı açıklaması için [API Çağrısı — Dinamik TTL](/tr/develop/politikalar/api-cagrisi#dinamik-ttl-dynamic-ttl) bölümüne bakabilirsiniz.
+
+:::
+
+### 3.4) Response — Token'ın Authorization Header'ına Eklenmesi
+
+Token alındıktan (veya cache'ten okunduktan) sonra, backend'e gidecek **orijinal istek** üzerine JWT yazılmalıdır.
+
+**BODY sekmesi:**
+
+- **Message Template Operation Type** olarak **NOT_CHANGE_BODY** seçilir. Böylece token servisinden dönen gövde, istemciden gelen orijinal request body'nin üzerine yazılmaz.
+
+**Original Message Data Manipulation / HEADER sekmesi:**
+
+:::info
+  Authorization header'ına, Original Data Manipulation yöntemiyle API çağrısından dönen JWT'yi ekleyebiliriz. Ancak ele aldığımız senaryoda backend servisimiz JWT token'ı "Bearer" prefix'i ile beklemektedir.
+  prefix (ön ek)'in Apinizer üzerine eklenebilme özelliğini kullanabilmek için JWT'yi Body sekmesinden değil, Header sekmesinden set etmemiz gerekir.
+:::
+
+- Backend'e gidecek isteğe yeni bir header eklenir:
+
+| Name | Kaynak | Prefix | Açıklama |
+| --- | --- | --- | --- |
+| `Authorization` | `jwtAccessToken` değişkeni | **BEARER** | `Bearer <access_token>` formatında header eklenir |
+
+**Header'a JWT set etmek için adımlar;**
+
+- Response altında Header sekmesine içerisindeki *New Header*'a tıklanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-jwt-adding-header.png" alt="After Call Authorization Header" width="1000" />
+
+-  Açılan sayfada JWT'nin set edileceği header'ın name'i, JWT'nin başına eklenecek *prefix (ön ek)*'in seçimi, JWT değerinin alınacağı `jwtAccessToken` variable'ının seçimi gerçekleştirilerek save butonuna basılarak JWT'nin header'a set edilme işlemi tamamlanır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-add-jwt-settings-2.png" alt="After Call Authorization Header" width="1000" />
+
+:::warning
+
+İstemciden gelen istekte zaten bir `Authorization` header'ı varsa ve backend'e yalnızca gateway'in aldığı JWT gitmeliyse, After Call öncesinde eski Authorization header'ını silin veya **Clear Authentication Information** benzeri bir yaklaşımla istemci kimlik bilgisinin backend'e sızmasını engelleyin.
+
+:::
+
+Api Call ile token alınması, cache ayarlamaları ve dönen response'un header'a set edilmesi ile ilgili işlemleri tamamlamak için save butonuna basarak API Call politikası kaydedilir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/save-api-call-proxy.png" alt="After Call Authorization Header" width="1000" />
+
+### 3.5) Hata Mesajı Özelleştirme (İsteğe Bağlı)
+
+Token servisi erişilemezse veya timeout olursa istemciye anlamlı bir hata dönülmesi için **Error Message Customization** sekmesi kullanılabilir.
+
+Örnek:
+
+```json
+{
+  "statusCode": 502,
+  "errorCode": "BACKEND_TOKEN_UNAVAILABLE",
+  "message": "Backend token servisi yanıt vermiyor. Lütfen daha sonra tekrar deneyin."
+}
+```
+
+Bu senaryo içerisinde kullanılacak olan ayarlamalar tamamlandıktan sonra sağ üst köşede yer alan **Save** butonuna tıklanır.
+
+Yapılan işlemin geçerli olması için proxy'nin yeniden **Deploy** edilmesi gerekmektedir.
+
+## 4) API Proxy'nin Test Edilmesi
+
+**Swagger Petstore** isimli proxy seçilir.
+
+**Develop** sekmesi altında yer alan bir endpoint seçilir. Bu senaryoda **`/user/login`** endpointi kullanılacaktır.
+
+**Test Endpoint** ifadesine tıklanarak bu endpoint test edilir.
+
+**Send** butonuna basılarak direkt istek gönderilir.
+
+### 4.1) İlk istek (Cache miss)
+
+İlk istekte cache boş olduğu için akış şu şekilde ilerler:
+
+1. API Call, token uç noktasına POST atar.
+2. Dönen JWT cache'e yazılır (Dynamic TTL ile).
+3. JWT, Authorization header'ına eklenir.
+4. Backend API çağrılır.
+
+Başarılı yanıt alınır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/first-succeeded-request.png" alt="First Succeeded Request" width="1000" />
+
+:::info
+
+İlk istekte token servisi çağrıldığı için gecikme, sonraki isteklere göre daha yüksek olabilir. Trace / adım adım izleme açıksa API Call adımının süresi görülebilir.
+
+:::
+
+### 4.2) Sonraki istekler (Cache hit)
+
+Aynı proxy'ye kısa süre içinde yeniden istek atıldığında:
+
+1. Cache'te geçerli JWT bulunur.
+2. Token uç noktasına **gidilmez**.
+3. Cache'teki JWT Authorization header'ına yazılır.
+4. Backend API çağrılır.
+
+:::info
+  Senaryonun konusu olan JWT'nin API Call ile alınarak cache'lenmesini adım adım daha iyi görebilmek adına cache'den dönmesini beklediğimiz isteği trace ile inceleyeceğiz.
+:::
+
+**İsteğin Trace üzerinden izlenebilmesi için**;
+
+- *Tracing* sekmesi içerisine girilerek açılan ekrandaki *Start* butonuna basılır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/open-tracing.png" alt="Tracing Start" width="1000" />
+
+- *Develop* Sekmesine geri dönülerek ilgili endpoint seçiminin ardından *test endpoint* butonuna basılarak açılan ekranda *send* butonu ile istek atılır.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/test-endpoint.png" alt="Test Endpoint" width="1000" />
+
+- İstek atıldıktan sonra gerçekleşen akışın detaylarını izleyebilmek için tekrardan *Tracing* sekmesine gelinerek atmış olduğumuz isteğin detayına girilir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/find-request-in-tracing.png" alt="View Detail Trace" width="1000" />
+
+- Açılan ekranda API Call politikası seçilir.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/select-api-call-policy.png" alt="Select API Call Policy" width="1000" />
+
+- Apı Call politikasının detayında *Cache:HIT* değeri ve JWT'nin header'a başarıyla set edildiği görülür.
+
+<img src="/images/tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi/api-call-policy-trace-detail.png" alt="View Trace Detail API Call Policy For Caching" width="1000" />
+
+:::info
+:::
+
+### 4.3) Token süresi dolduğunda
+
+Dynamic TTL + offset sayesinde cache kaydı, JWT `exp` değerinden **offset** kadar önce geçersiz olur. Sonraki istekte tekrar cache miss oluşur; yeni token alınır ve cache yenilenir. Böylece süresi dolmuş token ile backend'e istek gitmesi engellenmiş olur.
+
+:::tip
+
+Aynı token'ı birden fazla API Proxy'de kullanmanız gerekiyorsa, API Call politikasını **Global Policy** olarak tanımlayıp ilgili proxy'lere bağlayabilirsiniz. Politika alanlarının tamamı için [API Çağrısı](/tr/develop/politikalar/api-cagrisi) dokümanını inceleyin.
+
+:::

@@ -1097,7 +1097,8 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-scenarios/api-based-throttling-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/api-based-quota-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/custom-variable-map-business-rule",
-            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition"
+            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition",
+            "tutorials/api-proxy-scenarios/apicall-get-jwt-token-from-backend-with-cache"
           ]
         },
         {
