@@ -1391,6 +1391,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari"
           ]
         },
+        "articles/keycloak-dpop-apinizer-jose-validation-dogrulamasi",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",

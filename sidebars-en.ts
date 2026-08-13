@@ -1393,6 +1393,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards"
           ]
         },
+        "articles/keycloak-dpop-apinizer-jose-validation",
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-control-list-rlcl",

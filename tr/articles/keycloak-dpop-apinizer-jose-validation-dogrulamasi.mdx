@@ -1,0 +1,328 @@
+---
+title: "Keycloak'tan DPoP Token Almak ve Apinizer JOSE Validation ile Doğrulamak"
+description: "Keycloak'tan DPoP-bound access token alabilir, Apinizer JOSE Validation politikasında RFC 9449 DPoP proof doğrulamasını yapılandırarak çalınan token'ların yeniden kullanılmasını engelleyebilirsiniz."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info Bu Yazıda
+Keycloak'tan DPoP-bound bir access token alıp, Apinizer Gateway üzerindeki JOSE Validation politikası ile hem token imzasını hem de DPoP proof'unu uçtan uca doğrulayacağız. Örnekler, gerçek bir test ortamında çalıştırılmış Python script'lerinden alınmıştır.
+:::
+
+## DPoP Nedir, Hangi Problemi Çözer?
+
+Klasik OAuth 2.0 akışında access token bir bearer token'dır: "taşıyan" kimse token onundur. `Authorization: Bearer ...` header'ını gönderen herkes API'ye erişebilir; buna token'ı loglardan, bir proxy'den, sızdırılmış bir HAR dosyasından ya da tarayıcı eklentisinden ele geçirmiş bir saldırgan da dahildir. Token'ın kime verildiğini kanıtlayan hiçbir mekanizma yoktur.
+
+DPoP (Demonstrating Proof of Possession, [RFC 9449](https://datatracker.ietf.org/doc/html/rfc9449)) bu problemi token'ı sender-constrained hale getirerek çözer:
+
+1. Client, kendine ait bir asimetrik anahtar çifti üretir (tipik olarak EC P-256).
+2. Token isteği sırasında bu anahtarla imzalanmış küçük bir JWT, yani DPoP proof gönderir.
+3. Authorization server (Keycloak), public key'in parmak izini token'ın içine (`cnf.jkt` claim'i) gömer.
+4. API'ye atılan her istekte client, aynı anahtarla imzalanmış yeni bir proof üretir.
+5. Gateway (Apinizer), proof'un imzasını ve proof'taki anahtarın token'a gömülü parmak iziyle eşleştiğini doğrular.
+
+Sonuç: Access token çalınsa bile işe yaramaz. Saldırganın elinde private key olmadığı için geçerli bir proof üretemez; token tek başına kapıdan geçemez.
+
+:::tip Kısa özet
+Bearer token "bunu taşıyan girebilir" der. DPoP-bound token ise "bunu taşıyan ve şu anahtarın sahibi olduğunu her istekte kanıtlayan girebilir" der.
+:::
+
+## Doğrulama Zincirinin Özü: jwk → Thumbprint → cnf.jkt
+
+Tüm mekanizmanın kalbi tek bir eşleştirmedir. DPoP proof'un header'ında client'ın public key'i (`jwk`) açık halde taşınır:
+
+```json
+{
+  "typ": "dpop+jwt",
+  "alg": "ES256",
+  "jwk": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." }
+}
+```
+
+Doğrulayıcı taraf bu public key'den [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) JWK thumbprint'ini hesaplar: anahtarın zorunlu alanları (`crv`, `kty`, `x`, `y`) alfabetik sırada, boşluksuz JSON'a çevrilir, SHA-256'sı alınır ve base64url ile kodlanır. Çıkan değer, access token'ın içindeki `cnf.jkt` (confirmation - JWK thumbprint) claim'i ile birebir eşleşmek zorundadır:
+
+```json
+{
+  "iss": "https://<keycloak-access-url>/realms/master",
+  "cnf": {
+    "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+  }
+}
+```
+
+Proof'un imzası da yine bu `jwk` ile doğrulandığı için zincir kapanır: proof'u imzalayan anahtar, token'ın bağlandığı anahtardır; yani private key'in sahibi olan client'tır.
+
+Aşağıdaki diyagram, akışın tamamını ve doğrulama noktalarını özetliyor:
+
+<Frame caption="DPoP akışı: token alma, proof üretimi ve Apinizer JOSE Validation doğrulama noktaları">
+  <img
+    src="/images/articles/dpop-jose-validation/dpop-mimari.svg"
+    alt="Keycloak'tan DPoP-bound token alma, her istekte yeni proof üretme ve Apinizer Gateway doğrulama akış diyagramı"
+    width="1000"
+  />
+</Frame>
+
+Diyagramın alt notu mekanizmanın özünü veriyor: aynı anahtar hem token'ı aldırır hem her isteği imzalar. `cnf.jkt` sabittir; değişen tek şey her proof'un `jti`/`iat`/`htu`/`ath` payload'ıdır.
+
+## Keycloak Tarafı: DPoP Desteği
+
+Keycloak, 26.1.4 sürümünden itibaren DPoP'u ek bir yapılandırma gerektirmeden destekler. Token endpoint'ine geçerli bir DPoP proof ile gelen isteklerin access token'ına `cnf.jkt` claim'i otomatik olarak gömülür ve token tipi `DPoP` olarak döner.
+
+:::note
+Daha eski Keycloak sürümlerinde DPoP bir feature flag arkasındaydı ve sunucunun `--features=dpop` parametresiyle başlatılması gerekiyordu. 26.1.4 ve sonrasında bu adıma gerek yoktur.
+:::
+
+:::warning
+Token isteği DPoP proof olmadan yapılırsa Keycloak normal bir bearer token döner; `cnf.jkt` gömülmez ve gateway'de access token binding doğrulaması yapılamaz. Token'ı aldıktan sonra `cnf.jkt` claim'inin gerçekten var olduğunu kontrol etmek en sağlıklısıdır (aşağıdaki kod bunu otomatik yapıyor).
+:::
+
+## Client Tarafı: DPoP-Bound Token Almak
+
+Şimdi işin client tarafına geçelim. Örnek kod Python ile yazılmıştır; kütüphane olarak yalnızca `requests` ve `cryptography` kullanır, DPoP kısmı bilinçli olarak elle yazılmıştır ki her adım görünür olsun.
+
+### 1. Anahtar çifti ve JWK
+
+Client önce bir EC P-256 anahtar çifti üretir ve public key'i JWK formatında hazırlar:
+
+```python
+class DPoPKey:
+    def __init__(self, private_key=None):
+        self.private_key = private_key or ec.generate_private_key(ec.SECP256R1())
+        pub = self.private_key.public_key().public_numbers()
+        self.jwk = {"kty": "EC", "crv": "P-256",
+                    "x": b64u(pub.x.to_bytes(32, "big")),
+                    "y": b64u(pub.y.to_bytes(32, "big"))}
+```
+
+Anahtar dosyaya kaydedilir ve sonraki çalıştırmalarda tekrar kullanılır; çünkü token'ı aldıran anahtar ile API isteğini imzalayan anahtar aynı olmak zorundadır. Anahtar kaybolursa token da işe yaramaz hale gelir (bu, DPoP'un tam da vaat ettiği davranıştır).
+
+### 2. RFC 7638 thumbprint
+
+Keycloak'ın token'a koyacağı `cnf.jkt` değerini client kendi tarafında da hesaplayabilir; birazdan doğrulama için kullanacağız:
+
+```python
+    def thumbprint(self) -> str:
+        canonical = json.dumps({"crv": self.jwk["crv"], "kty": self.jwk["kty"],
+                                "x": self.jwk["x"], "y": self.jwk["y"]},
+                               separators=(",", ":"), sort_keys=True).encode()
+        return b64u(hashlib.sha256(canonical).digest())
+```
+
+Dikkat edilecek nokta: JSON boşluksuz (`separators=(",", ":")`) ve alfabetik sıralı (`sort_keys=True`) üretilmelidir; aksi halde hash tutmaz.
+
+### 3. Proof üretimi
+
+DPoP proof, kısa ömürlü ve tek kullanımlık bir JWT'dir. Header'da `typ: dpop+jwt` ve public key; payload'da ise dört kritik claim taşır:
+
+| Claim | Anlamı |
+|---|---|
+| `jti` | Proof'un benzersiz kimliği (replay koruması için) |
+| `htm` | İsteğin HTTP metodu (`POST`, `GET`, ...) |
+| `htu` | İsteğin hedef URI'si (query string hariç) |
+| `iat` | Proof'un üretilme zamanı |
+
+```python
+    def create_proof(self, htm, htu, access_token=None, nonce=None) -> str:
+        header = {"typ": "dpop+jwt", "alg": "ES256", "jwk": self.jwk}
+        payload = {"jti": str(uuid.uuid4()), "htm": htm, "htu": htu,
+                   "iat": int(time.time())}
+        if access_token:
+            payload["ath"] = b64u(hashlib.sha256(access_token.encode()).digest())
+        if nonce:
+            payload["nonce"] = nonce
+
+        signing_input = f"{b64u_json(header)}.{b64u_json(payload)}".encode()
+        der = self.private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der)
+        sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return f"{signing_input.decode()}.{b64u(sig)}"
+```
+
+İki opsiyonel claim'e dikkat: `ath` (access token hash) sadece API isteklerinde eklenir; token endpoint'ine giderken henüz elimizde token yoktur. `nonce` ise Keycloak talep ederse eklenir. Bir diğer ince nokta imza formatı: `cryptography` kütüphanesi ECDSA imzayı DER formatında verir, JWT ise ham `r || s` (64 byte) bekler; dönüşüm bu yüzden var.
+
+### 4. Token isteği ve nonce yeniden denemesi
+
+Token isteği normal bir `client_credentials` (veya `password`) isteğidir; tek fark `DPoP` header'ıdır:
+
+```python
+    proof = key.create_proof("POST", TOKEN_URL)
+    r = requests.post(TOKEN_URL, data=data, headers={"DPoP": proof}, verify=VERIFY_TLS)
+
+    # Keycloak nonce isterse tek sefer tekrar dene
+    if r.status_code == 400 and "use_dpop_nonce" in r.text:
+        nonce = r.headers.get("DPoP-Nonce")
+        proof = key.create_proof("POST", TOKEN_URL, nonce=nonce)
+        r = requests.post(TOKEN_URL, data=data, headers={"DPoP": proof}, verify=VERIFY_TLS)
+```
+
+Keycloak, sıkılaştırılmış konfigürasyonlarda ilk isteğe `use_dpop_nonce` hatası ve `DPoP-Nonce` response header'ı ile cevap verebilir; client aynı isteği nonce'u proof'a ekleyerek tekrarlar. Bu, RFC 9449'un standart akışıdır.
+
+Token alındıktan hemen sonra `cnf.jkt` kontrolü yapılabilir; olası üç durum şöyle raporlanır:
+
+```python
+    if jkt is None:
+        print("SONUC: cnf.jkt YOK -> Keycloak'ta DPoP kapali.")
+    elif jkt == key.thumbprint():
+        print("SONUC: BASARILI -> Token DPoP ile anahtara baglandi.")
+    else:
+        print("SONUC: UYUSMAZLIK -> Token baska bir anahtara bagli.")
+```
+
+## Apinizer'a Proof'lu İstek Atmak
+
+Token elimizde; şimdi Apinizer Gateway arkasındaki API'yi çağıralım. Client, kaydedilmiş anahtarı ve token'ı yükler ve bu istek için yeni bir proof üretir:
+
+```python
+key    = DPoPKey.load_or_create(KEY_FILE)
+saved  = json.load(open(TOKEN_FILE))
+token  = saved["access_token"]
+
+proof = key.create_proof(API_METHOD, API_URL, access_token=token)
+
+headers = {
+    "Authorization": f"DPoP {token}",
+    "DPoP": proof,
+    "Content-Type": "application/json"
+}
+```
+
+Üç noktaya dikkat:
+
+- Authorization şeması `Bearer` değil `DPoP`'tur. RFC 9449, DPoP-bound token'ların `Authorization: DPoP ...` şemasıyla taşınmasını tanımlar.
+- Proof artık `ath` claim'i içerir: access token'ın SHA-256 hash'i. Bu, proof'u yalnızca bu token ile kullanılabilir hale getirir; başka bir token'la aynı proof geçersizdir.
+- Her istek için yeni proof üretilir. `jti` ve `iat` her seferinde değişir; aynı proof'un ikinci kez kullanımı replay korumasına takılır.
+
+## Apinizer JOSE Validation: DPoP Doğrulamasını Yapılandırmak
+
+Gateway tarafında doğrulama, API Proxy'nin request pipeline'ına eklenen JOSE Validation politikası ile yapılır. Politika iki katmanda çalışır:
+
+1. Access token imza doğrulaması, Keycloak'ın JWKS endpoint'i üzerinden yapılır:
+
+```
+https://<keycloak-access-url>/realms/master/protocol/openid-connect/certs
+```
+
+JWKS URL politikaya tanımlandığında Apinizer, token'ın RS256 imzasını Keycloak'ın public key'i ile doğrular ve anahtar rotasyonunu otomatik takip eder.
+
+2. DPoP proof doğrulaması, politikanın DPoP Validation Settings bölümü açıldığında devreye girer:
+
+<Frame caption="Apinizer JOSE Validation DPoP doğrulama ayarları">
+  <img
+    src="/images/articles/dpop-jose-validation/dpop-validation-settings.png"
+    alt="Apinizer JOSE Validation politikasındaki DPoP doğrulama ayarları: proof header adı, maksimum proof yaşı, htm/htu doğrulama, cnf.jkt binding, ath ve jti replay koruması"
+    width="700"
+  />
+</Frame>
+
+Ayarların tek tek ne yaptığına bakalım:
+
+### Enable DPoP Validation
+
+Ana anahtar. Açıldığında gateway, istekle birlikte gelen DPoP proof'unu RFC 9449'a göre doğrular: proof'un `dpop+jwt` tipinde olduğu, imzasının header'daki `jwk` ile doğrulandığı ve aşağıda seçilen kontrollerin geçtiği teyit edilir.
+
+### DPoP Proof Header Name
+
+Proof'un hangi HTTP header'ında taşındığı. Standart değer `DPoP`'tur; özel bir entegrasyon farklı bir header kullanıyorsa burada değiştirilebilir.
+
+### Maximum Proof Age
+
+Proof'un `iat` değeri bu saniyeden daha eskiyse istek reddedilir. Üzerine ayrıca clock skew toleransı eklenir. Tipik değer 60 saniyedir; proof'lar zaten her istekte taze üretildiği için bu pencereyi geniş tutmaya gerek yoktur. Dar pencere, ele geçirilmiş bir proof'un kullanılabilirlik süresini kısaltır.
+
+### Validate htm (HTTP Method)
+
+Proof'taki `htm` claim'inin, isteğin gerçek HTTP metoduyla eşleştiğini kontrol eder. `GET` için üretilmiş bir proof `POST` isteğinde kullanılamaz.
+
+### Validate htu (Request URI) ve Expected htu Value
+
+Proof'taki `htu` claim'inin isteğin hedef URI'siyle eşleştiğini kontrol eder. Expected htu Value alanına client'ların proof üretirken kullandığı adres, yani gateway'in dışarıya açık adresi yazılır:
+
+```
+https://<apigateway-access-url>
+```
+
+:::warning Expected htu Value neden zorunlu?
+`Validate htu` açıkken bu alan boş bırakılamaz. Gateway isteğin hedef adresini Host header'ından türetebilirdi; ancak Host header client'ın kontrolündedir. Saldırgan, proof'undaki `htu` ile uyumlu sahte bir Host gönderip kontrolü boşa çıkarabilirdi. Bu yüzden beklenen adresin sunucu tarafında sabitlenmesi gerekir. Buraya yazılacak değer backend'in değil, gateway'in adresidir; client proof'u gateway adresine üretir.
+:::
+
+### Validate Access Token Binding (cnf.jkt)
+
+DPoP'un çekirdek kontrolü. Access token'daki `cnf.jkt` değerinin, proof header'ındaki `jwk`'dan hesaplanan RFC 7638 SHA-256 thumbprint'i ile eşleştiğini doğrular. Bu kontrol geçmezse token başka bir anahtara bağlıdır; yani ya yanlış anahtar kullanılıyordur ya da çalınmış bir token, saldırganın kendi anahtarıyla kullanılmaya çalışılıyordur.
+
+### Validate Access Token Hash (ath)
+
+Proof'taki `ath` claim'inin, `Authorization` header'ındaki access token'ın SHA-256 hash'i ile eşleştiğini kontrol eder. Bu, proof'u belirli bir token'a kilitler: aynı anahtarla üretilmiş ama başka bir token için hazırlanmış proof kabul edilmez.
+
+### Enable Replay Protection (jti) ve jti Retention
+
+Görülen `jti` değerlerini dağıtık cache'te tutarak aynı proof'un ikinci kez kullanılmasını engeller. Retention süresi boş bırakılırsa maksimum proof yaşı ile clock skew toleransının toplamından türetilir; bir proof zaten yaş kontrolünden geçemeyecek hale geldikten sonra `jti`'sini hatırlamaya gerek yoktur.
+
+:::info Doğrulama zinciri: bütün resim
+Tüm kontroller açıkken bir isteğin geçmesi için şunların tamamı doğru olmalıdır: token imzası Keycloak'ın JWKS'indeki key ile doğrulanır → proof imzası header'daki `jwk` ile doğrulanır → `jwk` thumbprint'i = token `cnf.jkt` → `ath` = token hash → `htm`/`htu` istekle uyumlu → `iat` taze → `jti` daha önce görülmemiş. Bu zincirin her halkası, çalınmış bir bileşenin tek başına işe yaramamasını sağlar.
+:::
+
+## Karşılaşabileceğiniz Sorunlar
+
+Kurulum sırasında sahada karşılaştığımız gerçek sorunlar ve çözümleri:
+
+### 1. htu uyuşmazlığı: Keycloak reverse proxy arkasındayken
+
+Keycloak bir ingress veya nginx (NodePort) arkasında çalışıyorsa, kendi adresini iç adres olarak görür; client ise proof'un `htu`'sunu dış adrese üretir. Sonuç: Keycloak token endpoint'inde proof'u reddeder.
+
+Çözüm, Keycloak'a dış dünyadaki adresini öğretmektir:
+
+```bash
+KC_HOSTNAME=<keycloak-access-url>
+KC_PROXY_HEADERS=xforwarded
+```
+
+ve nginx tarafında forward header'larının eksiksiz iletilmesi:
+
+```nginx
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $host;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+```
+
+Özellikle `X-Forwarded-Proto` kritik: iletilmezse Keycloak kendini `http` üzerinde sanır, client'ın `https://...` olarak ürettiği `htu` ile eşleşme kurulamaz.
+
+### 2. ERR-283: Expected htu Value boş bırakılmış
+
+Apinizer'da `Validate htu` açık ama Expected htu Value boşsa istek reddedilir. Yukarıda açıklandığı gibi bu bilinçli bir tasarım: Host header client kontrollü olduğu için güvenilir bir karşılaştırma tabanı değildir. Alanı doldururken gateway'in dış adresini yazın; backend servisin adresini değil.
+
+### 3. JWKS'te iki anahtar: use sig ve use enc
+
+Keycloak'ın JWKS endpoint'i tipik olarak iki anahtar döner: biri `use: sig` (imza), biri `use: enc` (şifreleme). İmza doğrulaması için `sig` olan anahtar kullanılmalıdır. Apinizer JWKS'i kendisi çektiğinde doğru anahtarı `kid` üzerinden seçer; ancak anahtarı elle tanımlıyorsanız (örneğin statik public key ile) yanlışlıkla `enc` anahtarını kopyalamak, her token'ın imza doğrulamasından dönmesine yol açar.
+
+### 4. ERR-284: Token'da cnf.jkt yok
+
+Access token DPoP-bound değilse, yani içinde `cnf.jkt` claim'i yoksa ve `Validate Access Token Binding` açıksa, Apinizer isteği reddeder. Bu genellikle token isteğinin DPoP proof olmadan yapıldığına ya da Keycloak sürümünün DPoP'u desteklemediğine işaret eder. Token alınırken `cnf.jkt` kontrolü yapmak bu durumu daha başında yakalar.
+
+### 5. Replay koruması sessizce devre dışı kalabilir
+
+`jti` replay koruması, görülen proof kimliklerini dağıtık cache'te tutar; birden fazla gateway pod'unun aynı proof'u ayrı ayrı kabul etmemesi için bu şarttır. Cache bağlantısı yoksa veya koparsa ve sistem fail-open davranıyorsa, replay denemeleri sessizce geçer. Replay korumasına güveniyorsanız cache bağlantısının sağlığını izlemeye alın ve doğrulamayı gerçek bir tekrar isteğiyle (aynı proof'u iki kez göndererek) test edin. İkinci istek reddedilmiyorsa koruma fiilen devrede değildir.
+
+## DPoP mi, mTLS mi?
+
+Sender-constrained token için standartlaşmış iki yol var: mTLS certificate binding ([RFC 8705](https://datatracker.ietf.org/doc/html/rfc8705)) ve DPoP. İkisi de "token'ı çalanın işine yaramasın" hedefine ulaşır; fark operasyonel maliyettedir.
+
+| | mTLS Binding | DPoP |
+|---|---|---|
+| Kanıt mekanizması | TLS el sıkışmasında client sertifikası | Uygulama katmanında imzalı proof JWT |
+| Altyapı gereksinimi | Uçtan uca mTLS; TLS sonlandıran her proxy'nin sertifikayı iletmesi | Yok; sıradan HTTPS yeterli |
+| Anahtar yaşam döngüsü | Sertifika ihracı, dağıtımı, rotasyonu, iptali (PKI) | Client'ın kendi ürettiği anahtar çifti; CA yok |
+| Proxy/CDN uyumu | TLS sonlandırma noktalarında özel yapılandırma ister | Şeffaf; proof bir HTTP header'ıdır |
+| Client karmaşıklığı | Sertifika deposu yönetimi | Birkaç satır JOSE kodu |
+
+mTLS, client sertifikası altyapısı zaten kurulu olan ortamlarda (ör. servisler arası iletişim, kapalı kurumsal ağlar) güçlü bir seçenektir. Ancak sertifika ihracı ve rotasyonu, TLS'i sonlandıran her ara katmanın (ingress, load balancer, CDN) sertifikayı doğru iletmesi ve client tarafında sertifika deposu yönetimi ciddi operasyonel yük getirir.
+
+DPoP bu yükün çoğunu ortadan kaldırır: anahtar çifti client tarafından üretilir, hiçbir CA sürecine girmez, rotasyon "yeni anahtar üret, yeni token al"dan ibarettir ve proof sıradan bir HTTP header'ı olarak her proxy'den şeffaf geçer. Public client'lar (SPA, mobil) ve TLS'in birden fazla noktada sonlandığı modern topolojiler için pratikte tek gerçekçi sender-constraint seçeneği DPoP'tur.
+
+## Sonuç
+
+Bearer token modelinin zayıf halkası, token'ın kendisinin tek yetki kanıtı olmasıydı. DPoP bu halkayı, her isteğe eşlik eden anahtar sahipliği kanıtıyla güçlendiriyor. Kurulumun tamamı üç adıma indirgenebilir:
+
+1. Keycloak: 26.1.4 ve sonrası sürümlerde ek yapılandırma gerekmez; DPoP proof'lu token isteğinde token'a `cnf.jkt` gömülür.
+2. Client: EC P-256 anahtar çifti, her istekte taze proof (`htm`, `htu`, `iat`, `jti`, `ath`) ve `Authorization: DPoP` şeması.
+3. Apinizer: JOSE Validation politikasında JWKS ile imza doğrulama ve DPoP ayarlarıyla proof zincirinin (imza, yaş, `htm`/`htu`, `cnf.jkt`, `ath`, `jti`) uçtan uca doğrulanması.
+
+Bu üçlü kurulduğunda, ağdan sızan bir access token saldırganın elinde yalnızca süresi dolmayı bekleyen bir metin parçasıdır; private key olmadan tek bir istek dahi geçiremez.
