@@ -1,0 +1,476 @@
+---
+title: "Sending Metrics to a Remote Prometheus via remote_write"
+description: "Step-by-step configuration guide for forwarding Apinizer metrics to a Prometheus instance outside the Apinizer cluster using Prometheus Agent and remote_write."
+---
+
+This guide explains how to forward Apinizer metrics to a Prometheus instance that already runs in your organization **without deploying a separate Prometheus inside the Apinizer Kubernetes cluster**.
+
+Where the target Prometheus runs (a different Kubernetes cluster, virtual server, managed service, etc.) does not matter; the agent in the Apinizer cluster only needs to reach the **`/api/v1/write`** endpoint.
+
+As described on the [Prometheus Installation and Scraping Configuration](./gateway-prometheus-scraping) page, Apinizer Gateway and Cache components publish metrics on port **9091**. If Prometheus runs in the same cluster as Apinizer, scraping can be done directly. If the target Prometheus is outside the Apinizer cluster, **Prometheus Agent mode** and **`remote_write`** are the recommended approach.
+
+## Architecture Overview
+
+The flow is as follows:
+
+1. A **Prometheus Agent** is deployed inside the Apinizer cluster.
+2. The agent scrapes Apinizer metric endpoints (`9091`) from within the cluster.
+3. The agent does not keep a local TSDB; it forwards data to the target Prometheus via **`remote_write`**.
+4. The target Prometheus must have the **`--web.enable-remote-write-receiver`** flag enabled.
+
+```text
+Apinizer Pod (9091)
+        ↓ scrape
+Prometheus Agent (Apinizer cluster)
+        ↓ remote_write
+Target Prometheus (outside Apinizer)
+        ↓
+Grafana / Alertmanager
+```
+
+:::info
+
+Prometheus Agent mode (`--enable-feature=agent`) only performs scrape and remote_write. Query APIs such as `/api/v1/query` are not available on this instance. Run queries against the target Prometheus.
+
+:::
+
+## Prerequisites
+
+The following conditions must be met:
+
+| Requirement | Description |
+|-------------|-------------|
+| Metric endpoint | `METRICS_ENABLED=true` must be set on Cache and Worker pods |
+| Network access | The Apinizer cluster must reach the target Prometheus `/api/v1/write` endpoint |
+| Target Prometheus | Must run with the `--web.enable-remote-write-receiver` flag |
+| Environment separation | `external_labels.cluster` must be unique for each Apinizer environment |
+
+:::info
+
+If Kubernetes is managed through Apinizer, you can add `METRICS_ENABLED=true` from **Gateway Environments** → **Deployments & Services** → **Edit deployment** for Worker and Cache. If Kubernetes manifests are managed directly, define the same variable in the deployment YAML or with `kubectl set env`.
+
+:::
+
+## Step 1 — Verify Metric Endpoints
+
+Check the `METRICS_ENABLED` value on Cache and Worker deployments:
+
+```bash
+kubectl get deploy cache -n <CACHE_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i METRICS
+
+kubectl get deploy worker -n <WORKER_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -i METRICS
+```
+
+If the value is missing or `false`, enable it with:
+
+```bash
+kubectl set env deploy/cache -n <CACHE_NAMESPACE> METRICS_ENABLED=true
+kubectl set env deploy/worker -n <WORKER_NAMESPACE> METRICS_ENABLED=true
+```
+
+Verify that the metric endpoint responds inside the pod. Prometheus scrapes the default `/metrics` path by default; if your environment uses a different path, test the same path you configure as `metrics_path` in the agent configuration.
+
+If `curl` is not available in the container, use a temporary debug pod:
+
+```bash
+# Get pod IPs
+kubectl get pod -n <CACHE_NAMESPACE> -l app=cache -o jsonpath='{.items[0].status.podIP}'
+kubectl get pod -n <WORKER_NAMESPACE> -l app=worker -o jsonpath='{.items[0].status.podIP}'
+
+# Test with a debug pod (default metrics path)
+kubectl run debug-curl --image=curlimages/curl -n <WORKER_NAMESPACE> --restart=Never -- \
+  curl -s -o /dev/null -w '%{http_code}\n' http://<POD_IP>:9091/metrics
+
+sleep 3
+kubectl logs debug-curl -n <WORKER_NAMESPACE>
+kubectl delete pod debug-curl -n <WORKER_NAMESPACE>
+```
+
+Expect `200`. If `/metrics` does not respond, try `/actuator/prometheus` depending on your environment; in that case add `metrics_path` to the agent `scrape_configs`.
+
+:::tip
+
+If `wget` is available in the Cache pod, you can test directly:
+
+```bash
+kubectl exec -n <CACHE_NAMESPACE> deploy/cache -- \
+  wget -qO- http://localhost:9091/metrics | head -5
+```
+
+:::
+
+## Step 2 — Create Metric Services
+
+Pod IP addresses change after restarts. Create ClusterIP services that expose port **9091** so the Prometheus Agent can scrape stable targets.
+
+### Cache metric service
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache-metrics
+  namespace: <CACHE_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: cache
+  type: ClusterIP
+```
+
+### Worker metric service
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-metrics
+  namespace: <WORKER_NAMESPACE>
+spec:
+  ports:
+    - port: 9091
+      protocol: TCP
+      targetPort: 9091
+  selector:
+    app: worker
+  type: ClusterIP
+```
+
+Apply the services:
+
+```bash
+kubectl apply -f apinizer-metrics-services.yaml
+```
+
+Verify that endpoints are populated:
+
+```bash
+kubectl get endpoints cache-metrics -n <CACHE_NAMESPACE>
+kubectl get endpoints worker-metrics -n <WORKER_NAMESPACE>
+```
+
+:::warning
+
+If the `ENDPOINTS` column is empty, the `selector` does not match pod labels. Check the actual labels:
+
+```bash
+kubectl get pod -n <CACHE_NAMESPACE> -l app=cache --show-labels
+kubectl get pod -n <WORKER_NAMESPACE> -l app=worker --show-labels
+```
+
+:::
+
+These services are referenced in the agent configuration with the following DNS names:
+
+```text
+cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091
+worker-metrics.<WORKER_NAMESPACE>.svc.cluster.local:9091
+```
+
+## Step 3 — Enable remote_write Receiver on the Target Prometheus
+
+The target Prometheus does not have to run in the same Kubernetes cluster as Apinizer. It may run in another environment, on a virtual server, or as a service. This step only requires the receiver to be enabled on the **target Prometheus instance**.
+
+The `remote_write` receiver is added as a Prometheus **startup flag**, not inside `prometheus.yml`:
+
+```text
+--web.enable-remote-write-receiver
+```
+
+Without this flag, the `/api/v1/write` endpoint returns **404** or **405**.
+
+If the target Prometheus runs on Kubernetes, you can check whether the flag is defined. In the commands below, `prometheus` deployment name and `monitoring` namespace are examples; replace them with the actual values in your environment:
+
+```bash
+kubectl get deploy prometheus -n <MONITORING_NAMESPACE> \
+  -o jsonpath='{.spec.template.spec.containers[0].args}'
+```
+
+Example patch if the flag is missing:
+
+```bash
+kubectl patch deploy prometheus -n <MONITORING_NAMESPACE> --type='json' \
+  -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--web.enable-remote-write-receiver"}]'
+```
+
+For Prometheus running outside Kubernetes, add the same flag through systemd, Docker, or your deployment method.
+
+The full URL used in the agent configuration depends on how the target Prometheus is exposed in your organization:
+
+```text
+http(s)://<HOST>:<PORT>/api/v1/write
+```
+
+`<HOST>` can be a DNS name, IP address, load balancer, or reverse proxy address. `<PORT>` varies by environment.
+
+Verify access from the Apinizer cluster:
+
+```bash
+curl -sv telnet://<HOST>:<PORT> --max-time 5
+```
+
+## Step 4 — Deploy Prometheus Agent in the Apinizer Cluster
+
+Deploy Prometheus in agent mode under the `monitoring` namespace in the Apinizer cluster.
+
+### ConfigMap
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-agent-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      external_labels:
+        cluster: <CLUSTER_NAME>
+        env: <ENVIRONMENT_NAME>
+
+    scrape_configs:
+      - job_name: 'apinizer-cache'
+        static_configs:
+          - targets:
+              - 'cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091'
+
+      - job_name: 'apinizer-worker'
+        static_configs:
+          - targets:
+              - 'worker-metrics.<WORKER_NAMESPACE>.svc.cluster.local:9091'
+
+    remote_write:
+      - url: "http://<HOST>:<PORT>/api/v1/write"
+        write_relabel_configs:
+          - source_labels: [__name__]
+            regex: 'go_.*|process_.*'
+            action: drop
+```
+
+:::note
+
+The scrape configuration above uses the default `/metrics` path, same as the fixed scraping example on the [Prometheus Installation and Scraping Configuration](./gateway-prometheus-scraping) page. If metrics are published on a different path, add `metrics_path` to the relevant job (for example, `metrics_path: /actuator/prometheus`).
+
+:::
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `external_labels.cluster` | Required label to separate environments on the target Prometheus | `qadev`, `prod-istanbul` |
+| `external_labels.env` | Optional environment label | `qa`, `production` |
+| `remote_write.url` | Target Prometheus write endpoint | `https://prometheus.example.com/api/v1/write` |
+| `write_relabel_configs` | Optional; can filter metrics before sending | `go_.*`, `process_.*` |
+
+:::info
+
+If multiple Apinizer environments send data to the same target Prometheus, `external_labels.cluster` **must** be different for each environment. Otherwise time series will overlap.
+
+:::
+
+### Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-agent
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus-agent
+  template:
+    metadata:
+      labels:
+        app: prometheus-agent
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.53.0
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--enable-feature=agent"
+            - "--storage.agent.path=/prometheus"
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: agent-storage
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-agent-config
+        - name: agent-storage
+          emptyDir: {}
+```
+
+Apply the manifest:
+
+```bash
+kubectl apply -f prometheus-agent.yaml
+```
+
+Check pod status:
+
+```bash
+kubectl get pods -n monitoring -l app=prometheus-agent
+kubectl logs -n monitoring -l app=prometheus-agent -f
+```
+
+The log should contain lines such as:
+
+```text
+msg="Starting WAL watcher"
+msg="Completed loading of configuration file"
+msg="Server is ready to receive web requests."
+```
+
+If you see `connection refused`, `403`, or `500`, recheck the receiver flag in Step 3 and network access.
+
+## Step 5 — TLS and Authentication (Production)
+
+In production environments, `remote_write` traffic should be protected with TLS. Example configuration:
+
+```yaml
+remote_write:
+  - url: "https://<HOST>:<PORT>/api/v1/write"
+    basic_auth:
+      username: apinizer-agent
+      password_file: /etc/secrets/remote-write-password
+    tls_config:
+      insecure_skip_verify: false
+      ca_file: /etc/secrets/remote-ca.crt
+    queue_config:
+      capacity: 10000
+      max_shards: 30
+      min_shards: 1
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      min_backoff: 30ms
+      max_backoff: 5s
+```
+
+Create the secret:
+
+```bash
+kubectl create secret generic remote-write-creds \
+  -n monitoring \
+  --from-literal=password=<PASSWORD>
+```
+
+Mount the secret in the Deployment:
+
+```yaml
+volumeMounts:
+  - name: secrets
+    mountPath: /etc/secrets
+    readOnly: true
+volumes:
+  - name: secrets
+    secret:
+      secretName: remote-write-creds
+      items:
+        - key: password
+          path: remote-write-password
+```
+
+:::warning
+
+Do not use `tls_config.insecure_skip_verify: true` in production. If a self-signed certificate is used, mount the CA certificate with `ca_file`.
+
+:::
+
+## Step 6 — Verification
+
+### Scrape status on the agent side
+
+If the agent pod does not include `wget` or `curl`, check with port-forward:
+
+```bash
+kubectl port-forward -n monitoring deploy/prometheus-agent 9090:9090
+```
+
+In another terminal:
+
+```bash
+curl -s 'http://localhost:9090/api/v1/targets' | grep -o '"health":"[a-z]*"'
+```
+
+Expect `"health":"up"` for each job.
+
+### Data check on the target Prometheus side
+
+Run a query against the reachable address of the target Prometheus. If you use `https` in `remote_write`, prefer `https` in the example below as well:
+
+```bash
+curl -s 'http://<HOST>:<PORT>/api/v1/query?query=up%7Bcluster%3D%22<CLUSTER_NAME>%22%7D' \
+  | python3 -m json.tool
+```
+
+A successful response shows `apinizer-cache` and `apinizer-worker` jobs with `up=1`:
+
+```json
+{
+  "metric": {
+    "__name__": "up",
+    "cluster": "<CLUSTER_NAME>",
+    "instance": "cache-metrics.<CACHE_NAMESPACE>.svc.cluster.local:9091",
+    "job": "apinizer-cache"
+  },
+  "value": [1786544236.762, "1"]
+}
+```
+
+In Grafana Explore:
+
+```promql
+up{cluster="<CLUSTER_NAME>"}
+```
+
+:::tip
+
+You can run the query from Prometheus UI, Grafana Explore, or any access address defined in your organization. The address you use must point to the same Prometheus instance the agent uses for `remote_write`.
+
+:::
+
+## Troubleshooting
+
+| Symptom | Likely cause | Solution |
+|---------|--------------|----------|
+| Worker or Cache 9091 unreachable | `METRICS_ENABLED` not set | Add `METRICS_ENABLED=true` to the deployment |
+| Agent scrape `down` | Wrong `metrics_path` or invalid service target | Check the endpoint test in Step 1 and the `metrics_path` value |
+| Empty `ENDPOINTS` | Service selector does not match pod labels | Fix the selector with `kubectl get pod --show-labels` |
+| remote_write 404/405 | Receiver flag missing | Add `--web.enable-remote-write-receiver` |
+| No data arriving | Network / firewall block | Verify access from the Apinizer cluster to `<HOST>:<PORT>` |
+| Environments mixed up | Missing or duplicate `external_labels.cluster` | Assign a unique cluster name to each Apinizer environment |
+| New environment not visible in Grafana | Fixed `cluster` filter on panels | Add the new `cluster` value to dashboard/panel filters |
+
+## Optional: Additional Components
+
+The default scope of this guide is **Cache** and **Worker**. If another component also exposes a metric endpoint on port 9091, create a ClusterIP service as in Step 2 and add a new job to the agent `scrape_configs`.
+
+If you prefer pod annotation-based discovery, add `kubernetes_sd_configs` to the agent configuration. This method is described in the **Dynamic Scraping** section of the [Prometheus Installation and Scraping Configuration](./gateway-prometheus-scraping) page.
+
+## Summary Checklist
+
+1. `METRICS_ENABLED=true` on Cache and Worker
+2. Cache and Worker pods return `200` on the metric endpoint at port 9091
+3. `cache-metrics` and `worker-metrics` services created and endpoints populated
+4. Apinizer cluster can reach the target Prometheus `/api/v1/write` address
+5. `--web.enable-remote-write-receiver` enabled on the target Prometheus
+6. Prometheus Agent deployed in the Apinizer cluster
+7. `external_labels.cluster` defined uniquely
+8. `up{cluster="<CLUSTER_NAME>"}` query returns results on the target Prometheus
