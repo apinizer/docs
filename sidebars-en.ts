@@ -1217,7 +1217,8 @@ const sidebars: SidebarsConfig = {
                 "tutorials/how-to-guides/developer-guides/groovy-usage/add-element-to-xml-body-child",
                 "tutorials/how-to-guides/developer-guides/groovy-usage/dynamic-xml-to-json-script",
                 "tutorials/how-to-guides/developer-guides/groovy-usage/base64-pdf-decode-browser",
-                "tutorials/how-to-guides/developer-guides/groovy-usage/obtaining-a-token-with-ntlm"
+                "tutorials/how-to-guides/developer-guides/groovy-usage/obtaining-a-token-with-ntlm",
+                "tutorials/how-to-guides/developer-guides/groovy-usage/using-jsonpath-with-groovy"
               ]
             },
             {
