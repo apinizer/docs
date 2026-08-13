@@ -90,6 +90,17 @@ const sidebars: SidebarsConfig = {
             },
             {
               "type": "category",
+              "label": "Promotion",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "api-proxies/promotion",
+                "api-proxies/promotion/list-api-proxies-for-promotion",
+                "api-proxies/promotion/save-api-proxy-for-promotion"
+              ]
+            },
+            {
+              "type": "category",
               "label": "Endpoints",
               "collapsed": true,
               "collapsible": true,

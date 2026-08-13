@@ -1,0 +1,149 @@
+---
+title: "Save API Proxy for Promotion"
+description: "Creates or updates an API proxy in a target project from a promotion payload, rebuilds its deployment records against the target project's environments, and optionally deploys it to selected environments."
+---
+
+## Endpoint
+
+```
+PUT /apiops/projects/{projectName}/apiProxies/promotion
+```
+
+Writes the **target** side of a promotion: the payload obtained from
+[List API Proxies for Promotion](/api-reference/api-proxies/promotion/list-api-proxies-for-promotion)
+on the source project is sent to the target project, where it is either created as a new proxy or
+used to update an existing one.
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Target project name |
+
+### Query Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| deployEnvironmentIds | string list | No | Comma-separated environment **settings IDs** of the target installation to deploy to after the save succeeds |
+
+### Request Body
+
+The full API Proxy object. Two modes are distinguished by the `id` field:
+
+| `id` | Mode | Behaviour |
+|------|------|-----------|
+| absent / empty | **Create** | A new proxy is created in the target project. If the name already exists there, the request is rejected with 400 |
+| present | **Update** | The existing target proxy with that ID is overwritten |
+
+```json
+{
+  "name": "petstore-api",
+  "description": "Petstore reverse proxy",
+  "type": "REVERSE_PROXY",
+  "clientRoute": {
+    "relativePathList": ["/petstore"]
+  },
+  "routing": {
+    "apiRoutingList": [
+      {
+        "url": "https://petstore.example.com/v2"
+      }
+    ]
+  }
+}
+```
+
+## Permissions
+
+`API_MANAGEMENT` × `MANAGE` on the target project. When `deployEnvironmentIds` is supplied, the
+deployment step additionally requires `DEPLOY_UNDEPLOY` — `AI_DEVELOPMENT` × `DEPLOY_UNDEPLOY` for
+AI, MCP, and A2A proxies, `API_MANAGEMENT` × `DEPLOY_UNDEPLOY` for all other types.
+
+## Deployment records
+
+The `apiProxyDeployList` sent in the request body is **never** applied as-is: it describes the source
+installation and is meaningless in the target. The list is always rebuilt from the target project's
+own environments, and how the deployment flags are resolved depends on the mode:
+
+| Mode | Deployment flags in the target |
+|------|-------------------------------|
+| **Create** (`id` absent) | Every environment starts undeployed (`deploy: false`) — a newly promoted proxy has not been deployed anywhere yet |
+| **Update** (`id` present) | The target proxy's **current** `deploy` and `redeployRequired` flags are preserved, matched by environment |
+
+:::warning
+
+The update mode matters for correctness, not only for display. If the deployment records were reset
+on every promotion, a proxy that is genuinely deployed in the target environment would be shown as
+undeployed in the Manager while the Gateway Worker kept serving it from the configuration snapshot
+it received at deploy time. Later changes would never reach the traffic, and no "redeploy required"
+warning would appear. You can verify the two sides agree with
+[Get Worker Route Health](/api-reference/api-proxies/deployment/get-route-health) — an
+`inconsistent: true` answer reports exactly this drift.
+
+:::
+
+## Global policies
+
+Global policies referenced by the promoted proxy are materialized in the target project: if a policy
+with the same name already exists there, the proxy is bound to that definition; otherwise it is
+created. The embedded policy snapshot carried in the payload is refreshed from the target's current
+definition, matching the behaviour of import.
+
+## Deployment after save
+
+When `deployEnvironmentIds` is provided, each environment is deployed to after the proxy is saved.
+Deployment is **best-effort and independent per environment**: an unknown environment ID is skipped
+with a log entry, and a failing deployment does not roll back the save or stop the remaining
+environments. The proxy is saved either way — check the deployment result separately with
+[Get Deploy Status](/api-reference/api-proxies/deployment/get-deploy-status).
+
+## Response
+
+### Success (200 OK)
+
+Returns the saved API Proxy object, including the rebuilt `apiProxyDeployList`.
+
+### Error Responses
+
+| Code | Meaning |
+|------|---------|
+| 400 | Validation error, or an API proxy with the same name already exists in the target project (create mode) |
+| 401 | Token is missing, invalid, or expired |
+| 500 | Server error |
+
+## Example
+
+Promote as a new proxy and deploy it to one environment:
+
+```bash
+curl -X PUT "https://apinizer.example.com/apiops/projects/prod-project/apiProxies/promotion?deployEnvironmentIds=66a1f0d25d4b2e7a91c04a02" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @promotion-payload.json
+```
+
+## Related Documentation
+
+- [List API Proxies for Promotion](/api-reference/api-proxies/promotion/list-api-proxies-for-promotion)
+- [Get Worker Route Health](/api-reference/api-proxies/deployment/get-route-health)
+- [Import API Proxy and Override](/api-reference/api-proxies/crud/import-api-proxy-and-override)
+- [Deploy API Proxy](/api-reference/api-proxies/deployment/deploy-api-proxy)
