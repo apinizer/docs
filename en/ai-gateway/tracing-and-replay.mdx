@@ -42,9 +42,29 @@ From the AI Gateway's **AI Trace** tab, when you select a trace group:
 
 ### A Policy's Internal Steps
 
-AI policies that reach the cache (semantic cache, token rate limit) produce several internal steps within a single execution — the request-phase decision, the stream-end commit, consecutive cache calls. These are **not drawn as separate nodes** in the flow; otherwise the policy would look as if it had been applied several times.
+AI policies that reach the cache (semantic cache, token rate limit) do real work in **two separate lifecycle passes**: the request-phase decision (cache lookup, token reservation) and a stream-end pass that runs once the response is complete (writing the response to the cache, reconciling the reservation against the tokens actually consumed).
 
-Instead the policy is represented by a single node whose duration is the sum of its steps, and the steps are listed one by one in the window opened by the **Execution Details** button on the top bar — the same behaviour as the API Call policy's detail window on the API proxy trace screen.
+Both passes are genuine executions, so each gets **its own node** in the flow — the trace shows what really ran, not a simplified summary. The second node carries a **↺ stream-end** badge, and its detail panel names the phase explicitly, so it reads as "second phase" rather than a duplicated policy.
+
+Whether a second node appears depends on the request:
+
+| Situation | Second node |
+|-----------|-------------|
+| Semantic cache MISS | Yes — the response is written to the cache at stream end |
+| Semantic cache HIT | No — nothing needs re-caching, so no stream-end pass is dispatched |
+| Token rate limit | Yes, one per configured policy — the reservation is reconciled or released |
+
+The **Execution Details** button on the top bar opens the cache calls behind the node: the operation (RESERVE / RECONCILE / RELEASE / GET / PUT), the bucket, the cache key, the result and the duration — the same behaviour as the API Call policy's detail window on the API proxy trace screen.
+
+### Why the Trace Order Can Differ From Develop
+
+The trace shows the **actual** execution order, and for AI proxies that is not always the order you arranged on the Develop canvas. Before running the request pipeline the gateway applies a defensive reordering so that a misconfigured order cannot silently break correctness or a guardrail:
+
+1. **Prompt Template** runs before **Prompt Decorator** — the Decorator injects into the `messages[]` array the Template produces.
+2. **Prompt Template / Prompt Decorator** run before **RAG Injection** and every guard/cache policy — those need to see the fully assembled prompt, not the raw client body.
+3. **RAG Injection** runs before **Prompt Guard, Context Integrity, DLP Guard and Semantic Cache** — content RAG injects must be scanned by the guards and must be part of the cache key, otherwise a guard is defeated and the cache can be poisoned.
+
+So if a node appears earlier in the trace than in Develop, the request was not mishandled — the gateway corrected the order. The Develop screen warns you when you save a policy list that violates one of these rules, so you can fix the configuration and make both screens agree.
 
 For the semantic cache, that window also shows the **cached conversation** alongside the decision itself (hit/miss, match source — exact or vector, similarity, cache key, TTL, model): the request's prompt text, plus the response body that was served from the cache on a hit, or written to it on the write phase. "Why did this request come from cache?" and "what response was stored?" are then answered in one window, without comparing raw request/response bodies along the flow.
 
