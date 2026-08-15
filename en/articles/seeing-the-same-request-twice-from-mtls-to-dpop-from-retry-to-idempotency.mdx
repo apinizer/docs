@@ -1,0 +1,230 @@
+---
+title: "Seeing the Same Request Twice: From mTLS to DPoP, From Retry to Idempotency"
+description: "You can examine the two faces of a request arriving twice and learn how to handle malicious replay attacks with DPoP and well-intentioned retries with Idempotency on Apinizer without writing a single line of code."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info In This Article
+A request arriving twice has two faces: one is an attacker trying to rob you, the other is an honest client retrying because it wondered "did that go through?". In this article we will talk about the two mechanisms in Apinizer that handle both, DPoP and Idempotency.
+:::
+
+## Two Different Repeats, One Question
+
+It has happened to all of us: you pressed the "Pay" button on the payment screen, the page kept spinning, and no response ever came. While wondering "was my card charged or not?", you clicked once more. Then you looked at your statement and saw two charges... At that moment you met one of the most classic problems of distributed systems: the same request being processed twice.
+
+<Frame caption="Instead of expecting the client to prevent double clicks, make the repeat harmless at the gateway">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/double-click-gateway-meme-en.png"
+    alt="Instead of telling the client please do not double click, a gateway that processes a double click only once"
+    width="500"
+    height="500"
+  />
+</Frame>
+
+Now consider another scenario: an attacker somehow captured an access token traveling on the network. They hold a valid "Bearer" token, and by the nature of a bearer token, it is valid for whoever carries it. The one who stole the token can access your APIs as if they were the real owner.
+
+At first glance these two stories look unrelated. One is a reliability problem, the other a security problem. But the same question sits at the center of both:
+
+> "Have I seen this request before? And if I have, what should I do?"
+
+The difference lies in the intent of the one repeating the request: one is a malicious replay attack, the other a well-intentioned retry. In this article we will look at how Apinizer handles both faces. First with DPoP, which binds the token to its owner, then with Idempotency, which renders the honest repeat harmless.
+
+And of course, as with every architectural decision, the answer starts with that famous phrase: it depends. But its conclusion is clearer than you might think.
+
+## Part 1: Should Identity Be Bound to the Channel or the Request? The Burden of mTLS
+
+<Frame caption="The strength and the operational burden of mTLS: certificate lifetime, certificate management, and identity being bound to the channel">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/mtls-operational-overhead-en.svg"
+    alt="mTLS diagram: the client presents a certificate, identity melts at TLS termination, the operational burden repeats for every application"
+    width="1000"
+    height="300"
+  />
+</Frame>
+
+How do we make sure the client calling an API really is "that" client? For years, one of the strongest answers to this question has been [mTLS (mutual TLS)](https://datatracker.ietf.org/doc/html/rfc8705).
+
+In mTLS the work is two-sided: just as the client verifies the server's certificate, the server verifies the client's certificate. The result is strong; identity is bound directly to the TLS channel itself. If you do not own the certificate that establishes the channel, the conversation never even starts. That is why mTLS has long been the standard in high-trust integrations such as banking, open banking, and defense.
+
+So why is everyone not still happily using mTLS? Because the price of mTLS is paid not on paper but in operations.
+
+<Frame caption="As certificate lifetimes shrink, renewal stops being a one-time job">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/certificate-lifetime-meme-en.png"
+    alt="We migrated all internal services to mTLS, then the certificate lifecycle dropped to 47 days"
+    width="500"
+    height="507"
+  />
+</Frame>
+
+### Certificate lifetimes are shrinking, on a published schedule
+
+Once upon a time you obtained a certificate and forgot about it for years; those days are over. With the [CA/Browser Forum's SC-081v3 ballot](https://cabforum.org/2025/04/11/ballot-sc081v3-introduce-schedule-of-reducing-validity-and-data-reuse-periods/), the upper limit for public TLS certificates dropped from 398 days to 200 days in March 2026; it will be 100 in March 2027 and 47 days in March 2029. This schedule does not directly bind mTLS client certificates but publicly trusted server certificates; yet the direction is clear, and the internal PKI world is already running faster: in service meshes, certificates already rotate hourly or daily. As lifetimes shorten, "renewal" stops being a one-off task and turns into a continuously running machine. Although this is being addressed by automating with management APIs and making it part of CI/CD and DevOps processes, dealing with legacy services in particular is still painful.
+
+### Every internal application has to manage a certificate
+
+Here is where it really hurts. If you have tens, sometimes hundreds of internal services, mTLS means each of these services must own a certificate, store it securely, renew it before it expires, and distribute it. If a single rotation is missed, that service silently stops communicating. Behind most incidents that start with "why are we getting 500s?" in the middle of the night, you find an expired certificate.
+
+### Identity is bound to the channel, it does not travel with the request
+
+The strength of mTLS is also its constraint: identity belongs to the TLS connection itself. When a reverse proxy, a load balancer, or an ingress steps in and terminates TLS (and in enterprise architecture one almost always does), the client identity "melts" at the first hop. Carrying it to the backend requires extra headers and extra trust chains.
+
+In short, mTLS is a strong but expensive solution. And this expense comes back to you with every new internal application, with every certificate cycle. To anyone who loves the DRY principle, this repeating operational burden should feel familiar: you are doing the same job, in every application, over and over.
+
+## Part 2: Binding the Token to the Request with DPoP (RFC 9449)
+
+<Frame caption="The DPoP flow: key generation, binding the token to the key, the signed proof, and the validation outcome">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/dpop-flow-en.svg"
+    alt="DPoP flow diagram: the client generates a key pair, the auth server binds the token to the key, the resource server validates the proof, the attacker cannot sign a proof"
+    width="1000"
+    height="372"
+  />
+</Frame>
+
+The problem with bearer tokens can be summarized in one sentence: they are not sender-constrained. The token is not bound to the one carrying it. If it is stolen, the thief uses it.
+
+[DPoP](https://datatracker.ietf.org/doc/html/rfc9449) (Demonstrating Proof-of-Possession) was born precisely to solve this. The idea is elegant:
+
+1. The client generates an asymmetric key pair (RSA / EC / EdDSA). The private key always stays with the client.
+2. The access token obtained from the authorization server is bound to the public part of this key; `cnf.jkt` (the SHA-256 fingerprint of the key) is written into the token. The token is no longer for "anyone" but for "whoever owns this key".
+3. The client attaches a short-lived DPoP proof, signed with the private key, to every API request. This proof travels in an HTTP header (`DPoP:`) and says: "I made this request, here is the evidence."
+
+What is inside the proof?
+
+- `htm`: The HTTP method of the request (POST, GET...). Binds the proof to that method.
+- `htu`: The URI the request goes to. Binds the proof to that address.
+- `iat`: The time of creation. Proofs that are too old are rejected.
+- `jti`: The unique identifier of the proof. Prevents the same proof from being used a second time (replay protection).
+- `ath`: The SHA-256 digest of the access token. Makes the proof valid only with that token.
+- `cnf.jkt` (in the token): Which key the token is bound to. The real protection of DPoP.
+
+<Frame caption="The implicit assumption of bearer tokens: the bearer of the token really is its owner, right?">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/bearer-token-meme-en.png"
+    alt="We are using bearer tokens, the bearer of the token is truly the owner right dialogue"
+    width="500"
+    height="503"
+  />
+</Frame>
+
+Now let us return to the attacker's story: say they stole the token. But the private key is still with its real owner. The attacker cannot produce a valid proof, because they cannot sign one. If they try to use the token, the server sees that `cnf.jkt` does not match the proof key and rejects the request. A stolen token, without a proof, is a dead piece of paper.
+
+And the beautiful part: all of this happens at the HTTP layer, with standard headers. We do not touch TLS, distribute certificates, or build a PKI chain. A kind of "application-level proof-of-possession over HTTPS". A mobile app, an SPA, an internal microservice; each can generate its own key pair and send proofs. Nobody needs to register with a certificate authority or build a distribution infrastructure.
+
+### mTLS or DPoP? Exactly the "it depends" moment
+
+Let us be honest here: DPoP is not a technology that "kills" mTLS in every scenario. The two operate at different layers and are sometimes even used together.
+
+mTLS may still be the right choice, if:
+
+- Your topology is fixed, the parties are few, and trust is very high,
+- You already have a mature PKI / service mesh infrastructure,
+- You need a guarantee at the channel level, coming from the very bottom.
+
+DPoP becomes more pragmatic, if:
+
+- You have many internal applications/clients that need authentication and you do not want to distribute a certificate to each,
+- You want to avoid the operational burden of shrinking certificate lifetimes,
+- Your clients live in environments like mobile/SPA where storing certificates is hard,
+- You want identity to travel end to end with the request rather than melting at every TLS-terminating middle layer.
+
+The reality of most organizations is this: the cost of integrating tens of internal applications into mTLS one by one and managing each one's certificate cycle starts to outweigh the extra security it provides. Once that threshold is crossed, DPoP is no longer "a pragmatic fix that saves the day" but simply "the more correct architectural decision".
+
+:::warning Field Note
+When working with short-lived signed objects, the most insidious failure is not cryptographic but chronological. In one integration, the reason signature validations were failing randomly was a four-minute clock skew between servers; the signature was correct, the time window was not. The `iat` check in DPoP falls into the same class: NTP synchronization and an alert on clock drift on the side validating the proof are not optional, they are a precondition.
+:::
+
+## Part 3: The Other Side of the Same Coin: Idempotency
+
+<Frame caption="The Idempotency flow: the key is looked up in the cache, the first request is processed, repeats are answered with the stored response">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/idempotency-flow-en.svg"
+    alt="Idempotency flow diagram: the client sends a request with an Idempotency-Key, the gateway looks the key up in the cache, on a repeat the stored response is returned"
+    width="1000"
+    height="383"
+  />
+</Frame>
+
+Now let us return to the double-click story from the beginning of this article. This time there is no attacker; there is only an honest client, and it sent the same request twice. Why?
+
+- Timeout: The client gave up before the response arrived and tried again.
+- Retry: The network had a brief hiccup and the library automatically resent.
+- Double click: The user got impatient.
+- Load balancer / proxy: Somewhere, a request was sent a second time through failover.
+
+For idempotent methods like `GET` (harmless to repeat), this does not matter. But if you are withdrawing money with `POST`, creating an order, or recording a consent in open banking, the same request being processed twice spells disaster. Double charge, double order, double consent.
+
+The solution pattern has been known for years (the Idempotency-Key pattern that Stripe made famous and the [IETF carried into a draft standard](https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/)):
+
+1. The client generates a unique key for every logical operation and attaches it to the request.
+2. Apinizer processes the first request and stores the backend's response.
+3. When a second request arrives with the same key, Apinizer returns the stored response without bothering the backend at all.
+
+The result: no matter how many times the client resends, the operation happens exactly one time from the client's point of view. We deliberately do not call this "exactly-once"; in a distributed system, a network request always travels at-least-once. What is done is to absorb the repeat at the very edge and reduce its effect to a single occurrence.
+
+If you noticed, DPoP and idempotency are two different uses of the same infrastructure:
+
+- DPoP checks in a distributed cache whether a `jti` has been seen before and rejects the attack.
+- Idempotency checks in a distributed cache whether a key has been seen before and renders the honest repeat harmless.
+
+Both answer the question "have I seen this request before?" in a distributed memory. They just give different answers when they find a match:
+
+> DPoP says "I recognize you, get out"; idempotency says "I recognize you, here is your response from the first time".
+
+Security and reliability, two sides of the same coin.
+
+## Part 4: And in Apinizer?
+
+<Frame caption="One gateway, different settings: DPoP policies and the Idempotency setting use the same distributed memory">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/apinizer-gateway-overview-en.svg"
+    alt="Apinizer Gateway diagram: JOSE Validation verifies the incoming proof, JOSE Implementation produces the outgoing proof, Idempotency works as an API Proxy setting"
+    width="1000"
+    height="438"
+  />
+</Frame>
+
+This is where our favorite Apinizer philosophy comes into play: centralize cross-cutting concerns. Neither binding the token to a proof nor catching the repeat is the real job of your business application. Writing these into every application one by one is a textbook violation of the DRY principle. Apinizer meets both needs as settings; without a single line of code.
+
+The nice thing on the DPoP side is this: because Apinizer stands at both the inbound and outbound ends of the traffic, it can take on both roles of DPoP. If a service behind it will call an external DPoP-protected API (say, an open banking service), Apinizer produces the proof for that call in the JOSE Implementation policy. Conversely, if a client comes to an API protected by Apinizer with DPoP, it validates the incoming proof and that the token is really bound to that key in the JOSE Validation policy; and it prevents the same proof from being used a second time by keeping the identifiers it has seen in a distributed cache. Replay protection kicks in exactly here. In summary, Apinizer produces evidence for the outside and validates what comes in; none of your applications has to know what DPoP is.
+
+Let us clarify one point: in DPoP, the claim binding the token to the key (`cnf.jkt`) is written by the authorization server when the token is issued; Apinizer verifies that this binding was really established and that the proof belongs to that key. So for the chain to be complete end to end, the party issuing the token must also support DPoP; that is the first place to look when designing your architecture.
+
+:::tip Hands-On Follow-Up
+To obtain a DPoP-bound token from Keycloak and validate the proof chain step by step in the Apinizer JOSE Validation policy, you can read [Obtaining DPoP Tokens from Keycloak and Validating Them with Apinizer JOSE Validation](/en/articles/keycloak-dpop-apinizer-jose-validation).
+:::
+
+On the Idempotency side, the setting is not a policy but lives directly on the API Proxy; because catching the repeat is a behavior that concerns the whole proxy. You can have the key read from a header the client sends (Idempotency-Key), or derive it from the business data itself (like a consent number in open banking). Apinizer handles the rest: it processes the first request and stores its response; repeats arriving with the same key are answered with that stored response without tiring the backend at all. The operation, no matter how many times the client tries, happens exactly once from the client's point of view. Of course, Apinizer's job is not only to store and return the response. If a second request with the same key arrives while the first is still being processed, the race condition is handled separately; and using the same key with different content is rejected so that a wrong response is never silently returned. What separates an idempotency implementation from a demo is, in practice, exactly these two details.
+
+The shared beauty of both: you write no code for either. YAGNI; you turn it on where you need it and never touch it where you do not. Your payment flow wants these, a simple query service does not; the same gateway serves both with different settings.
+
+## Conclusion: It Depends, But Operational Reality Points in One Direction
+
+Let us close this article with two claims.
+
+The first is on the security side: mTLS is a powerful tool and, in the right place, still indispensable. But the burden of "distributing a certificate to every internal application that needs authentication, rotating them with ever-shortening lifetimes, carrying identity over again at every TLS termination" becomes unbearable past a certain scale. DPoP, by binding identity to the request instead of the channel, removes most of this burden. Without building certificate infrastructure, at the HTTP layer, it renders a stolen token useless. For most organizations with many internal integrations this is not a "pragmatic compromise" but cleaner architecture.
+
+The second is on the reliability side: Idempotency is not a preference but a necessity in non-idempotent flows like money/consent/orders. The network will inevitably repeat a request one day; the question is not "will it happen" but "what happens when it does". Your answer should be "Apinizer already recognizes it and renders it harmless".
+
+The shared lesson of both mechanisms is this: the same request arriving twice is inevitable. The difference is who sent that repeat. DPoP rejects the hostile repeat, idempotency forgives the honest one; but both take the question "have I seen this request before?" off your application's shoulders and place it on Apinizer's distributed memory.
+
+<Frame caption="Instead of solving idempotency separately in every application, a single setting at the gateway">
+  <img
+    src="/images/articles/mtls-dpop-idempotency/en/idempotency-gateway-meme-en.png"
+    alt="The evolution from implementing idempotency logic in every service to a single setting on the API gateway"
+    width="500"
+    height="505"
+  />
+</Frame>
+
+Apinizer's whole stance is summarized right here: security and reliability are cross-cutting concerns that would otherwise have to be solved over and over in every API. Instead of scattering them across your applications, you solve them at a single point, at the level of a setting. Your applications focus on their real job, the business logic. Instead of reinventing the wheel, you use what exists and move on.
+
+And yes, when to use which still starts with "it depends". But once you put the parameters on the table (how many internal applications you have, whether you can carry the certificate burden, how sensitive your flow is to repeats), the answer usually comes out clearer than it seems.
+
+> Because in the end, good architecture is not merely what "works"; it is what is secure, reliable, and sustainable.
+
+:::note
+This article was originally published in Turkish on the [Apinizer Medium publication](https://medium.com/apinizer/ayn%C4%B1-i%CC%87ste%C4%9Fi-i%CC%87ki-kez-g%C3%B6r%C3%BCnce-mtlsten-dpop-a-retry-dan-idempotency-ye-9524802a31ce).
+:::
