@@ -1518,7 +1518,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz"
+            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz",
+            "articles/apinizer-de-ai-gateway-nasil-duruyor"
           ]
         },
         {

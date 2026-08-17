@@ -1521,7 +1521,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms"
+            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms",
+            "articles/how-ai-gateway-fits-in-apinizer"
           ]
         },
         {
