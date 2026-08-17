@@ -1535,6 +1535,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-export"
           ]
         },
+        "articles/the-story-of-apinizer-ai-gateway",
         "articles/from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
