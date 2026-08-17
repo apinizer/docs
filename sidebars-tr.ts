@@ -1395,6 +1395,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari"
           ]
         },
+        "articles/apinizer-ai-gatewayin-hikayesi",
         "articles/ayni-istegi-iki-kez-gorunce-mtls-ten-dpop-a-retry-dan-idempotency-ye",
         "articles/keycloak-dpop-apinizer-jose-validation-dogrulamasi",
         "articles/apinizer-api-portal-mcp-entegrasyonu",

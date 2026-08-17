@@ -1397,6 +1397,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards"
           ]
         },
+        "articles/the-story-of-apinizer-ai-gateway",
         "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/keycloak-dpop-apinizer-jose-validation",
         "articles/apinizer-api-portal-mcp-integration",
