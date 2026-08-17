@@ -1091,6 +1091,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1235,7 +1236,8 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-senaryolari/api-based-throttling-sabit-zaman",
             "tutorials/api-proxy-senaryolari/api-based-quota-sabit-zaman",
             "tutorials/api-proxy-senaryolari/custom-variable-map-business-rule",
-            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu"
+            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu",
+            "tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi"
           ]
         },
         {
@@ -1463,6 +1465,7 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
+                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1533,7 +1536,8 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-disa-aktarim"
           ]
         },
-        "articles/mtlsten-dpopa-retrydan-idempotencyye",
+        "articles/ayni-istegi-iki-kez-gorunce-mtls-ten-dpop-a-retry-dan-idempotency-ye",
+        "articles/keycloak-dpop-apinizer-jose-validation-dogrulamasi",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",

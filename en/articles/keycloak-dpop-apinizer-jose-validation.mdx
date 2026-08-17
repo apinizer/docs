@@ -1,0 +1,340 @@
+---
+title: "Obtaining DPoP Tokens from Keycloak and Validating Them with Apinizer JOSE Validation"
+description: "You can obtain DPoP-bound access tokens from Keycloak and configure RFC 9449 DPoP proof validation in the Apinizer JOSE Validation policy to render stolen tokens unusable."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info In This Article
+We covered why bearer tokens fall short, the operational burden of mTLS, and where DPoP fits into this picture at a conceptual level in [Seeing the Same Request Twice: From mTLS to DPoP, From Retry to Idempotency](/en/articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency); if you are wondering why DPoP is needed at all, we recommend starting there. This article builds on that background and focuses directly on practice: we will obtain a DPoP-bound access token from Keycloak and validate both the token signature and the DPoP proof end to end with the JOSE Validation policy on Apinizer Gateway. The examples are taken from Python scripts executed in a real test environment.
+:::
+
+## What Is DPoP and What Problem Does It Solve?
+
+In the classic OAuth 2.0 flow, an access token is a bearer token: whoever "bears" it owns it. Anyone who sends the `Authorization: Bearer ...` header can access the API; this includes an attacker who captured the token from logs, a proxy, a leaked HAR file, or a browser extension. There is no mechanism proving who the token was issued to.
+
+DPoP (Demonstrating Proof of Possession, [RFC 9449](https://datatracker.ietf.org/doc/html/rfc9449)) solves this by making the token sender-constrained:
+
+1. The client generates its own asymmetric key pair (typically EC P-256).
+2. During the token request it sends a small JWT signed with this key, called the DPoP proof.
+3. The authorization server (Keycloak) embeds the public key's fingerprint into the token (the `cnf.jkt` claim).
+4. On every request to the API, the client produces a fresh proof signed with the same key.
+5. The gateway (Apinizer) verifies the proof's signature and checks that the key in the proof matches the fingerprint embedded in the token.
+
+The result: even if the access token is stolen, it is useless. The attacker cannot produce a valid proof without the private key; the token alone cannot get through the door.
+
+:::tip In short
+A bearer token says "whoever carries this may enter." A DPoP-bound token says "whoever carries this and proves possession of this specific key on every request may enter."
+:::
+
+## The Core of the Validation Chain: jwk → Thumbprint → cnf.jkt
+
+The heart of the whole mechanism is a single comparison. The DPoP proof carries the client's public key (`jwk`) openly in its header:
+
+```json
+{
+  "typ": "dpop+jwt",
+  "alg": "ES256",
+  "jwk": { "kty": "EC", "crv": "P-256", "x": "...", "y": "..." }
+}
+```
+
+The validating party computes the [RFC 7638](https://datatracker.ietf.org/doc/html/rfc7638) JWK thumbprint of this public key: the key's required members (`crv`, `kty`, `x`, `y`) are serialized to compact JSON in alphabetical order, hashed with SHA-256, and base64url-encoded. The resulting value must exactly match the `cnf.jkt` (confirmation - JWK thumbprint) claim inside the access token:
+
+```json
+{
+  "iss": "https://<keycloak-access-url>/realms/master",
+  "cnf": {
+    "jkt": "0ZcOCORZNYy-DWpqq30jZyJGHTN0d2HglBV3uiguA4I"
+  }
+}
+```
+
+Since the proof's signature is also verified with the same `jwk`, the chain closes: the key that signed the proof is the key the token is bound to, which belongs to the client holding the private key.
+
+The diagram below summarizes the entire flow and the validation points:
+
+<Frame caption="DPoP flow: token acquisition, proof generation, and Apinizer JOSE Validation checkpoints">
+  <img
+    src="/images/articles/dpop-jose-validation/dpop-mimari-en.svg"
+    alt="Flow diagram: obtaining a DPoP-bound token from Keycloak, producing a fresh proof per request, and Apinizer Gateway performing the validation"
+    width="1000"
+  />
+</Frame>
+
+The footnote of the diagram captures the essence: the same key both obtains the token and signs every request. `cnf.jkt` is fixed; the only things that change are each proof's `jti`/`iat`/`htu`/`ath` payload.
+
+## Keycloak Side: DPoP Support
+
+As of version 26.4, Keycloak [officially supports DPoP as a fully supported feature](https://www.keycloak.org/2025/10/dpop-support-26-4) without any additional configuration. When a request arrives at the token endpoint with a valid DPoP proof, the `cnf.jkt` claim is automatically embedded into the issued access token and the token type is returned as `DPoP`.
+
+:::note
+In versions before 26.4, DPoP was a preview feature and the server had to be started with the `--features=dpop` parameter. As of 26.4, this step is no longer necessary; if you want to force a client to use DPoP, you can enable the "Require DPoP bound tokens" switch in the client settings.
+:::
+
+:::warning
+If the token request is made without a DPoP proof, Keycloak returns a plain bearer token; `cnf.jkt` is not embedded and access token binding cannot be validated at the gateway. The safest practice is to check that the `cnf.jkt` claim actually exists right after obtaining the token (the code below does this automatically).
+:::
+
+## Client Side: Obtaining a DPoP-Bound Token
+
+Now to the client side. The example code is written in Python; it uses only `requests` and `cryptography`, with the DPoP part deliberately written by hand so every step is visible.
+
+### 1. Key pair and JWK
+
+The client first generates an EC P-256 key pair and prepares the public key in JWK format:
+
+```python
+class DPoPKey:
+    def __init__(self, private_key=None):
+        self.private_key = private_key or ec.generate_private_key(ec.SECP256R1())
+        pub = self.private_key.public_key().public_numbers()
+        self.jwk = {"kty": "EC", "crv": "P-256",
+                    "x": b64u(pub.x.to_bytes(32, "big")),
+                    "y": b64u(pub.y.to_bytes(32, "big"))}
+```
+
+The key is saved to disk and reused on subsequent runs, because the key that obtained the token and the key that signs API requests must be the same. If the key is lost, the token becomes useless too (which is exactly the behavior DPoP promises).
+
+### 2. RFC 7638 thumbprint
+
+The client can compute the `cnf.jkt` value Keycloak will put into the token on its own side; we will use it for verification shortly:
+
+```python
+    def thumbprint(self) -> str:
+        canonical = json.dumps({"crv": self.jwk["crv"], "kty": self.jwk["kty"],
+                                "x": self.jwk["x"], "y": self.jwk["y"]},
+                               separators=(",", ":"), sort_keys=True).encode()
+        return b64u(hashlib.sha256(canonical).digest())
+```
+
+Note the details: the JSON must be produced without whitespace (`separators=(",", ":")`) and in alphabetical order (`sort_keys=True`); otherwise the hash will not match.
+
+### 3. Generating the proof
+
+A DPoP proof is a short-lived, single-use JWT. Its header carries `typ: dpop+jwt` and the public key; its payload carries four critical claims:
+
+| Claim | Meaning |
+|---|---|
+| `jti` | Unique identifier of the proof (for replay protection) |
+| `htm` | HTTP method of the request (`POST`, `GET`, ...) |
+| `htu` | Target URI of the request (without the query string) |
+| `iat` | Time the proof was created |
+
+```python
+    def create_proof(self, htm, htu, access_token=None, nonce=None) -> str:
+        header = {"typ": "dpop+jwt", "alg": "ES256", "jwk": self.jwk}
+        payload = {"jti": str(uuid.uuid4()), "htm": htm, "htu": htu,
+                   "iat": int(time.time())}
+        if access_token:
+            payload["ath"] = b64u(hashlib.sha256(access_token.encode()).digest())
+        if nonce:
+            payload["nonce"] = nonce
+
+        signing_input = f"{b64u_json(header)}.{b64u_json(payload)}".encode()
+        der = self.private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+        r, s = decode_dss_signature(der)
+        sig = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+        return f"{signing_input.decode()}.{b64u(sig)}"
+```
+
+Note the two optional claims: `ath` (access token hash) is only added on API requests; there is no token yet when calling the token endpoint. `nonce` is added if Keycloak demands one. Another subtle point is the signature format: the `cryptography` library outputs ECDSA signatures in DER format, while JWT expects raw `r || s` (64 bytes); hence the conversion.
+
+### 4. Token request and nonce retry
+
+The token request is a normal `client_credentials` (or `password`) request; the only difference is the `DPoP` header:
+
+```python
+    proof = key.create_proof("POST", TOKEN_URL)
+    r = requests.post(TOKEN_URL, data=data, headers={"DPoP": proof}, verify=VERIFY_TLS)
+
+    # Keycloak nonce isterse tek sefer tekrar dene
+    if r.status_code == 400 and "use_dpop_nonce" in r.text:
+        nonce = r.headers.get("DPoP-Nonce")
+        proof = key.create_proof("POST", TOKEN_URL, nonce=nonce)
+        r = requests.post(TOKEN_URL, data=data, headers={"DPoP": proof}, verify=VERIFY_TLS)
+```
+
+In hardened configurations, Keycloak may answer the first request with a `use_dpop_nonce` error and a `DPoP-Nonce` response header; the client repeats the same request with the nonce added to the proof. This is the standard flow defined in RFC 9449.
+
+The `cnf.jkt` check can be performed right after obtaining the token; the three possible outcomes are reported as follows:
+
+```python
+    if jkt is None:
+        print("SONUC: cnf.jkt YOK -> Keycloak'ta DPoP kapali.")
+    elif jkt == key.thumbprint():
+        print("SONUC: BASARILI -> Token DPoP ile anahtara baglandi.")
+    else:
+        print("SONUC: UYUSMAZLIK -> Token baska bir anahtara bagli.")
+```
+
+## Calling Apinizer with a Proof
+
+We have the token; now let's call the API behind Apinizer Gateway. The client loads the saved key and token and produces a new proof for this request:
+
+```python
+key    = DPoPKey.load_or_create(KEY_FILE)
+saved  = json.load(open(TOKEN_FILE))
+token  = saved["access_token"]
+
+proof = key.create_proof(API_METHOD, API_URL, access_token=token)
+
+headers = {
+    "Authorization": f"DPoP {token}",
+    "DPoP": proof,
+    "Content-Type": "application/json"
+}
+```
+
+Three points deserve attention:
+
+- The authorization scheme is `DPoP`, not `Bearer`. RFC 9449 defines that DPoP-bound tokens are carried with the `Authorization: DPoP ...` scheme.
+- The proof now contains the `ath` claim: the SHA-256 hash of the access token. This makes the proof usable only with this token; the same proof with a different token is invalid.
+- A fresh proof is generated for every request. `jti` and `iat` change every time; reusing the same proof trips replay protection.
+
+## Apinizer JOSE Validation: Configuring DPoP Validation
+
+On the gateway side, validation is performed by the JOSE Validation policy added to the API Proxy's request pipeline. The policy works in two layers:
+
+1. Access token signature validation, done via Keycloak's JWKS endpoint:
+
+```
+https://<keycloak-access-url>/realms/master/protocol/openid-connect/certs
+```
+
+With the JWKS URL defined in the policy, Apinizer verifies the token's RS256 signature against Keycloak's public key and automatically tracks key rotation.
+
+2. DPoP proof validation, enabled through the DPoP Validation Settings section of the policy:
+
+<Frame caption="Apinizer JOSE Validation DPoP validation settings">
+  <img
+    src="/images/articles/dpop-jose-validation/dpop-validation-settings.png"
+    alt="DPoP validation settings in the Apinizer JOSE Validation policy: proof header name, maximum proof age, htm/htu validation, cnf.jkt binding, ath, and jti replay protection"
+    width="700"
+  />
+</Frame>
+
+Let's go through the settings one by one:
+
+### Enable DPoP Validation
+
+The master switch. When enabled, the gateway validates the DPoP proof accompanying the request per RFC 9449: the proof must be of type `dpop+jwt`, its signature must verify against the `jwk` in its header, and the checks selected below must pass.
+
+### DPoP Proof Header Name
+
+The HTTP header that carries the proof. The standard value is `DPoP`; it can be changed here if a custom integration uses a different header.
+
+### Maximum Proof Age
+
+The request is rejected if the proof's `iat` is older than this many seconds. Clock skew tolerance is added on top. A typical value is 60 seconds; since proofs are freshly generated for every request anyway, there is no need for a wide window. A narrow window shortens the usable lifetime of an intercepted proof.
+
+### Validate htm (HTTP Method)
+
+Checks that the `htm` claim in the proof matches the actual HTTP method of the request. A proof generated for `GET` cannot be used on a `POST` request.
+
+### Validate htu (Request URI) and Expected htu Value
+
+Checks that the `htu` claim in the proof matches the target URI of the request. The Expected htu Value field takes the address clients use when generating the proof, that is, the externally visible address of the gateway:
+
+```
+https://<apigateway-access-url>
+```
+
+:::warning Why is Expected htu Value required?
+This field cannot be left empty while `Validate htu` is enabled. The gateway could derive the request's target address from the Host header; but the Host header is client-controlled. An attacker could send a forged Host matching the `htu` in their proof and defeat the check. That is why the expected address must be pinned on the server side. The value to enter here is the gateway's address, not the backend's; clients generate the proof for the gateway address.
+:::
+
+### Validate Access Token Binding (cnf.jkt)
+
+The core DPoP check. Verifies that the `cnf.jkt` value in the access token equals the RFC 7638 SHA-256 thumbprint computed from the `jwk` in the proof header. If this check fails, the token is bound to a different key; either the wrong key is being used, or a stolen token is being replayed with the attacker's own key.
+
+### Validate Access Token Hash (ath)
+
+Checks that the `ath` claim in the proof equals the SHA-256 hash of the access token in the `Authorization` header. This locks the proof to a specific token: a proof produced with the same key but prepared for a different token is rejected.
+
+### Enable Replay Protection (jti) and jti Retention
+
+Remembers seen `jti` values in the distributed cache so that the same proof cannot be used twice. If the retention period is left blank, it is derived from the maximum proof age plus the clock skew tolerance; once a proof can no longer pass the age check anyway, there is no need to remember its `jti`.
+
+:::info The validation chain: the whole picture
+With all checks enabled, a request passes only if all of the following hold: the token signature verifies against a key in Keycloak's JWKS → the proof signature verifies against the `jwk` in its header → the `jwk` thumbprint equals the token's `cnf.jkt` → `ath` equals the token hash → `htm`/`htu` match the request → `iat` is fresh → `jti` has never been seen before. Every link in this chain ensures that no single stolen component is useful on its own.
+:::
+
+## Problems You May Encounter
+
+Real issues we hit in the field during setup, and their solutions:
+
+### 1. htu mismatch: Keycloak behind a reverse proxy
+
+If Keycloak runs behind an ingress or nginx (NodePort), it sees its own address as the internal address, while the client generates the proof's `htu` for the external address. Result: Keycloak rejects the proof at the token endpoint.
+
+The fix is teaching Keycloak its externally visible address:
+
+```bash
+KC_HOSTNAME=<keycloak-access-url>
+KC_PROXY_HEADERS=xforwarded
+```
+
+and forwarding the headers completely on the nginx side:
+
+```nginx
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Forwarded-Host  $host;
+proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+```
+
+`X-Forwarded-Proto` is especially critical: without it, Keycloak believes it is serving over `http`, and no match can be established with the `htu` the client generated as `https://...`.
+
+### 2. ERR-283: Expected htu Value left empty
+
+In Apinizer, if `Validate htu` is enabled but Expected htu Value is empty, the request is rejected. As explained above, this is a deliberate design decision: since the Host header is client-controlled, it is not a trustworthy comparison base. When filling in the field, enter the gateway's external address, not the backend service's address.
+
+### 3. Two keys in the JWKS: use sig and use enc
+
+Keycloak's JWKS endpoint typically returns two keys: one with `use: sig` (signing) and one with `use: enc` (encryption). Signature validation must use the `sig` key. When Apinizer fetches the JWKS itself, it selects the correct key by `kid`; but if you define the key manually (for example, as a static public key), accidentally copying the `enc` key will make every token fail signature validation.
+
+### 4. ERR-284: No cnf.jkt in the token
+
+If the access token is not DPoP-bound, that is, it contains no `cnf.jkt` claim, and `Validate Access Token Binding` is enabled, Apinizer rejects the request. This usually points to the token request having been made without a DPoP proof, or to a Keycloak version that does not support DPoP. Checking the `cnf.jkt` claim at token acquisition time catches this condition early.
+
+### 5. Replay protection can silently drop out
+
+`jti` replay protection keeps seen proof identifiers in the distributed cache; this is required so that multiple gateway pods do not each accept the same proof independently. If the cache connection is missing or drops, and the system behaves fail-open, replay attempts pass silently. If you rely on replay protection, monitor the health of the cache connection and verify the protection with an actual replay (sending the same proof twice). If the second request is not rejected, the protection is effectively not active.
+
+## DPoP or mTLS?
+
+There are two standardized paths to sender-constrained tokens: mTLS certificate binding ([RFC 8705](https://datatracker.ietf.org/doc/html/rfc8705)) and DPoP. Both achieve the goal of "a stolen token must be useless"; the difference is operational cost.
+
+| | mTLS Binding | DPoP |
+|---|---|---|
+| Proof mechanism | Client certificate in the TLS handshake | Signed proof JWT at the application layer |
+| Infrastructure requirement | End-to-end mTLS; every TLS-terminating proxy must forward the certificate | None; plain HTTPS suffices |
+| Key lifecycle | Certificate issuance, distribution, rotation, revocation (PKI) | Client-generated key pair; no CA |
+| Proxy/CDN compatibility | Requires special configuration at TLS termination points | Transparent; the proof is an HTTP header |
+| Client complexity | Certificate store management | A few lines of JOSE code |
+
+mTLS is a strong option in environments where client certificate infrastructure is already in place (e.g., service-to-service communication, closed enterprise networks). But certificate issuance and rotation, ensuring every intermediate layer terminating TLS (ingress, load balancer, CDN) forwards the certificate correctly, and managing certificate stores on the client side add serious operational overhead.
+
+DPoP removes most of that burden: the key pair is generated by the client, never enters any CA process, rotation amounts to "generate a new key, obtain a new token," and the proof travels transparently through every proxy as an ordinary HTTP header. For public clients (SPAs, mobile) and modern topologies where TLS terminates at multiple points, DPoP is in practice the only realistic sender-constraint option.
+
+### Open Banking in Turkey: Why Did the National Standard Choose mTLS?
+
+To keep the comparison above from remaining theoretical, let us close with a concrete example: the Payment Services Data Sharing Services standard published by the Central Bank of the Republic of Turkey (known by its Turkish abbreviation, ÖHVPS) mandates the mTLS + JWS pair, not DPoP. All API traffic between account servicing banks and authorized payment service providers is carried over mutual TLS based on eIDAS QWAC/QSealC certificates; request and response bodies are additionally signed with JWS.
+
+The reason is not technical but institutional: in the ÖHVPS ecosystem the parties are already known, licensed, audited organizations (banks and payment service providers certified through the shared Open Banking Gateway operated by the Interbank Card Center, BKM). PKI infrastructure and certificate lifecycle management are an already-existing cost; the "public client, no CA, dynamic key" problem that DPoP tries to solve does not exist here. The operational burden of mTLS is not a disadvantage in a closed, pre-certified list of parties.
+
+DPoP is strong in exactly the opposite scenario: open ecosystems where the client cannot be certified in advance, where public clients such as SPAs and mobile apps exist, and where TLS terminates at multiple points such as CDNs and ingresses. This is also why FAPI 2.0 allows its "sender-constrained token" requirement to be met with DPoP instead of mTLS.
+
+:::tip Practical Summary
+If you are building an open banking integration under the ÖHVPS/BDDK regulation, stick with mTLS + JWS; the standard mandates it. But for the other APIs the same bank exposes to the outside, accessed by certificate-less public clients (mobile apps, third-party agents, partner integrations), DPoP provides a similar sender-constraint guarantee without the PKI burden of mTLS. Since both mechanisms can be configured under the JOSE Validation policy in Apinizer, it is possible to enforce mTLS on one API group and apply a DPoP policy to another on the same gateway: you can protect regulated and non-regulated traffic from a single management point, with different sender-constraint strategies.
+:::
+
+## Conclusion
+
+The weak link of the bearer token model was that the token itself was the sole proof of authorization. DPoP strengthens that link with a proof of key possession accompanying every request. The entire setup boils down to three steps:
+
+1. Keycloak: DPoP is officially supported with version 26.4 and later and no extra configuration is needed; `cnf.jkt` is embedded into the token when the token request carries a DPoP proof.
+2. Client: an EC P-256 key pair, a fresh proof on every request (`htm`, `htu`, `iat`, `jti`, `ath`), and the `Authorization: DPoP` scheme.
+3. Apinizer: signature validation via JWKS in the JOSE Validation policy, plus end-to-end validation of the proof chain (signature, age, `htm`/`htu`, `cnf.jkt`, `ath`, `jti`) through the DPoP settings.
+
+With these three in place, an access token leaked from the network is nothing more than a piece of text waiting to expire in the attacker's hands; without the private key, it cannot get a single request through.
