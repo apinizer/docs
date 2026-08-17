@@ -135,6 +135,9 @@ const config: Config = {
           {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
           {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
           {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          // 2026.07.0 → 2026.09.0 release rename (ALTER script pages)
+          {from: '/tr/release-notes/2026-07-0-log-tablosu-alter', to: '/tr/release-notes/2026-09-0-log-tablosu-alter'},
+          {from: '/en/release-notes/2026-07-0-log-table-alter', to: '/en/release-notes/2026-09-0-log-table-alter'},
         ],
         createRedirects(existingPath) {
           if (existingPath === '/tr') {
