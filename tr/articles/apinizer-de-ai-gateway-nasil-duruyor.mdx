@@ -1,0 +1,183 @@
+---
+title: "Apinizer'de AI Gateway Nasıl Duruyor?"
+description: "Apinizer AI Gateway yazı serisi Bölüm 2: çalışma zamanı ile denetimin ayrımı, menü yapısı ve ana bileşenler."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info Seri Hakkında
+Bu yazı, **Apinizer AI Gateway yazı serisinin** ikinci bölümüdür. [Bölüm 1'de](/tr/articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz) AI Gateway'in neden gerektiğini konuşmuştuk.
+
+Bu bölümde soru daha somut: **Apinizer'de bu katman nasıl kurulmuş, parçalar ne işe yarıyor?**
+
+1. **AI Gateway nedir ve neden önemli?** ([Bölüm 1](/tr/articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz))
+2. **Apinizer'de AI Gateway:** yönetişim birliği, runtime ayrımı, bileşenler (bu bölüm)
+3. **Pratik senaryo:** RAG ile kendi verinizle cevap üretmek
+:::
+
+<Frame caption="Apinizer AI Gateway yazı serisi — Bölüm 2">
+  <img
+    src="/images/articles/apinizer-ai-gateway-serisi/bolum-2-kapak.png"
+    alt="Apinizer AI Gateway bileşen haritası: AI Proxy, politikalar, LLM Provider ve RAG Hub"
+    width="1200"
+    height="675"
+  />
+</Frame>
+
+## İki şeyi karıştırmayalım
+
+LLM trafiğini yönetirken iki farklı ihtiyaç var:
+
+1. **Çalışma zamanı** — İstek modele nasıl gidecek? Streaming nasıl işleyecek? Provider düşünce ne olacak?
+2. **Denetim** — Kim çağırıyor? Anahtar nerede? Kota kimde? Log'a ne düşüyor? Deploy nasıl yapılıyor?
+
+Birincisi LLM'e özeldir; ikincisi kurumda zaten vardır (veya olmalıdır).
+
+Apinizer'in tercihi şu:
+
+- LLM'e özel iş ayrı yürür.
+- Kimlik, yetki, politika, log ve deploy ise mevcut API yönetim düzeninin içindedir.
+
+Yani AI için ikinci bir kullanıcı sistemi, ikinci bir key kasası, ikinci bir admin dünyası açılmaz. Model tarafı ayrı düşünebilirsiniz; denetim dağılmaz.
+
+## Menüde nerede duruyor?
+
+Apinizer Manager'da **AI Gateway** altında parçalar tek tek dağınık değil; okunabilir bir düzen var:
+
+| Menü | Ne yaparsınız? |
+|------|----------------|
+| **AI Proxies** | İstemcinin konuştuğu LLM kapısı; politika, routing, deploy |
+| **LLM Providers** | OpenAI, Anthropic, Azure, Ollama… bağlantıları |
+| **RAG** | Bilgi tabanı, vector DB, prompt şablonları (sekme ile) |
+| **Guardrails** | AI'ye özgü koruma tanımları |
+| **Analytics** | Token, maliyet, trace — kimin ne yaktığı |
+| **AI Quota** | Bütçe ve kota kuralları |
+
+Bölüm 3'te ekran ekran gideceğiz. Burada önemli olan: LLM trafiği için ayrı bir "mini ürün" değil; **aynı proje, aynı deploy, aynı yetki düzeni** içinde yönetiliyor.
+
+## Apinizer'de ana parçalar
+
+### AI Proxy
+
+İstemcinin konuştuğu kapı. OpenAI SDK ile `base_url` buraya bakar.
+
+Klasik API Proxy ile aynı omurgada yaşar: proje, deploy, politika listesi, log. Farkı, arkasında bir REST servisi değil **LLM yönlendirmesi** olmasıdır.
+
+Pratikte şunu sağlar:
+
+- İstemci her zaman **OpenAI formatında** konuşur; sağlayıcı Anthropic, Bedrock veya Ollama olsa bile yanıt aynı forma normalize edilir.
+- Streaming (SSE) desteklenir; uzun cevaplar chunk chunk döner.
+- Auth, rate limit gibi klasik politikalar burada da kullanılabilir.
+- AI'ye özel politikalar (RAG, cache, guardrail, token kota) aynı proxy'ye eklenir.
+
+Yani AI Proxy = "LLM trafiğinin API Proxy'si". Uygulama tarafında çoğu zaman sadece `base_url` ve Apinizer kimlik bilgisi değişir.
+
+### LLM Provider
+
+Modele giden bağlantı kaydıdır. OpenAI, Anthropic, Azure OpenAI, Bedrock, Vertex, Ollama, vLLM veya OpenAI-uyumlu özel bir uç nokta tanımlarsınız.
+
+Burada duranlar:
+
+- Sağlayıcı tipi ve endpoint
+- **Gerçek API key** (şifreli; log'a yazılmaz)
+- **Dağıtım türü:** Bulut veya şirket içi — maliyet ve kapasite planlamasında kullanılır
+- İzin verilen modeller
+
+En sık karışan nokta: istemciye verdiğiniz Apinizer credential'ı ile provider'daki gerçek model key'i. İkisi aynı şey değil. İstemci Apinizer'a gelir; Apinizer, seçilen provider'a kendi key'iyle çıkar.
+
+Provider kaydını test ederken de dikkat: test, Management Console'dan değil, seçilen ortamın **Worker**'ından yapılır. Yani "laptop'tan OpenAI'ye gidiyor" ile "production path'ten gidiyor" aynı şey değildir.
+
+### AI Routing
+
+AI Proxy içinde **"şu model adı → şu provider"** eşlemesidir.
+
+Örnek: `gpt-4o` isteği OpenAI provider'a, `deepseek-chat` başka bir provider'a, `phi3:mini` şirket içi Ollama'ya gidebilir. İstemci kodu değişmez; değişen routing'dir.
+
+Failover da burada tanımlanır: birincil provider cevap vermezse sıradaki devreye girer. İstemci yine aynı OpenAI formatıyla konuşmaya devam eder.
+
+### RAG
+
+Menüde Vector DB ve Knowledge Base ayrı satırlar olarak değil; **RAG** adlı tek bir yerde toplanır. İçinde sekmeler var:
+
+- **Bilgi Tabanları** — PDF/TXT yükleyip indexlediğiniz doküman setleri
+- **Vector Veritabanları** — vektörlerin saklandığı bağlantı (pgvector, Qdrant, Redis…)
+- **Prompt Şablonları** — tekrar kullanılan prompt kalıpları
+
+Kavramsal olarak üç parça birbirine bağlıdır:
+
+1. Vector DB = depo
+2. Knowledge Base = "hangi doküman, hangi depoda, hangi embedding ile"
+3. RAG Injection politikası = "soru gelince KB'den bağlam çek, isteğe ekle"
+
+Arayüzde RAG altında toplanması, kurulumu da buna göre düşünmenizi sağlar: önce vector bağlantısı, sonra bilgi tabanı, sonra proxy'ye politika.
+
+Embedding tarafında ayrı bir hatırlatma: **chat modeli embedding modeli değildir.** RAG'in index ve arama tarafı embedding provider ister; cevap üreten chat provider ayrıdır.
+
+### AI politikaları
+
+AI Proxy'ye eklenen LLM'e özel kurallar. Bölüm 1'deki akışın ürün karşılığı kabaca şöyle:
+
+| Politika | Ne yapar? |
+|----------|-----------|
+| **RAG Injection** | İstek modele gitmeden KB'den bağlam ekler |
+| **Semantic Cache** | Benzer soruyu tekrar modele göndermeden cevaplar |
+| **Token Rate Limit** | Token veya bütçe limiti — "kaç istek" değil |
+| **Prompt Guard / PII / DLP…** | İçerik ve güvenlik kontrolleri |
+
+Sıra önemli: RAG önce çalışır; guardrail ve cache **zenginleştirilmiş isteğe** bakmalıdır. Tersine sıra, yanlış cache veya atlanan tarama riski doğurur.
+
+### Guardrails ve Analytics (menü tarafı)
+
+Politikalar proxy üzerinde uygulanır; **Guardrails** menüsü bu kuralların tanımlandığı yerdir. Prompt injection, PII maskeleme, konu dışı kullanım gibi kontroller burada yönetilir.
+
+**Analytics** tarafında ise "kim, hangi model, kaç token, ne kadar maliyet" sorusuna cevap ararsınız. LLM trafiğinde TPS yetmez; token ve model bazlı görünürlük gerekir. AI Trace ile bir isteğin hangi aşamalardan geçtiğini de inceleyebilirsiniz — RAG devreye girdi mi, cache'ten mi döndü, failover oldu mu.
+
+**AI Quota** ise bütçe ve kota kurallarını merkezi tutar. "Bu ekip ayda şu kadar token" veya "bu proxy'de günlük bütçe" gibi limitler burada tanımlanır.
+
+## İstek Apinizer'de kabaca nasıl akar?
+
+<Frame caption="Apinizer AI Gateway istek akışı — AI Proxy ve politikalar">
+  <img
+    src="/images/articles/apinizer-ai-gateway-serisi/bolum-2-istek-akisi.svg"
+    alt="İstemciden AI Proxy politikaları üzerinden LLM Provider'a giden Apinizer istek akışı"
+    width="1200"
+    height="675"
+  />
+</Frame>
+
+Üç pratik kural:
+
+1. **RAG, guardrail ve cache'ten önce gelir.** Önce bağlam eklenir; güvenlik ve cache o zengin isteğe bakmalıdır.
+2. **Chat modeli ile embedding modeli ayrıdır.** Biri cevap üretir, biri metni vektöre çevirir.
+3. **Gerçek model key'i Provider'da, istemci key'i Apinizer'dedir.** En sık kurulum hatası budur.
+
+## Tipik kurulum sırası (kavramsal)
+
+Henüz ekran ekran gitmiyoruz; ama parçaların birbirine bağlanma sırası kabaca şöyle:
+
+1. **LLM Provider** — en az bir chat provider (ve RAG için embedding provider)
+2. **RAG** — Vector DB bağlantısı, bilgi tabanı, gerekirse prompt şablonu
+3. **AI Proxy** — routing, politikalar
+4. **Deploy** — ortama al
+5. **Test** — OpenAI SDK ile `base_url` + Apinizer kimliği
+
+Bölüm 3'te bunu tek senaryo üzerinden yapacağız.
+
+## Neden bu düzen?
+
+İki uç var; ikisi de kötü:
+
+- Bütün işi tek araca yüklemek — LLM, routing, güvenlik, her şey aynı yerde şişer; değişmesi zorlaşır
+- Her AI aracıyla ayrı kimlik, ayrı log, ayrı key dünyası kurmak — denetim dağılır, gölge IT çıkar
+
+Apinizer ortayı arıyor: LLM işi kendi hattında yürüsün, kurumsal denetim parçalanmasın.
+
+Bu yüzden "Apinizer'de AI Gateway var" derken kastettiğimiz şey yeni bir ada ürün değil. Mevcut API platformunun LLM trafiğini de aynı disiplinle yönetmesidir.
+
+## Bundan sonra
+
+Harita bu.
+
+Sıradaki yazıda tek senaryoyu kuracağız: Embedding Provider → RAG (Vector DB + Bilgi Tabanı) → Chat AI Proxy → RAG Injection → test.
+
+Orada ekran ekran ilerleyeceğiz.
