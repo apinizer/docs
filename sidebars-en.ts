@@ -1521,7 +1521,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms"
+            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms",
+            "articles/how-ai-gateway-fits-in-apinizer"
           ]
         },
         {
@@ -1537,6 +1538,8 @@ const sidebars: SidebarsConfig = {
         },
         "articles/the-story-of-apinizer-ai-gateway",
         "articles/from-mtls-to-dpop-from-retry-to-idempotency",
+        "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",
+        "articles/keycloak-dpop-apinizer-jose-validation",
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-control-list-rlcl",

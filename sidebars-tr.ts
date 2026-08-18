@@ -1518,7 +1518,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz"
+            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz",
+            "articles/apinizer-de-ai-gateway-nasil-duruyor"
           ]
         },
         {
@@ -1534,6 +1535,8 @@ const sidebars: SidebarsConfig = {
         },
         "articles/apinizer-ai-gatewayin-hikayesi",
         "articles/mtlsten-dpopa-retrydan-idempotencyye",
+        "articles/ayni-istegi-iki-kez-gorunce-mtls-ten-dpop-a-retry-dan-idempotency-ye",
+        "articles/keycloak-dpop-apinizer-jose-validation-dogrulamasi",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",
