@@ -1537,7 +1537,6 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "articles/the-story-of-apinizer-ai-gateway",
-        "articles/from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/keycloak-dpop-apinizer-jose-validation",
         "articles/apinizer-api-portal-mcp-integration",
