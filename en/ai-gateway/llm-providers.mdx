@@ -1,0 +1,244 @@
+---
+title: "LLM Providers and Connections"
+description: "You can connect Apinizer to any supported LLM provider — cloud or self-hosted — by creating one encrypted connection, then route requests to it by model name from any AI Gateway."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Overview
+
+An **LLM Provider Connection** is a secure, encrypted link to an external LLM service (OpenAI, Anthropic, Azure, a self-hosted engine, etc.). Each connection holds the provider type, API credentials, and deployment metadata, and becomes available to any AI Gateway for routing once saved.
+
+## Provider Categories
+
+<CardGroup cols={2}>
+  <Card title="Cloud Providers" icon="cloud">
+    OpenAI, Anthropic (Claude), Azure OpenAI, Google Vertex AI (Gemini), AWS Bedrock — hosted and scaled by the provider.
+  </Card>
+  <Card title="Self-Hosted" icon="server">
+    vLLM, Ollama, Hugging Face TGI — models running on infrastructure you operate.
+  </Card>
+  <Card title="Custom" icon="plug">
+    Any OpenAI-compatible API endpoint, for providers not in the built-in list.
+  </Card>
+</CardGroup>
+
+| Provider | Deployment (default) | Notes |
+|----------|----------------------|-------|
+| OpenAI | Cloud | GPT-4o, GPT-4 Turbo, GPT-3.5, and other OpenAI models |
+| Anthropic | Cloud | Claude models |
+| Azure OpenAI | Cloud | OpenAI models hosted on Azure |
+| Google Vertex AI | Cloud | Gemini and PaLM models |
+| AWS Bedrock | Cloud | Claude, Llama, Mistral, and other Bedrock-hosted models |
+| vLLM | On-Premise | Self-hosted inference engine |
+| Ollama | On-Premise | Local LLM inference |
+| Hugging Face TGI | On-Premise | Self-hosted Text Generation Inference server |
+| Custom OpenAI-Compatible | On-Premise (default) | Any endpoint that speaks the OpenAI API format |
+
+## Deployment Type
+
+Each connection declares whether the LLM runs in the cloud or on-premise:
+
+- **Cloud** — the LLM is managed by the provider (OpenAI, Anthropic, Azure, Vertex, Bedrock)
+- **On-Premise** — the LLM runs in your infrastructure (vLLM, Ollama, Hugging Face TGI, custom endpoints)
+
+**Deployment type is auto-filled** based on provider type when you create a connection, but you can override it if needed (for example, a self-hosted vLLM instance running on a cloud VM).
+
+## Credentials
+
+All API keys and secrets are **encrypted at rest** and **never logged**. Connections are managed through Apinizer's [credential system](/en/admin/identity-management/credentials), the same system used to secure API Proxy access.
+
+## Request and Response Translation
+
+Clients always talk to Apinizer in the OpenAI format — there's no separate Anthropic Messages or Gemini inbound format to integrate against. Apinizer translates each outbound request into the target provider's native format and normalizes the response (including streamed chunks) back to the OpenAI canonical format before it reaches your client.
+
+:::warning AWS Bedrock chat streaming isn't supported yet
+Bedrock's `InvokeModelWithResponseStream` API uses a binary event-stream framing the worker doesn't parse. A streaming chat request routed to a Bedrock connection is rejected with a configuration error before any call reaches AWS — nothing is attempted and nothing is billed. Set `streaming: false` for that leg, or route streaming traffic through a different provider. Non-streaming (unary) Bedrock chat requests are unaffected.
+:::
+
+## Provider Capability Matrix
+
+Not every connection type supports every endpoint, and not every provider gets a full request/response rewrite into its own wire format — some are forwarded in OpenAI's format as-is because the provider already speaks it (or is expected to); a smaller set is actively translated.
+
+| Provider | Chat completions | Chat streaming | Embeddings | Audio / image (STT, TTS, image generation) |
+|---|---|---|---|---|
+| OpenAI, Azure OpenAI, Custom OpenAI-Compatible, vLLM, Ollama | ✅ | ✅ | ✅ | ✅ |
+| Mistral, Zhipu (GLM), Qwen (DashScope) | ✅ | ✅ | ✅ | ❌ |
+| DeepSeek, Groq, Moonshot (Kimi) | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | ❌ |
+| Cohere | ✅ | ✅ | ❌ (not yet — needs a dedicated adapter) | ❌ |
+| Voyage AI | — (embedding-only provider) | — | ✅ | ❌ |
+| Anthropic | ✅ (native translation) | ✅ (native translation) | ❌ (no embeddings endpoint at all — connect a Voyage AI provider instead, see Built-in Templates below) | ❌ |
+| Google Vertex AI (Gemini) | ✅ (native translation) | ✅ (native translation, SSE) | ❌ (not yet) | ❌ |
+| AWS Bedrock — Anthropic models | ✅ (native translation) | ❌ (see warning above) | ❌ (not yet) | ❌ |
+| AWS Bedrock — Titan, Llama, Mistral, Nova | ✅ (forwarded as an OpenAI-shaped body; native translation isn't implemented for these families yet) | ❌ | ❌ (not yet) | ❌ |
+
+A ❌ on Embeddings or Audio/Image means Apinizer rejects the request before contacting the provider — nothing is attempted, and nothing is billed.
+
+### Native Translation vs. Pass-Through
+
+Only three connection types get an actual request/response rewrite into their own schema: **Anthropic**, **Google Vertex AI (Gemini)**, and **AWS Bedrock when the routed model is an Anthropic-on-Bedrock model** (any model ID containing `anthropic.`, including cross-region inference profiles like `us.anthropic.*`). Every other provider — including Bedrock's Titan/Llama/Mistral/Nova models and Cohere — receives the client's OpenAI-shaped request forwarded unchanged.
+
+For the three natively-translated providers, a handful of OpenAI request fields have no equivalent and are silently dropped (logged as a `WARN` on the worker, never surfaced to the client):
+
+| OpenAI field | Anthropic | Google Vertex AI (Gemini) |
+|---|---|---|
+| `model` | kept in the body | not in the body — carried in the URL path |
+| System / developer message | mapped to top-level `system` | mapped to `systemInstruction` |
+| `max_tokens` / `max_completion_tokens` | **required** — falls back to the model catalog's max output, then `4096`, if the client omits it | optional — set only when the client provides it |
+| `tools[].function` | mapped to `tools[].input_schema` | mapped to `functionDeclarations` |
+| `tool_choice: "none"` | dropped (tool definitions are dropped too) | mapped to `mode: "NONE"` (tool definitions are kept) |
+| `temperature` | clamped to `1.0` if the client sends higher | forwarded as-is (0–2 range) |
+| `stop` | mapped to `stop_sequences` | mapped to `stopSequences` (only the first 5 entries) |
+| `user` | mapped to `metadata.user_id` | dropped |
+| `n`, `presence_penalty`, `frequency_penalty`, `logit_bias`, `logprobs`, `seed`, `response_format`, `parallel_tool_calls` | dropped | dropped |
+| Non-text message content (image, audio, …) | dropped — text-only today | dropped — text-only today |
+
+Usage accounting also differs by family: Anthropic's client-facing `prompt_tokens` **adds** cached tokens on top of fresh input tokens, while Gemini's `promptTokenCount` **already includes** them. Apinizer accounts for this difference internally, so cost tracking and quotas stay correct no matter which family served the request — see [Reports and Analytics](/en/ai-gateway/reports) and [Token Quotas](/en/ai-gateway/token-quotas).
+
+When a proxy fails over between providers in different families — for example, an Anthropic primary with an OpenAI or Gemini backup — each leg's request is always rebuilt from your original client request, never from a previous leg's already-translated native body. See [Failover Chains](/en/ai-gateway/routing-and-failover#failover-chains).
+
+## Built-in Templates
+
+Five **built-in provider templates** ship with the installation: `OpenAI Provider`, `Voyage AI Provider`, `DeepSeek Provider`, `Moonshot (Kimi) Provider` and `Zhipu (GLM) Provider`. Each comes with the endpoint and a default model filled in, but **no API key**.
+
+The intended flow is to **clone** a template and enter your own API key; the template itself is owned by the installation and may be refreshed by an upgrade.
+
+:::note
+The default model on these templates targets embedding generation (for example `text-embedding-3-small` on the OpenAI template), because that is the most common starting point for RAG and the semantic cache. A template is **not** locked to embeddings — after cloning it you can change the default model and use the same provider for chat/completion as well.
+:::
+
+## Creating a Connection
+
+<Steps>
+  <Step title="Navigate to Connections">
+    In the Apinizer UI, go to **AI Gateway** → **LLM Providers**. The hub has three tabs — **Providers**, **Model Catalog**, and **Definitions** — make sure you're on the **Providers** tab.
+  </Step>
+
+  <Step title="Click Add Provider">
+    Click the **Add** button to open the provider form.
+  </Step>
+
+  <Step title="Select Provider Type">
+    Choose the provider from the dropdown (OpenAI, Anthropic, Azure, vLLM, Ollama, etc.).
+
+    Deployment type **auto-fills**:
+    - If the provider is OpenAI, Anthropic, Azure, Vertex, or Bedrock → defaults to **Cloud**
+    - If the provider is vLLM, Ollama, Hugging Face TGI, or Custom → defaults to **On-Premise**
+  </Step>
+
+  <Step title="Enter Credentials">
+    Paste the API key or secret. Apinizer **encrypts and never logs** credentials.
+
+    Examples:
+    - **OpenAI**: paste your `sk-...` key
+    - **Anthropic**: paste your `sk-ant-...` key
+    - **Azure**: paste the endpoint URL and key
+    - **vLLM / Ollama / Hugging Face TGI**: paste the base URL (e.g., `http://localhost:8000`)
+  </Step>
+
+  <Step title="Override Deployment Type (optional)">
+    If your cloud provider has an on-premise instance (or vice versa), toggle the **Deployment Type** dropdown to Cloud or On-Premise.
+  </Step>
+
+  <Step title="Test the Connection (optional but recommended)">
+    Pick the environment to test against from the dropdown at the top of the form — the **Test Connection** button stays disabled until you do.
+
+    The check runs from the **Worker** deployed to that environment rather than from the Manager, so it exercises the same network path — firewall rules, egress restrictions, proxies — the connection will actually use once it's live, and it resolves any `${env.X}` variables in the endpoint or credentials the same way a real request would.
+
+    Apinizer sends a single request to the provider's model-list endpoint using your saved credentials; any 2xx response counts as a pass.
+
+    :::note
+    AWS Bedrock and Google Vertex AI connections don't support **Test Connection** yet — their signing schemes (AWS SigV4, Google OAuth2) aren't wired into the check. Save these connections without testing; this doesn't affect chat or embedding traffic, only the pre-save probe and the periodic status shown in [Reports and Analytics](/en/ai-gateway/reports).
+    :::
+  </Step>
+
+  <Step title="Save">
+    Click **Save**. The connection is encrypted and stored. Credentials are never visible in logs or exports.
+  </Step>
+</Steps>
+
+<img
+  src="/images/ai-gateway/llm-provider-form.png"
+  alt="LLM Provider form — Provider Type and Deployment Type"
+  width="1000"
+/>
+
+## Provider Definitions Tab
+
+The same hub — **AI Gateway** → **LLM Providers** — has a third tab, **Definitions**, listing the provider type catalog: the built-in and custom definitions every connection above is created from (default endpoint, default auth scheme, and so on). Built-in definitions (OpenAI, Anthropic, Azure, etc.) are read-only — view only, no edit or delete. There's no creation form on this tab: a custom definition is created only by importing a **Provider Definition** package through the [Export/Import Wizard](/en/admin/secrets-management/export-import) or through the APIops REST API — and importing one also adds a shortcut on the import completion screen straight to this tab. Once a custom definition exists, you can view its details, export it, or delete it from here.
+
+For the underlying concept, see [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog).
+
+## Using Connections in Routing
+
+Once created, a provider connection is available for **API Proxy routing**. When you create an AI Gateway, you map each model to the connection that should serve it:
+
+```yaml
+# Example: route requests for "gpt-4o" to the OpenAI connection
+Proxy: "my-chat-api"
+Models:
+  - name: "gpt-4o"
+    provider: "OpenAI" # reference the saved connection
+  - name: "gpt-4-turbo"
+    provider: "OpenAI"
+  - name: "claude-3-sonnet"
+    provider: "Anthropic" # different connection
+```
+
+For the bundled list of models and their default pricing, see [Model Catalog and Pricing](/en/ai-gateway/model-catalog). To chain multiple connections together for failover, cost-aware, or latency-aware routing, see [Routing and Failover](/en/ai-gateway/routing-and-failover).
+
+LLM provider connections can also be managed through the APIops REST API; see [API Reference: LLM Providers](/api-reference/llm-providers).
+
+## Monitoring Connections
+
+- **Usage by Deployment** — see how many tokens were consumed by cloud vs. on-premise connections on the **Analytics** page's **Usage Reports** tab, under **By Deployment Type**
+- **Cost Attribution** — each connection logs its deployment type in traffic records for accurate cost allocation
+- **Failover & Load Balancing** — multiple connections to the same provider can be chained together for redundancy (see [Routing and Failover](/en/ai-gateway/routing-and-failover))
+
+## Deleting a Connection
+
+An LLM provider connection that is **in use cannot be deleted**. The delete is rejected while anything still points at it, and the error message names where those references live.
+
+The reason is that a provider is a reference-type asset: it is never copied into the proxy or policy document, it is resolved by id at runtime. Without the guard, deleting one would leave dangling references behind and the live gateway would fail on the very next request.
+
+The check covers four containers at once — API Proxy, Proxy Group, Policy Group and standalone (global) policies — across these reference paths:
+
+- An API Proxy's AI routing: primary provider, failover chain, conditional routes, primary pool and semantic embedding provider
+- The embedding provider of Semantic Cache and RAG Injection policies
+- The external guardrail provider of Prompt Guard and Topic Guard policies
+
+To delete the connection, remove those references first or point them at another provider. The same rule applies to deletes made through APIops: `DELETE /apiops/projects/{projectName}/llm-providers/{providerName}/` returns **400 Bad Request** for a connection that is still in use.
+
+The **Used by API Proxies** panel on the connection's detail screen shows which proxies are bound to it before you delete.
+
+## Troubleshooting
+
+**Connection Test Failed**
+- Select an environment first — **Test Connection** is disabled until you do, and the check always runs through that environment's Worker, not the Manager
+- Verify the API key or endpoint URL is correct
+- Check that credentials have the required permissions
+- Ensure the provider service is reachable from the selected environment's network — not just from the Manager's
+- AWS Bedrock and Google Vertex AI connections don't support Test Connection yet — save without testing
+
+**Credentials Not Saving**
+- Ensure you have admin permissions
+- Clear browser cache and try again
+
+**Wrong Deployment Type Selected**
+- Edit the connection and toggle **Deployment Type** to the correct value
+- Deployment type changes are retroactive (logs will show the updated type going forward)
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Model Catalog and Pricing" icon="database" href="/en/ai-gateway/model-catalog">
+    Bundled models, pricing, and cost tracking
+  </Card>
+  <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
+    Chain connections for failover and cost/latency-aware routing
+  </Card>
+  <Card title="Token Quotas and Rate Limiting" icon="gauge" href="/en/ai-gateway/token-quotas">
+    Set per-provider or per-model usage limits
+  </Card>
+</CardGroup>

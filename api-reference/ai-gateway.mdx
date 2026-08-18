@@ -1,0 +1,135 @@
+---
+title: "AI Gateway API"
+description: "The AI Gateway APIops API provides name-based, token-authenticated endpoints for managing every AI Gateway configuration asset — LLM providers, MCP/A2A proxies (with their inline servers/agents), VectorDB, Knowledge Bases, token budgets, reusable presets and gateway settings — so the full AI configuration surface can be driven from CI/CD."
+---
+
+## Overview
+
+Every AI Gateway configuration asset is manageable through APIops. Endpoints follow the standard
+APIops conventions:
+
+- **Name-based** references (project, asset). Runtime IDs are never required in the path.
+- **Secret masking on read** — `apiKey`/`apiSecret`/`bearerToken`/credential references
+  are returned as boolean presence flags only; plaintext/ciphertext secrets are never disclosed.
+- **Save = encrypt + deploy** — write operations encrypt `@SecretData` fields and push to the workers
+  through the owning service; delete undeploys.
+- **Upsert** — `POST /{name}/` creates the asset, or updates it in place if the name already exists.
+
+## Project-scoped resources
+
+Base path: `/apiops/projects/{projectName}/...` — authenticated with `AI_DEVELOPMENT`
+(VIEW for reads, MANAGE for writes), except AI Budgets which use `AI_BUDGETS`.
+
+### LLM Providers — `/llm-providers`
+`GET /` · `GET /{providerName}/` · `POST /{providerName}/` · `PUT /{providerName}/` · `DELETE /{providerName}/`
+
+### Model Catalog — `/llm-models`
+`GET /` · `GET /{modelName}/` · `POST /{modelName}/` · `PUT /{modelName}/` · `DELETE /{modelName}/`
+
+### VectorDB Connections — `/vector-dbs`
+`GET /` · `GET /{vectorDbName}/` · `POST /{vectorDbName}/` · `PUT /{vectorDbName}/` · `DELETE /{vectorDbName}/`
+- `POST /{vectorDbName}/test-connection/` — validates connectivity against the target vector store
+  (in-process manager test), returns a deployment result.
+
+### Knowledge Bases — `/knowledge-bases`
+`GET /` · `GET /{name}/` · `POST /{name}/` · `PUT /{name}/` · `DELETE /{name}/`
+- `POST /{name}/reindex/` — rebuilds the vector index for the knowledge base.
+
+#### Knowledge Base Documents — `/knowledge-bases/{kbName}/documents`
+- `POST /` — upload a document (`multipart/form-data`, `file` part). Chunked + embedded on ingest.
+- `GET /` — list documents in the knowledge base.
+- `GET /{documentId}/` — get a single document. *(Documents are referenced by id — filenames are not unique.)*
+- `DELETE /{documentId}/` — remove a document and its vectors.
+
+### MCP / A2A / AI Gateway Proxies — `apiProxies/ai` · `apiProxies/mcp` · `apiProxies/a2a` · `apiProxies/{apiProxyName}/ai-routing` · `mcp-routing` · `a2a-routing`
+
+Inbound MCP servers and A2A agents are not standalone resources — they live as **API proxies**
+(`type=MCP` / `type=A2A`) managed through the standard [API Proxies](/api-reference/api-proxies)
+APIops surface (deploy/undeploy, deploy history). Outbound MCP servers and A2A agents aren't standalone
+resources either — `/mcp-connections` and `/a2a-connections` are **retired**; a server/agent is now
+configured inline, wherever it's used (a Passthrough proxy's own routing config, or an MCP Call (LLM) /
+A2A Call (LLM) policy). A package from an older release that still carries a standalone MCP/A2A
+connection object is rejected on import with an explanatory error. For the inline server/agent contract
+on the policy side — required fields, secret masking, allow-list behaviour — see
+[MCP Call Policy](/api-reference/policies/policies/policy-ai-mcp-call) and
+[A2A Call Policy](/api-reference/policies/policies/policy-ai-a2a-call).
+
+*(permission: `API_MANAGEMENT` × MANAGE, like [Update AI Routing](/api-reference/api-proxies/settings/update-ai-routing))*:
+
+- `POST /apiops/projects/{projectName}/apiProxies/ai/{apiProxyName}/` — creates an AI proxy in one
+  call
+  ([details](/api-reference/api-proxies/crud/create-ai-api-proxy)).
+- `PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/ai-routing/` — replaces the
+  `AiRouting` config of an AI proxy, including primary provider/model, failover, and load balancing
+  ([details](/api-reference/api-proxies/settings/update-ai-routing)).
+- `POST /apiops/projects/{projectName}/apiProxies/mcp/{apiProxyName}/` — creates an MCP proxy in one
+  call; `routingMode` is required, with no implicit default
+  ([details](/api-reference/api-proxies/crud/create-mcp-api-proxy)).
+- `POST /apiops/projects/{projectName}/apiProxies/a2a/{apiProxyName}/` — creates an A2A proxy in one
+  call; `routingMode` defaults to `AGENT_EXPOSE` when omitted
+  ([details](/api-reference/api-proxies/crud/create-a2a-api-proxy)).
+- `PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/mcp-routing/` — replaces the
+  `McpRouting` config of an MCP proxy, including its inline `backendServers`
+  ([details](/api-reference/api-proxies/settings/update-mcp-routing)).
+- `PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/a2a-routing/` — replaces the
+  `A2aRouting` config of an A2A proxy, including its inline `backendServers`
+  ([details](/api-reference/api-proxies/settings/update-a2a-routing)).
+- `POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/parse-tools/` —
+  preview-only tools/list discovery for an existing policy's inline `mcpServer`
+  ([details](/api-reference/policies/crud/discover-mcp-policy-tools)).
+- `POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/parse-skills/` —
+  preview-only AgentCard discovery for an existing policy's inline `a2aAgent`
+  ([details](/api-reference/policies/crud/discover-a2a-policy-skills)).
+
+> There is no longer a dedicated `ai-global-policies` resource — AI global policies are plain `Policy`
+> documents (`global=true`) managed the same way as every other global policy, through the Manager UI's
+> **Global Policies** list rather than a standalone screen or APIOps endpoint group.
+
+### AI Budgets / Quota — `/ai-budgets` *(permission: `AI_BUDGETS`)*
+- `GET /scope-rules/` — flat list of budget scope rules.
+- `GET /hierarchy/` — budget hierarchy tree rooted at the project.
+- `GET /hierarchy/{nodeType}/{nodeId}/effective-limit/` — effective limit preview for a node
+  (`nodeType`: `CREDENTIAL` | `CREDENTIAL_ORGANIZATION` | `API_PROXY` | `PROJECT`).
+- `PUT /` — update an owner token budget. The body `targetProjectId` is forced to the path project
+  (cross-tenant guard).
+
+## Admin (global) resources
+
+Base path: `/apiops/settings/...` — these are platform-level catalogs/settings and require an
+**ADMIN** API token (sysAdmin), matching the classic UI. A project-scoped `AI_DEVELOPMENT` token is
+NOT sufficient.
+
+### AI Gateway Settings — `/apiops/settings/ai-gateway` *(no trailing slash — unlike the other Admin resources on this page)*
+- `GET` — read the singleton AI Gateway settings.
+- `PUT` — update the settings (timeouts, retry, response-body caps, `maxToolTurns`, default token/cost budget).
+
+### AI Privacy (PII) Presets — `/apiops/settings/ai-privacy-presets`
+`GET /` · `GET /{presetName}/` · `POST /{presetName}/` · `PUT /{presetName}/` · `DELETE /{presetName}/`
+- Optional `?projectId=` selects the scope (default admin/global). Built-in presets are read-only.
+
+### AI Prompt-Guard Presets — `/apiops/settings/ai-prompt-guard-presets`
+`GET /` · `GET /{presetName}/` · `POST /{presetName}/` · `PUT /{presetName}/` · `DELETE /{presetName}/`
+- Same scope/immutability rules as privacy presets.
+
+## Authentication
+
+All endpoints require authentication using a Personal API Access Token
+(`Authorization: Bearer {token}` or `apinizer-token: {token}`). JHipster JWTs do not work on APIops.
+
+## Permissions
+
+| Resource group | Permission |
+| --- | --- |
+| LLM Providers / Model Catalog / VectorDB / Knowledge Bases | `AI_DEVELOPMENT` (VIEW / MANAGE) |
+| MCP/A2A proxy create, `ai-routing`/`mcp-routing`/`a2a-routing`, policy-embedded `parse-tools`/`parse-skills` | `API_MANAGEMENT` × MANAGE (consistent with [Update AI Routing](/api-reference/api-proxies/settings/update-ai-routing) and every other API-proxy-scoped write) |
+| AI Budgets / Quota | `AI_BUDGETS` (VIEW / MANAGE) |
+| Presets & Gateway Settings | **Admin only** (sysAdmin) |
+
+APIops never widens the privilege surface relative to the UI: presets and gateway settings require
+system-admin exactly as they do in the Manager UI; A2A private-network egress remains admin-gated.
+
+## Related Documentation
+
+- [Authentication Guide](/api-reference/getting-started/authentication) - How to obtain and use API tokens
+- [Error Handling](/api-reference/getting-started/error-handling) - Error response formats
+- [API Proxies](/api-reference/api-proxies) - Managing API proxies (including `type=AI` proxies) via APIops

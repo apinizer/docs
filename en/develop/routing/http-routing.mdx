@@ -1,6 +1,6 @@
 ---
 title: "HTTP Routing"
-description: "You can configure routing settings for HTTP API Proxy type. You can manage backend API addresses, define conditional routing, select load balancing algorithms, configure sticky session, connection settings, circuit breaker, active health check with automatic failback, retry and failover mechanisms, SSE, download, proxy server, mTLS and NTLM settings."
+description: "You can configure routing settings for HTTP API Proxy type. You can manage backend API addresses, define conditional routing, select load balancing algorithms, configure sticky session, connection settings, circuit breaker, active health check with automatic failback, retry and failover mechanisms, SSE, download, query parameter encoding, backend HTTP version (HTTP/2), proxy server, mTLS and NTLM settings."
 ---
 
 :::note
@@ -214,13 +214,28 @@ Policies on the response line are not executed for unexpected situations (i.e., 
 ::: |
 | **Connection Pool Management Type** | Connection Pool Management options: **General**: Existing General Connection Pool settings for the Environment (Environment) it is in are applied. **Custom**: Used to create a Connection Pool specific to this API Proxy. **None**: If None option is selected, Connection Pool is not created. |
 | **Fix SOAP Action and Namespace information** | With this option active in SOAP and Rest2Soap services, the process of fixing SOAP actions and namespaces according to WSDL by default is performed. You can visit [this page](/en/develop/api-proxy-creation/soap-api-proxy-creation#soap-version-determination) for more detailed information. If the setting is disabled, no change is made on the request sent by the client. |
-| **Hop-by-hop headers to delete** | Determines the information to be deleted from the header information coming during the request sent from client to backend. |
+| **Hop-by-hop headers to delete** | Determines the information to be deleted from the header information coming during the request sent from client to backend. Note that some headers are always removed regardless of this list — see the **Always-Removed (Transport-Managed) Headers** info box below. |
 | **Send User Agent to Backend** | Information that User Agent information will be sent when sending request to Backend. When this option is enabled, the User-Agent value can be customized. |
 | **Disable SSL/TLS Verification** | Server certificate is not verified when sending request to Backend. |
 
 :::info
 
 **Connection Pool Dependency**: The **Validate After Inactivity** and **Idle Connection Timeout** settings are applied per API Proxy only when the **Connection Pool Management Type** is set to **Custom**. When **General** or **None** pool is selected, these values are taken from the global System Settings (System Settings > Gateway > Connection Settings), and any values entered at the API Proxy level are ignored. This is because the General pool is shared across all proxies, while Custom pool is specific to each proxy. Other timeout settings (Connect Timeout, Read Timeout, Connection Pool Wait Timeout) always apply per API Proxy regardless of the pool type.
+
+:::
+
+:::info
+
+**Always-Removed (Transport-Managed) Headers**: Regardless of the **Hop-by-hop headers to delete** configuration, Apinizer Gateway always removes certain headers from the request forwarded to the backend, because these headers are managed by the gateway's own HTTP transport layer rather than by policy configuration:
+
+- **Content-Length** and **Transfer-Encoding**: The gateway's HTTP client calculates the body boundaries itself, so these headers are always recalculated rather than forwarded as received.
+- **Expect** (100-continue): The 100-continue handshake is connection-based (hop-by-hop), not end-to-end. The gateway already reads the full request body for policy processing, and the handshake with the backend is managed by the gateway's own HTTP client layer. The raw **Expect** header sent by the client is not forwarded to the backend — forwarding it as-is could otherwise cause a 417 Expectation Failed response, a hang, or a protocol error depending on the backend.
+
+Other headers in the hop-by-hop list remain configurable; the transport-managed headers above are never forwarded to the backend even if they are removed from that list.
+
+**Visibility in traffic logs**: In traffic log **region 1** (the request as received from the client), the **Expect** header sent by the client is shown as-is. In traffic log **region 2** (the request as sent to the backend), the **Expect** header is shown as removed — it does not appear in the header list.
+
+**Impact on uploads**: There is no impact on uploads. The body is always sent to the backend in full; the only thing lost is the backend's optimization of rejecting a large body before receiving it.
 
 :::
 
@@ -488,6 +503,48 @@ Decompress Override options: **GZIP**, **DEFLATE**, **BR (Brotli)**, **ZSTD**, *
 Request Compress Override options: **GZIP**, **DEFLATE**, **BR (Brotli)**, **ZSTD**, **Not Apply (skip)**.
 
 Response Compress Override options: **Mirror server response**, **Auto by client Accept-Encoding** (default), **GZIP**, **DEFLATE**, **BR (Brotli)**, **ZSTD**, **Not Apply (skip)**.
+
+## Query Parameter Encoding
+
+You can choose how query parameter values are encoded when forwarded to the backend. By default, special characters such as `/`, `+`, and `=` are encoded for safety; for example, `/` is sent as `%2F` in the address. Some backend services, however, expect these characters unencoded. In such cases, you can change the encoding behavior to suit your needs.
+
+| Mode | Behavior |
+|------|----------|
+| **Standard (URL Encode)** _(default)_ | All special characters, including `/`, `+`, and `=`, are encoded. This is the behavior of all existing API Proxies and does not change. |
+| **RFC 3986 (Preserved)** | Characters allowed in the query component of the address standard (`/`, `+`, `=`, `:`, `@`) are preserved as-is; only characters that genuinely require escaping are encoded. Suitable for backends that expect values such as Base64 or signed tokens to arrive unchanged. |
+| **Raw (No Encoding)** | Values are forwarded without encoding. Only characters that could break the address (such as spaces or line breaks) are encoded for safety. You are responsible for the suitability of the forwarded values; in most cases, **RFC 3986 (Preserved)** is the safer choice. |
+
+:::note
+The default mode is **Standard**, and all existing API Proxies continue to work unchanged. You only need to change this setting if your backend expects query parameters to be unencoded.
+:::
+
+## Backend HTTP Version
+
+You can choose which HTTP protocol version Apinizer uses when connecting to the backend. By default, Apinizer speaks HTTP/1.1 with the backend, exactly as before; you can opt in to negotiating HTTP/2 over TLS or, for cleartext backends known to support it, to speaking HTTP/2 directly without an upgrade step.
+
+| Option | Behavior |
+|--------|----------|
+| **HTTP/1.1 (Default)** | Apinizer connects to the backend using HTTP/1.1. This is the behavior of all existing API Proxies and does not change. |
+| **HTTP/2 (ALPN, falls back to HTTP/1.1)** | For `https` addresses, Apinizer negotiates the protocol with the backend during the TLS handshake (ALPN) and uses HTTP/2 if the backend supports it; if not, it automatically falls back to HTTP/1.1. For plain `http` addresses, this option behaves the same as **HTTP/1.1 (Default)**. |
+| **HTTP/2 Prior Knowledge (h2c, cleartext)** | For plain `http` addresses, Apinizer speaks HTTP/2 directly, without an upgrade negotiation (h2c). Use this option only when the backend is known to support HTTP/2 over cleartext. |
+
+:::note
+The default option is **HTTP/1.1 (Default)**, and all existing API Proxies continue to work unchanged — no migration or additional configuration is required.
+:::
+
+:::warning
+The following combinations are rejected on save, with a descriptive error message:
+
+* Using **HTTP/2 (ALPN, falls back to HTTP/1.1)** or **HTTP/2 Prior Knowledge (h2c, cleartext)** together with NTLM authentication.
+* Using **HTTP/2 Prior Knowledge (h2c, cleartext)** with an `https` address.
+* Using **HTTP/2 Prior Knowledge (h2c, cleartext)** while a backend health check path is defined.
+
+Regardless of the selected option, traffic mirror targets and health check requests always connect using HTTP/1.1; this setting only affects requests sent to the actual backend.
+:::
+
+:::note
+API definition requests (`?wsdl`, `?wadl`, `?swagger`, `?openapi`, `?xsd=...`) are **not affected** by this setting. Apinizer serves them from the definition content it stores itself, so they never reach the backend. The only exception is when the API Proxy's **Spec Access Type** is set to **Backend Proxy**: the definition request is then forwarded to the backend and therefore does follow the **Backend HTTP Version** setting.
+:::
 
 ## Proxy Server
 

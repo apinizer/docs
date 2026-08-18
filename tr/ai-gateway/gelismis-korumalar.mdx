@@ -1,0 +1,475 @@
+---
+title: "Gelişmiş Korumalar"
+description: "AI Gateway'e gelen ve giden içeriği kişisel veri sızıntısına, istem enjeksiyonuna, sır sızıntısına, konu dışı kullanıma, tekrar döngülerine, aşırı boyutlu isteklere ve yapısal enjeksiyona karşı koruyabilir; her koruma için satır içi engelleme, eşzamansız değerlendirme veya yalnız-gözlem modunu seçebilir, İstem Koruması ve Konu-Dışı Koruması'nda ayrıca bir dış LLM'i hakem olarak devreye alabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+Apinizer AI Gateway, istek ve yanıtları aşağıdaki koruma katmanlarından geçirebilir:
+
+- **Kişisel Veri (PII) Maskeleme** — kimlik numarası, IBAN, telefon gibi kişisel verilerin maskelenmesi
+- **İstem Koruması** — jailbreak / prompt injection kalıplarının tespiti
+- **Veri Sızıntısı Koruması (DLP)** — API anahtarı, özel anahtar, JWT gibi sırların yanıtta sızmasının engellenmesi
+- **Konu-Dışı Koruması** — gateway'in amaçlanan konu kapsamı dışındaki isteklerin işaretlenmesi
+- **Tekrar-Fırtınası (Loop) Koruması** — kısa sürede tekrarlanan aynı isteğin tespiti
+- **Aşırı Boyut Koruması** — aşırı büyük isteklerin reddedilmesi
+- **Bağlam Bütünlüğü Koruması** — sohbet geçmişine sahte rol/talimat enjekte edilmesinin engellenmesi
+
+:::warning Politika sırası: korumalar prompt'u kuran politikalardan sonra
+İstem koruması, veri sızıntısı koruması ve bağlam bütünlüğü; [Prompt Şablonu](/tr/ai-gateway/prompt-sablonlari), [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici) ve [RAG](/tr/ai-gateway/rag) politikalarından **sonra** çalışmalıdır. Denetim, modele gidecek prompt'un tam hâli üzerinde yapılmalıdır; daha erken çalışan bir koruma sonradan eklenen içeriği göremez.
+
+**Kişisel veri maskeleme bu kuralın dışındadır.** Maskelemenin RAG'den önce mi sonra mı çalışacağı sizin veri sınırı tercihinizdir ve Apinizer bu politikanın yerini değiştirmez. Maskelemeyi RAG'den önce koyduğunuzda kullanıcının kişisel verisi gömme (embedding) sağlayıcısına hiç ulaşmaz.
+
+Politika listesini bu kurala aykırı bir sırayla kaydederseniz Apinizer sırayı **kayıt anında** otomatik olarak düzeltir ve neyi neden taşıdığını bir bilgi notuyla bildirir. Böylece Develop ekranında gördüğünüz sıra ile [izleme](/tr/ai-gateway/izleme-ve-tekrar-oynatma) ekranındaki gerçek çalışma sırası her zaman aynı kalır.
+:::
+
+## Kapsam: AI, MCP ve A2A Gateway'lerinde Kullanım
+
+Yukarıdaki yedi korumadan **beşi** — Kişisel Veri (PII) Maskeleme, İstem Koruması, Veri Sızıntısı Koruması (DLP), Konu-Dışı Koruması ve Tekrar-Fırtınası (Loop) Koruması — yalnızca [AI Gateway](/tr/ai-gateway/genel-bakis) proxy'lerinde değil, [MCP Gateway](/tr/ai-gateway/mcp-gateway) ve [A2A Gateway](/tr/ai-gateway/a2a-gateway) proxy'lerinde de eklenebilir ve çalışır:
+
+- **MCP'de** taranan içerik, bir araç çağrısının argümanlarıdır (JSON-RPC `params.arguments`) ve araç çağrısının sonucudur.
+- **A2A'da** taranan içerik, gönderilen görevin mesaj parçalarıdır (`parts[]` — hem metin hem yapılandırılmış veri).
+
+Bu beş koruma dışındaki türler — Aşırı Boyut Koruması ve Bağlam Bütünlüğü Koruması dahil — bir LLM çağrısına doğrudan bağlı olduğu için (token/maliyet hesaplaması, sohbet geçmişi yapısı) yalnızca AI Gateway'lerinde kullanılabilir. Aynı kısıtlama [Semantik Önbellek](/tr/ai-gateway/semantik-onbellek), [Token Kotaları ve Hız Sınırlaması](/tr/ai-gateway/token-kotalari), [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici), [Prompt Şablonları](/tr/ai-gateway/prompt-sablonlari) ve [RAG](/tr/ai-gateway/rag) politikaları için de geçerlidir — bu politikalardan biri bir MCP veya A2A Gateway'ine eklenmeye çalışıldığında kaydetme adımında reddedilir.
+
+## Kişisel Veri (PII) Maskeleme
+
+İstek ve yanıt içeriğini (akış dahil) bilinen kişisel veri kalıplarına karşı tarar.
+
+### Hazır Doğrulayıcılar
+
+| Tür | Örnek | Checksum |
+|-----|-------|----------|
+| TC Kimlik Numarası | `12345678901` | Var (11. hane doğrulama) |
+| Türkiye IBAN | `TR330006100519786457841326` | Var (mod97) |
+| Türkiye telefon numarası | `+905XXXXXXXXX` | — |
+| E-posta | `ornek@sirket.com` | — |
+| Kredi kartı numarası | `4111111111111111` | Var (Luhn) |
+| IP Adresi (IPv4/IPv6) | `192.168.1.1` | — (yapısal doğrulama, DNS sorgusu yapılmaz) |
+| URL | `https://ornek.com/yol` | — (yalnızca `http/https/ftp/ftps` şeması + geçerli host kabul edilir) |
+| Pasaport No | `A1234567` | **Yok** — basılı pasaportta check-digit bulunmaz; yüksek false-positive riski, alan adı bazlı kalıpla daraltılması önerilir |
+| Sosyal Güvenlik No (ABD) | `123-45-6789` | — (ayraç zorunlu; ayraçsız 9 hane kabul edilmez, kart/telefon ile karışmasını önler) |
+| Sürücü Belgesi No (TR) | `A12345678` | **Yok** — best-effort yapısal kalıp; Pasaport ile aynı false-positive uyarısı geçerli |
+| IBAN (Genel, ülke-bağımsız) | `DE89370400440532013000` | Var (mod97) — Türkiye IBAN'dan ayrı, ISO 13616 kapsamındaki tüm ülkeleri kapsar |
+| Kripto Cüzdan Adresi | `1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa`, `bc1q...`, `0xAbC...` | **Zorunlu** — BTC (base58check), bech32 (segwit v0) veya ETH (EIP-55 karışık-harf) formatlarından biri geçerli checksum taşımalıdır |
+
+Checksum'u olmayan türlerde (Pasaport, Sürücü Belgesi) yalnızca yapısal bir kalıp kontrolü yapılır — bu, gerçek bir belge numarasıyla aynı şekle sahip rastgele bir metni de eşleştirebilir. Bu iki tür için taramayı belirli bir alan/header adıyla daraltmak üzere **alan adı bazlı** kalıp tipini kullanmanız önerilir.
+
+:::note Kapsam dışı bırakılanlar
+Tarih, tıbbi terim ve isim/soyisim (NRP) gibi türler bilinçli olarak eklenmedi — bunlar yalnızca regex ile güvenilir biçimde ayırt edilemez (doğal dil işleme gerektirir) ve regex-only bir yaklaşım aşırı false-positive üretir.
+:::
+
+Hazır doğrulayıcılara ek olarak, kendi **özel regex** veya **alan adı bazlı** (örn. belirli bir header/parametre adı) kalıplarınızı tanımlayabilirsiniz.
+
+### Kural Listesini Yönetme
+
+Yeni bir PII Maskeleme politikası **boş bir kural listesiyle** açılır — Apinizer'ın diğer formlarındaki davranışın aynısı: yalnızca istediğiniz kuralları eklersiniz. Kural listesinin üstündeki toplu aksiyonlar:
+
+| Aksiyon | Ne yapar |
+|---------|----------|
+| **Varsayılan Seti Ekle** | Yukarıdaki hazır doğrulayıcıların **hepsi** için birer maskeleme kuralını tek tıkla ekler. Zaten tanımlı olan kurallar atlanır; butona ikinci kez basmak listeyi çoğaltmaz. |
+| **Preset'ten Ekle** | PII Patterns kataloğundan seçtiğiniz kalıpları ekler. Modal başlığındaki kutuyla katalogun tamamını tek tıkla seçebilirsiniz. |
+| **Tanım Ekle** | Sıfırdan tek bir kural oluşturur. |
+| **Tümünü Temizle** | Listedeki tüm kuralları tek adımda kaldırır; onay ister. Yeni bir AI proxy ile birlikte otomatik gelen dolu **Default PII Mask** politikasını sıfırlamak için de kullanılır. |
+
+:::note
+Kural listesindeki değişiklikler, politikayı **kaydedene kadar** kalıcı olmaz. Kural listesi boş bırakılan bir politika hiçbir şey maskelemez — ekranda bu durum uyarı olarak gösterilir.
+:::
+
+:::info
+**Akış (streaming) yanıtlarda**: PII maskeleme, chunk sınırında bölünen bir kimlik numarasını da yakalayabilmek için bir tampon (carry) mekanizması kullanır — örn. bir kimlik numarasının ilk yarısı bir chunk'ta, ikinci yarısı sonraki chunk'ta gelse bile eşleşme kaçırılmaz.
+:::
+
+### Desen Yazma ve Deneme
+
+Desenler **Java düzenli ifade** sözdizimini kullanır (`java.util.regex.Pattern`) — gateway eşleştirmeyi bu motorla yapar. JavaScript veya PCRE ile birebir aynı değildir: lookbehind sabit genişlik ister, adlandırılmış grup `(?<ad>...)` biçiminde yazılır, `\p{L}` gibi Unicode sınıfları desteklenir.
+
+PII Patterns ekranındaki **Deseni Dene** paneli, deseni kaydetmeden önce örnek bir metin üzerinde çalıştırır. Test **sunucuda**, gateway ile aynı motorda koşar; dolayısıyla panelde gördüğünüz eşleşmeler ve maskelenmiş çıktı, çalışma anında olacak olanın birebir aynısıdır.
+
+:::warning
+Aşırı geri-izleme (catastrophic backtracking) üretebilen desenler çalışma anında **atlanır**. Gateway her deseni bir ReDoS kontrolünden geçirir; kontrolü geçemeyen desen istek işlenirken hiç uygulanmaz — kural açık görünür ama hiçbir şeyi maskelemez. Test paneli bu durumu kaydetmeden önce "ReDoS riski" olarak bildirir.
+:::
+
+### Eşleşen Değere Ne Olur
+
+Maskeleme biçimi kural bazında seçilir:
+
+| Biçim | Girdi | Çıktı |
+|-------|-------|-------|
+| **Tamamını değiştir** (varsayılan) | `05321234567` | `***` |
+| **İlk N karakteri koru** (N=4) | `05321234567` | `0532*******` |
+| **Son N karakteri koru** (N=4) | `05321234567` | `*******4567` |
+| **İlk N karakteri maskele** (N=4) | `05321234567` | `****1234567` |
+
+Varsayılan biçim değerin tamamını `***` ile değiştirir ve hiçbir şey sızdırmaz. Kısmî biçimler çıktının uzunluğunu korur ve değerin bir bölümünü **bilerek** açıkta bırakır; kalan parça tek başına bile kişiyi tanımlayabileceği için (örneğin telefonun son dört hanesi) bilinçli seçilmelidir. Değiştirme metni de yapılandırılabilir — kısmî biçimlerde metnin ilk karakteri maskeleme karakteri olarak kullanılır.
+
+Korunacak karakter sayısı değerin uzunluğuna eşit ya da büyükse hiçbir şey maskelenmemiş olurdu; böyle bir durumda güvenli tarafa düşülür ve değerin tamamı değiştirilir.
+
+### Kalıcı Yer Tutucu ve Sahte Değer Modları
+
+Yukarıdaki dört biçime ek olarak iki mod daha vardır — ikisi de eşleşen değerin **hiçbir parçasını** açıkta bırakmaz, ama sabit `***` yerine daha kullanışlı bir çıktı üretir:
+
+| Mod | Çıktı | Örnek |
+|-----|-------|-------|
+| **Sıralı yer tutucu** | Aynı istek içinde tutarlı, tip-etiketli bir yer tutucu (`{TİP}_{SIRA}` biçiminde, özelleştirilebilir) | `12345678901` → `<TCKN_1>`, ikinci bir TC kimlik no eşleşmesi → `<TCKN_2>` |
+| **Sahte (sentetik) değer üret** | Kendi doğrulayıcısından (varsa checksum dahil) geçen, uydurma ama **biçimsel olarak geçerli** bir değer | Gerçek bir IBAN → geçerli mod97 checksum'lı başka bir IBAN; gerçek bir kredi kartı → ayrılmış test BIN'i (`4111`) ile başlayan, Luhn'dan geçen bir numara |
+
+Bu iki mod için önemli davranış kuralları:
+
+- **Tutarlılık, tek istek içindir**: aynı istekte aynı orijinal değer her göründüğünde aynı yer tutucuyu/sahte değeri alır (örn. bir kullanıcı mesajında geçen bir TC kimlik no ile onu tekrar eden bir sonraki mesajdaki aynı numara, aynı `<TCKN_1>` etiketine düşer). Farklı istekler arasında ise **aynı orijinal değer farklı bir sahte değere düşer** (rainbow-table saldırısına karşı koruma) — bir isteğin çıktısında görülen bir yer tutucu/sahte değer, başka bir isteğin trafiğiyle korele edilemez.
+- **Geri döndürme (rehydration) yoktur**: orijinal değer hiçbir aşamada geri verilmez; bu iki mod tek yönlüdür.
+- **Bellek tavanı**: bir istekte üretilen benzersiz yer tutucu/sahte değer sayısı belirli bir tavanı (varsayılan 5000) aşarsa, tavanı aşan **yeni** değerler için sistem otomatik olarak "Tamamını değiştir" davranışına düşer — halihazırda üretilmiş eşlemeler etkilenmez.
+- **Araç/ajan çağrısı sonuçlarında da korunur**: bir MCP aracı veya A2A ajanı çağrısının sonucu isteğe geri besleniyorsa, aynı istekteki maskeleme aynı yer tutucu/sahte değer eşlemesini kullanmaya devam eder — aynı orijinal değer, isteğin hiçbir noktasında iki farklı etiket almaz.
+
+### Maskeleme Dışındaki İşlemler ve Değeri Geri Okuma
+
+Maskeleme dışında **silme**, **hashleme**, **şifreleme** ve **tespit** işlemleri de seçilebilir:
+
+- **Şifreleme** — değer AES/GCM/NoPadding ile şifrelenir ve sonuç Base64 olarak yazılır. Anahtar Apinizer kurulumuna gömülüdür, kullanıcı tarafından verilmez; bu nedenle şifreli değer **yalnız aynı Apinizer kurulumu içinde** çözülebilir. Pratik yol, bir Groovy script politikasında `UtilCommon.decryptWithDefaultAlgorithm(<base64değer>)` çağırıp çıktıyı `request_log()` / `response_log()` ile yazdırmaktır. Dışarıdan bir araçla (openssl vb.) çözmek mümkün değildir — anahtar dışa verilmez.
+- **Hashleme** — SHA-256 + kuruluma özel salt uygulanır ve **geri döndürülemez**. Aynı girdi her zaman aynı çıktıyı ürettiği için korelasyon amacıyla kullanılabilir, ama özgün değere ulaşılamaz.
+
+Sonradan okunması gerekebilecek veriler için şifreleme, gerekmeyecekler için hashleme veya maskeleme seçin.
+
+## İstem Koruması (Jailbreak / Enjeksiyon)
+
+İstek içeriğini bilinen **jailbreak** ve **prompt injection** kalıplarına karşı tarar. Hazır kural setine ek olarak kendi kalıplarınızı ekleyebilirsiniz; her kural kendi **Engelle** veya **İşaretle** aksiyonuyla çalışır.
+
+## Veri Sızıntısı Koruması (DLP)
+
+İstek ve/veya yanıt gövdesini **bilinen sır ve kimlik bilgisi kalıplarına** karşı tarar.
+
+### Hazır Kalıplar
+
+| Kalıp | Örnek | Varsayılan Aksiyon |
+|-------|-------|---------------------|
+| AWS erişim anahtarı | `AKIAIOSFODNN7EXAMPLE` | Engelle |
+| OpenAI API anahtarı | `sk-...` | Engelle |
+| GitHub kişisel erişim token'ı | `ghp_...` / `gho_...` | Engelle |
+| Slack token'ı | `xoxb-...` | Engelle |
+| Google API anahtarı | `AIza...` | Engelle |
+| Özel anahtar / sertifika bloğu (PEM) | `-----BEGIN PRIVATE KEY-----` | Engelle |
+| JWT (JSON Web Token) | `eyJhbGci...` | Maskele |
+| Genel parola/sır atama kalıbı | `password: ...`, `api_key=...` | Maskele |
+
+:::info
+Kalıplar **hazır şablon (preset)** olarak gelir; kuruluşunuza özel ek kalıplar (regex) tanımlayabilirsiniz.
+:::
+
+### Aksiyonlar
+
+- **Engelle** — istek/yanıt tamamen reddedilir
+- **İşaretle** — işleme devam eder, olay günlüğe ve rapora işaretlenir
+- **Maskele** — eşleşen değer `[REDACTED]` ile değiştirilir, işleme devam eder
+
+:::warning
+**Akış (streaming) yanıtlarda**: DLP koruması, yanıtı pencereler (chunk grupları) halinde tarar. Bir pencerede **Engelle** eşleşmesi bulunduğunda, akışın **kalan tüm pencereleri** de otomatik olarak maskelenir — bölünmüş bir sırrın pencereler arasında sızması bu şekilde önlenir.
+:::
+
+## Konu-Dışı Koruması
+
+Gateway'in amaçlanan kullanım alanı dışındaki istekleri tespit eder — örneğin bir müşteri hizmetleri botunun genel sohbet veya alakasız konularda kullanılmasını önler.
+
+<Steps>
+  <Step title="Konu Tanımları Oluşturun">
+    Yönetici, gateway'in kapsamındaki konuları (örn. "fatura sorguları", "ürün destek talepleri") tanımlar.
+  </Step>
+
+  <Step title="Benzerlik Karşılaştırması">
+    Gelen her istek, tanımlı konularla anlamsal (embedding tabanlı) benzerlik açısından karşılaştırılır.
+  </Step>
+
+  <Step title="Eşik Kararı">
+    Benzerlik eşiğin altındaysa istek konu-dışı sayılır ve yapılandırılan aksiyon uygulanır.
+  </Step>
+</Steps>
+
+:::note
+Konu-dışı koruması varsayılan olarak **eşzamansız** modda çalışır — istek akışını yavaşlatmadan arka planda değerlendirilir ve raporlanır; satır içi (garanti engellemeli) mod da yapılandırılabilir.
+:::
+
+### Yasaklı Konular
+
+İzin verilen konu listesine ek olarak, bu proxy'nin **asla** yanıtlamaması gereken konuları da tanımlayabilirsiniz — örneğin "hukuki tavsiye" veya "rakip fiyatlandırması". Bu ikisi bağımsız çalışır: yalnız izin verilen konuları, yalnız yasaklı konuları veya ikisini birden yapılandırabilirsiniz.
+
+**Yasaklı yön her zaman önce değerlendirilir ve kazanır**: gelen istek önce yasaklı konu tanımlarıyla karşılaştırılır; bir eşleşme bulunursa izin verilen konu kontrolü hiç yapılmadan doğrudan aksiyon uygulanır — istek, izin verilen bir konuya da yüksek benzerlik gösterse fark etmez. İzin verilen konu kontrolü yalnızca yasaklı yönde eşleşme **olmadığında** çalışır.
+
+Yasaklı yön, izin verilen yönden bağımsız kendi **eşiğini** ve **aksiyonunu** alabilir; boş bırakılırsa izin verilen yön için ayarladığınız değerleri miras alır:
+
+| Ayar | Boş bırakılırsa |
+|------|------------------|
+| Yasaklı Benzerlik Eşiği | İzin verilen yönün Benzerlik Eşiği'ni izler |
+| Yasaklı Konu Aksiyonu | İzin verilen yönün Aksiyonu'nu izler |
+
+Her iki liste de boşsa koruma karşılaştıracak hiçbir tanım bulamaz ve çalışma anında sessizce hiçbir şey yapmaz. Bu yüzden ekran, yerleşik (embedding tabanlı) motor açıkken **en az bir konu tanımı** ister: izin verilen ya da yasaklı listeden biri doluysa politikayı kaydedebilirsiniz, ikisi de boşken Kaydet düğmesi kapalı kalır. Yalnız-yasaklı kurulum meşru bir moddur ve engellenmez. Motor **yalnız dış sağlayıcı** olarak seçildiğinde yerleşik karşılaştırma hiç çalışmadığı için konu listesi aranmaz.
+
+:::warning
+Konu karşılaştırması için kullanılan embedding sağlayıcısına ulaşılamazsa varsayılan davranış **fail-closed**'dır — istek reddedilir, sağlayıcı toparlanana kadar geçirilmez. Bu davranış izin verilen ve yasaklı yön için **aynıdır**: doğrulanamayan bir istek, yasaklı bir konuya da uyuyor olabileceği için sessizce geçirilmez.
+:::
+
+## Dış Sağlayıcı Guardrail
+
+İstem Koruması ve Konu-Dışı Koruması, yerleşik (regex/embedding tabanlı) değerlendirmenin yanında **dış bir LLM'i hakem olarak da** kullanabilir (external provider). Bu genişletme yalnız bu iki korumaya özgüdür — PII Maskeleme, DLP, Tekrar-Fırtınası, Aşırı Boyut ve Bağlam Bütünlüğü Korumaları dış sağlayıcı motoru taşımaz.
+
+### Motor Seçimi
+
+Her iki politikada da bir dış sağlayıcı motoru seçilebilir:
+
+| Motor | Davranış |
+|-------|----------|
+| **Yerleşik** — varsayılan | Bugünkü davranış; yalnızca regex/embedding tabanlı değerlendirme çalışır, dış çağrı yapılmaz |
+| **Yerleşik + Dış Sağlayıcı** | İkisi de çalışır; yerleşik veya dış sağlayıcıdan **herhangi biri** güvensiz/uygunsuz sonucu verirse aksiyon uygulanır. Yerleşik değerlendirme engellerse dış çağrı hiç yapılmaz (kısa devre) — Yalnız-Gözlem modu bu kuralın dışındadır, bkz. aşağı |
+| **Yalnız Dış Sağlayıcı** | Yalnızca dış sağlayıcı değerlendirilir; regex/embedding tanımları dolu olsa bile yok sayılır |
+
+Dış çağrı **hata verir veya zaman aşımına uğrarsa** ne olacağı ayrı bir ayarla belirlenir — varsayılan **Kapalı-Güvenli**: istek engellenir. Bu bilinçli bir tercihtir — yanlış yapılandırılmış bir dış sağlayıcının korumayı sessizce devre dışı bırakmasındansa (fail-open sessizliği), yanlış konfigürasyonun **gürültülü** biçimde bloklaması tercih edilmiştir. Açık-Güvenli seçilirse istek devam eder, ama bu her zaman görünür bir uyarı ve işaretlemeyle birlikte olur — sessiz açık-geçiş yoktur.
+
+:::info
+Dış çağrı hiç yapılamayacak bir konfigürasyon tutarsızlığı (dış sağlayıcı seçili ama adaptör tanımsız veya LLM sağlayıcı referansı çözülemiyor) yukarıdaki hata/zaman-aşımı davranışından **ayrıdır**: bu bir çalışma-zamanı hatası değil bir kayıt/dağıtım hatasıdır — motor otomatik olarak Yerleşik'e düşer ve durum görünür biçimde işaretlenir/loglanır (sessiz geçiş yasak).
+:::
+
+Değerlendirme aşağıdaki [Çalışma Modları](#çalışma-modları)ndan biriyle yapılır:
+
+- **Satır İçi** — dış çağrı istek yoluna eklenir; sonuç beklenir. **Bu, isteğin p95 gecikmesini doğrudan artırır** — dış hakem modelinin kendi yanıt süresi kadar. Düşük gecikme kritikse Eşzamansız modu tercih edin.
+- **Eşzamansız** — yapılandırılabilir bir üst bekleme süresi içinde sonuç beklenir; süre aşılırsa yukarıdaki hata/zaman-aşımı kararı uygulanır.
+- **Yalnız-Gözlem** — dış sağlayıcı çağrılır ama sonuç **karara asla katılmaz**; yalnızca loglanır ve bir Prometheus uyum (agreement) metriğine yazılır. Yeni bir dış sağlayıcıyı üretime almadan önce yerleşik değerlendirmeyle ne kadar örtüştüğünü ölçmek (kalibrasyon) ve kademeli geçiş için kullanılır.
+
+### llm-judge Adaptörü
+
+Bugün desteklenen tek dış değerlendirici tipi **llm-judge**'dır — mevcut bir [LLM Provider](/tr/ai-gateway/llm-saglayicilari) tanımına referans verir. Yeni bir bağlantı tipi açılmaz; hâlihazırda tanımlı herhangi bir LLM sağlayıcısı hakem olarak kullanılabilir. Provider tipi aşağıdaki OpenAI-uyumlu liste ile sınırlıdır:
+
+`OpenAI`, `Azure OpenAI`, `vLLM`, `Ollama`, `Custom OpenAI-Compatible`, `DeepSeek`, `Groq`, `Moonshot`, `Mistral`, `Zhipu`, `Qwen (DashScope)`
+
+Bu listenin dışındaki bir provider tipi (örn. Anthropic, Cohere, Bedrock, Vertex — farklı bir kablo protokolü konuşur) hakem olarak seçilemez.
+
+Adaptörün kendi ayarları:
+
+| Ayar | Açıklama | Varsayılan |
+|------|----------|------------|
+| Hakem model adı | Değerlendirmeyi yapacak model kimliği (örn. `llama-guard3:1b`, `gpt-4o-mini`) | — (zorunlu) |
+| Yanıt bekleme süresi | Hakem çağrısının HTTP zaman aşımı | 2000 ms |
+| En fazla girdi karakteri | Hakeme gönderilecek metin bu uzunluğa kırpılır | 8000 karakter |
+| En fazla çıktı token'ı | Hakemin yanıtı için ayrılan token bütçesi | 64 |
+| JSON modu | Etkinse hakemden yapılandırılmış (safe/flagged alanlı) bir yanıt istenir; kapalıysa düz metin `safe`/`unsafe` satırı beklenir | Kapalı |
+
+### İki Değerlendirme Modu
+
+Hakem prompt'unun nasıl oluşturulacağı **tek bir alanla** belirlenir — değerlendirme şablonu boş mu, dolu mu:
+
+| Değerlendirme şablonu | Mod | Kullanım senaryosu |
+|---|---|---|
+| **Boş** | **NATIVE (doğrudan) geçiş** | Güvenlik için özel eğitilmiş bir model (örn. Llama Guard 3, ShieldGemma). Bu modeller taksonomi talimatını kendi sohbet şablonlarının içinde zaten taşır — üstüne ayrıca bir taksonomi metni eklemek modelin taksonomiyi *değerlendirilecek içerik* sanmasına ve sessizce yanlış bir karara (false-negative dahil) yol açabilir. Bu yüzden değerlendirme şablonu **bilinçli olarak boş bırakılır**. |
+| **Dolu** | **Şablon modu** | Genel amaçlı bir instruct model (örn. `gpt-4o-mini`) hakem olarak kullanılıyorsa, modele ne arayacağını anlatan bir taksonomi talimatı gerekir. Yapılandırma ekranındaki hazır şablon butonu S1-S13 güvenlik taksonomisini (şiddet, nefret söylemi, cinsel içerik, vb.) tek tıkla doldurur; kullanıcı metninin yerleştirileceği yer `<<<PROMPT>>>` yer tutucusuyla işaretlenir. |
+
+:::note
+NATIVE geçiş modunda hakeme gönderilen metin **olduğu gibi** iletilir; ekstra bir talimat sarmalanmaz. Guard-tuned olmayan bir modelle NATIVE modu kullanırsanız model taksonomiyi bilmez ve genel bir sohbet yanıtı üretir — NATIVE mod yalnız bu amaçla eğitilmiş modeller içindir.
+:::
+
+### Kendi Sunucunuzda Barındırma Örneği: Ollama ile Llama Guard 3
+
+<Steps>
+  <Step title="Modeli indirin">
+    Ollama çalıştıran sunucuda: `ollama pull llama-guard3`
+  </Step>
+  <Step title="LLM Provider tanımlayın">
+    [LLM Sağlayıcıları](/tr/ai-gateway/llm-saglayicilari) ekranında provider tipi **Ollama**, adres `http://<host>:11434/v1`, kimlik doğrulama **Yok** olacak şekilde yeni bir bağlantı ekleyin.
+  </Step>
+  <Step title="Politikayı yapılandırın">
+    İstem Koruması veya Konu-Dışı Koruması politikasında motoru **Yerleşik + Dış Sağlayıcı** veya **Yalnız Dış Sağlayıcı** seçin, dış değerlendirici olarak `llm-judge` adaptörünü ekleyin, yukarıda tanımladığınız provider'a referans verin ve **değerlendirme şablonunu boş bırakın** (bu model için doğru mod NATIVE geçiştir).
+  </Step>
+</Steps>
+
+Ollama'nın OpenAI-uyumlu `/v1/chat/completions` uç noktası, bu şekilde guard-tuned bir modelin kendi sohbet şablonunu otomatik uygular — bu davranış canlı bir testte doğrulanmıştır (`llama-guard3:1b` modeliyle, beklenen `safe`/`unsafe` biçiminde yanıt alınmıştır).
+
+vLLM üzerinde aynı yaklaşım (guard-tuned modeli vLLM'in OpenAI-uyumlu sunucusuyla servis edip elde edilen `/v1/chat/completions` uç noktasını LLM Provider olarak tanımlamak) vLLM'in kendi dokümantasyonundaki chat-template otomatik uygulama davranışına dayanır; bu adımı kendi vLLM kurulumunuzda ayrıca doğrulamanız önerilir.
+
+### Reasoning (Akıl Yürütme) Modelleri Hakem Olarak Kullanılırken
+
+:::warning
+qwen3 gibi "reasoning" modelleri hakem olarak seçildiğinde, modelin ürettiği akıl yürütme adımları da **en fazla çıktı token'ı** bütçesinden düşer. Bu bütçe düşük tutulursa (varsayılan 64), model asıl `safe`/`unsafe` yanıtına hiç ulaşamadan token bütçesi tükenir ve yanıt boş/eksik kalır — bu durumda değerlendirme başarısız sayılır ve yukarıdaki hata/zaman-aşımı kararı devreye girer.
+
+Bir reasoning modeli hakem olarak kullanmanız gerekiyorsa en fazla çıktı token'ını en az 1024'e çıkarın veya modelin akıl yürütme modunu kapatın. **Asıl önerilen yol**: mümkünse güvenlik için özel eğitilmiş (guard-tuned) bir model ile NATIVE geçiş modunu tercih etmektir — bu modeller kısa ve deterministik yanıt üretir, reasoning bütçesi sorunu hiç oluşmaz.
+:::
+
+### Güvenlik Notu
+
+Hakeme gönderilen metin **maskelenmemiş, ham** istem/yanıt içeriğidir. Zincirde PII Maskeleme politikası varsa, bu politikanın İstem Koruması / Konu-Dışı Koruması'ndan **önce mi sonra mı** çalıştığına dikkat edin — PII Maskeleme sonradan çalışıyorsa hakem hâlâ maskelenmemiş kişisel veriyi görür ve bu veri kullandığınız sağlayıcıya gönderilmiş olur.
+
+Hassas/gizli veri içeren trafikte, hakemi **kendi sunucunuzda veya kendi VPC'nizde** barındırmanız (self-hosted Ollama/vLLM) önerilir — dış bir buluta ham istem gönderilmesini tamamen ortadan kaldırır.
+
+### Konu-Dışı Koruması'ndaki Fark
+
+İstem Koruması'nda boş bir değerlendirme şablonu meşru ve desteklenen bir yapılandırmadır (NATIVE geçiş). **Konu-Dışı Koruması'nda ise dış sağlayıcı kullanılırken değerlendirme şablonu boş bırakılamaz** — bir güvenlik hakeminin ("bu içerik güvenli mi") verdiği yanıt, bir konu-uygunluk sorusunun ("bu istek izin verilen konu kapsamında mı") yanıtı değildir; boş şablonla genel bir güvenlik hakemi devreye girer ve yanıltıcı "konu-dışı" kararları üretebilir. Bu nedenle Konu-Dışı Koruması, dış sağlayıcı seçiliyken boş şablonu **kayıt sırasında reddeder**. Bu, iki koruma arasında bilinçli bir asimetridir.
+
+### Gözlemlenebilirlik
+
+Dış sağlayıcı çağrılarının sonucu (güvenli / güvensiz / zaman aşımı / hata) ve hangi sağlayıcının kaç kez tetiklendiği [Güvenlik ve Guardrail'ler raporunda](/tr/ai-gateway/raporlar) izlenebilir. Yalnız-Gözlem modundaki uyum oranı ise yalnız bir Prometheus metriğidir — bu oran için ayrı bir UI raporu yoktur; kalibrasyon/kademeli geçiş kararı sırasında Prometheus/Grafana üzerinden izlenmelidir.
+
+### APIops
+
+Dış sağlayıcı yapılandırması, politika JSON'unda `externalGuardrail` bloğu ile taşınır:
+
+- `externalGuardrail` bloğu gönderiliyorsa `"type": "llm-judge"` alanı **zorunludur** — eksik veya tanınmayan bir `type` ile gönderilen istek (boş bir `{}` blok dahil) `engine` değeri ne olursa olsun (Yerleşik dahil) reddedilir.
+- `engine` alanı `BUILTIN` ise `externalGuardrail` bloğunu **hiç göndermeyin** (alanı boş/null bırakın).
+- LLM sağlayıcı referansı **ada göre** (`llmProviderName`) taşınır — iç kimlik (ObjectId) APIops yüzeyine hiç çıkmaz, projeye özgü sağlayıcı adı yeterlidir.
+- `GET /api/ai-catalog/guardrail-defaults` uç noktası, hazır taksonomi şablonunun ve `<<<PROMPT>>>` yer tutucusunun güncel varsayılan değerlerini döner — UI'daki hazır şablon butonuyla aynı kaynağı kullanır.
+
+## Tekrar-Fırtınası (Loop) Koruması
+
+Aynı isteğin kısa bir zaman penceresinde **tekrar tekrar** gönderilmesini tespit eder (örn. istemci tarafı hatalı bir yeniden deneme döngüsü veya kendi kendine tekrar üreten bir ajan zinciri):
+
+- İstek içeriğinin bir özeti çıkarılır
+- Yapılandırılabilir bir zaman penceresinde (N saniyede M istek) aynı özetin tekrar sayısı izlenir
+- Eşik aşılırsa istek **işaretlenir** veya **engellenir**
+
+Sayaç; model, API proxy ve **çağıranın kimliği** ile birlikte anahtarlanır. Böylece bir çağıranın tekrarı başka bir çağıranın hakkını tüketmez.
+
+:::tip
+Bu koruma, özellikle otonom ajan zincirlerinde beklenmeyen maliyet artışını erken tespit etmek için değerlidir.
+:::
+
+### Kimliği Olmayan (Anonim) İstekler
+
+Kimlik doğrulaması olmayan bir API proxy'de istek, sayacın anahtarlanacağı bir kimlik taşımaz. Bu durumda ne yapılacağı politikada seçilir:
+
+| Seçenek | Davranış |
+|---------|----------|
+| **Politikayı uygulama** (varsayılan) | İstek geçer, tekrar sayacı işletilmez |
+| **Ortak havuzdan tüket** | Tüm anonim trafik **tek** bir sayaçta toplanır |
+| **İsteği reddet** | Anonim istek HTTP 401 ile geri çevrilir |
+
+Varsayılan seçenek, bu ayar eklenmeden önceki davranışla birebir aynıdır: anonim istekte koruma sessizce devre dışı kalır. "Ortak havuzdan tüket" seçildiğinde kiracı izolasyonu **beklenmez** — bir çağıranın tüketimi diğerlerinin hakkını da harcar; anonim erişime bilinçli olarak izin verilmiş, ama yine de bir tavan konmak istenen kurulumlar içindir.
+
+:::info
+Bu seçim, API proxy düzeyindeki **anonim istekleri engelle** ayarından farklıdır. O ayar isteği bu politikaya hiç ulaştırmadan reddeder; buradaki seçim ise anonim erişime izin verilmiş bir proxy'de bu politikanın ne yapacağını belirler.
+:::
+
+## Aşırı Boyut Koruması
+
+İstek boyutunu iki boyutta sınırlar:
+
+- **İstek başına maksimum token** — istemin tahmini token sayısı bu değeri aşarsa istek reddedilir
+- **İstem başına maksimum karakter** — ham istem metni karakter sınırını aşarsa istek reddedilir
+
+Sınır aşıldığında varsayılan davranış isteği engellemektir; dilerseniz engellemek yerine **en eski konuşma turlarının otomatik kesilmesini** seçebilirsiniz — bkz. [Tek İstek Sınırı: Bağlam Penceresi Taşması](/tr/ai-gateway/token-kotalari#tek-i̇stek-sınırı-bağlam-penceresi-taşması).
+
+Bu koruma, aşırı büyük isteklerin hem maliyet hem de kaynak tüketimi açısından kontrolsüz büyümesini engeller.
+
+## Bağlam Bütünlüğü Koruması (Yapısal Enjeksiyon)
+
+Sohbet geçmişine (mesaj listesine) **sahte sistem/asistan rolü** enjekte edilmeye çalışılıp çalışılmadığını tespit eder. İstem Koruması içeriği anlam bazında tararken, bu koruma sohbetin **yapısını** korur:
+
+- **Sahte rol imi tespiti** — bir kullanıcı mesajının içeriğine gömülü, modeli önceki bir sistem/asistan turu gibi kandırmaya çalışan kalıplar (örn. sohbet şablonu kontrol imleri veya `###Talimat` benzeri sahte talimat imleri)
+- **Rol sırası doğrulama** (isteğe bağlı) — istemcinin izin verilenden fazla sistem mesajı eklemesi ya da izin verilmeyen bir rol kullanması engellenir
+
+Eşleşmede üç aksiyondan biri uygulanır: **Engelle**, **İşaretle**, veya **Maskele** (yalnızca sahte rol imi eşleşmeleri maskelenebilir; bir rol-sırası ihlali maskeleme yerine işaretlemeye döner — yapısal bir uyuşmazlık maskelenemez).
+
+## Çalışma Modları
+
+Her koruma için üç değerlendirme modundan biri seçilebilir:
+
+| Mod | Davranış |
+|-----|----------|
+| **Satır İçi** | İstek eşzamanlı olarak beklenir; sonuç anında engelleme/işaretleme kararına yansır |
+| **Eşzamansız** | Değerlendirme arka planda paralel çalışır, kısa bir üst süre içinde sonuç beklenir; süre aşılırsa güvenli varsayılan uygulanır |
+| **Yalnız-Gözlem** | Değerlendirme sonucu asla engellemez veya işaretlemez; yalnızca ölçüm ve raporlama amacıyla çalışır |
+
+:::note
+Çoğu koruma için varsayılan mod **satır içi**dir; Konu-Dışı Koruması varsayılan olarak **eşzamansız** çalışır. Her koruma için mod ayrı ayrı değiştirilebilir.
+:::
+
+[Dış Sağlayıcı Guardrail](#dış-sağlayıcı-guardrail) kullanan İstem Koruması ve Konu-Dışı Koruması'nda **Yalnız-Gözlem** modu özellikle bir dış sağlayıcıyı üretime almadan önce kalibrasyon ve kademeli geçiş amacıyla kullanılır. Bu mod, dış çağrının **hata verme/zaman aşımı** davranışını belirleyen ayrı bir ayardan (Kapalı-Güvenli / Açık-Güvenli) bağımsızdır — çalışma modu *ne zaman* değerlendirileceğini, hata davranışı ise dış çağrı *başarısız olduğunda* ne olacağını belirler.
+
+## Hazır Şablonlar ve Politikalar: Bağlı mı, Yerelleştirilmiş mi
+
+Kişisel veri, İstem Koruması ve Veri Sızıntısı Koruması politikaları kurallarını istek anında katalogdan okumaz — her kural, siz seçtiğinizde alınmış bir **kopyadır**. Bu kopyanın kataloğu izlemeye devam edip etmediğini, kural satırındaki **Kaynak** kolonunda görünen durumu belirler.
+
+| Durum | Anlamı |
+|-------|--------|
+| **Katalog bağlı** | İçeriği hazır şablon sahiplenir. Şablonu düzenleyip kaydettiğinizde, onu kullanan tüm politikalardaki bu kural yeniden yazılır ve etkilenen dağıtımlar "yeniden dağıtım gerekli" olarak işaretlenir. Kuralın katalog sahipli alanları politika ekranında salt-okunurdur. |
+| **Yerel** | Kopmuş, bağımsız bir kopya. Katalog düzenlemeleri ona ulaşmaz; politika ekranında serbestçe düzenleyebilirsiniz. |
+
+Katalogdan eklenen kural **katalog bağlı** doğar. Kural satırı iki durum arasında geçiş yapar:
+
+- **Yerelleştir** — bağı koparır. Mevcut içerik korunur, ama kural katalog güncellemelerini almayı bırakır ve düzenlenebilir hale gelir. Yalnızca tek bir politikada özelleştirme yapmak istediğinizde kullanın.
+
+**Katalogun hangi alanları sahiplendiği** korumaya göre biraz değişir; kalan her şey politikaya özel kalır:
+
+| Koruma | Şablondan tazelenen | Her zaman politikaya özel kalan |
+|---|---|---|
+| İstem Koruması / Veri Sızıntısı Koruması | Desen, aksiyon, kategori, açıklama | **Ad** ve aktif/pasif durumu |
+| Kişisel veri maskeleme | Alan adı, işlem, desen tipi, regex, maskeleme ayarları | Aktif/pasif durumu |
+
+Kişisel veri maskelemede politikaya özel ayrı bir etiket alanı yoktur: **alan adı** fonksiyoneldir (alan adı modunda gerçekten eşleştirilen alandır), bu yüzden onu da şablon sahiplenir.
+
+:::warning Paylaşımlı Şablonu Düzenlemek Tüm Kurulumu Etkiler
+Her proje **paylaşımlı** bir hazır şablonu (sistem yöneticisinin kaydını) seçebildiği için, böyle bir şablonu düzenlemek ona bağlı kuralları **kurulumdaki tüm projelerde** tazeler ve etkilenen dağıtımları "yeniden dağıtım gerekli" olarak işaretler. Böyle bir şablonu yalnızca sistem yöneticisi düzenleyebilir ve kaydetmeden önce gördüğü kullanım listesi kurulumun tamamını kapsar. Aynı şablonu proje ekranından görüntüleyen bir kullanıcı **yalnızca kendi projesinin** kullanımlarını görür. **Projeye ait** şablonlarda hem güncelleme hem liste o projenin içinde kalır.
+:::
+
+:::note Eski Kurallar ve İçe Aktarma
+Bu davranıştan önce oluşturulmuş kurallar şablon referansı taşımaz, dolayısıyla **yerel** sayılır ve kendiliğinden senkron olmaz.
+
+**Yerelleştirme tek yönlüdür**: yerelleştirilmiş bir kuralı sonradan şablona geri bağlama diye bir işlem yoktur. Ada bakarak otomatik eşleştirme güvenilir değildir (ad düzenlenebilir olduğu için isim benzerliği yanlış şablona bağlama riski taşır) ve bağlanan kural, şablon her düzenlendiğinde desenini/aksiyonunu oradan yeniden alır — yani yanlış bağ sessiz bir güvenlik davranışı değişikliğine dönüşebilir. Bir kuralın şablonla senkron olmasını istiyorsanız onu **silin ve katalogdan yeniden ekleyin**.
+
+Bir yapılandırmayı başka bir ortama içe aktardığınızda da kurallar yerelleştirilmiş iner, çünkü hedef ortamın şablon kayıtları farklıdır. Orada da senkron istiyorsanız aynı yolu izleyin: sil ve katalogdan yeniden ekle.
+:::
+
+### Hazır Şablonu Silmek
+
+Silme hiçbir zaman engellenmez. Şablon bir yere bağlıysa, silme gerçekleşmeden önce nerelerde kullanıldığını listeleyen bir uyarı çıkar. Onayladığınızda şablon silinir ve ona bağlı kurallar **yerelleştirilir** — içerikleri korunur, dağıtılmış hiçbir politika bozulmaz ve yeniden dağıtım istenmez (yalnızca bağ değişti, etkin içerik değil).
+
+Şablonu yeniden adlandırmak bağlı kuralları etkilemez: kurallar şablonu adıyla değil, kimliğiyle izler.
+
+## Merkezi Yönetim
+
+Bu korumaları ilgili API Proxy özelinde tanımlayabilir ya da **Global Politikalar** ekranından tüm API Proxy'lerde ortak olarak yönetebilirsiniz — bir global koruma politikasını güncellediğinizde onu kullanan tüm proxy'ler etkilenir. Merkezi tanım, içe/dışa aktarma ve toplu dağıtım için bkz. [Global Politikalar](/tr/develop/global-configurations/global-policies).
+
+Kişisel veri, İstem Koruması ve Veri Sızıntısı Koruması hazır şablonları APIops REST API ile de yönetilebilir; bkz. [API Referansı: AI Privacy Presets](/api-reference/ai-privacy-presets), [AI Prompt-Guard Presets](/api-reference/ai-prompt-guard-presets), [AI DLP Presets](/api-reference/ai-dlp-presets).
+
+## Yapılandırma
+
+<Steps>
+  <Step title="Politikayı Ekleyin">
+    İlgili API proxy veya global politika grubuna istediğiniz koruma politikasını (PII / İstem / DLP / Konu-Dışı / Döngü / Aşırı Boyut / Bağlam Bütünlüğü) ekleyin.
+  </Step>
+
+  <Step title="Kalıpları / Eşikleri Seçin">
+    Hazır kalıp setlerini seçin veya kendi kalıbınızı tanımlayın; eşik ve zaman penceresi gerektiren korumalar için bu değerleri girin.
+  </Step>
+
+  <Step title="Aksiyonu ve Çalışma Modunu Belirleyin">
+    Engelle / İşaretle / Maskele aksiyonlarından hangisinin uygulanacağını ve satır içi / eşzamansız / yalnız-gözlem modlarından hangisinin kullanılacağını seçin.
+  </Step>
+
+  <Step title="Dağıtın (Deploy)">
+    Politikayı kaydettikten sonra **Dağıt**'a tıklayın — kayıt ile dağıtım ayrık adımlardır, otomatik dağıtım yapılmaz.
+  </Step>
+</Steps>
+
+<img
+  src="/images/ai-gateway/guardrail-pii-create.png"
+  alt="PII Pattern Create formu — Pattern Type, Rule, Operation ve Mask ayarları"
+  width="1000"
+/>
+
+## Semantik Önbellek ile İlişki
+
+Yanıt maskeleme veya DLP koruması etkinken, maskeden **önceki ham içerik** semantik önbelleğe yazılmaz — böylece sonraki bir önbellek eşleşmesi maskeleme adımını atlayarak hassas veriyi sızdıramaz. Detaylar için bkz. [Semantik Önbellek](/tr/ai-gateway/semantik-onbellek).
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Global Politikalar" icon="shield" href="/tr/develop/global-configurations/global-policies">
+    Korumaları tüm API Proxy'lerde merkezi olarak yönetin
+  </Card>
+  <Card title="A2A Gateway" icon="network-wired" href="/tr/ai-gateway/a2a-gateway">
+    Ajanlar arası iletişimde de aynı egress koruma prensipleri geçerlidir
+  </Card>
+  <Card title="Çok-Modaliteli Uç Noktalar" icon="wand-magic-sparkles" href="/tr/ai-gateway/coklu-modalite">
+    Ses ve görsel uç noktalarını yapılandırın
+  </Card>
+  <Card title="Raporlar ve Analitik" icon="chart-bar" href="/tr/ai-gateway/raporlar">
+    Koruma tetiklenme oranlarını izleyin
+  </Card>
+</CardGroup>

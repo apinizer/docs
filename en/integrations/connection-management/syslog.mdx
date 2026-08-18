@@ -131,6 +131,14 @@ import {Accordion} from '@site/src/components/Accordion';
       <Card title="Connection Monitoring" icon="chart-line">
         Monitoring connection health, pool status, and performance metrics.
       </Card>
+
+      <Card title="Length-Prefixed Framing" icon="file-code">
+        Optional octet-counted framing (RFC 6587) keeps large, multi-line records intact instead of relying on a trailing line break to mark the end of each message.
+      </Card>
+
+      <Card title="Parallel TCP Connections" icon="layer-group">
+        Multiple TCP sockets can be opened to the same syslog server to raise throughput under high log volume.
+      </Card>
     </CardGroup>
   </Accordion>
 
@@ -299,7 +307,7 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
   
   <Card title="Queue Capacity" icon="list-ol">
-    **Description:** Maximum number of log messages in the TCP async send queue. When the queue is full, new messages are routed to the failover connector.  
+    **Description:** Maximum number of log messages in the TCP async send queue. Works together with the buffer memory ceiling below — whichever limit is reached first applies. When the queue is full, new messages are routed to the failover connector.  
     **Default:** 10000  
     **Min:** 100 | **Max:** 1000000  
     **Unit:** messages
@@ -312,6 +320,46 @@ import {Accordion} from '@site/src/components/Accordion';
     **Unit:** seconds
   </Card>
 </CardGroup>
+
+### Framing and Delivery Parameters
+
+<CardGroup cols={2}>
+  <Card title="Syslog Framing Type" icon="file-code">
+    **Description:** How message boundaries are marked on the wire in TCP mode.  
+    **Default:** AUTO — derived from Syslog Message Format: `RFC_5425` uses octet-counted framing, every other format uses the traditional line-ending framing.  
+    **Values:** AUTO, NON_TRANSPARENT, OCTET_COUNTING
+  </Card>
+
+  <Card title="Parallel Connection Count" icon="layer-group">
+    **Description:** Number of parallel TCP sockets opened to the syslog server.  
+    **Default:** 1 — existing connections keep sending over a single socket unless changed.  
+    **Unit:** sockets
+  </Card>
+
+  <Card title="Buffer Memory Ceiling" icon="database">
+    **Description:** Byte ceiling for the outbound send queue, independent of the message-count limit above.  
+    **Default:** 64 MB  
+    **Unit:** bytes
+  </Card>
+
+  <Card title="Offer Timeout" icon="hourglass">
+    **Description:** Maximum time the sending side waits when the queue is full before giving up on that attempt and routing the message to the failover connector.  
+    **Default:** 100  
+    **Unit:** milliseconds
+  </Card>
+
+  <Card title="Batch Flush Frames" icon="repeat">
+    **Description:** Number of frames written in one send cycle before the connection is flushed.  
+    **Default:** 8  
+    **Unit:** frames
+  </Card>
+</CardGroup>
+
+:::note
+
+These parameters are all optional. Connections created before this release keep working exactly as they do today — no configuration change is required.
+
+:::
 
 ## Use Cases
 
@@ -551,6 +599,46 @@ In this step, you can use the **Syslog Connection** connection you created in di
     - This test is critical in debugging process.
   </Card>
 </CardGroup>
+
+## Large Records and High Volume
+
+:::info
+
+The settings below matter most for API proxies with large payloads (audit trails, batch responses, stack traces) or high request volume. They are optional — a connection that never touches them keeps behaving exactly as it does today.
+
+:::
+
+### Why the Buffer Has a Byte Ceiling
+
+Before this release, the send queue was limited only by message count (Queue Capacity, default 10,000). For API traffic records that average around 200 KB, a full queue of that size could hold close to 2 GB in memory, and messages that wait there for a while tend to get promoted to a longer-lived memory generation, which then triggers heavier garbage collection. The Buffer Memory Ceiling parameter bounds the same queue by bytes (default 64 MB) so it can no longer grow unbounded on large-payload traffic. The two limits work together — whichever is reached first applies, and once the queue is full, new messages are routed to the failover connector rather than dropped.
+
+### Keeping Large Records Intact
+
+In `NON_TRANSPARENT` framing, the syslog server treats the end of each line in the message body as the end of a frame, so any line break in a record is stripped before sending — a multi-line JSON payload, XML document, or stack trace is flattened onto a single line. `OCTET_COUNTING` framing (RFC 6587 §3.4.1) prefixes each frame with its length instead (`<length> <message>`), so line breaks inside the body no longer split the frame and no cleanup is needed — the record reaches the syslog server exactly as it left the gateway.
+
+This was verified against a real rsyslog 8.2504.0 server: a 200 KB message arrived as a single event with `OCTET_COUNTING` framing, while the same message body split into multiple events under `NON_TRANSPARENT`.
+
+When **Syslog Framing Type** is left at `AUTO`, `RFC_5425` messages automatically use `OCTET_COUNTING`; every other format keeps using `NON_TRANSPARENT`, matching current behavior.
+
+### Delivery Order with Multiple Connections
+
+When **Parallel Connection Count** is greater than 1, messages are distributed across different sockets and can arrive at the syslog server out of order. `RFC 5424` messages carry a microsecond-resolution timestamp and an increasing message ID per socket, which is enough to reorder events downstream if needed. When **Syslog Message Format** is `RFC 3164`, the connection count is fixed at 1, since that format's timestamp has no sub-second resolution to distinguish reordered events.
+
+### rsyslog Server-Side Requirements
+
+Octet-counted framing only helps if the receiving rsyslog server accepts frames of that size. The `imtcp` input's `maxFrameSize` defaults to 200,000 bytes — smaller than a 200 KB message (204,800 bytes) — and a message that exceeds it falls back out of length-prefixed handling on the server side:
+
+```
+input(type="imtcp" port="514" maxFrameSize="2000000" SupportOctetCountedFraming="on")
+
+global(maxMessageSize="2097152")
+global(oversizemsg.report="on")
+```
+
+- `global(maxMessageSize="...")` is a separate setting from `maxFrameSize` and needs to be raised together with it.
+- `maxFrameSize` is only recognized by rsyslog 8.1905 and later; older versions reject it with `parameter maxFrameSize not known`, so confirm the server version before rolling out this configuration.
+- `oversizemsg.report="on"` makes rsyslog log records that still exceed the limit instead of dropping them without a trace.
+- rsyslog escapes line breaks inside the message body with its own control-character sequence by default, which shows up as `#012` on the SIEM side. Set `global(parser.escapeControlCharactersOnReceive="off")` if the original line breaks should be preserved as-is.
 
 ## Best Practices
 
@@ -871,6 +959,32 @@ Different connection may be selected in Integration/Connector step, step may be 
     </Steps>
   </Accordion>
 
+  <Accordion title="Large Records Arriving Split or Truncated">
+    :::warning
+
+A multi-line JSON or stack-trace record is being cut into several syslog events, or long records are missing entirely on the receiving side.
+
+:::
+
+    <Steps>
+      <Step title="Framing Type">
+        Confirm **Syslog Framing Type** is `OCTET_COUNTING` (or `AUTO` with the `RFC_5425` message format) for records that contain line breaks.
+      </Step>
+
+      <Step title="rsyslog Frame Size">
+        Raise `maxFrameSize` and `global(maxMessageSize=...)` on the syslog server to comfortably exceed your largest record.
+      </Step>
+
+      <Step title="rsyslog Version">
+        Verify the syslog server runs rsyslog 8.1905 or later; `maxFrameSize` is rejected on older versions.
+      </Step>
+
+      <Step title="Buffer and Queue Limits">
+        Check whether **Buffer Memory Ceiling** or **Queue Capacity** is being reached under peak load, sending messages to the failover connector.
+      </Step>
+    </Steps>
+  </Accordion>
+
 
 ## Frequently Asked Questions (FAQ)
 
@@ -952,6 +1066,22 @@ Several reasons may exist:
     4. Integration Flow may not be redeployed yet
   </Accordion>
 
+  <Accordion title="Do I need to reconfigure existing Syslog connections after upgrading?">
+    :::info
+
+No. Framing type, parallel connection count, buffer memory ceiling, offer timeout, and batch flush frames all default to today's behavior; change them only if you need the new large-record or high-volume handling.
+
+:::
+  </Accordion>
+
+  <Accordion title="How do I make sure large records are not split into multiple syslog events?">
+    :::tip
+
+Select `RFC_5425` as the Syslog Message Format (or set Syslog Framing Type to `OCTET_COUNTING` explicitly), and make sure the receiving rsyslog server's `maxFrameSize` and `maxMessageSize` are raised to accommodate your largest record.
+
+:::
+  </Accordion>
+
 
 ## Next Steps
 
@@ -964,6 +1094,9 @@ Several reasons may exist:
   </Card>
   <Card title="Logback Connector" icon="file-lines" href="/en/integrations/connectors/logback-connector">
     Logback log records
+  </Card>
+  <Card title="Transferring Traffic Logs to Syslog" icon="file-lines" href="/en/operations/administrator-guides/traffic-logs-syslog-transfer">
+    Recommendations for high-volume traffic log delivery
   </Card>
 </CardGroup>
 

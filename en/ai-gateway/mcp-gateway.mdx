@@ -1,0 +1,251 @@
+---
+title: "MCP Gateway"
+description: "You can create an MCP Gateway that publishes your existing APIs as tools for AI agents to discover and call, or forwards calls through to an external MCP server — with protocol version handling, identity-based access control, and catalog drift protection built in."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Overview
+
+**MCP (Model Context Protocol)** is the standard AI agents use to discover and call external tools. In Apinizer, MCP is a **first-class API proxy type** — you create an MCP Gateway the same way you'd create a REST, SOAP, or AI Gateway, and configure its behavior on a dedicated routing tab. An MCP Gateway works in one of two directions:
+
+- **Expose Tools** — publishes your existing API proxy operations as MCP tools that any MCP-compatible client can discover and call
+- **Passthrough** — forwards MCP calls through to an external MCP server, applying tool filtering and output masking along the way
+
+The **MCP Gateway** menu item takes you to a card-based list of your MCP Gateways, the same layout used for AI Gateways — open a card to reach that proxy's routing, policies, and trace/traffic/analytics tabs.
+
+:::info
+**Coming from an older release?** MCP used to be configured on a separate "Inbound Server" screen with its own authentication settings, reachable at a dedicated path. That model has been replaced entirely — see [Migrating from the Previous Model](#migrating-from-the-previous-model). New to the MCP protocol itself? See [AI Fundamentals](/en/concepts/core-concepts/ai-fundamentals) for a primer.
+:::
+
+## Quick Start
+
+<Steps>
+  <Step title="Create an MCP Gateway">
+    Create a new **MCP Gateway** the same way you'd create any other API proxy: give it a name and a single client-facing path.
+  </Step>
+
+  <Step title="Choose a Routing Mode">
+    Open the proxy's **MCP Routing** tab and pick **Expose Tools** or **Passthrough**.
+  </Step>
+
+  <Step title="Configure the Mode">
+    For Expose Tools, select which of your API proxy operations should be published as tools. For Passthrough, add one or more MCP servers directly on the routing tab (endpoint, transport, and authentication) and, optionally, restrict which of their discovered tools are allowed through.
+  </Step>
+
+  <Step title="Add Authentication">
+    Attach any of Apinizer's regular authentication policies (API Key, JWT, OAuth2, ...) to the proxy — the same way you would on any other proxy type.
+  </Step>
+
+  <Step title="Save and Deploy">
+    Deploy the proxy. Its client path becomes the single endpoint MCP clients connect to, for both discovery and tool calls.
+  </Step>
+
+  <Step title="Connect a Client">
+    Point an MCP-compatible client at the proxy's path — it discovers the manifest and tool catalog through the standard handshake, then calls tools over that same path.
+  </Step>
+</Steps>
+
+## Modes
+
+### Expose Tools
+
+Publishes selected operations from your existing API proxies as MCP tools. Each exposed tool maps to one API proxy operation, can override the tool's auto-generated input schema, and can optionally require a specific scope — enforced only when the caller authenticated through OAuth2 and ignored for every other authentication type. A caller missing the required scope is denied that particular tool while the rest of the catalog behaves normally.
+
+### Passthrough
+
+Forwards MCP calls to one or more external MCP servers, defined directly on the proxy's **MCP Routing** tab — there's nothing to create or reference elsewhere first.
+
+<CardGroup cols={2}>
+  <Card title="Automatic Tool Discovery" icon="search">
+    Once a server's endpoint is saved, a **Discover / Reparse Tools** action fetches its tool catalog and pins it as the approved baseline.
+  </Card>
+  <Card title="Tool Allow-List" icon="shield-check">
+    Leave the allow-list empty to pass every discovered tool through, or select specific tools to restrict what's reachable through this proxy.
+  </Card>
+  <Card title="Health Probe" icon="activity">
+    Each server is probed periodically and reports **Healthy**, **Down**, or **Unknown** status with its last response time.
+  </Card>
+  <Card title="Egress Protection" icon="shield">
+    Discovery and tool calls can't reach cloud-metadata endpoints, loopback, or link-local addresses — see [Security and Governance](#security-and-governance).
+  </Card>
+</CardGroup>
+
+Both modes' tool results pass through the same output filtering used elsewhere in the gateway: a deny-pattern match blocks the whole response (not just the matched portion), and PII masking covers the platform's built-in personal-data types.
+
+### MCP Servers Are Configured Inline
+
+There's no standalone "MCP connection" screen to visit first — an MCP server is defined at the exact place it's used:
+
+- On a **Passthrough** proxy's MCP Routing tab, where it can be one of several aggregated servers (see [Multi-Target Aggregation](#multi-target-aggregation)).
+- Inside the **MCP Call (LLM)** / **MCP Call (Fixed)** policy, as a single server a model calls as part of any AI Gateway's own [tool-call loop](/en/ai-gateway/routing-and-failover#tool-call-loop-agentic-requests) — no MCP Gateway required for that path at all.
+
+Each definition carries its own endpoint, transport, authentication, discovered-tool catalog, health status, and approved-catalog fingerprint — nothing is shared by reference between proxies or policies, so there's no separate object to look up, and no cross-proxy blast radius when one server's credentials change.
+
+## Outbound Tool Call
+
+When an AI Gateway's model wants to call a tool (tool_use / function calling), the component that actually forwards that call to an external MCP server is the **MCP Call (LLM)** / **MCP Call (Fixed)** policy, attached to the proxy's tool-call step. As with Passthrough, the target server is defined **inline, on the policy's own screen**:
+
+<Steps>
+  <Step title="Add the policy">
+    Attach the **MCP Call (LLM)** policy to an AI Gateway's tool-call step.
+  </Step>
+  <Step title="Define the server">
+    In the **MCP Server (Inline)** section, enter the endpoint, protocol version, authentication scheme (Bearer / OAuth2 Client Credentials / mTLS / None), and capability-cache settings. It carries a single endpoint — there's no failover/multi-server list here; to call more than one external server, add a separate policy instance for each.
+  </Step>
+  <Step title="Discover tools">
+    The **Discover Tools** button connects to the server, confirms the connection works, and fetches its tool catalog — it runs before you save, so there's no separate "test connection" step.
+  </Step>
+  <Step title="Restrict allowed tools (optional)">
+    Leave it empty to allow every discovered tool; if no tools have been discovered yet, the call is denied fail-closed. To restrict, pick from the **Allowed Tools** list.
+  </Step>
+</Steps>
+
+This server definition is subject to the same SSRF protection as Passthrough mode (see [Security and Governance](#security-and-governance)). The policy screen's **MCP Connection** field is kept for backward compatibility: it's disabled once an inline server is defined, and only one of the two is ever used at runtime.
+
+This policy can also be added and updated through the APIops REST API — see [API Reference: Policies](/api-reference/policies/crud/add-policy).
+
+## Protocol Versions
+
+An MCP Gateway negotiates one of three protocol behaviors, set per proxy and applied on the next redeploy:
+
+| Version | Behavior |
+|---|---|
+| `2024-11-05` | Legacy HTTP+SSE transport — a `GET` to the proxy's SSE sub-path opens a bounded push channel. |
+| `2025-06-18` | Streamable HTTP — the default for new proxies. Responses carry an `MCP-Protocol-Version` header confirming the negotiated version. |
+| `2026-07-28` | Stateless mode — no `initialize` handshake is required before calling tools. |
+
+If a connecting client requests a version Apinizer doesn't recognize during `initialize`, the proxy falls back to the nearest earlier version it does support and logs a warning, rather than rejecting the request outright.
+
+The discovery manifest is published, unauthenticated, at the proxy's client path plus `/.well-known/mcp/manifest.json` — required so a client can see what's on offer before it has credentials to authenticate. The manifest is a best-effort discovery aid: it advertises a generic "authentication required" hint whenever the proxy has any request policy attached, but the actual scheme enforced is whatever policy chain you've configured (see [Authentication](#authentication)).
+
+## Multi-Target Aggregation
+
+A Passthrough proxy isn't limited to a single backend: define up to **10** MCP servers on its MCP Routing tab, behind one client-facing endpoint. Their tool catalogs are merged into a single list; if two servers expose a tool with the same name, the collision is resolved deterministically by prefixing the tool name with its source server (`serverName__toolName`). If one server is slow or unreachable, the others still respond — a single failing target doesn't take down the whole catalog.
+
+## Security and Governance
+
+### Authentication
+
+Authentication for an MCP Gateway is whatever policy chain you attach to it — API Key, JWT, OAuth2, Basic, and so on — the same policies every other proxy type uses. There's no separate per-server auth-mode selector anymore; the proxy's own policy chain runs before a request ever reaches MCP handling. The one deliberate exception is the discovery manifest itself, which stays reachable without authentication.
+
+### Identity-Based Access Control
+
+Optionally, restrict tool visibility by the caller's credential, role, or organization — in **Passthrough** mode only; Expose Tools mode never evaluates this list, and instead relies solely on each tool's own required-scope check (see [Expose Tools](#expose-tools)). Each rule allows or denies specific tool names for the principal it matches; once at least one rule is configured, a caller not covered by any rule sees nothing in the Passthrough tool list (default-deny) and can't call any tool either. This is set on the proxy's MCP routing configuration — today through the Management REST API rather than a Manager UI screen:
+
+```json
+{
+  "identityAcl": [
+    {
+      "principalType": "ROLE",
+      "principalName": "partner-readonly",
+      "allow": ["search", "fetch"],
+      "deny": []
+    }
+  ]
+}
+```
+
+### Argument Constraints
+
+Attach validation rules to a tool's arguments — a required field, a maximum string length, an allowed value list, or a regular expression — matched with dot-notation against the argument object (for example `user.email`). A malformed rule is skipped rather than blocking all traffic through the tool. Regular-expression rules run under a hard ceiling (a 4096-character input cap and a 200ms evaluation deadline) so a crafted value can't turn a rule into a denial-of-service vector.
+
+```json
+{
+  "argumentConstraints": [
+    {
+      "toolName": "search",
+      "rules": [
+        { "argumentPath": "query", "ruleType": "MAX_LENGTH", "value": "500" },
+        { "argumentPath": "region", "ruleType": "ENUM", "value": "eu,us,apac" }
+      ]
+    }
+  ]
+}
+```
+
+### Call Quotas
+
+Cap how often a tool can be called per minute, hour, or day — scoped per tool, per calling credential, or both combined. A call that would exceed the quota is rejected before it dispatches; an unauthorized or argument-invalid call never consumes a unit.
+
+```json
+{
+  "callQuota": { "scope": "PER_CREDENTIAL", "period": "HOUR", "limit": 1000 }
+}
+```
+
+### Catalog Drift Protection
+
+Each inline MCP server remembers a fingerprint of its tool catalog captured at the moment it was last approved (an explicit Discover / Reparse). A periodic health check compares the live catalog against that fingerprint; when they diverge, the server either just logs and surfaces the drift (the default) or blocks every tool call through it until an operator re-approves the new catalog. This guards against a backend server silently changing what a tool does, or what it expects, underneath an already-approved integration.
+
+### Token Passthrough
+
+By default, Apinizer never forwards a caller's own token to a backend MCP server — the server's own configured credential is always used instead. You can opt in per server: the caller's bearer token is relayed as-is, optionally restricted to an allow-list of accepted JWT audiences, with the server's own credential resolution skipped once a forward succeeds. This is off everywhere by default — an operator has to enable it deliberately.
+
+### Guardrail Policies
+
+Five of Apinizer's [Advanced Guardrails](/en/ai-gateway/advanced-guardrails) — Personal Data Masking, Prompt Protection, Data-Loss Protection (DLP), Off-Topic Protection, and Retry-Storm (Loop) Protection — can be attached to an MCP Gateway the same way as on any other proxy type. They run through the proxy's regular policy chain and scan the JSON-RPC tool-call arguments (`params.arguments`) on the request side and the tool result content on the response side. This is a separate mechanism from the built-in output filtering described above (deny-pattern matching and PII masking on tool results) — a guardrail policy is configured, scoped, and reported on independently. Two of these five — Prompt Protection and Off-Topic Protection — can additionally call out to an [external LLM judge](/en/ai-gateway/advanced-guardrails#external-provider-guardrails) for a second opinion, the same way they do on an AI Gateway. The remaining AI policy types (Semantic Cache, Token Quotas, Prompt Decorator, Prompt Templates, RAG Injection, Context-Integrity Protection) depend on an actual LLM invocation and are rejected if you try to attach them to an MCP Gateway; see [Advanced Guardrails: MCP and A2A Gateways](/en/ai-gateway/advanced-guardrails#mcp-and-a2a-gateways).
+
+### Egress Protection
+
+:::danger
+Outbound MCP calls — discovery, tool calls, and health probes — can never reach cloud-metadata endpoints, loopback, link-local, multicast, or carrier-grade-NAT addresses, regardless of configuration. A server can optionally be allowed to reach other private-network ranges (for example an in-cluster MCP server), but that opt-in never lifts the addresses above.
+:::
+
+This same protection is shared with [A2A Gateway](/en/ai-gateway/a2a-gateway) outbound calls.
+
+## Environment Variables in Configuration
+
+Most of the text you type into an MCP Gateway's configuration accepts an [environment variable](/en/develop/environment-variables) reference in `${VARIABLE_NAME}` form, resolved per environment when the proxy runs. That lets one configuration move from test to production without editing it — a tool that is named differently in each environment, an allowed-audience value, or a per-environment scope name is written once as a variable.
+
+Fields that accept a variable:
+
+| Where | Fields |
+|---|---|
+| Outbound tool call | Tool name, arguments template |
+| Access rules | Allowed tool list, identity rule credential/role/organization name, allow and deny lists |
+| Argument constraints | Argument path and rule value |
+| Exposed tools | Required scopes |
+| Token passthrough | Accepted audience list |
+
+The arguments template additionally accepts `#{...}` [context variables](/en/develop/policies/message-builder), which are evaluated per request after the environment variables have been substituted.
+
+:::caution
+Resolution is fail-closed. If a variable is not defined in the environment the proxy is running in, the text stays as written — and because no real tool, scope, or audience is literally named `${VARIABLE_NAME}`, the call is denied rather than falling through to an unintended match. A caller cannot send the literal text `${VARIABLE_NAME}` as a tool name to slip past an access rule either; such a request is rejected outright.
+:::
+
+:::note
+Tool detection patterns and output deny-patterns do **not** accept variables. Those are regular expressions, and Apinizer probes each one at save time for patterns that could stall the gateway. A pattern arriving from an environment variable would reach the engine unprobed, so the check that protects you would be the thing disabled. The same reasoning applies to a manually overridden tool input schema, which is validated when you save it.
+:::
+
+## Logging and Analytics
+
+Every MCP call is recorded in your traffic logs with the request's correlation ID, so a single agent turn can be followed end to end; an inbound gateway request additionally records the tool name and JSON-RPC id. Per-call detail for an outbound tool call — which server it resolved to, every tool invoked in a batch, and each call's duration and outcome — is captured in the request's trace execution detail rather than as flat log columns, so a multi-turn agentic exchange doesn't collapse into "whatever the last turn did." These calls also appear in [trace groups](/en/ai-gateway/tracing-and-replay) alongside the rest of a request's chain, and roll up into your usage [reports](/en/ai-gateway/reports).
+
+An MCP Gateway's own detail page carries this same trace/traffic/analytics view under proxy-specific tabs — **MCP Trace**, **MCP Traffic**, and **MCP Analytics** — so you don't have to leave the proxy to inspect its recent calls or trends.
+
+## Migrating from the Previous Model
+
+- The separate MCP "Inbound Server" screen is gone; MCP is now configured directly on an MCP Gateway's **MCP Routing** tab.
+- Per-server authentication mode (None / API Key / OAuth2) no longer exists — authentication is whatever policy chain you attach to the proxy, the same as any other proxy type.
+- The old dedicated inbound path is gone; clients must be repointed at the MCP Gateway's own client path.
+- Existing inbound server definitions aren't carried forward automatically — recreate your exposed tool list as an MCP Gateway.
+- **Outbound MCP connections are no longer a standalone, shared resource.** The connection screen is gone; an MCP server is now defined inline, directly on a Passthrough proxy's MCP Routing tab or inside the MCP Call (LLM) / MCP Call (Fixed) policy that uses it (see [MCP Servers Are Configured Inline](#mcp-servers-are-configured-inline)). This is auto-migrated on upgrade: any proxy or policy that referenced an outbound MCP connection under the old model gets that connection copied inline automatically — there's nothing to recreate. If the same connection was shared by more than one proxy or policy, each one ends up with its own independent copy (credential included) after the upgrade; keep that in mind when you next rotate the credential. Discovery, health probing, catalog drift protection, and token passthrough all still work the same way; they're just scoped to the server's own definition instead of a shared record.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="A2A Gateway" icon="share-2" href="/en/ai-gateway/a2a-gateway">
+    Agent-to-agent task delegation, the other side of agentic connectivity
+  </Card>
+  <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
+    See how the tool-call loop fits into request routing
+  </Card>
+  <Card title="Global Policies" icon="globe" href="/en/develop/global-configurations/global-policies">
+    Reuse a guardrail or masking policy across proxies and tools
+  </Card>
+  <Card title="Credentials" icon="key" href="/en/admin/identity-management/credentials">
+    Manage the credentials behind MCP Gateway authentication and inline MCP servers
+  </Card>
+</CardGroup>

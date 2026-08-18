@@ -1,0 +1,156 @@
+---
+title: "Çok-Modaliteli Uç Noktalar"
+description: "Sohbet tamamlamanın ötesinde ses-metin, metin-ses, görsel üretim ve embedding uç noktalarını aynı gateway üzerinden, aynı kota/maliyet/koruma kontrolleriyle kullanabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+Apinizer AI Gateway, metin tabanlı sohbet tamamlama uç noktasına ek olarak dört modaliteyi daha destekler — **hepsi aynı gateway üzerinden, aynı [token kotaları](/tr/ai-gateway/token-kotalari), maliyet takibi ve [koruma](/tr/ai-gateway/gelismis-korumalar) kontrolleriyle**:
+
+- **Ses-Metin (STT — Speech to Text)** — `/v1/audio/transcriptions`
+- **Metin-Ses (TTS — Text to Speech)** — `/v1/audio/speech`
+- **Görsel Üretim (Image Generation)** — `/v1/images/generations`
+- **Embedding** — `/v1/embeddings`
+
+Her uç nokta **OpenAI-uyumlu istek/yanıt formatını** kullanır; mevcut OpenAI SDK istemcileriniz `base_url` değişikliği dışında kod değişikliği gerektirmeden çalışır.
+
+:::note
+Video modalitesi bu kapsamda değildir.
+:::
+
+## Ses-Metin (STT)
+
+Ses dosyasını metne çevirir:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="apinizer-kimlik-bilgisi-anahtarınız",
+    base_url="https://apinizer-gateway-adresiniz.com/api/ai/v1"
+)
+
+with open("kayit.mp3", "rb") as audio_file:
+    transcript = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file
+    )
+
+print(transcript.text)
+```
+
+- İstek **çok parçalı (multipart/form-data)** formatında gönderilir
+- Kullanım metrikleri **ses süresine (duration)** dayalı hesaplanır (token sayımı yerine)
+- Yanıt metni, mevcut **PII maskeleme** politikasından geçirilebilir — transkript içinde tespit edilen kişisel veriler diğer metin uç noktalarıyla aynı kurallarla maskelenir
+
+## Metin-Ses (TTS)
+
+Metni sese çevirir; yanıt **ikili (binary) ses akışı** olarak döner:
+
+```python
+response = client.audio.speech.create(
+    model="tts-1",
+    voice="alloy",
+    input="Merhaba, bu bir test mesajıdır."
+)
+
+response.stream_to_file("cikti.mp3")
+```
+
+:::note
+TTS yanıtı JSON değil, doğrudan ses dosyası (binary) olarak döner — gateway bu yanıt tipini şeffaf şekilde iletir (pass-through), içerik türü (content-type) korunur.
+:::
+
+## Görsel Üretim
+
+Metin isteminden görsel üretir:
+
+```python
+response = client.images.generate(
+    model="gpt-image-1",
+    prompt="Deniz kenarında gün batımı, dijital sanat",
+    n=1,
+    size="1024x1024"
+)
+
+print(response.data[0].url)
+```
+
+## Embedding
+
+Metni sayısal vektöre çevirir — anlamsal arama, [RAG](/tr/ai-gateway/rag) ve [vektör veritabanı](/tr/ai-gateway/vektor-veritabani) entegrasyonlarında kullanılır:
+
+```python
+response = client.embeddings.create(
+    model="text-embedding-3-small",
+    input="Apinizer API Management platformu"
+)
+
+print(response.data[0].embedding)
+```
+
+Kullanım maliyeti yalnızca **girdi (input) token** üzerinden hesaplanır — embedding isteklerinde çıkış token'ı yoktur.
+
+:::warning
+Embedding istekleri, yalnızca embedding yeteneğini destekleyen bir sağlayıcı bağlantısına yönlendirilir. Bu yeteneğe sahip olmayan bir bağlantı hedef alınırsa istek reddedilir.
+:::
+
+## Responses API (`/v1/responses`)
+
+Sohbet tamamlama uç noktasının yanında, OpenAI'nin `/v1/responses` uç noktası da desteklenir — OpenAI SDK'sının `client.responses.create(...)` çağrısıyla kullanılan, konuşma durumunu sağlayıcı tarafında taşıyabilen alternatif istek/yanıt biçimi.
+
+:::warning Yalnızca OpenAI-native sağlayıcılar
+Bu uç nokta yalnızca gerçekten OpenAI Responses API tel-formatını (wire format) konuşan sağlayıcı bağlantılarında çalışır: **OpenAI**, **Azure OpenAI**, **Özel OpenAI-Uyumlu**. Diğer sağlayıcılara (Anthropic, Google Vertex AI, AWS Bedrock, vLLM, Ollama vb.) yönlendirilen bir `/v1/responses` isteği **HTTP 400** ile reddedilir — hiçbir şey denenmez, hiçbir maliyet oluşmaz. Bunun nedeni, `previous_response_id`/`store` gibi sağlayıcı tarafı konuşma durumu taşıyan alanları sessizce yok sayacak bir "Responses → Chat" köprüsünün bulunmamasıdır; böyle bir köprü, istemcinin beklediği durum yönetimini fark ettirmeden bozardı.
+:::
+
+Akış (streaming) dahil desteklenir; kullanım/maliyet metrikleri diğer uç noktalarla aynı [Raporlar ve Analitik](/tr/ai-gateway/raporlar) altyapısına işlenir — sağlayıcının bu uç noktada farklı bir kullanım alan adlandırması kullanması, maliyet takibinin doğruluğunu etkilemez.
+
+### Bilinen v1 Sınırları
+
+- **Araç (tool/function) çağrıları otomatik döngüye girmez.** Sohbet tamamlama uç noktasındaki çok-turlu araç çağrısı otomasyonu (ajan döngüsü) bu uç nokta için henüz uygulanmadı — model bir araç çağrısıyla yanıt verirse bu, ek bir tur yapılmadan doğrudan istemciye iletilir.
+- **Mesaj-listesi tabanlı politikalar `input` alanını tanımaz.** [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici), [Prompt Şablonu](/tr/ai-gateway/prompt-sablonlari) ve RAG bağlam ekleme gibi `messages[]` dizisi üzerinde çalışan özellikler, Responses API'nin kullandığı `input` alanını yapılandırılmış biçimde ayrıştırmaz; bu politikalar `/v1/responses` isteklerinde sessizce atlanır (istek etkilenmeden geçer). Kişisel veri maskeleme, konu-dışı/yasaklı-konu koruması gibi tarama tabanlı korumalar ise ham istek metni üzerinden (gerekirse kısaltılarak) çalışmaya devam eder.
+- **Metin-dışı modaliteler kapsam dışı.** Bu uç nokta yalnızca metin-tabanlı modeller için geçerlidir; embedding veya ses-only bir modele yönlendirilirse istek reddedilir.
+
+## Fiyatlandırma ve Kullanım Metrikleri
+
+Her modalite, mevcut [AI Maliyet Ayarları](/tr/ai-gateway/maliyet-ayarlari) ve [Raporlar](/tr/ai-gateway/raporlar) altyapısına entegre edilmiştir:
+
+| Modalite | Fiyatlandırma Birimi | Kullanım Metriği |
+|----------|----------------------|-------------------|
+| STT | Dakika başına | Ses süresi (saniye/dakika) |
+| TTS | Karakter başına | Girdi karakter sayısı |
+| Görsel Üretim | Görsel başına (boyuta göre) | Üretilen görsel sayısı |
+| Embedding | 1M token başına | Girdi token sayısı |
+
+Bu metrikler **Raporlar ve Analitik** ekranında diğer LLM modelleriyle birlikte, kişi/proje/model kırılımında görüntülenebilir.
+
+:::tip
+Yeni modeller (whisper, tts, gpt-image gibi) [Model Kataloğu](/tr/ai-gateway/model-katalogu)'nda **önceden tanımlı fiyatlarla** gelir; ihtiyaç halinde model fiyatlarını **AI Maliyet Ayarları** sayfasından özelleştirebilirsiniz.
+:::
+
+## Uç Nokta Yönlendirme
+
+Gateway, gelen isteğin hedef yolunu (`/v1/chat/completions`, `/v1/responses`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`) otomatik olarak tanır ve modaliteye özgü işleme hattına (binary yanıt desteği, multipart ayrıştırma, süre bazlı kullanım hesaplama dahil) yönlendirir — ek yapılandırma gerekmez, aynı AI Gateway üzerinden tüm modaliteler sunulabilir.
+
+<img
+  src="/images/ai-gateway/model-catalog-multimodal.png"
+  alt="Model Kataloğu — Image Generation, Embedding, Audio (Whisper/TTS) satırları"
+  width="1000"
+/>
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Token Kotaları ve Hız Sınırlaması" icon="gauge" href="/tr/ai-gateway/token-kotalari">
+    Modalite başına kullanım sınırlarını yapılandırın
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    STT yanıtlarında PII maskeleme dahil koruma katmanlarını yapılandırın
+  </Card>
+  <Card title="Vektör Veritabanı" icon="database" href="/tr/ai-gateway/vektor-veritabani">
+    Embedding çıktısını bir vektör veritabanına bağlayın
+  </Card>
+</CardGroup>

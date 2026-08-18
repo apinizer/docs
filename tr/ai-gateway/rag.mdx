@@ -1,0 +1,130 @@
+---
+title: "Bağlam Zenginleştirmeli Üretim (RAG)"
+description: "İsteğiniz modele ulaşmadan önce bilgi tabanınızdan ilgili bağlamı otomatik olarak çekip isteğe ekleyin; yanıtları kendi verinize dayandırarak halüsinasyonu azaltın."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+
+## Genel Bakış
+
+**RAG (Retrieval-Augmented Generation / Bağlam Zenginleştirmeli Üretim)**, bir isteği doğrudan modele göndermek yerine, önce [bilgi tabanınızdan](/tr/ai-gateway/bilgi-tabanlari) ilgili içeriği bularak isteğe ekleyen ve ardından zenginleştirilmiş isteği modele ileten bir tekniktir.
+
+:::info
+RAG'in dayandığı embedding/vektör kavramları için [Yapay Zeka Temel Kavramları](/tr/concepts/temel-kavramlar/yapay-zeka-temel-kavramlari) sayfasına bakabilirsiniz. Bu sayfa, Apinizer'ın RAG özelliğinin nasıl çalıştığına odaklanır.
+:::
+
+:::warning Politika sırası: RAG, korumalardan ve önbellekten önce
+RAG; [istem koruması, veri sızıntısı koruması ve bağlam bütünlüğü](/tr/ai-gateway/gelismis-korumalar) ile [semantik önbellek](/tr/ai-gateway/semantik-onbellek) politikalarından **önce** çalışmalıdır. Getirilen bilgi tabanı içeriğinin de denetimden geçmesi gerekir; aksi halde bir belgeye gömülü zararlı yönerge ya da sır, denetlenmeden modele ulaşır ve önbellek anahtarı bu içeriği kapsamadığı için yanlış önbellek isabeti oluşur. RAG'in kendisi de [Prompt Şablonu](/tr/ai-gateway/prompt-sablonlari) ve [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici) politikalarından **sonra** gelmelidir.
+
+Politika listesini bu kurala aykırı bir sırayla kaydederseniz Apinizer sırayı **kayıt anında** otomatik olarak düzeltir ve neyi neden taşıdığını bir bilgi notuyla bildirir. Böylece Develop ekranında gördüğünüz sıra ile [izleme](/tr/ai-gateway/izleme-ve-tekrar-oynatma) ekranındaki gerçek çalışma sırası her zaman aynı kalır.
+:::
+
+## Ne Zaman Devreye Girer?
+
+RAG, istek akışında **modele ulaşmadan önce ve semantik önbellekten önce** çalışır:
+
+```
+İstek → Korumalar → RAG (bağlam ekleme) → Semantik Önbellek → Yönlendirme → Model
+```
+
+Bağlamın önbellekten önce eklenmesi önemlidir: böylece semantik önbellek, zenginleştirilmiş (bağlamlı) isteği görür ve doğru yanıtı eşleştirir.
+
+## Neden Önemli?
+
+Bir LLM yalnızca eğitildiği veriyi "bilir" — şirketinize özel bir dokümanı, güncel bir mevzuatı veya müşteriye özel bir veriyi bilmez ve bilmediği şeyi uydurabilir (halüsinasyon). RAG, modele **yanıtı yazması için gereken gerçek bağlamı** verir:
+
+- Yanıtlar kendi verinize dayanır, halüsinasyon riski azalır
+- Bilgi tabanınızı güncellediğinizde model davranışı da güncellenir — yeniden eğitim gerekmez
+
+## Kapsam İzolasyonu
+
+RAG sorguları, çağıran isteğin **proje** ve **bilgi tabanı** sınırlarını aşamaz:
+
+- Bir sorgu yalnızca kendi projesine ait bilgi tabanı içeriğinden bağlam çekebilir
+- Aynı vektör veritabanı birden fazla bilgi tabanı barındırsa bile, sorgu yalnızca ilişkilendirilen bilgi tabanının parçalarını hedefler
+
+Bu iki katmanlı sınır, farklı projelerin veya farklı bilgi tabanlarının içeriğinin birbirine karışmasını engeller.
+
+:::warning Güvenli Varsayılan (Fail-Closed)
+İsteğin proje kapsamı net bir şekilde çözülemezse, RAG bağlam çekimini **tamamen atlar** — isteği filtresiz, kapsamsız bir sorguyla çalıştırmak yerine bağlamsız devam eder. Bu güvenli davranışı kapatmayın; yalnızca tek-kiracılı (tek proje) test kurulumlarında eski (fail-open) modu tercih edebilirsiniz.
+:::
+
+## Bağlantı veya Referans Hatalarında Davranış (Fail-Closed)
+
+RAG'in çalışması, bir [vektör veritabanı bağlantısına](/tr/ai-gateway/vektor-veritabani) ve bir embedding sağlayıcısına ihtiyaç duyar. Politika deploy edildikten sonra bu bağlantılardan biri kullanılamaz hale gelirse — bağlantı silinir veya deploy'dan kalkarsa, embedding sağlayıcısı kaldırılırsa, ya da politikanın atıfta bulunduğu koleksiyon/bilgi tabanı silinmişse — RAG isteği **sessizce bağlamsız geçirmez**:
+
+:::danger Fail-Closed
+Vektör veritabanı bağlantısı veya embedding sağlayıcısı kullanılamıyorsa, ya da politikanın atıfta bulunduğu koleksiyon/bilgi tabanı ortadan kalkmışsa, RAG politikası her istekte **HTTP 502 (ERR-268)** ile isteği reddeder. Bu davranış kasıtlıdır: bağlam araması başarısız olduğunda isteğin ham (zenginleştirilmemiş) haliyle modele iletilmesi, RAG'e dayanan bir proxy'de sessizce yanlış veya eksik yanıt riski taşır. Politika deploy'da kalmaya devam eder; ancak etkilenen bağlantı veya referans düzeltilene kadar bu proxy üzerinden yapılan istekler engellenir.
+:::
+
+Bu davranış özellikle bir [bilgi tabanını](/tr/ai-gateway/bilgi-tabanlari) silme senaryosunda önemlidir: silinen bilgi tabanının koleksiyonu başka bir bilgi tabanıyla paylaşılmıyorsa koleksiyon da birlikte kaldırılır; hâlâ o koleksiyona veya bilgi tabanına atıfta bulunan deploy edilmiş bir RAG politikası varsa, bu politika bağlı olduğu proxy'nin tüm isteklerini yukarıdaki şekilde engellemeye başlar. Bir bilgi tabanını silmeden önce onu kullanan politikaları güncelleyin veya kaldırın.
+
+Bu, yukarıdaki **Kapsam İzolasyonu** bölümünde anlatılan davranıştan farklıdır — orada istek bloke edilmez, sadece bağlamsız devam eder. Burada ise politika hiç çalışamaz durumda olduğu için istek doğrudan reddedilir. Bu iki senaryo, aşağıdaki **Eşleşme Bulunamadığında** alanının **İsteği Engelle** seçeneğiyle oluşan HTTP 403 (ERR-267) engellemesinden de farklıdır — o, benzerlik eşiğini geçen içerik bulunamadığında devreye giren, ayrı ve isteğe bağlı bir yapılandırma seçimidir.
+
+## Yapılandırma
+
+RAG, bir API proxy'sine eklenen **AI RAG Injection** politikasıyla etkinleştirilir:
+
+1. İlgili API proxy'sinin politika listesine **AI RAG Injection** politikasını ekleyin
+2. Kullanılacak [bilgi tabanını](/tr/ai-gateway/bilgi-tabanlari) seçin
+3. Kaydedin ve deploy edin
+
+### Yapılandırma Alanları
+
+| Alan | Açıklama | Zorunlu | Varsayılan |
+|---|---|---|---|
+| **Knowledge Base** | Seçildiğinde Vector DB Bağlantısı, Embedding Sağlayıcı ve Koleksiyon Adı alanlarını otomatik doldurur; alanlar seçim sonrası yine elle düzenlenebilir. | Hayır | — |
+| **Vector DB Bağlantısı** | Bağlam aramasının çalıştığı [vektör veritabanı](/tr/ai-gateway/vektor-veritabani) bağlantısı. | Evet | — |
+| **Embedding Sağlayıcı** | İsteğin embedding'e çevrilmesinde kullanılacak sağlayıcı. Yalnız embedding destekleyen sağlayıcı tipleri (OpenAI-uyumlu, Voyage AI) seçilebilir — Anthropic/Bedrock/Vertex bu alanda kullanılamaz. | Evet | — |
+| **Koleksiyon Adı** | Aranacak vektör koleksiyonu/index adı. Yalnızca ortam değişkeni (`${env}`) ile çözülür; istek verisiyle çözülmez, böylece bir istek başka bir koleksiyonu hedefleyemez. | Evet | — |
+| **Embedding Model** | Embedding sağlayıcısına gönderilecek model adı. Ortam değişkeni (`${env}`) destekler. | Hayır | `text-embedding-3-small` |
+| **Embedding Boyutu** | Embedding vektörünün boyutu; seçilen Vector DB bağlantısının yapılandırılmış boyutuyla eşleşmelidir. | Hayır | `1536` |
+| **Üst K Sonuç (topK)** | Getirilecek en alakalı parça (chunk) sayısının üst sınırı; en az 1 olmalıdır. | Hayır | `4` |
+| **Benzerlik Eşiği** | Bir parçanın bağlama dahil edilmesi için gereken minimum benzerlik skoru (cosine benzerliği). | Hayır | `0.7` |
+| **Maks. Context Karakteri** | Enjekte edilecek toplam bağlam metninin karakter sınırı (token bütçesi koruması); en yüksek skorlu parçalar önce eklenir, sınıra ulaşılınca kesilir. | Hayır | `4096` |
+| **Eşleşme Bulunamadığında** | Benzerlik eşiğini geçen parça bulunamazsa izlenecek davranış: **Devam Et** isteği bağlamsız iletir; **İsteği Engelle** isteği HTTP 403 (ERR-267) ile reddeder. | Hayır | `Devam Et (context olmadan)` |
+| **Enjeksiyon Modu** | Bulunan bağlamın isteğe nasıl ekleneceği: kullanıcı mesajının başına, sistem mesajının başına, mevcut sistem mesajından hemen sonra veya aşağıdaki şablona doldurularak. | Hayır | `Kullanıcı Mesajına Ekle (Başa)` |
+| **Enjeksiyon Şablonu** | Enjeksiyon Modu **Şablon ile Enjekte Et** seçiliyken kullanılan metin; `{{context}}` ve `{{prompt}}` yer tutucularını içerir (aşağıya bakın). Hem ortam değişkeni (`${env}`) hem [bağlam değişkeni](/tr/concepts/temel-kavramlar/dinamik-degiskenler) (`#{...}`) destekler. | Hayır (yalnızca Şablon modunda kullanılır) | aşağıya bakın |
+| **Hedef Değişken** | Enjekte edilmiş (bağlamla zenginleştirilmiş) isteği isteğe bağlı olarak yazacağı bir değişken; boş bırakılırsa değer yalnızca istek gövdesine yazılır. | Hayır | — |
+| **Proje Kimliği Çözülemezse RAG'i Atla (fail-closed)** | Yukarıdaki **Kapsam İzolasyonu** bölümünde açıklanan güvenli varsayılanı yönetir. | Hayır | Açık |
+
+Varsayılan Enjeksiyon Şablonu:
+
+```
+<CONTEXT>
+{{context}}
+</CONTEXT>
+
+{{prompt}}
+```
+
+:::warning Şablon önce çözülür, sonra doldurulur
+`${...}` / `#{...}` değişkenleri şablonda çözüldükten SONRA `{{context}}` ve `{{prompt}}` yer tutucuları doldurulur — asla tersi değil. Bu sıralama kasıtlıdır: sıra tersine çevrilseydi, getirilen bağlam metni veya kullanıcının isteği içine gizlenmiş bir `#{...}` ifadesi şablon motoru tarafından değerlendirilip üçüncü taraf model sağlayıcısına giden isteğe karışabilirdi — şablon enjeksiyonu (SSTI) ve olası sır sızıntısı riski. Değişken çözümleme yalnızca yönetici tarafından yazılan şablon metniyle sınırlıdır; getirilen bağlam veya kullanıcı isteği hiçbir zaman değişken olarak yeniden değerlendirilmez.
+:::
+
+### Enjeksiyon Modu ve Sağlayıcı Prompt Cache'i
+
+Bazı LLM sağlayıcıları (statik) sistem mesajının başındaki değişmeyen kısmı önbelleğe alarak (prompt-prefix cache) tekrarlayan isteklerde maliyet ve gecikmeyi düşürür. Bu önbellek, mesaj listesinin **en baştaki** baytlarına göre anahtarlanır.
+
+:::warning Sistem Mesajına Ekle (Başa), Sağlayıcı Prompt Cache'ini Etkisizleştirir
+Bu mod, bulunan bağlamı tüm mesajların en başına yeni bir sistem mesajı olarak ekler — varsa statik sistem prompt'unun bile önüne geçer. Bağlam her istekte değiştiği için bu, sağlayıcının prompt cache'ini **her istekte** geçersiz kılar; statik sistem prompt'unun kendisi hiç değişmese bile. Cache önemliyse **Kullanıcı Mesajına Ekle (Başa)** veya **Sistem Mesajından Sonra Ekle (cache-dostu)** modlarını kullanın — ikisi de statik öneki olduğu yerde bırakır.
+:::
+
+**Sistem Mesajından Sonra Ekle (cache-dostu)** modu, bağlamı mevcut son sistem mesajından *sonra* yeni bir sistem mesajı olarak ekler; böylece statik önek dokunulmadan kalır ve sağlayıcının prompt cache'i çalışmaya devam eder. **Kullanıcı Mesajına Ekle (Başa)** ve **Şablon ile Enjekte Et** modları zaten her zaman son kullanıcı mesajını değiştirdiğinden (statik önekin arkasında kaldığından) bu sorunu hiç yaşamaz.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Bilgi Tabanları" icon="book-open" href="/tr/ai-gateway/bilgi-tabanlari">
+    RAG'in kaynağı olan dokümanları yönetin
+  </Card>
+  <Card title="Vektör Veritabanı" icon="database" href="/tr/ai-gateway/vektor-veritabani">
+    Bağlam aramasının çalıştığı veritabanını yapılandırın
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    RAG'den önce çalışan koruma katmanlarını inceleyin
+  </Card>
+  <Card title="Semantik Önbellek" icon="brain" href="/tr/ai-gateway/semantik-onbellek">
+    RAG'den sonra çalışan önbellekleme katmanını öğrenin
+  </Card>
+</CardGroup>

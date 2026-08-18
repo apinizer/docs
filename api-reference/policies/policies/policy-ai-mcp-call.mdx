@@ -1,0 +1,542 @@
+---
+title: "MCP Call Policy"
+description: "MCP Call policies let an AI proxy reach an external MCP server to run tools. The backend server is always defined inline on the policy itself, so a policy carries everything it needs to dispatch a tool call — endpoint, transport, authentication, mTLS and capability-cache settings."
+---
+
+## General Information
+
+### Policy Types
+
+Two variants share the same inline server definition and differ only in who chooses the tool.
+
+```plaintext
+ai-mcp-call-llm
+ai-mcp-call-fixed
+```
+
+| Type | Who picks the tool |
+|------|--------------------|
+| ai-mcp-call-llm | The model picks it from its own tool-use response. The policy may narrow the choice with an allow-list. |
+| ai-mcp-call-fixed | You pin one tool by name and supply an argument template. |
+
+:::note Renamed in 2026.04
+The wire values were renamed so they state who picks the target. The former values `ai-mcp-tool-call` and `ai-mcp-tool-invoke` are still accepted on import, so packages exported before the rename keep working.
+:::
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## The Inline MCP Server
+
+`mcpServer` is the **only** way to define the backend MCP server, and a non-blank `endpoint` is required. There is no reference to a separate, shared connection object: an MCP server is not a standalone resource, and the endpoints that used to manage one are retired. A policy that omits `mcpServer`, or supplies one with a blank `endpoint`, is rejected with `400`.
+
+:::info Why inline
+Because the definition travels with the policy, exporting or importing the policy carries its server with it, and two policies pointing at the same URL stay independent — rotating a credential on one never disturbs the other. See [MCP Gateway](/en/ai-gateway/mcp-gateway) for the full picture.
+:::
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| endpoint | string | Yes | Base URL of the MCP server. Must be non-blank. |
+| transport | string | No | `HTTP_SSE` (default) or `STDIO`. |
+| mcpProtocolVersion | string | No | Protocol version advertised on initialize. Left empty, the server's own version is accepted. |
+| allowPrivateNetworkEgress | boolean | No | Permits the endpoint to resolve to a private address. Off by default; the same SSRF protection applies as for Passthrough routing. |
+| authScheme | string | No | `NONE` (default), `BEARER`, `OAUTH` or `MTLS`. |
+| bearerToken | string | Conditional | Required for `BEARER`. Write-only, see [Secret fields](#secret-fields). |
+| credentialRef | string | No | Name of a stored credential to use instead of an inline token. |
+| tokenEndpoint | string | Conditional | Required for `OAUTH`. |
+| clientId | string | Conditional | Required for `OAUTH`. |
+| clientSecret | string | Conditional | Required for `OAUTH`. Write-only, see [Secret fields](#secret-fields). |
+| scope | string | No | Space-separated scopes requested for `OAUTH`. |
+| mTLSSettings | object | Conditional | Client certificate settings, required for `MTLS`. |
+| capabilityCacheEnabled | boolean | No | Caches the discovered tool catalog. Enabled by default. |
+| capabilityCacheTtlSeconds | integer | No | Catalog cache lifetime in seconds. Default `300`. |
+| driftPolicy | string | No | `WARN_ONLY` or `FAIL_CLOSED`. Decides what happens when the server's tool catalog changes after discovery. |
+| credentialMappingRef | string | No | Name of a credential mapping used to forward the caller's own identity to the server. |
+
+### Secret fields
+
+`bearerToken` and `clientSecret` follow the platform's standard secret handling.
+
+- On a `GET` or list response they are **always** masked as `null`. Two read-only booleans report whether a value is stored: `mcpServerBearerTokenSet` and `mcpServerClientSecretSet`. Both are ignored if you send them on a write.
+- On `POST` or `PUT`, **omit the field entirely** to keep the stored value. Send a plaintext value only when the secret genuinely changes. Sending `null` or an empty string clears it.
+
+### Server-managed fields
+
+The discovered catalog, health state and drift state belong to the platform. Any value submitted for them is discarded on write and the persisted state is kept:
+
+```plaintext
+discoveredTools      toolsParsedAt
+healthStatus         lastHealthCheckAt      healthMessage
+pinnedCatalogHash    driftDetected          driftMessage
+```
+
+`driftPolicy` is **not** in this group — it is your setting and is honoured as sent.
+
+To inspect a server's catalog without persisting anything, use [Discover MCP Policy Tools](/api-reference/policies/crud/discover-mcp-policy-tools).
+
+### Allow-list behaviour
+
+Dispatch is **fail-closed**: a tool runs only when something explicitly vetted it. The discovered catalog and `allowedToolNames` are combined as follows.
+
+| Discovered catalog | allowedToolNames | Result |
+|--------------------|------------------|--------|
+| Empty or unavailable | Empty | **Denied.** Nothing has vetted the name, so no call is dispatched. |
+| Non-empty | Empty | Allowed if the tool is in the discovered catalog. Discovery alone governs. |
+| Non-empty | Non-empty | Allowed only if the tool is in **both**. The policy list narrows the catalog and can never widen it. |
+| Empty or unavailable | Non-empty | Allowed if the tool is in `allowedToolNames`. A server that cannot be discovered is still usable through an explicit list. |
+
+:::warning
+An empty `allowedToolNames` is not a blanket "allow everything" — it defers to discovery. If discovery has never succeeded, every call is denied.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-mcp-call-llm",
+            "name": "crm-tools",
+            "description": "CRM tool calls for the support assistant",
+            "active": true,
+            "enabled": true,
+            "mcpServer": {
+              "endpoint": "https://mcp.internal.example.com/sse",
+              "transport": "HTTP_SSE",
+              "authScheme": "BEARER",
+              "bearerToken": null,
+              "capabilityCacheEnabled": true,
+              "capabilityCacheTtlSeconds": 300,
+              "driftPolicy": "WARN_ONLY"
+            },
+            "mcpServerBearerTokenSet": true,
+            "mcpServerClientSecretSet": false,
+            "toolCallTimeoutMs": 30000,
+            "parallelToolCalls": true,
+            "allowedToolNames": ["search_customer", "create_ticket"]
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+:::note Masked secrets in a read
+`bearerToken` comes back as `null` while `mcpServerBearerTokenSet` reports `true` — the secret is stored, it is simply never returned.
+:::
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Model Picks the Tool
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-mcp-call-llm",
+    "description": "CRM tool calls for the support assistant",
+    "active": true,
+    "enabled": true,
+    "mcpServer": {
+      "endpoint": "https://mcp.internal.example.com/sse",
+      "transport": "HTTP_SSE",
+      "authScheme": "BEARER",
+      "bearerToken": "PLAINTEXT_TOKEN",
+      "allowPrivateNetworkEgress": false,
+      "capabilityCacheEnabled": true,
+      "capabilityCacheTtlSeconds": 300,
+      "driftPolicy": "WARN_ONLY"
+    },
+    "toolCallTimeoutMs": 30000,
+    "parallelToolCalls": true,
+    "allowedToolNames": ["search_customer", "create_ticket"],
+    "argumentConstraints": [
+      {
+        "argumentPath": "customer.email",
+        "ruleType": "REGEX",
+        "value": "^[^@]+@example\\.com$"
+      }
+    ]
+  }
+}
+```
+
+##### Full JSON Body Example — Pinned Tool
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-mcp-call-fixed",
+    "description": "Always enrich the request with the customer record",
+    "active": true,
+    "enabled": true,
+    "mcpServer": {
+      "endpoint": "https://mcp.internal.example.com/sse",
+      "transport": "HTTP_SSE",
+      "authScheme": "OAUTH",
+      "tokenEndpoint": "https://idp.example.com/oauth2/token",
+      "clientId": "apinizer-gateway",
+      "clientSecret": "PLAINTEXT_SECRET",
+      "scope": "mcp.read mcp.write"
+    },
+    "targetToolName": "search_customer",
+    "argumentsTemplate": "{\"email\": \"${request.header.x-customer-email}\"}",
+    "waitMode": "SYNC_TO_VARIABLE",
+    "outputVariableName": "customerRecord",
+    "callTimeoutMs": 30000
+  }
+}
+```
+
+#### Common Body Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | `ai-mcp-call-llm` or `ai-mcp-call-fixed`. |
+| description | string | No | Free-text description. |
+| active | boolean | No | Whether the policy takes part in the pipeline. |
+| enabled | boolean | No | Whether the tool call itself is enabled. Default `true`. |
+| mcpServer | object | Yes | Inline server definition. See [The Inline MCP Server](#the-inline-mcp-server). |
+| argumentConstraints | array | No | Validation rules applied to the resolved tool-call arguments before dispatch. Each entry carries an `argumentPath` in dot notation, a `ruleType` of `REGEX`, `MAX_LENGTH`, `ENUM` or `REQUIRED`, and its `value`. Empty means no validation. |
+
+#### Fields for `ai-mcp-call-llm`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| toolCallTimeoutMs | integer | No | Per-tool-call HTTP timeout in milliseconds. Default `30000`. |
+| parallelToolCalls | boolean | No | Dispatches several tool calls at once. Default `true`. |
+| allowedToolNames | array | No | Allow-list narrowing what the model may call, as a subset of the discovered catalog. See [Allow-list behaviour](#allow-list-behaviour) — an empty list is not the same as "allow everything". |
+
+#### Fields for `ai-mcp-call-fixed`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| targetToolName | string | Yes | Name of the single tool to invoke. Must be non-blank. |
+| argumentsTemplate | string | No | JSON template for the tool arguments. Variables are resolved at request time. |
+| waitMode | string | No | `FIRE_AND_FORGET` (default) returns without waiting; `SYNC_TO_VARIABLE` waits and stores the result. |
+| outputVariableName | string | No | Name of the variable that receives the result. Only meaningful under `SYNC_TO_VARIABLE`; it is not enforced, so a `SYNC_TO_VARIABLE` policy without it is accepted and simply stores nothing. |
+| callTimeoutMs | integer | No | Call timeout in milliseconds. Default `30000`. |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; missing `mcpServer`; `mcpServer.endpoint` blank; `targetToolName` blank on `ai-mcp-call-fixed`; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/crm-tools/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-mcp-call-llm",
+      "description": "CRM tool calls",
+      "active": true,
+      "mcpServer": {
+        "endpoint": "https://mcp.internal.example.com/sse",
+        "transport": "HTTP_SSE",
+        "authScheme": "BEARER",
+        "bearerToken": "PLAINTEXT_TOKEN"
+      },
+      "allowedToolNames": ["search_customer"]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+:::warning Keeping a stored secret
+Omit `bearerToken` and `clientSecret` to preserve what is already stored. A read response masks them as `null`, so echoing a response back unchanged would clear them. Check `mcpServerBearerTokenSet` and `mcpServerClientSecretSet` to see whether a value exists.
+:::
+
+##### Full JSON Body Example — Widening the Allow-List
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-mcp-call-llm",
+    "description": "CRM tool calls for the support assistant",
+    "active": true,
+    "mcpServer": {
+      "endpoint": "https://mcp.internal.example.com/sse",
+      "transport": "HTTP_SSE",
+      "authScheme": "BEARER",
+      "capabilityCacheTtlSeconds": 600,
+      "driftPolicy": "FAIL_CLOSED"
+    },
+    "allowedToolNames": ["search_customer", "create_ticket", "close_ticket"]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/crm-tools/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-mcp-call-llm",
+      "active": true,
+      "mcpServer": {
+        "endpoint": "https://mcp.internal.example.com/sse",
+        "authScheme": "BEARER",
+        "driftPolicy": "FAIL_CLOSED"
+      },
+      "allowedToolNames": ["search_customer", "create_ticket", "close_ticket"]
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/crm-tools/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **The inline server is the only target.** There is no field that points at a shared, standalone MCP server, and the endpoints that used to manage one are retired. A configuration created before this change is migrated automatically: the server it referenced is copied into the policy on upgrade.
+- **Shared servers become independent copies.** If several policies referenced the same server before the migration, each now owns its own copy, credential included. Rotating that credential is a per-policy operation.
+- **An empty allow-list defers to discovery, it does not open the door.** With no discovered catalog and no `allowedToolNames`, every call is denied. See [Allow-list behaviour](#allow-list-behaviour).
+- **Egress to private addresses is refused by default.** Set `allowPrivateNetworkEgress` deliberately, and only for a server you control.
+- **A drift policy of `FAIL_CLOSED` stops calls when the catalog changes.** Prefer it for regulated traffic; prefer `WARN_ONLY` while a server is still evolving.
+
+## Related Documentation
+
+- [MCP Gateway](/en/ai-gateway/mcp-gateway)
+- [Discover MCP Policy Tools](/api-reference/policies/crud/discover-mcp-policy-tools)
+- [Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing)
+- [Create MCP API Proxy](/api-reference/api-proxies/crud/create-mcp-api-proxy)
+- [A2A Call Policy](/api-reference/policies/policies/policy-ai-a2a-call)

@@ -1,0 +1,158 @@
+---
+title: "Açık Telemetri"
+description: "Apinizer'ın ürün-native OpenTelemetry (OTLP) dışa aktarımını yapılandırın — javaagent kurmadan tüm trafik için W3C trace yayılımı ve retrospektif span ağacı, AI Gateway için GenAI semantik-kural katmanı."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+## Genel Bakış
+
+Apinizer, [OpenTelemetry](https://opentelemetry.io/) (OTLP) trace ve metriklerini doğrudan üründen dışa aktarır — javaagent yok, sidecar yok. Her istek (REST/SOAP ve sunucu tarafında WebSocket/gRPC) W3C `traceparent` yayılımı taşır ve retrospektif bir span ağacı üretir; AI Gateway trafiği ayrıca bir [GenAI semantik-kural kümesi](https://opentelemetry.io/docs/specs/semconv/gen-ai/) öznitelik ve metrik katmanı taşır — böylece token kullanımı, maliyet ve gecikme, OpenTelemetry ekosisteminin geri kalanının kullandığı aynı alan adlarıyla APM aracınızda görünür.
+
+Bu sayfa **AI'a özgü katmanı** kapsar — AI Gateway trafiğinin native dışa aktarımın üstüne eklediği GenAI öznitelikleri, metrikler, içerik yakalama ve dashboard. Native OTLP dışa aktarımın kendisi platform-geneldir (her proxy tipini kapsar); kurulum adımları, genel-trafik span/öznitelik referansı ve javaagent'e-karşı-native karşılaştırması için bkz. **[OpenTelemetry Dışa Aktarımı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi)**.
+
+:::note Semantik kurallar belirli bir registry anlık görüntüsüne pinlidir
+Aşağıdaki öznitelik ve metrik adları OpenTelemetry semantic-conventions registry'sinin **2026-08** anlık görüntüsünü izler; GenAI için bu registry hâlâ **Development** statüsündedir — adlar OpenTelemetry Stable'a ulaşmadan önce değişebilir. Apinizer registry'yi ileriye doğru takip edecektir; gelecekteki bir yükseltme bir özniteliği yeniden adlandırırsa bu, release notes'ta belirtilir.
+:::
+
+## Ne Dışa Aktarılır?
+
+Native dışa aktarımın iki katmanı vardır. İlki dışa aktarımı açtığınız anda daima açıktır; ikincisi o istek için [Live Trace](/tr/ai-gateway/izleme-ve-tekrar-oynatma)'in aktif olmasını gerektirir çünkü aynı anlık trace-toplama altyapısını yeniden kullanır. İçerik yakalama, her iki katmanın da üzerinde ayrı, opt-in bir kapıdır.
+
+| Katman | Ne alırsınız | Gereksinim |
+| --- | --- | --- |
+| **Her zaman açık** | İstek başına bir SERVER span, backend denemesi başına bir CLIENT span (retry/failover adımları dahil), istek/yanıt pipeline span'leri ve — AI trafiği için — GenAI inference span'i + deneme-başına failover adımları + kullanım/maliyet/gecikme öznitelik ve metrikleri | Export Modu = `NATIVE` |
+| **Live Trace'e bağlı** | Politika/koruma çalıştırma span'leri, istek span'inin INTERNAL çocukları olarak (semantik önbellek, korumalar, RAG adımları vb.) | Export Modu = `NATIVE` **ve** o istek için Live Trace aktif |
+| **İçerik yakalama (opt-in)** | Prompt/yanıt metni, span özniteliği olarak | Export Modu = `NATIVE` **ve** içerik-yakalama ayarı açıkça etkinleştirilmiş |
+
+İki kapılı katmanı bir kısıt olarak değil, **bilinçli olarak açılan özellikler** olarak düşünün — her-zaman-açık katman, dışa aktarımı açmanın ötesinde hiçbir yapılandırma gerektirmeden tam RED (rate/error/duration) görünürlüğü ve maliyet/gecikme muhasebesi verir; Live Trace ve içerik yakalama, aktif olarak hata ayıkladığınız istekler için giderek daha fazla ayrıntı ekler.
+
+## Öznitelik Referansı
+
+### GenAI Standart Öznitelikleri (`gen_ai.*`)
+
+Kök AI inference span'inde (kind `CLIENT`, `{operation} {model}` adıyla) ayarlanır.
+
+| Öznitelik | Anlamı |
+| --- | --- |
+| `gen_ai.operation.name` | `chat`, `embeddings`, `generate_content`, `execute_tool`, `invoke_agent` |
+| `gen_ai.provider.name` | Bilinen sağlayıcı adı (aşağıdaki [sağlayıcı adı eşlemesi](#sağlayıcı-adı-eşlemesi)ne bakın) |
+| `gen_ai.request.model` | **İstenen** model (load-balancer hedefi) |
+| `gen_ai.response.model` | İsteği fiilen **karşılayan** model — failover'da istenen modelden farklı olabilir |
+| `gen_ai.usage.input_tokens` / `gen_ai.usage.output_tokens` | Token sayıları |
+| `gen_ai.response.finish_reasons` | Bitiş nedeni, tek elemanlı bir dizi olarak |
+| `gen_ai.input.messages` / `gen_ai.output.messages` | Prompt/yanıt metni — **yalnızca içerik yakalama etkinken**, streaming yanıtlarda hiçbir zaman ([Bilinen Sınırlar](#bilinen-sınırlar)a bakın) |
+
+#### Sağlayıcı Adı Eşlemesi
+
+`gen_ai.provider.name`, Apinizer'ın iç sağlayıcı kodunu, karşılığı varsa OTel'in bilinen değerine normalize eder; registry'de karşılığı olmayan sağlayıcılar değiştirilmeden geçer — böylece gelecekteki bir sağlayıcı kimliğini asla sessizce kaybetmez.
+
+| Apinizer sağlayıcısı | `gen_ai.provider.name` |
+| --- | --- |
+| `openai`, `anthropic`, `cohere`, `deepseek`, `groq` | değişmez (bilinen değerle aynı) |
+| `azure-openai` | `azure.ai.openai` |
+| `bedrock` | `aws.bedrock` |
+| `vertex` | `gcp.vertex_ai` |
+| `mistral` | `mistral_ai` |
+| diğerleri (self-hosted, custom, moonshot, zhipu, qwen-dashscope, voyage, …) | olduğu gibi geçer |
+
+:::warning Prometheus ve OTLP metrik ailelerinde aynı değeri karıştırmayın
+Prometheus `apinizer_ai_*` ailesi ([Metrikler](#metrikler)e bakın) isteği **ham** sağlayıcı koduyla (`bedrock`) etiketler; OTLP ailesi **normalize edilmiş** adı (`aws.bedrock`) kullanır. Bir ailenin etiket değerlerine göre kurulan bir dashboard değişkeni diğer aileyle eşleşmez — işlenmiş bir örnek için indirilebilir [Grafana dashboard](#grafana-dashboardu)una bakın.
+:::
+
+### Apinizer Vendor Öznitelikleri (`apinizer.ai.*`)
+
+Vendor'a özgü öznitelikler, OpenTelemetry'nin bilinen-vendor-namespace kuralına uygun olarak `gen_ai.*` altına gömülü değil, Apinizer'ın kendi namespace'inde durur.
+
+| Öznitelik | Anlamı |
+| --- | --- |
+| `apinizer.ai.usage.cached_tokens` | Sağlayıcı taraflı prompt-cache token'ları |
+| `apinizer.ai.cost.total_micro_usd` / `.input_micro_usd` / `.output_micro_usd` / `.cached_micro_usd` | Maliyet kırılımı, mikro-USD cinsinden |
+| `apinizer.ai.latency.ttft_ms` / `.tpot_ms` / `.total_ms` | İlk-token-süresi, çıktı-token-başı-süre, toplam gecikme |
+| `apinizer.ai.latency.guardrail_ms` / `.inference_ms` / `.overhead_ms` | Gecikme aşama kırılımı |
+| `apinizer.ai.streaming` | Yanıtın streaming olup olmadığı |
+| `apinizer.ai.cache.hit` | Bu istek için semantik-önbellek isabeti ([dashboard'un önbellek notu](#grafana-dashboardu)na bakın — bu yalnız span'de vardır, karşılık gelen bir metrik henüz yoktur) |
+| `apinizer.ai.failover.from` | Yalnız failover gerçekleştiğinde vardır — önce denenen model/sağlayıcı |
+| `apinizer.ai.agentic.turns` | Birden fazlaysa agentic tool-call tur sayısı |
+| `apinizer.ai.trace_id` | AI Trace kaydına çapraz referans ([Korelasyon](#korelasyon)a bakın) |
+| `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | Aşağıdaki her span tipiyle paylaşılan kimlik alanları |
+
+### Genel Trafik Öznitelikleri
+
+SERVER ve deneme-başına CLIENT span'leri ayrıca her proxy tipinin paylaştığı genel HTTP/routing özniteliklerini (metod, durum, `url.path`, faz-başına ağ zamanlaması vb.) taşır — bunlar platform referansında tek yerde belgelenmiştir: [OpenTelemetry Dışa Aktarımı: Öznitelik Referansı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi#öznitelik-referansı).
+
+Header değerleri, istek/yanıt gövdeleri, query string'ler ve kimlik bilgileri yukarıdaki açık içerik-yakalama yolu dışında span'lere **asla** konmaz — span adları, kardinaliteyi sınırlı tutmak için API proxy'nin şablon yolunu kullanır, ham URI'yi değil.
+
+## Metrikler
+
+| Metrik | Tip | Birim | Aile |
+| --- | --- | --- | --- |
+| `gen_ai.client.token.usage` | Histogram | `{token}` | OTLP (yalnız native export) |
+| `gen_ai.client.operation.duration` | Histogram | `s` | OTLP |
+| `apinizer.ai.client.cost` | Counter | `{microusd}` | OTLP |
+| `apinizer.ai.client.ttft` / `apinizer.ai.client.tpot` | Histogram | `s` (yalnız streaming istekler) | OTLP |
+
+Bunlar, gateway'in Prometheus endpoint'indeki mevcut `apinizer_ai_*` sayaç/zamanlayıcılarından (sağlayıcı/model/proje/durum etiketli) bilinçli olarak **ayrıktır** — o aile bunlardan hiçbirinden etkilenmez ve native OTLP export açık olsun olmasın çalışmaya devam eder. İki ailenin var olma nedeni farklıdır: Prometheus her zaman açık ve sıfır-yapılandırmadır; OTLP histogramları gerçek bucket'lanmış dağılımlar taşır (gerçek p50/p95/p99) — Prometheus zamanlayıcıları bunu sağlamaz. Stack'inizin zaten kazıdığı hangisiyse onu kullanın, ya da ikisini birden — her ikisi üzerine kurulu panelleri aşağıdaki [Grafana dashboard](#grafana-dashboardu)unda görün.
+
+## Yapılandırma
+
+Native dışa aktarımı açmak platform-genel bir kurulumdur — bir OTLP Collector konnektörü oluşturun, ortamın dışa aktarım modunu `NATIVE` yapın ve örneklemeyi ayarlayın. Bu adımlar tek yerde [OpenTelemetry Dışa Aktarımı: Yapılandırma](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi#yapılandırma) altında anlatılmıştır. Bir ayar AI trafiğine özgüdür:
+
+<Steps>
+  <Step title="İçerik yakalamaya karar verin">
+    **AI Prompt/Yanıt İçeriğini Yakala** varsayılan olarak kapalıdır. Açmak, prompt/yanıt metnini (maskeleme yapılandırılmışsa zaten PII-maskelenmiş — içerik yakalama yalnızca client/backend'in fiilen gördüğü aynı post-mask gövdeyi okur) **İçerik Yakalama Azami Karakter**'e tabi olarak OTLP collector'ınıza span özniteliği olarak gönderir. Bunu yalnızca collector'ın kendisi uyumluluk sınırınızın içindeyse etkinleştirin — içerik yakalamanın *kapsamadığı* şeyler için [Bilinen Sınırlar](#bilinen-sınırlar)a bakın.
+  </Step>
+</Steps>
+
+## Korelasyon
+
+`apinizer.correlation_id` her span tipinde damgalanır ve API trafik loglarında zaten gördüğünüz `APINIZER-CORRELATION-ID` ile eşleşir — trafik kaydını, trace'i ve (AI trafiği için) AI Trace kaydını birbirine bağlayan tek kimliktir.
+
+Özellikle AI Gateway trafiği için korelasyon çift yönlüdür: her [AI Trace](/tr/ai-gateway/izleme-ve-tekrar-oynatma) kaydı ürettiği OTel trace ID'sini ve kök span ID'sini saklar, kök span da AI Trace kaydına geri işaret eden `apinizer.ai.trace_id`'yi taşır. Her iki taraftan da diğerine atlayabilirsiniz — APM aracınızda başlayıp AI Trace'te tam istek/yanıt detayını açabilir, ya da AI Trace'te başlayıp OTLP backend'inizde dağıtık trace'i açabilirsiniz.
+
+## Grafana Dashboard'u
+
+Prometheus `apinizer_ai_*` ailesini OTLP `gen_ai.*`/`apinizer.ai.client.*` histogramlarıyla birleştiren, içe aktarmaya hazır bir Grafana dashboard'u burada:
+
+<Card title="apinizer-ai-gateway-grafana-dashboard.json" icon="download" href="/files/apinizer-ai-gateway-grafana-dashboard.json">
+  Dashboard JSON'unu indirin — Overview, Tokens, Cost, Streaming, Guardrail, Cache ve Reliability satırları
+</Card>
+
+<AccordionGroup>
+  <Accordion title="Nasıl içe aktarılır">
+    Grafana'da: **Dashboards → New → Import**, indirdiğiniz JSON'u yükleyin (ya da içeriğini yapıştırın), sonra istediği iki datasource değişkenini eşleyin — biri mevcut gateway Prometheus scrape hedefinize, diğeri OTLP collector'ınızın `gen_ai.*` metriklerini yazdığı Prometheus-uyumlu depoya (örn. Grafana Mimir, ya da bir collector'ın remote-write exporter'ının arkasındaki Prometheus) işaret eder. Bu bir Tempo/trace datasource'u DEĞİLDİR — bunlar metrik panelleridir.
+  </Accordion>
+  <Accordion title="Cache ve Reliability satırları gerçekte neyi gösterir">
+    Dashboard'daki iki satır, arkasında sorgulanacak Prometheus ya da OTLP metriği bulunmayan, şu an yalnız span/trace seviyesinde var olan sinyalleri işaret eden bir metin paneli içerir: semantik-önbellek isabet oranı ve önlenen maliyet (`apinizer.ai.cache.hit` bir span özniteliğidir; önbellek-verimliliği görünümü için ürün-içi Raporlar'a bakın), ve failover'ın kimden-kime'si ile VectorDB-skip görünürlüğü (`apinizer.ai.failover.from` ve politika span'leri, ikisi de trace-seviyesinde). Dashboard, arkasında veri olmayan bir panel göndermek yerine bu konuda bilinçli olarak dürüsttür — bunları AI Trace zaman çizelgesi ya da öznitelik üzerinde bir TraceQL sorgusuyla inceleyin.
+  </Accordion>
+</AccordionGroup>
+
+## Bilinen Sınırlar
+
+- **Streaming yanıtlar hiçbir zaman içerik-yakalanmaz.** Streaming çıktı, tek bir "yanıt gövdesi" olmadan parça parça gelir — içerik yakalama etkin olsa bile streaming isteklerde `gen_ai.output.messages` hiç ayarlanmaz.
+- **Politika/koruma span'leri Live Trace gerektirir.** Semantik önbellek, korumalar ve RAG adımları için INTERNAL çocuk span'ler yalnız o istek için Live Trace aktifken vardır — her-zaman-açık dışa aktarım tek başına bunları üretmez.
+- **WebSocket/gRPC sunucu-tarafı span alır, W3C yayılımı almaz.** WS/gRPC trafiği için diğer her istek gibi bir SERVER span üretilir, ama gelen `traceparent`'ın çıkarılması ve backend'e yayılması şu an yalnız HTTP/SOAP'tadır; bir WS/gRPC isteği çağıranın trace'ini devam ettirmek yerine daima yeni bir trace başlatır.
+- **GenAI semantik kuralları belirli bir registry anlık görüntüsüne (2026-08) pinlidir**, ki bu üst-akışta hâlâ Development statüsündedir — registry olgunlaştıkça gelecekteki bir Apinizer sürümünde olası öznitelik yeniden-adlandırmaları beklenebilir.
+- **Prometheus ve OTLP metrik aileleri farklı sağlayıcı-adı yazımı kullanır** — bkz. [Sağlayıcı Adı Eşlemesi](#sağlayıcı-adı-eşlemesi).
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="OpenTelemetry Dışa Aktarımı" icon="radio" href="/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi">
+    Platform-genel native dışa aktarım — kurulum, genel-trafik span'leri ve javaagent'e karşı native
+  </Card>
+  <Card title="İzleme ve Tekrar Oynatma" icon="route" href="/tr/ai-gateway/izleme-ve-tekrar-oynatma">
+    Trace grubunun (DAG) ve Zaman Çizelgesi Görünümü'nün UI'da nasıl çalıştığını görün
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    Live Trace altında bir politika span'i olarak neyin göründüğünü anlayın
+  </Card>
+  <Card title="Raporlar ve Analitik" icon="chart-bar" href="/tr/ai-gateway/raporlar">
+    Harici bir APM aracı gerektirmeyen maliyet, önbellek-verimliliği ve koruma raporları
+  </Card>
+  <Card title="Apinizer Gateway OpenTelemetry Entegrasyonu" icon="book-open" href="/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum">
+    JVM-geneli auto-instrumentation gerekiyorsa javaagent-tabanlı tam-stack yol
+  </Card>
+</CardGroup>

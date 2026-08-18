@@ -120,6 +120,22 @@ import {Accordion} from '@site/src/components/Accordion';
       <Card title="Connection Monitoring" icon="chart-line">
         Monitoring connection health, pool status, and performance metrics.
       </Card>
+
+      <Card title="Per-Host Connection Pool" icon="layer-group">
+        Connection pool size can be tuned per connection, separately for a single host and for the pool as a whole.
+      </Card>
+
+      <Card title="Trust Store Selection" icon="shield-halved">
+        A trust store and, if mutual TLS is required, a key store can be assigned to each connection for server certificate verification.
+      </Card>
+
+      <Card title="Event Batching and Compression" icon="file-zipper">
+        Multiple events can be combined into a single request and optionally gzip-compressed instead of sending one HTTP call per event.
+      </Card>
+
+      <Card title="Splunk HEC Mode" icon="send">
+        Requests can be wrapped in the Splunk HTTP Event Collector envelope, with optional acknowledgment tracking for guaranteed delivery.
+      </Card>
     </CardGroup>
   </Accordion>
 
@@ -182,24 +198,29 @@ import {Accordion} from '@site/src/components/Accordion';
 
 <CardGroup cols={2}>
   <Card title="Connection Timeout" icon="clock">
-    **Description:** Wait time for TCP connection establishment  
+    **Description:** Wait time for TCP connection establishment (`connectTimeoutSeconds`). Falls back to the single **Timeout** field above when left empty.  
     **Default:** 2000  
     **Min:** 1000 | **Max:** 60000  
     **Unit:** milliseconds
   </Card>
   
   <Card title="Request Timeout" icon="hourglass">
-    **Description:** Total response time of HTTP request  
+    **Description:** Total response wait time of the HTTP request (`responseTimeoutSeconds`). Falls back to the single **Timeout** field above when left empty.  
     **Default:** 2000  
     **Min:** 1000 | **Max:** 60000  
     **Unit:** milliseconds
   </Card>
   
-  <Card title="Pool Size" icon="layer-group">
-    **Description:** Maximum number of connections in Connection pool  
-    **Default:** 0  
-    **Min:** 0 | **Max:** 0  
-    **Unit:** count
+  <Card title="Connections Per Host" icon="layer-group">
+    **Description:** Maximum concurrent connections the pool keeps open to a single host  
+    **Default:** 24  
+    **Rule:** must be at least 1
+  </Card>
+  
+  <Card title="Total Pool Connections" icon="database">
+    **Description:** Maximum concurrent connections the pool keeps open across all hosts  
+    **Default:** 48  
+    **Rule:** must be at least Connections Per Host
   </Card>
   
   <Card title="Webhook Retry Delay" icon="repeat">
@@ -208,6 +229,12 @@ import {Accordion} from '@site/src/components/Accordion';
     **Unit:** seconds
   </Card>
 </CardGroup>
+
+:::note
+
+The pool size fields were already used internally with fixed values; they are now exposed per connection instead of being hardcoded. Existing connections keep the same default pool sizing behavior.
+
+:::
 
 ## Usage Scenarios
 
@@ -437,6 +464,196 @@ In this step, users can export existing connections for backup, transfer to diff
     The correctness of the connection can be checked independently of the Integration Flow with the Connection Test feature. This test is critical in the debugging process
   </Card>
 </CardGroup>
+
+## TLS and Trust Store
+
+:::info
+
+A connection can select a trust store to verify the webhook endpoint's server certificate, and a key store if the endpoint requires mutual TLS. Both fields are optional.
+
+:::
+
+<CardGroup cols={2}>
+  <Card title="Trust Store" icon="shield-halved">
+    Certificate authority bundle used to verify the server certificate presented by the webhook endpoint.
+  </Card>
+
+  <Card title="Key Store" icon="key">
+    Client certificate and private key presented to the endpoint when mutual TLS is required.
+  </Card>
+
+  <Card title="Verify Hostname" icon="shield-check">
+    Checks that the certificate's subject matches the endpoint hostname. Disabled by default.
+  </Card>
+</CardGroup>
+
+:::warning
+
+When no trust store is selected, the server certificate is not verified — this reproduces the connection's previous behavior, and it is logged as a warning at connection time. Organizations sending traffic records that contain personal data over HTTPS are encouraged to configure a trust store.
+
+:::
+
+TLS 1.2 and TLS 1.3 are the supported protocols; SSLv3, TLS 1.0, and TLS 1.1 are no longer offered.
+
+## Timeouts
+
+Four timeout phases can be set independently. Any of them left empty falls back to the single **Timeout** value in Connection Parameters, so existing connections keep working unchanged.
+
+<CardGroup cols={2}>
+  <Card title="Connect Timeout" icon="clock">
+    Time allowed to establish the TCP connection.
+  </Card>
+
+  <Card title="Response Timeout" icon="hourglass">
+    Time allowed to receive the full response.
+  </Card>
+
+  <Card title="Connection Request Timeout" icon="stopwatch">
+    Time allowed to obtain a connection from the pool.
+  </Card>
+
+  <Card title="Socket Timeout" icon="network-wired">
+    Maximum idle time allowed between data packets on an already-open socket.
+  </Card>
+</CardGroup>
+
+### Write Stall Timeout
+
+**Write Stall Timeout** (default 30 seconds) is a separate guard: if sending the request body takes longer than this duration, the request is cancelled. Setting it to 0 or a negative value disables the guard.
+
+## Batching and Compression
+
+By default, each event is sent as its own HTTP call — the same behavior as today. **Batch Enabled** turns on combining multiple events into a single request, sent as newline-delimited JSON, optionally gzip-compressed.
+
+<CardGroup cols={2}>
+  <Card title="Batch Enabled" icon="layer-group">
+    Turns event batching on. Disabled by default.
+  </Card>
+
+  <Card title="Batch Max Events" icon="list-ol">
+    Maximum number of events in one batch.  
+    **Default:** 100
+  </Card>
+
+  <Card title="Batch Max Bytes" icon="file-zipper">
+    Maximum batch size in bytes.  
+    **Default:** 1 MB
+  </Card>
+
+  <Card title="Batch Max Delay" icon="hourglass">
+    Maximum time a batch waits before being sent even if it hasn't reached the event or byte limit.  
+    **Default:** 200 milliseconds
+  </Card>
+
+  <Card title="Batch Buffer Memory" icon="database">
+    Byte ceiling for events waiting to be batched.  
+    **Default:** 32 MB
+  </Card>
+
+  <Card title="Gzip Enabled" icon="file-zipper">
+    Compresses the batch request body. Disabled by default.
+  </Card>
+</CardGroup>
+
+Whichever of the three triggers — event count, byte size, or delay — is reached first flushes the current batch in a single request.
+
+**Producer Throttle** (default 100 ms, capped at 2000 ms) is how long the sending side waits when the batch buffer is full before routing the event to the failover connector instead. It is independent from the batch delay above.
+
+## Retry Behavior
+
+<CardGroup cols={2}>
+  <Card title="Max Retry Count" icon="repeat">
+    Number of retry attempts after the initial request fails.  
+    **Default:** 1
+  </Card>
+
+  <Card title="Retry Backoff" icon="clock">
+    Wait time between retry attempts.  
+    **Default:** 200 milliseconds
+  </Card>
+
+  <Card title="Max Retry-After" icon="hourglass">
+    Upper bound applied to a server-provided `Retry-After` value on 429/503 responses.  
+    **Default:** 5 seconds
+  </Card>
+
+  <Card title="Retry Non-Idempotent" icon="refresh-cw">
+    Allows retrying non-idempotent methods. Disabled by default.
+  </Card>
+</CardGroup>
+
+By default, requests using non-idempotent methods such as POST or PATCH are **not** retried, to avoid creating duplicate records on the target system. GET, PUT, and DELETE are retried once by default. Enable **Retry Non-Idempotent** only if the receiving endpoint is known to handle duplicate deliveries safely.
+
+## Resilience (Circuit Breaker)
+
+:::info
+
+A connection-level circuit breaker can be enabled to protect log delivery from a failing endpoint. It only affects log delivery — traffic, token, and audit logs sent through this connection; API proxy backend calls and task flow executions that use the same connection type are not affected and keep their existing error handling.
+
+:::
+
+<CardGroup cols={2}>
+  <Card title="Circuit Breaker Enabled" icon="toggle-off">
+    Turns the connection-level circuit breaker on or off.  
+    **Default:** false (disabled)  
+    Leave empty to inherit the platform-wide default from **Management → System Settings → Logging & Monitoring → Connector Circuit Breaker**.
+  </Card>
+
+  <Card title="Error Threshold Value" icon="gauge">
+    Number of failed log deliveries within the error window that trips the circuit open.  
+    **Default:** 5  
+    **Min:** 1 | **Max:** 10000
+  </Card>
+
+  <Card title="Sleep Window" icon="clock">
+    How long the circuit stays open before a single recovery attempt is made.  
+    **Default:** 30  
+    **Min:** 1 | **Max:** 3600  
+    **Unit:** seconds
+  </Card>
+</CardGroup>
+
+When the error threshold is reached, the circuit opens: log delivery through this connection is skipped entirely for the duration of the sleep window — the endpoint is not contacted at all. Skipped log events are routed to the connection's failover connector when one is configured, otherwise they are dropped and counted. Only log delivery is affected; API proxy backend calls and task flow executions keep their normal behavior. After the sleep window elapses, a single attempt is made to reach the endpoint again — success closes the circuit, failure reopens it for another sleep window. In multi-pod deployments, circuit state is evaluated independently per pod.
+
+:::warning
+
+Changes to these fields take effect for API Proxies using this connection only after redeployment.
+
+:::
+
+## Splunk HEC Mode
+
+:::info
+
+Splunk HTTP Event Collector (HEC) mode wraps outgoing records in the HEC event envelope and sends them to the `/services/collector/event` endpoint, instead of sending the raw payload to a generic webhook URL.
+
+:::
+
+<CardGroup cols={2}>
+  <Card title="HEC Mode Enabled" icon="send">
+    Turns Splunk HEC mode on. Disabled by default.
+  </Card>
+
+  <Card title="Index / Sourcetype / Source / Host" icon="tag">
+    Standard Splunk HEC metadata fields attached to each event envelope.
+  </Card>
+
+  <Card title="Use ACK" icon="check-circle">
+    Waits for Splunk's indexer acknowledgment before considering delivery successful. Disabled by default.
+  </Card>
+
+  <Card title="ACK Timeout" icon="hourglass">
+    Maximum time to wait for an acknowledgment.  
+    **Default:** 30 seconds
+  </Card>
+
+  <Card title="Max ACK Resend" icon="repeat">
+    Number of times an unacknowledged batch is resent before it is routed to the failover connector.  
+    **Default:** 2
+  </Card>
+</CardGroup>
+
+Each connection sends a fixed `X-Splunk-Request-Channel` identifier with every request. When **Use ACK** is off, a Splunk `200` response only means the event was accepted into the ingestion queue — **it does not mean the event has been indexed**. Setups with a long-term retention commitment should enable **Use ACK** to get a stronger delivery guarantee.
 
 ## Best Practices
 
@@ -713,6 +930,50 @@ A different connection may be selected in Integration/Connector step, the step m
     </Steps>
   </Accordion>
 
+  <Accordion title="Server Certificate Not Verified">
+    :::warning
+
+No trust store is selected on the connection, so the webhook endpoint's server certificate is accepted without verification.
+
+:::
+    
+    <Steps>
+      <Step title="Select a Trust Store">
+        Assign a **Trust Store** containing the certificate authority that issued the endpoint's certificate.
+      </Step>
+      
+      <Step title="Enable Hostname Verification">
+        Turn on **Verify Hostname** if the certificate subject should be matched against the endpoint host.
+      </Step>
+      
+      <Step title="Mutual TLS">
+        If the endpoint requires client certificates, also assign a **Key Store**.
+      </Step>
+    </Steps>
+  </Accordion>
+
+  <Accordion title="Splunk Events Show as Sent But Never Appear">
+    :::warning
+
+A `200` response from Splunk HEC only confirms the event reached the ingestion queue, not that it was indexed.
+
+:::
+    
+    <Steps>
+      <Step title="Enable ACK">
+        Turn on **Use ACK** so delivery is only considered successful after Splunk confirms indexing.
+      </Step>
+      
+      <Step title="Check Index and Sourcetype">
+        Verify that **Index** and **Sourcetype** match a configuration Splunk actually accepts events for.
+      </Step>
+      
+      <Step title="ACK Timeout and Resend">
+        If ACKs are timing out, increase **ACK Timeout** or check **Max ACK Resend** exhaustion in connection logs.
+      </Step>
+    </Steps>
+  </Accordion>
+
 
 ## Frequently Asked Questions (FAQ)
 
@@ -792,6 +1053,22 @@ Several reasons may exist:
     2. A different connection may be selected in Integration step
     3. Connection may not be deployed
     4. Integration Flow may not have been redeployed yet
+  </Accordion>
+
+  <Accordion title="Do I need to reconfigure existing Webhook connections after upgrading?">
+    :::info
+
+No. Connection pool sizes, timeouts, batching, retry, and Splunk HEC mode all default to today's behavior; change them only if you need the new pooling, TLS verification, batching, or Splunk delivery behavior.
+
+:::
+  </Accordion>
+
+  <Accordion title="Why isn't my POST request retried when it fails?">
+    :::info
+
+By default, non-idempotent methods such as POST and PATCH are not retried, to avoid creating duplicate records on the target system. Enable **Retry Non-Idempotent** only if the endpoint is known to handle duplicate deliveries safely.
+
+:::
   </Accordion>
 
 

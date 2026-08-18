@@ -1,0 +1,217 @@
+---
+title: "Create Policy Group"
+description: "Creates a new policy group in the specified project from a policy group snapshot JSON. Primarily used by cross-instance API Promotion to materialize a source proxy's embedded policy group on the target as a standalone, reusable group."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/policyGroups/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+
+### Query Parameters
+
+None
+
+### Request Body
+
+The body is a `PolicyGroup` snapshot. The top-level `"_class"` field is **required** and must be
+`"policy-group"`. The desired name is carried in the body's `"name"` field, not a URL path segment.
+
+#### Full JSON Body Example
+
+```json
+{
+  "_class": "policy-group",
+  "name": "standard-security-bundle",
+  "description": "IP allow-list applied before authentication",
+  "active": true,
+  "targetPipeline": "REQUEST",
+  "order": 1,
+  "makeDefault": false,
+  "canBeDeleted": true,
+  "policyList": [
+    {
+      "_class": "ip-white",
+      "name": "office-network-allow-list",
+      "active": true,
+      "useApinizerDefault": false,
+      "ipList": ["203.0.113.0/24", "198.51.100.10"]
+    }
+  ]
+}
+```
+
+#### Request Body Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| _class | string | Yes | - | Must be `"policy-group"` |
+| name | string | Yes | - | Policy group name — the value stored, not necessarily a URL segment |
+| description | string | No | - | Policy group description |
+| active | boolean | No | `false` | Whether the group is active |
+| targetPipeline | string | No | - | Pipeline the group is bound to: `REQUEST`, `RESPONSE` or `ERROR` |
+| order | integer | No | - | Execution order among other policies/groups on the same pipeline |
+| makeDefault | boolean | No | - | Whether this group is applied by default |
+| canBeDeleted | boolean | No | - | Deletion-eligibility flag used by the classic UI |
+| policyList | array | No | `[]` | Ordered list of embedded policies, each a polymorphic `Policy` snapshot (own `_class`) |
+
+`id`, `projectId` and `global` are always server-assigned and ignored if present in the body —
+`global` is unconditionally forced to `false` for every policy group, regardless of what is sent.
+
+### Secret Contract (POST vs PUT)
+
+This endpoint is shared with cross-instance API Promotion, which exports a policy group from a source
+instance and replays it here as-is. Because of that:
+
+- **`POST` (this endpoint)**: any `@SecretData` field on an embedded policy in `policyList` (e.g.
+  `password` on an embedded WS-Security Username Token policy) is expected to already be
+  **encrypted** (as exported from the source instance) and is persisted **unchanged**.
+- **`PUT`** ([Update Policy Group](/api-reference/policy-groups/update-policy-group)) is the
+  opposite: embedded policy secrets must be **plaintext** and are encrypted before persist.
+
+Sending a plaintext secret to `POST`, or an already-encrypted value to `PUT`, corrupts the secret.
+
+### Cross-Instance Global Policy Rebinding
+
+If an entry in `policyList` is itself a reference to a **global** policy (rather than an ad-hoc inline
+one), `POST` rebinds it to a same-type, same-name global policy that already exists on this instance,
+or creates it if this instance does not have one yet — the same logic cross-instance API Promotion
+uses when replaying a proxy's embedded policy group on a different instance. `PUT` does **not**
+perform this rebinding; it persists `policyList` as given.
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "id": "665f2a1c9b3e4a0012ab35aa",
+      "name": "standard-security-bundle",
+      "targetPipeline": "REQUEST"
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|--------------|
+| status | string | Response status: `SUCCESS` or `FAILURE` |
+| resultList | array | Single-element list containing the created policy group's descriptor |
+| resultCount | integer | Always `1` on success |
+
+The response does not echo the saved policy group body (including `policyList`) — use
+[Get Policy Group](/api-reference/policy-groups/get-policy-group) to confirm it exists (it too only
+returns the lightweight descriptor, never the embedded policy list).
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "name value can not be empty!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "The supplied snapshot is not a policy group."
+}
+```
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/policyGroups/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "_class": "policy-group",
+    "name": "standard-security-bundle",
+    "description": "IP allow-list applied before authentication",
+    "active": true,
+    "targetPipeline": "REQUEST",
+    "order": 1,
+    "policyList": [
+      {
+        "_class": "ip-white",
+        "name": "office-network-allow-list",
+        "active": true,
+        "useApinizerDefault": false,
+        "ipList": ["203.0.113.0/24", "198.51.100.10"]
+      }
+    ]
+  }'
+```
+
+## Notes and Warnings
+
+- **Always Creates**: This is create-only — it does not upsert. Creating with a `name` that already
+  exists in the project produces a second, separate record (name uniqueness is not enforced by this
+  endpoint).
+- **`global` Is Always False**: Regardless of the body, a policy group is always persisted with
+  `global=false`.
+- **Cross-Instance Snapshot Semantics**: Designed for cross-instance API Promotion; embedded policy
+  `@SecretData` fields are persisted exactly as received (assumed already encrypted), and embedded
+  global policy references are rebound to this instance's own definitions. See
+  [Secret Contract](#secret-contract-post-vs-put) and
+  [Cross-Instance Global Policy Rebinding](#cross-instance-global-policy-rebinding) above.
+- **Not Deployed on Create**: This endpoint persists the group; it does not deploy it to gateway
+  workers. A policy group only reaches a running environment once embedded in a proxy/proxy-group and
+  that proxy is deployed, or when updated via
+  [Update Policy Group](/api-reference/policy-groups/update-policy-group), which does redeploy.
+- **Permission**: Requires `API_MANAGEMENT` + `MANAGE` in the project.
+
+## Related Documentation
+
+- [Update Policy Group](/api-reference/policy-groups/update-policy-group) - Update an existing policy group (plaintext secret contract)
+- [Get Policy Group](/api-reference/policy-groups/get-policy-group) - Read a policy group's descriptor back
+- [Delete Policy Group](/api-reference/policy-groups/delete-policy-group) - Delete a policy group
+- [Policy Groups API](/api-reference/policy-groups) - Resource overview
+- [Global Policies API](/api-reference/global-policies) - Manage standalone global policies referenced from a group
+- [Authentication Guide](/api-reference/getting-started/authentication) - How to obtain and use API tokens
+- [Error Handling](/api-reference/getting-started/error-handling) - Error response formats

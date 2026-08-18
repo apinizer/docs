@@ -6,6 +6,109 @@
 import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
+  "ai-gateway": [
+    {
+      "type": "category",
+      "label": "Getting Started",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/overview",
+        "ai-gateway/quickstart"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Providers and Routing",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/llm-providers",
+        "ai-gateway/model-catalog",
+        "ai-gateway/routing-and-failover"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Cost and Quota",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/token-quotas",
+        "ai-gateway/cost-settings"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Prompt Engineering",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/prompt-decorator",
+        "ai-gateway/prompt-templates"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Security and Privacy",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/advanced-guardrails"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Knowledge and Retrieval (RAG)",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/knowledge-bases",
+        "ai-gateway/rag-injection",
+        "ai-gateway/vector-database"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Caching",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/semantic-cache"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Tool and Agent Integration",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/mcp-gateway",
+        "ai-gateway/a2a-gateway"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Multi-Modal Endpoints",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/multi-modal-endpoints"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Observability and Management",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/reports",
+        "ai-gateway/tracing-and-replay",
+        "ai-gateway/opentelemetry",
+        "ai-gateway/access-control-rbac"
+      ]
+    }
+  ],
   "overview": [
     {
       "type": "category",
@@ -68,7 +171,9 @@ const sidebars: SidebarsConfig = {
             "concepts/core-concepts/variable",
             "concepts/core-concepts/dynamic-variables",
             "concepts/core-concepts/environment-variable",
-            "concepts/core-concepts/api-proxy-group"
+            "concepts/core-concepts/api-proxy-group",
+            "concepts/core-concepts/ai-fundamentals",
+            "concepts/core-concepts/asset-lifecycle"
           ]
         },
         {
@@ -86,7 +191,8 @@ const sidebars: SidebarsConfig = {
             "concepts/core-components/api-creator",
             "concepts/core-components/api-integrator",
             "concepts/core-components/cache-component",
-            "concepts/core-components/monitoring-component"
+            "concepts/core-components/monitoring-component",
+            "concepts/core-components/ai-gateway"
           ]
         },
         {
@@ -202,7 +308,7 @@ const sidebars: SidebarsConfig = {
             "installation/elasticsearch/ubuntu-elasticsearch-8.17.10",
             "installation/elasticsearch/rhel-elasticsearch",
             "installation/elasticsearch/rhel-elasticsearch-8.17.10",
-            "installation/elasticsearch/Add-Elasticsearch-Node",
+            "installation/elasticsearch/add-elasticsearch-node",
             "installation/elasticsearch/simple-authentication",
             "installation/elasticsearch/permission-requirements",
             "installation/elasticsearch/backup-policy",
@@ -238,21 +344,19 @@ const sidebars: SidebarsConfig = {
   "managing-apis": [
     {
       "type": "category",
-      "label": "API Development",
+      "label": "Getting Started",
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "develop/quick-start",
-        {
-          "type": "category",
-          "label": "API Design",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "develop/api-design/spec-designer",
-            "develop/api-design/data-models"
-          ]
-        },
+        "develop/quick-start"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "develop/api-list-management",
         {
           "type": "category",
@@ -267,9 +371,6 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-creation/soap-rest-api-proxy-creation",
             "develop/api-proxy-creation/websocket-api-proxy-creation",
             "develop/api-proxy-creation/grpc-api-proxy-creation",
-            "develop/api-proxy-creation/api-creator-db-api-creation",
-            "develop/api-proxy-creation/api-creator-script-api-creation",
-            "develop/api-proxy-creation/api-creator-mock-api-creation",
             "develop/api-proxy-creation/connector-api-proxy-creation",
             "develop/api-proxy-creation/multiple-schema-port-wsdl"
           ]
@@ -292,6 +393,38 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-configuration/deployment-and-specification-information"
           ]
         }
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Creator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-proxy-creation/api-creator-db-api-creation",
+        "develop/api-proxy-creation/api-creator-script-api-creation",
+        "develop/api-proxy-creation/api-creator-mock-api-creation"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Integrator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "integrations/api-integrator-task-flow-builder/overview",
+        "integrations/api-integrator-task-flow-builder/task-flow-design",
+        "integrations/api-integrator-task-flow-builder/taskflow-monitor"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Designer",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-design/spec-designer",
+        "develop/api-design/data-models"
       ]
     },
     {
@@ -422,6 +555,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "develop/monitoring-analysis/step-by-step-tracing",
+        "develop/monitoring-analysis/opentelemetry-export",
         "develop/monitoring-analysis/api-traffic",
         "develop/monitoring-analysis/analytics",
         "develop/monitoring-analysis/audit-records",
@@ -522,13 +656,16 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/credentials",
+            "admin/identity-management/portal-applications",
             "admin/identity-management/organizations",
             "admin/identity-management/ip-groups",
             "admin/identity-management/contracts-protocols",
             "admin/identity-management/credential-roles",
+            "admin/identity-management/access-control",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-group-acl",
-            "admin/identity-management/rate-limit-control-list"
+            "admin/identity-management/rate-limit-control-list",
+            "admin/identity-management/quota-usage-and-alerts"
           ]
         },
         {
@@ -539,7 +676,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "admin/identity-management/identity-providers/database-provider",
             "admin/identity-management/identity-providers/ldap-active-directory",
-            "admin/identity-management/identity-providers/api-authentication-provider"
+            "admin/identity-management/identity-providers/api-authentication-provider",
+            "admin/identity-management/identity-providers/credential-sync"
           ]
         },
         "admin/identity-management/acl-report"
@@ -660,18 +798,7 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/logback",
         "integrations/connection-management/snmp",
         "integrations/connection-management/syslog",
-        "integrations/connection-management/webhook",
-        {
-          "type": "category",
-          "label": "API Integrator (Task Flow Builder)",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "integrations/api-integrator-task-flow-builder/overview",
-            "integrations/api-integrator-task-flow-builder/task-flow-design",
-            "integrations/api-integrator-task-flow-builder/taskflow-monitor"
-          ]
-        }
+        "integrations/connection-management/webhook"
       ]
     },
     {
@@ -784,12 +911,25 @@ const sidebars: SidebarsConfig = {
         "api-portal/api-multi-portal-usage",
         "api-portal/appearance-theme",
         "api-portal/api-product",
+        "api-portal/api-catalog",
         "api-portal/api-product-categories",
         "api-portal/frequently-asked-questions",
         "api-portal/accounts-developers",
+        "api-portal/portal-organizations",
+        "api-portal/portal-membership-and-invitation",
         "api-portal/approval-requests",
         "api-portal/application-management",
+        "api-portal/application-promote",
+        "api-portal/support-tickets",
         "api-portal/jira-integration",
+        "api-portal/traffic-and-usage",
+        "api-portal/api-traffic-report",
+        "api-portal/api-consumption-trend",
+        "api-portal/api-quota-plan-usage",
+        "api-portal/top-api-products",
+        "api-portal/api-error-block-analysis",
+        "api-portal/inactive-subscribers",
+        "api-portal/subscription-funnel",
         "api-portal/api-product-application-registrations",
         "api-portal/login-logs",
         "api-portal/api-product-view-history",
@@ -936,7 +1076,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
-            "operations/administrator-guides/Clear-Elasticsearch-Index-Data",
+            "operations/administrator-guides/clear-elasticsearch-index-data",
             "operations/administrator-guides/prometheus-zabbix-integration",
             {
               "type": "category",
@@ -953,7 +1093,6 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
-                    "operations/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]
@@ -1098,8 +1237,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-scenarios/api-based-throttling-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/api-based-quota-fixed-time-intervals",
             "tutorials/api-proxy-scenarios/custom-variable-map-business-rule",
-            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition",
-            "tutorials/api-proxy-scenarios/apicall-get-jwt-token-from-backend-with-cache"
+            "tutorials/api-proxy-scenarios/api-proxy-http-websocket-policy-condition"
           ]
         },
         {
@@ -1165,6 +1303,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-portal-scenarios/api-portal-on-api-developer-operations",
+            "tutorials/api-portal-scenarios/api-portal-on-api-manager-operations",
             "tutorials/api-portal-scenarios/api-portal-api-manager-operations"
           ]
         }
@@ -1327,7 +1466,6 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
-                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
                     "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
                   ]
@@ -1383,8 +1521,7 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms",
-			"articles/how-ai-gateway-fits-in-apinizer"
+            "articles/the-way-we-manage-apis-is-how-we-should-manage-llms"
           ]
         },
         {
@@ -1394,12 +1531,12 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "articles/apinizer-gateway-opentelemetry-integration-part-1-setup",
-            "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards"
+            "articles/apinizer-gateway-opentelemetry-integration-part-2-grafana-dashboards",
+            "articles/apinizer-gateway-native-opentelemetry-export"
           ]
         },
         "articles/the-story-of-apinizer-ai-gateway",
-        "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",
-        "articles/keycloak-dpop-apinizer-jose-validation",
+        "articles/from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/apinizer-api-portal-mcp-integration",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-control-list-rlcl",

@@ -1,0 +1,124 @@
+---
+title: "İzleme ve Tekrar Oynatma"
+description: "AI isteklerini uçtan uca bir trace zinciriyle (DAG) izleyebilir, zaman çizelgesi görünümünde inceleyebilir, geçmiş bir isteği yeniden çalıştırabilir (replay) ve gözlemlenebilirlik verilerini kendi APM altyapınıza aktarabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+AI izleme (trace) özelliği, AI Gateway'den geçen isteklerin **uçtan uca zincirini** (trace grubu / DAG) gerçek zamanlı olarak oluşturur ve şu yetenekleri sunar:
+
+- **İlişkili İstek Görünümü** — bir ana isteğin tüm alt-çağrılarını (örn. bir MCP araç-çağrısı zinciri ya da A2A görev zinciri) tek bir grup altında görün
+- **Zaman Çizelgesi (Timeline) Görünümü** — bir trace grubuna ait tüm adımları tek ekranda görselleştirin
+- **Tekrar Oynatma (Replay)** — geçmiş bir trace'i, aynı istek gövdesiyle yeniden çalıştırın
+- **APM Entegrasyonu** — kullanım metriklerini OpenTelemetry GenAI semantiği ve Prometheus üzerinden dışa aktarın
+
+:::note
+İzleme verisine erişim kendi yetki kapsamıyla korunur (analitik görüntüleme yetkisi + proje kapsamı) ve kayıtlar kısa bir saklama süresi sonunda otomatik olarak temizlenir.
+:::
+
+## Trace Grubu (DAG) Nasıl Oluşur?
+
+Trace açıkken, her istek girişinde benzersiz bir **trace kimliği** üretilir ve isteğin tüm yaşam döngüsü boyunca taşınır:
+
+- Ana istek ile alt-çağrılar (örn. bir ajan aracının başka bir AI Gateway'i çağırması, veya bir A2A görev zinciri) aynı **trace grubu kimliği** altında ilişkilendirilir
+- Her alt-adım, bir üst (parent) trace kimliğine referans verir — böylece adımlar arasında **ebeveyn-çocuk** ilişkisi kurulur
+
+:::info
+Bu, özellikle [MCP araç çağrıları](/tr/ai-gateway/mcp-gateway) ve [A2A ajan görevleri](/tr/ai-gateway/a2a-gateway) gibi çok-adımlı senaryolarda tek bir kullanıcı isteğinin tüm alt-işlemlerinin birbirine bağlı şekilde izlenmesini sağlar.
+:::
+
+## Zaman Çizelgesi (Timeline) Görünümü
+
+AI Gateway'in **AI Trace** sekmesinden bir trace grubunu seçtiğinizde:
+
+- Grup içindeki tüm adımlar **kronolojik sırayla** listelenir
+- Her adımın süresi, durumu (başarılı/hata) ve ilişkili proxy/politika bilgisi görüntülenir
+- Ebeveyn-çocuk ilişkisi görsel olarak (girintili liste / bağlantı çizgileri) gösterilir
+
+{/* TODO: ekran görüntüsü — trace grubu zaman çizelgesi, adımlar arası bağlantı görselleştirmesi */}
+
+### Politikanın İç Adımları
+
+Önbelleğe erişen AI politikaları (semantik önbellek, token hız sınırı) **iki ayrı yaşam döngüsü geçişinde** gerçek iş yapar: istek fazındaki karar (önbellek sorgusu, token rezervasyonu) ve yanıt tamamlandıktan sonra çalışan akış-sonu geçişi (yanıtın önbelleğe yazılması, rezervasyonun gerçekte tüketilen token ile işlenmesi).
+
+İki geçiş de gerçek birer çalışmadır; bu yüzden akışta **her biri kendi düğümüyle** görünür — trace, sadeleştirilmiş bir özet değil gerçekte çalışanı gösterir. İkinci düğüm **↺** rozeti taşır; üzerine geldiğinizde rozet fazın adını değil o geçişte yapılan **işi** söyler ("Akış sonu — yanıt önbelleğe yazıldı", "Akış sonu — token rezervasyonu kapatıldı"). Düğüme tıkladığınızda detay panelinde aynı etiketle birlikte "Neden ikinci kayıt?" satırı çıkar; böylece "mükerrer politika" değil "ikinci faz" olarak okunur.
+
+İkinci düğümün çıkıp çıkmayacağı isteğe bağlıdır:
+
+| Durum | İkinci düğüm |
+|-------|--------------|
+| Semantik önbellek ıskalama (MISS) | Var — yanıt akış sonunda önbelleğe yazılır |
+| Semantik önbellek isabet (HIT) | Yok — yeniden önbelleklenecek bir şey olmadığı için akış-sonu geçişi hiç tetiklenmez |
+| Token hız sınırı | Var, yapılandırılan politika sayısı kadar — rezervasyon işlenir ya da serbest bırakılır |
+
+Üst bardaki **Çalıştırma Detayları** düğmesi, düğümün arkasındaki önbellek çağrılarını açar: işlem (RESERVE / RECONCILE / RELEASE / GET / PUT), kova (bucket), önbellek anahtarı, sonuç ve süre. Bu davranış, API proxy izleme ekranındaki API Call politikasının detay penceresiyle aynıdır.
+
+### Trace Sırası Develop'tan Neden Farklı Olabilir
+
+Trace, **gerçek** çalışma sırasını gösterir ve AI proxy'lerde bu, Develop ekranında dizdiğiniz sıra ile her zaman aynı olmaz. Gateway, istek hattını çalıştırmadan önce savunmacı bir yeniden sıralama uygular; böylece yanlış bir sıralama doğruluğu ya da bir korumayı sessizce bozamaz:
+
+1. **Prompt Template**, **Prompt Decorator**'dan önce çalışır — Decorator, Template'in ürettiği `messages[]` dizisine ekleme yapar.
+2. **Prompt Template / Prompt Decorator**, **RAG Injection** ve tüm guard/cache politikalarından önce çalışır — bunların tam kurulmuş prompt'u görmesi gerekir, ham istemci gövdesini değil.
+3. **RAG Injection**, **İstem Koruması, Bağlam Bütünlüğü, DLP Koruması ve Semantik Önbellek**'ten önce çalışır — RAG'in enjekte ettiği içerik korumalar tarafından taranmalı ve önbellek anahtarına girmelidir; aksi halde koruma etkisiz kalır ve önbellek zehirlenebilir.
+
+Yani bir düğüm trace'te Develop'takinden daha erken görünüyorsa istek yanlış işlenmiş değildir — gateway sırayı düzeltmiştir. Develop ekranı bu kurallardan biri ihlal edildiğinde sizi uyarır: hem politikaları sürükle-bırak ile yeniden sıraladığınızda, hem de akış ekranı bu sırayla yüklendiğinde (yeni bir politika eklenip geri dönüldüğünde de). Konfigürasyonu düzelttiğinizde uyarı kesilir ve iki ekran birbiriyle örtüşür.
+
+Semantik önbellek için bu pencere, kararın kendisinin (isabet/ıskalama, eşleşme kaynağı — birebir ya da vektör, benzerlik değeri, önbellek anahtarı, TTL, model) yanı sıra **önbellek konuşmasını** da gösterir: isteğin prompt metni ve isabet durumunda önbellekten sunulan, yazma fazında ise önbelleğe kaydedilen yanıt gövdesi. Böylece "bu istek neden önbellekten döndü" ya da "önbelleğe hangi yanıt yazıldı" sorusu, akıştaki ham istek/yanıt gövdelerini karşılaştırmaya gerek kalmadan tek pencereden cevaplanır.
+
+## Tekrar Oynatma (Replay)
+
+Bir trace kaydını, **aynı istek gövdesiyle** yeniden çalıştırabilirsiniz — hata ayıklama, regresyon testi veya bir müşteri şikayetini yeniden üretmek için kullanışlıdır.
+
+<Steps>
+  <Step title="Trace Kaydını Bulun">
+    AI Gateway'in **AI Trace** sekmesinde, yeniden çalıştırmak istediğiniz isteği bulun.
+  </Step>
+
+  <Step title="Tekrar Oynat'a Tıklayın">
+    İlgili trace satırındaki **Tekrar Oynat (Replay)** düğmesine tıklayın.
+  </Step>
+
+  <Step title="Yeni Çalıştırmayı İzleyin">
+    Apinizer, orijinal istek gövdesini aynı yapılandırmayla (aynı model, aynı politika zinciri) yeniden çalıştırır; sonuç yeni bir trace kaydı olarak görüntülenir.
+  </Step>
+</Steps>
+
+:::warning
+Tekrar oynatma, **orijinal isteği aynen tekrar gönderir** — eğer orijinal istek bir yan etki üretiyorsa (örn. dış sisteme yazma yapan bir araç çağrısı), bu yan etki de tekrar tetiklenebilir. Salt-okunur/analiz amaçlı isteklerde kullanmanız önerilir.
+:::
+
+:::note
+Tekrar oynatma, mevcut trace-DAG altyapısını **ön koşul** olarak kullanır — trace izleme kapalıyken oluşan istekler için tekrar oynatma kullanılamaz.
+:::
+
+## Metrik ve Trace Aktarımı: OpenTelemetry ve Prometheus
+
+UI'daki trace ve zaman çizelgesi görünümlerinin ötesinde, AI Gateway kullanım sinyalleri (token, maliyet, gecikme, koruma sonucu) kendi gözlemlenebilirlik altyapınıza iki tamamlayıcı yoldan ulaşır:
+
+- **Prometheus** — gateway'in mevcut `apinizer_ai_*` sayaç/zamanlayıcıları (sağlayıcı, model, proje, durum etiketleriyle), aşağıdaki ayardan bağımsız her zaman açık.
+- **Doğal OpenTelemetry (OTLP) dışa aktarımı** — opsiyonel, agent gerektirmeyen ürün-native bir özellik: **tüm** trafik için W3C `traceparent` yayılımı ile retrospektif bir span ağacı (SERVER + deneme-başına CLIENT + istek/yanıt span'leri) ve özellikle AI trafiği için GenAI semantik-kural katmanı (`gen_ai.*`, `apinizer.ai.*`) — doğrudan üründen OTLP collector'ınıza aktarılır, javaagent gerekmez. İçerik yakalama (span'lerde prompt/completion) **varsayılan olarak kapalıdır**.
+
+Tam öznitelik/metrik referansı, kurulum adımları ve indirilebilir bir Grafana dashboard'u için **[OpenTelemetry](/tr/ai-gateway/acik-telemetri)** sayfasına bakın.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="A2A Gateway" icon="network-wired" href="/tr/ai-gateway/a2a-gateway">
+    Ajan görevlerinin trace zincirindeki izini görün
+  </Card>
+  <Card title="MCP Gateway" icon="server" href="/tr/ai-gateway/mcp-gateway">
+    Araç çağrısı zincirlerini izleyin
+  </Card>
+  <Card title="Raporlar ve Analitik" icon="chart-bar" href="/tr/ai-gateway/raporlar">
+    Performans ve gecikme metriklerini inceleyin
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    Koruma tetiklenmelerini trace zincirinde ilişkilendirin
+  </Card>
+  <Card title="Açık Telemetri" icon="radio" href="/tr/ai-gateway/acik-telemetri">
+    Doğal OTLP dışa aktarımını yapılandırın ve Grafana dashboard'unu içe aktarın
+  </Card>
+</CardGroup>

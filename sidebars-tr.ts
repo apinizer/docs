@@ -6,6 +6,109 @@
 import type { SidebarsConfig } from '@docusaurus/plugin-content-docs';
 
 const sidebars: SidebarsConfig = {
+  "ai-gateway": [
+    {
+      "type": "category",
+      "label": "Başlangıç",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/genel-bakis",
+        "ai-gateway/hizli-baslangic"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Sağlayıcılar ve Yönlendirme",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/llm-saglayicilari",
+        "ai-gateway/model-katalogu",
+        "ai-gateway/yonlendirme-failover"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Prompt Yönetimi",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/prompt-susleyici",
+        "ai-gateway/prompt-sablonlari"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Maliyet ve Kota",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/token-kotalari",
+        "ai-gateway/maliyet-ayarlari"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Güvenlik ve Gizlilik",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/gelismis-korumalar"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Bilgi ve Erişim (RAG)",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/bilgi-tabanlari",
+        "ai-gateway/rag",
+        "ai-gateway/vektor-veritabani"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Önbellekleme",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/semantik-onbellek"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Araç ve Ajan Entegrasyonu",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/mcp-gateway",
+        "ai-gateway/a2a-gateway"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "Çok-Modaliteli Uç Noktalar",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/coklu-modalite"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "İzleme ve Yönetim",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/raporlar",
+        "ai-gateway/izleme-ve-tekrar-oynatma",
+        "ai-gateway/acik-telemetri",
+        "ai-gateway/erisim-kontrolu-rbac"
+      ]
+    }
+  ],
   "genel-bakis": [
     {
       "type": "category",
@@ -69,7 +172,9 @@ const sidebars: SidebarsConfig = {
             "concepts/temel-kavramlar/variable",
             "concepts/temel-kavramlar/dinamik-degiskenler",
             "concepts/temel-kavramlar/environment-variable",
-            "concepts/temel-kavramlar/api-proxy-group"
+            "concepts/temel-kavramlar/api-proxy-group",
+            "concepts/temel-kavramlar/yapay-zeka-temel-kavramlari",
+            "concepts/temel-kavramlar/varlik-yasam-dongusu"
           ]
         },
         {
@@ -87,7 +192,8 @@ const sidebars: SidebarsConfig = {
             "concepts/temel-bilesenler/api-creator",
             "concepts/temel-bilesenler/api-integrator",
             "concepts/temel-bilesenler/onbellek-bileseni",
-            "concepts/temel-bilesenler/izleme-bileseni"
+            "concepts/temel-bilesenler/izleme-bileseni",
+            "concepts/temel-bilesenler/ai-gateway"
           ]
         },
         {
@@ -235,21 +341,19 @@ const sidebars: SidebarsConfig = {
   "api-leri-yonetme": [
     {
       "type": "category",
-      "label": "API Geliştirme",
+      "label": "Başlangıç",
       "collapsed": false,
       "collapsible": true,
       "items": [
-        "develop/quick-start",
-        {
-          "type": "category",
-          "label": "API Tasarımı",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "develop/api-tasarimi/spec-designer",
-            "develop/api-tasarimi/data-models"
-          ]
-        },
+        "develop/quick-start"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Gateway",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
         "develop/api-listesi-yonetimi",
         {
           "type": "category",
@@ -264,9 +368,6 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-olusturma/soaprest-api-proxy-olusturma",
             "develop/api-proxy-olusturma/websocket-api-proxy-olusturma",
             "develop/api-proxy-olusturma/grpc-api-proxy-olusturma",
-            "develop/api-proxy-olusturma/api-creator-db-api-olusturma",
-            "develop/api-proxy-olusturma/api-creator-script-api-olusturma",
-            "develop/api-proxy-olusturma/api-creator-mock-api-olusturma",
             "develop/api-proxy-olusturma/connector-api-proxy-olusturma",
             "develop/api-proxy-olusturma/coklu-schema-port-wsdl"
           ]
@@ -289,6 +390,38 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-konfigurasyonu/client-route"
           ]
         }
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Creator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-proxy-olusturma/api-creator-db-api-olusturma",
+        "develop/api-proxy-olusturma/api-creator-script-api-olusturma",
+        "develop/api-proxy-olusturma/api-creator-mock-api-olusturma"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Integrator",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "integrations/api-integrator-task-flow-builder/genel-bakis",
+        "integrations/api-integrator-task-flow-builder/task-flow-tasarimi",
+        "integrations/api-integrator-task-flow-builder/taskflow-monitor"
+      ]
+    },
+    {
+      "type": "category",
+      "label": "API Designer",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "develop/api-tasarimi/spec-designer",
+        "develop/api-tasarimi/data-models"
       ]
     },
     {
@@ -419,6 +552,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "develop/izleme-analiz/adim-adim-izleme",
+        "develop/izleme-analiz/opentelemetry-disa-aktarimi",
         "develop/izleme-analiz/api-trafigi",
         "develop/izleme-analiz/analitik",
         "develop/izleme-analiz/islem-kayitlari",
@@ -519,13 +653,16 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/kimlik-bilgileri",
+            "admin/identity-management/portal-applications",
             "admin/identity-management/kurumlar",
             "admin/identity-management/sozlesmeler-protokoller",
             "admin/identity-management/ip-guruplari",
             "admin/identity-management/kimlik-bilgisi-rolleri",
+            "admin/identity-management/erisim-kontrolu",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-grup-acl",
-            "admin/identity-management/rate-limit-kontrol-listesi"
+            "admin/identity-management/rate-limit-kontrol-listesi",
+            "admin/identity-management/kota-kullanimi-ve-uyarilar"
           ]
         },
         {
@@ -536,7 +673,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "admin/identity-management/identity-providers/database-provider",
             "admin/identity-management/identity-providers/ldap-active-directory",
-            "admin/identity-management/identity-providers/api-authentication-provider"
+            "admin/identity-management/identity-providers/api-authentication-provider",
+            "admin/identity-management/identity-providers/credential-sync"
           ]
         },
         "admin/identity-management/acl-raporu"
@@ -658,18 +796,7 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/logback",
         "integrations/baglanti-yonetimi/snmp",
         "integrations/baglanti-yonetimi/syslog",
-        "integrations/baglanti-yonetimi/webhook",
-        {
-          "type": "category",
-          "label": "API Integrator (Task Flow Builder)",
-          "collapsed": true,
-          "collapsible": true,
-          "items": [
-            "integrations/api-integrator-task-flow-builder/genel-bakis",
-            "integrations/api-integrator-task-flow-builder/task-flow-tasarimi",
-            "integrations/api-integrator-task-flow-builder/taskflow-monitor"
-          ]
-        }
+        "integrations/baglanti-yonetimi/webhook"
       ]
     },
     {
@@ -782,12 +909,25 @@ const sidebars: SidebarsConfig = {
         "api-portal/api-multi-portal-kullanimi",
         "api-portal/gorunum-tema",
         "api-portal/api-urunu",
+        "api-portal/api-katalog",
         "api-portal/api-urun-kategorileri",
         "api-portal/sss",
         "api-portal/hesaplar-gelistiriciler",
+        "api-portal/portal-organizasyonlari",
+        "api-portal/portal-uyelik-ve-davet",
         "api-portal/onay-istekleri",
         "api-portal/uygulama-yonetimi",
+        "api-portal/uygulama-promote",
+        "api-portal/destek-talepleri",
         "api-portal/jira-entegrasyonu",
+        "api-portal/trafik-ve-kullanim",
+        "api-portal/api-trafik-raporu",
+        "api-portal/api-tuketim-trendi",
+        "api-portal/api-kota-plan-kullanimi",
+        "api-portal/en-cok-kullanilan-urunler",
+        "api-portal/api-hata-blok-analizi",
+        "api-portal/aktif-olmayan-aboneler",
+        "api-portal/abonelik-hunisi",
         "api-portal/api-urun-uygulama-kayitlari",
         "api-portal/giris-kayitlari",
         "api-portal/api-urun-goruntulenme-gecmisi",
@@ -951,7 +1091,6 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
-                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1096,8 +1235,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-senaryolari/api-based-throttling-sabit-zaman",
             "tutorials/api-proxy-senaryolari/api-based-quota-sabit-zaman",
             "tutorials/api-proxy-senaryolari/custom-variable-map-business-rule",
-            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu",
-            "tutorials/api-proxy-senaryolari/apicall-ile-backend-uygulamasindan-jwt-token-alip-cache-uygulanmasi"
+            "tutorials/api-proxy-senaryolari/api-proxy-http-websocket-politika-kosulu"
           ]
         },
         {
@@ -1325,7 +1463,6 @@ const sidebars: SidebarsConfig = {
                   "items": [
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
                     "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
                   ]
@@ -1381,8 +1518,7 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz",
-			"articles/apinizer-de-ai-gateway-nasil-duruyor"
+            "articles/api-leri-nasil-yonetiyorsak-llm-leri-de-oyle-yonetmeliyiz"
           ]
         },
         {
@@ -1392,12 +1528,12 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum",
-            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari"
+            "articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-2-grafana-dashboardlari",
+            "articles/apinizer-gateway-native-opentelemetry-disa-aktarim"
           ]
         },
         "articles/apinizer-ai-gatewayin-hikayesi",
-        "articles/ayni-istegi-iki-kez-gorunce-mtls-ten-dpop-a-retry-dan-idempotency-ye",
-        "articles/keycloak-dpop-apinizer-jose-validation-dogrulamasi",
+        "articles/mtlsten-dpopa-retrydan-idempotencyye",
         "articles/apinizer-api-portal-mcp-entegrasyonu",
         "articles/rate-limit-throttling-quota-management",
         "articles/rate-limit-kontrol-listesi-rlcl",

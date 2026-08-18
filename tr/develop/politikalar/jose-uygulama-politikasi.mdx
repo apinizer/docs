@@ -99,6 +99,62 @@ Bu adımda, kullanıcı **yeni bir politika oluşturabilir** ya da **mevcut poli
 
 Hata mesajı yapılandırmasının tüm katmanları, öncelik sırası ve senaryo örnekleri için [Hata Mesajı Yapılandırma Rehberi](/tr/concepts/temel-kavramlar/hata-mesaji-yapilandirma) sayfasına bakın.
 
+## DPoP Proof Üretimi (RFC 9449)
+
+Bu politika, DPoP-korumalı bir üst sisteme (yetkilendirme veya kaynak sunucusu) **istemci** olarak giderken, isteğe **sahiplik kanıtı (DPoP proof)** ekleyebilir. DPoP, çalınan bir erişim jetonunu işe yaramaz hale getirir: jeton yalnız, kanıtı üreten anahtarın sahibi tarafından kullanılabilir.
+
+:::info Yalnızca istemci tarafı rolü (RFC 9449)
+Bu politika DPoP **istemci** rolünü uygular: Apinizer bir kanıt üretir ve DPoP-korumalı bir üst sisteme giden isteğe ekler. Access token **üretmez** ve token-anahtar bağını (`cnf.jkt`) yazmaz — bu, yetkilendirme sunucusunun işidir. Gateway'e gelen DPoP kanıtlarını doğrulamak (kaynak sunucu rolü) için [JOSE Doğrulama](/tr/develop/politikalar/jose-dogrulama) politikasını kullanın.
+:::
+
+:::info Ayrı bir çalışma modu
+DPoP açıldığında politika, normal JWT üretimi yerine sabit yapıda bir DPoP proof üretir. Bu nedenle **Claim ayarları, Expiration, Şifreleme ve Hedef** ayarları bu modda kullanılmaz; arayüzde otomatik olarak gizlenir. Kullanılmaya devam eden tek yapılandırma **imza anahtarıdır** (proof imzalanır) ve dilerseniz **Ek Claim** ile eklediğiniz alanlardır.
+:::
+
+DPoP proof'un yapısı standarda göre sabittir: yalnızca isteğin metodu (`htm`), hedef adresi (`htu`), üretim zamanı (`iat`) ve tekil kimliği (`jti`) taşır; isteğe bağlı olarak jeton özeti (`ath`) eklenir. Süre (`exp`), issuer, audience veya subject **içermez** ve **şifrelenemez**.
+
+<img src="/images/develop/politikalar/jose-imp-dpop.png" alt="DPoP Proof Üretimi" width="1000" />
+
+### DPoP Yapılandırma Alanları
+
+| Alan | Açıklama |
+|------|----------|
+| **DPoP Proof Üret** | Ana anahtar. Açıldığında politika bir DPoP proof üretir ve alttaki JWT/claim/şifreleme bölümleri kapanır. Bu anahtar, yapılandırma sayfasının en üstündedir; böylece açtığınız anda ilgisiz alanları doldurmadan önce kapanırlar. |
+| **Proof Header Adı** | Üretilen proof'un yazılacağı istek başlığı; varsayılan `DPoP`. Değişken destekler. |
+| **htu Kaynağı** | Proof'un bağlanacağı hedef adresin (`htu`) nasıl belirleneceği. **Elle Gir:** adresi siz girersiniz (önerilen, öngörülebilir). **Backend Yönlendirme Adresinden Türet:** proxy'nin yönlendirme adresinden türetilir (best-effort) — yük dengeleyici/failover altında gerçek adres farklı olabileceğinden dikkatli kullanın. |
+| **htu (Hedef URI)** | htu Kaynağı = Elle Gir iken zorunlu. Proof'un bağlanacağı hedef adres; sorgu dizesi ve fragment otomatik atılır. Değişken destekler. |
+| **htm (HTTP Metodu) Override** | Boş bırakılırsa gidecek isteğin kendi metodu kullanılır. Değişken destekler. |
+| **Access Token Hash (ath) Ekle** | Proof'a, erişim jetonunun özetini (`ath`) ekler. Proof bir erişim jetonuyla birlikte kullanılıyorsa standart bunu zorunlu kılar; kapalıysa karşı taraf proof'u reddedebilir. Varsayılan açık. |
+| **Access Token Kaynağı** | Jetonun (ath ve şema yeniden yazımı için) nereden okunacağı: Authorization Başlığı, Gövde veya Değişkenden Seç. |
+| **Access Token Değişkeni** | Kaynak = Değişkenden Seç iken zorunlu; jetonu tutan proje değişkeni. |
+| **Authorization Şemasını DPoP'a Çevir** | Gidecek istekte `Authorization` başlığını `Bearer <jeton>` yerine `DPoP <jeton>` olarak yazar. DPoP-korumalı kaynak sunucular `Bearer` şemasını reddeder. Varsayılan açık. |
+| **Nonce Değişkeni** | Değeri `nonce` claim'i olarak eklenir. Sunucunun döndürdüğü nonce'un saklanıp bu değişkene aktarılması size aittir (script/cache). |
+
+:::tip İmza anahtarı
+DPoP açıkken proof, **JWS Uygulama Ayarları** bölümünde seçtiğiniz anahtarla imzalanır. DPoP asimetrik (RSA/EC/EdDSA) anahtar gerektirir; simetrik anahtar reddedilir. İstemci kimlik bilgisiyle imzalamıyorsanız bir imza anahtarı seçmeniz zorunludur.
+:::
+
+:::warning htu uyuşmazlığı
+Sahada en sık karşılaşılan sorun `htu` uyuşmazlığıdır. Ters proxy / TLS sonlandırma arkasında otomatik türetilen adres, kaynak sunucunun beklediğinden farklı çıkabilir. Bu durumda **htu Kaynağı = Elle Gir** ile kaynak sunucunun gördüğü genel adresi girin.
+:::
+
+### DPoP istemci akışı
+
+**DPoP Proof Üret** açıkken Apinizer, üst sisteme karşı DPoP istemcisi olarak davranır:
+
+```mermaid
+sequenceDiagram
+    participant APZ as Apinizer (İstemci)
+    participant UP as DPoP-korumalı üst sistem
+
+    Note over APZ: JOSE Uygulama politikası, DPoP Proof Üret = açık
+    APZ->>APZ: Proof üret: htm + htu + iat + jti (+ ath), imza anahtarıyla imzala
+    APZ->>APZ: Authorization: Bearer yerine DPoP olarak yeniden yaz
+    APZ->>UP: İstek + DPoP proof header + DPoP token
+    UP-->>APZ: Yanıt (proof geçerliyse)
+    Note over APZ,UP: Token üretimi ve cnf.jkt Apinizer'ın işi DEĞİL — üst sistemin AS'i yazar
+```
+
 ## Politikayı Silme
 
 Bu politikanın silme adımları ve kullanımdayken uygulanacak işlemler için [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi) sayfasındaki [Akıştan Politika Kaldırma](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi#akıştan-politika-kaldırma) bölümüne bakabilirsiniz.
@@ -119,6 +175,28 @@ Bu politikanın API’lere nasıl bağlanacağına ilişkin süreç için [Polit
 | **Gömülü JWK ile İmza/Şifreleme** | - İmza veya şifreleme panelinde Key Source Mode = Gömülü iken ilgili JWK seçicisini açın.<br />- Var olan anahtarı seçin veya **New** seçeneğiyle Secret Manager’a yönlenin.<br />- Güncel JWK kaydedildiğinde politika formu otomatik güncellenir. |
 | **Dynamic HTTP ile Anahtar Çekme** | - Key Source Mode = Dinamik HTTP seçin.<br />- HTTP Request alanında Test Console ile servis URL ve isteği tanımlayın.<br />- **Settings** sekmesinde güvenli bağlantıyı **Yapılandır** ile tanımlayın ([Test Console](/tr/develop/test-debug-araclari/test-console#ayarlar) ile aynı mantık).<br />- Key Extraction Variable (zorunlu), Key Format, Key Algorithm belirleyin; cache açacaksanız Apply By değişkeni, Capacity, TTL ve diğer cache alanlarını doldurun.<br />- **Parse Response (Try It)** ile yanıtı test edin; başarılıysa algılanan format/algoritma otomatik atanabilir. |
 | **Token Zinciri Manipülasyonu** | - **Oluşturulan JWT/JWE için Injection Target** alanından token’ın yazılacağı hedefi (Gövde, Authorization Başlığı veya Değişkenden Seç) seçin.<br />- Değişkenden Seç ise decode edilmiş veriyi başka politikaya aktaracak **Target for Decoded Claims için Hedef Değişken** değişkenini tanımlayın.<br />- İlgili ikinci politikada aynı değişkeni kaynak olarak kullanarak veri akışını tamamlayın. |
+
+
+### Dinamik Anahtar Çekmede Yeniden Deneme (Retry)
+
+Anahtar HTTP üzerinden çekildiğinde, anahtar ucundaki geçici bir ağ hatası imzalama veya doğrulama işlemini tümden başarısız kılar. Dinamik anahtar ayarlarındaki **Yeniden Deneme** bölümünden anahtar isteğinin otomatik olarak tekrar gönderilmesini sağlayabilirsiniz.
+
+| **Alan** | **Açıklama** |
+|:---------|:-------------|
+| **Hata alınırsa yeniden dene** | Ana anahtar. Varsayılan kapalıdır; anahtar isteği eskisi gibi tek kez denenir. |
+| **Yeniden Deneme Sayısı** | İlk denemeden sonra yapılacak ek deneme sayısı. |
+| **Bekleme Stratejisi** | `Gecikme Yok`, `Sabit Gecikme` veya `Üstel Bekleme` ve ilgili gecikme alanları. |
+| **Yeniden Denenecek Durum Kodları** | Yeniden denemeyi tetikleyecek HTTP durum kodları. Varsayılan `502`, `503`, `504`. |
+
+Bağlantı aşamasındaki hatalar (bağlantı reddedildi, connect timeout, DNS veya TLS hatası) her zaman yeniden denenir; çünkü istek anahtar ucuna hiç ulaşmamıştır. İstek gönderildikten sonra oluşan hatalar yalnızca idempotent metotlarda yeniden denenir. Davranış API Çağrısı politikasıyla aynıdır; tam tablo için [API Çağrısı — Hata Alınırsa Yeniden Deneme](/tr/develop/politikalar/api-cagrisi#retry) bölümüne bakabilirsiniz.
+
+:::note
+
+Bu ayar, bir üst katmandaki **Anahtar hatasında yeniden dene** seçeneğiyle **aynı şey değildir**: o seçenek, anahtarın kendisi kriptografik olarak kullanılamaz çıktığında cache'i temizleyip anahtarı bir kez daha çeker. Burada anlatılan retry ise anahtar isteğinin ağ seviyesinde başarısız olması durumunda çalışır. İkisi birlikte açık olabilir; her çekme kendi deneme sınırı içinde kalır.
+
+:::
+
+Anahtar, anahtar cache'inden karşılandığında hiç HTTP isteği yapılmaz; dolayısıyla retry devreye girmez. Çekilen anahtar cache'e yalnızca başarılı yanıt sonrasında yazılır.
 
 ## Best Practices
 

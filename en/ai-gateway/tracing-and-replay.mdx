@@ -1,0 +1,128 @@
+---
+title: "Tracing and Replay"
+description: "You can follow an AI request end-to-end through its trace chain, inspect every step in a timeline view, and replay a past request under the same conditions — with metrics exported to OpenTelemetry and Prometheus for APM integration."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Overview
+
+AI Gateway builds an **end-to-end chain** of requests (trace group / DAG) in real time, enabling two capabilities:
+
+- **Timeline View** — Visualize every step of a trace group (the main request plus any sub-calls) in a single screen
+- **Replay** — Re-execute a past trace with the same request body
+
+## How the Trace Group (DAG) Is Built
+
+When tracing is enabled (in METRIC/FULL_TRACE/DEBUG mode), a unique **trace ID** is generated at the start of each request and carried through the entire lifecycle of that request:
+
+- The main request and any sub-calls (for example, an agent tool calling another AI Gateway, or an A2A task chain) are correlated under the same **trace group ID**
+- Each sub-step references a **parent** trace ID, establishing a **parent-child** relationship between steps
+
+:::info
+
+This is especially useful for multi-step scenarios such as **[MCP](/en/ai-gateway/mcp-gateway) tool-call sequences** and **[A2A](/en/ai-gateway/a2a-gateway) agent tasks**, where all sub-operations of a single user request need to be traced as a connected chain.
+
+:::
+
+## Access and Retention
+
+Trace data is sensitive — it can contain full request and response bodies. Viewing it requires the AI analytics view permission, scoped to your project, so only people with legitimate access to a project's AI traffic can inspect it. Trace records are also retained for a limited period and purged automatically rather than kept indefinitely.
+
+## Timeline View
+
+From the AI Gateway's **AI Trace** tab, when you select a trace group:
+
+- All steps in the group are listed in **chronological order**
+- Each step's duration, status (success/error), and associated proxy/policy information are displayed
+- The parent-child relationship is shown visually (indented list / connecting lines)
+
+{/* TODO: screenshot — trace group timeline, visualization of connections between steps */}
+
+### A Policy's Internal Steps
+
+AI policies that reach the cache (semantic cache, token rate limit) do real work in **two separate lifecycle passes**: the request-phase decision (cache lookup, token reservation) and a stream-end pass that runs once the response is complete (writing the response to the cache, reconciling the reservation against the tokens actually consumed).
+
+Both passes are genuine executions, so each gets **its own node** in the flow — the trace shows what really ran, not a simplified summary. The second node carries a **↺** badge; hovering it names the work done in that pass rather than the phase itself ("Stream end — response written to the cache", "Stream end — token reservation settled"). Clicking the node shows the same label in the detail panel next to a "Why a second record?" line, so it reads as a second phase rather than a duplicated policy.
+
+Whether a second node appears depends on the request:
+
+| Situation | Second node |
+|-----------|-------------|
+| Semantic cache MISS | Yes — the response is written to the cache at stream end |
+| Semantic cache HIT | No — nothing needs re-caching, so no stream-end pass is dispatched |
+| Token rate limit | Yes, one per configured policy — the reservation is reconciled or released |
+
+The **Execution Details** button on the top bar opens the cache calls behind the node: the operation (RESERVE / RECONCILE / RELEASE / GET / PUT), the bucket, the cache key, the result and the duration — the same behaviour as the API Call policy's detail window on the API proxy trace screen.
+
+### Why the Trace Order Can Differ From Develop
+
+The trace shows the **actual** execution order, and for AI proxies that is not always the order you arranged on the Develop canvas. Before running the request pipeline the gateway applies a defensive reordering so that a misconfigured order cannot silently break correctness or a guardrail:
+
+1. **Prompt Template** runs before **Prompt Decorator** — the Decorator injects into the `messages[]` array the Template produces.
+2. **Prompt Template / Prompt Decorator** run before **RAG Injection** and every guard/cache policy — those need to see the fully assembled prompt, not the raw client body.
+3. **RAG Injection** runs before **Prompt Guard, Context Integrity, DLP Guard and Semantic Cache** — content RAG injects must be scanned by the guards and must be part of the cache key, otherwise a guard is defeated and the cache can be poisoned.
+
+So if a node appears earlier in the trace than in Develop, the request was not mishandled — the gateway corrected the order. The Develop screen warns you whenever one of these rules is violated: when you reorder policies by drag and drop, and when the flow screen loads with that order (including the return trip after adding a new policy). Fix the configuration and the warning stops, making both screens agree.
+
+For the semantic cache, that window also shows the **cached conversation** alongside the decision itself (hit/miss, match source — exact or vector, similarity, cache key, TTL, model): the request's prompt text, plus the response body that was served from the cache on a hit, or written to it on the write phase. "Why did this request come from cache?" and "what response was stored?" are then answered in one window, without comparing raw request/response bodies along the flow.
+
+## Replay
+
+You can re-execute a trace record with **the same request body** — useful for debugging, regression testing, or reproducing a customer-reported issue.
+
+<Steps>
+  <Step title="Find the Trace Record">
+    In the AI Gateway's **AI Trace** tab, locate the request you want to re-execute.
+  </Step>
+
+  <Step title="Click Replay">
+    Click the **Replay** button on the relevant trace row.
+  </Step>
+
+  <Step title="Watch the New Run">
+    Apinizer re-executes the original request body with the same configuration (same model, same policy chain); the result is shown as a new trace record.
+  </Step>
+</Steps>
+
+:::warning
+
+Replay **resends the original request as-is** — if the original request produces a side effect (for example, a tool call that writes to an external system), that side effect may be triggered again. It is recommended for read-only/analysis-oriented requests.
+
+:::
+
+:::note
+
+Replay uses the existing trace-DAG infrastructure as a **prerequisite** — requests made while trace was disabled cannot be replayed.
+
+:::
+
+## Metrics and Traces: OpenTelemetry and Prometheus
+
+Beyond the trace and timeline views in the UI, AI Gateway usage signals (tokens, cost, latency, guardrail outcomes) reach your own observability stack through two complementary paths:
+
+- **Prometheus** — the gateway's existing `apinizer_ai_*` counters/timers (provider, model, project, status tags) on its Prometheus endpoint, unchanged and always on regardless of the setting below.
+- **Native OpenTelemetry (OTLP) export** — an optional, agent-free product feature: W3C `traceparent` propagation plus a retrospective span tree (SERVER + per-attempt CLIENT + request/response spans) for **all** traffic, and a GenAI semantic-convention attribute/metric layer (`gen_ai.*`, `apinizer.ai.*`) for AI traffic specifically — exported straight from the product to your OTLP collector, no javaagent required. Content capture (prompts/completions on spans) is **off by default**.
+
+See **[OpenTelemetry](/en/ai-gateway/opentelemetry)** for the full attribute/metric reference, setup steps, and a downloadable Grafana dashboard.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="MCP Gateway" icon="plug" href="/en/ai-gateway/mcp-gateway">
+    See how tool-call sequences show up in the trace chain
+  </Card>
+  <Card title="A2A Gateway" icon="share-2" href="/en/ai-gateway/a2a-gateway">
+    See how agent tasks are traced across the chain
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    Review performance and latency metrics
+  </Card>
+  <Card title="Advanced Guardrails" icon="shield" href="/en/ai-gateway/advanced-guardrails">
+    Correlate guardrail triggers within the trace chain
+  </Card>
+  <Card title="OpenTelemetry" icon="radio" href="/en/ai-gateway/opentelemetry">
+    Configure native OTLP export and import the Grafana dashboard
+  </Card>
+</CardGroup>

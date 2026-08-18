@@ -1,0 +1,125 @@
+---
+title: "OpenTelemetry Export"
+description: "Export OpenTelemetry (OTLP) traces and metrics directly from the gateway for every proxy type — W3C trace propagation and a retrospective span tree for all traffic, with no javaagent to install."
+---
+
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+## Overview
+
+Apinizer can export [OpenTelemetry](https://opentelemetry.io/) (OTLP) traces and metrics straight from the gateway — no javaagent, no sidecar. Every request the gateway handles, regardless of proxy type, carries W3C `traceparent` propagation and produces a retrospective span tree in your OTLP collector, so a request that passes through Apinizer shows up as part of the same distributed trace as the systems in front of and behind it.
+
+This is the platform-wide reference: how export is turned on, what spans and attributes every proxy type produces, and how native export compares to the javaagent path. AI Gateway traffic carries an additional GenAI semantic-convention layer on top of everything here — token usage, cost, and model attributes — documented separately under [AI Gateway OpenTelemetry](/en/ai-gateway/opentelemetry).
+
+:::note Semantic conventions are pinned to a specific registry snapshot
+Attribute and metric names on this page follow the OpenTelemetry semantic-conventions registry as of **2026-08**. Apinizer follows the registry forward; if a future upgrade renames an attribute, it is called out in the release notes.
+:::
+
+## What Gets Exported
+
+Turning export on produces, for each request, a small span tree that mirrors how the gateway actually handled it:
+
+| Span | Kind | Represents |
+| --- | --- | --- |
+| Request span | SERVER | The whole request lifecycle, from the moment the gateway accepts it to the moment it finishes responding |
+| Backend attempt span | CLIENT | One span **per attempt** to reach a backend — a retry or a failover to another target is its own span, so a request that failed over twice shows three CLIENT spans |
+| Pipeline spans | INTERNAL | The request-processing and response-processing phases, as children of the request span |
+
+Spans are built **retrospectively** from timings the gateway already records, so turning export on adds no new per-request measurement work — it reuses the same data that already backs the traffic log.
+
+:::info Trace continuation
+When a request arrives already carrying a W3C `traceparent`, Apinizer joins that trace rather than starting a new one, and propagates a fresh child context to the backend it calls. A request that arrives without one starts a new trace. This is how an upstream API gateway, a browser, or a calling service and the backend behind Apinizer all end up on a single end-to-end trace.
+:::
+
+## Attribute Reference
+
+Header values, request/response bodies, query strings, and credentials are **never** placed on spans. Span names use the API proxy's templated path — never the raw request URI — so that trace cardinality stays bounded no matter how many distinct URLs your clients call.
+
+| Attribute | Span kind | Meaning |
+| --- | --- | --- |
+| `http.request.method` | SERVER, CLIENT | HTTP method |
+| `http.response.status_code` | SERVER, CLIENT | Status code |
+| `url.path` | SERVER | Request path only — the query string is never captured |
+| `network.peer.address` | CLIENT | The upstream address actually connected to |
+| `http.request.resend_count` | CLIENT | Set only on retried attempts |
+| `error.type` | SERVER, CLIENT | Failure classification when a request or attempt failed |
+| `apinizer.routing.dns_ns` / `.tcp_connect_ns` / `.tls_handshake_ns` / `.ttfb_ns` / `.body_read_ns` / `.pool_wait_ns` | CLIENT | Per-phase network timing for the attempt, each present only when it was actually measured |
+| `apinizer.cache_hit` | SERVER | Whether the response was served from the response cache |
+| `apinizer.result_type` | SERVER | Success / error / blocked classification |
+| `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | SERVER, CLIENT | Identity fields shared with every span — see [Correlation](#correlation) |
+
+## Metrics
+
+Native export does not change the gateway's existing Prometheus endpoint. The `apinizer_*` Prometheus counters and timers you already scrape keep working exactly as before, whether or not OTLP export is enabled — the two are independent. Enabling OTLP export adds trace data; it does not move or rename any Prometheus metric.
+
+AI Gateway traffic additionally emits GenAI-specific OTLP metric histograms (token usage, operation duration, cost). Those are documented with the rest of the AI layer under [AI Gateway OpenTelemetry](/en/ai-gateway/opentelemetry#metrics).
+
+:::note Spans cover every proxy type; OTLP metrics do not
+The split is deliberate and worth knowing before you plan your dashboards. **Spans** are emitted for every proxy type — REST, SOAP, AI, MCP, A2A alike. **OTLP metrics** are emitted only for AI Gateway traffic, because the GenAI histograms describe quantities (tokens, model cost) that have no counterpart on a plain REST proxy. Rate, error and duration for non-AI proxies are not pushed over OTLP.
+
+That does not leave you without gateway RED metrics. Pick whichever fits your stack:
+
+- **Scrape the Prometheus endpoint.** The `apinizer_*` series are complete for every proxy type and are unaffected by OTLP export.
+- **Derive them from the spans.** Point the collector's `spanmetrics` connector at the Apinizer spans; because every request produces a SERVER span carrying `http.response.status_code`, `error.type` and duration, rate/error/duration series come out of the traces themselves. This is the usual choice for an OTLP-only deployment that does not scrape Prometheus at all.
+:::
+
+## Configuration
+
+<Steps>
+  <Step title="Create an OTLP Collector connector">
+    Under connection management, create a new **OTLP Collector** connector. Set **Endpoint** to your collector's **base URL** (for example `http://collector:4318`) — Apinizer appends the signal path (`/v1/traces`, `/v1/metrics`) itself, so do not include it. Configure **Protocol** (HTTP/protobuf or gRPC), optional **Gzip Compression**, **Timeout**, an optional **Auth Header Name**/**Auth Header Value** pair (stored encrypted), and any **Additional Headers**. The **Batch / Export Tuning** section (max queue size, max export batch size, schedule delay, metric export interval) controls the exporter's batching behavior — the defaults are reasonable for most collectors.
+  </Step>
+  <Step title="Test the connection">
+    Use **Test Connection** on the connector. This is not a TCP ping — Apinizer builds a temporary exporter from the saved settings and sends one real synthetic span to the collector, proving the collector actually accepts Apinizer's OTLP payload (auth, TLS, and path included) before you deploy it.
+  </Step>
+  <Step title="Enable export on the environment">
+    In the target environment's **OpenTelemetry Export** section, set **Export Mode** to `NATIVE` and select the connector you just created as the **OTLP Collector**. Mode stays `OFF` by default (zero cost) until you opt in here — this is a per-environment setting, so you can pilot it on a staging environment before touching production.
+  </Step>
+  <Step title="Tune sampling">
+    **Sampling Ratio** controls parent-based `traceIdRatio` sampling for requests that start a new trace. A request that arrives with an existing sampled `traceparent` always inherits the parent's decision, regardless of this ratio. Start conservative on high-traffic proxies and raise it once you have confirmed collector capacity.
+  </Step>
+</Steps>
+
+## javaagent vs. Native
+
+Apinizer supports two ways of getting OpenTelemetry data out of the gateway, and it deliberately stops you from running both at once.
+
+| | javaagent | Native (this page) |
+| --- | --- | --- |
+| Install | Attach the OpenTelemetry Java agent to the worker JVM | Nothing to install — configure a connector plus one environment setting |
+| Scope | Full JVM auto-instrumentation (HTTP client/server, database calls, and more) | Apinizer's own request lifecycle, with business context (correlation ID, project, proxy) built in |
+| Double-export | N/A | **Automatically detected and disabled.** If Apinizer detects an OpenTelemetry javaagent attached to the JVM while an environment's export mode is `NATIVE`, it forces native export off and logs a warning rather than sending every span twice. Set the mode to `AGENT` explicitly to silence the warning once you have chosen the javaagent path. |
+
+Pick native for the fastest path to Apinizer-aware traces with no deployment change. Pick the javaagent when you need full-stack JVM instrumentation beyond what the gateway emits itself — the [OpenTelemetry Integration article series](/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup) walks through that setup. Running both against the same environment is not supported; the automatic veto exists specifically to stop that from happening silently.
+
+## Correlation
+
+`apinizer.correlation_id` is stamped on every span and matches the `APINIZER-CORRELATION-ID` you already see on API traffic logs. It is the one identifier that ties a trace in your APM tool back to the corresponding [traffic record](/en/develop/monitoring-analysis/api-traffic) in Apinizer — start from a slow span in your collector and pull up the full request in Apinizer's traffic log using the same value.
+
+For AI Gateway traffic the correlation is bidirectional and richer, tying the trace to the AI Trace record in both directions — see [AI Gateway OpenTelemetry: Correlation](/en/ai-gateway/opentelemetry#correlation).
+
+## Known Limits
+
+- **WebSocket and gRPC get server-side spans, not W3C propagation.** A request span is produced for WebSocket/gRPC traffic like any other request, but reading an incoming `traceparent` and propagating one to the backend are currently HTTP/SOAP-only. A WebSocket/gRPC request always starts a new trace rather than continuing one from its caller.
+- **Policy and guardrail spans require Live Trace.** The gateway can emit INTERNAL child spans for individual policy steps, but only when Live Trace is active for that request; always-on export alone does not produce them.
+- **Semantic conventions are pinned to a 2026-08 registry snapshot**, still in Development status upstream — expect possible attribute renames in a future Apinizer release as the registry stabilizes.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="AI Gateway OpenTelemetry" icon="bot" href="/en/ai-gateway/opentelemetry">
+    The GenAI attribute and metric layer, provider-name mapping, content capture, and the downloadable Grafana dashboard
+  </Card>
+  <Card title="Step-by-Step Tracing" icon="route" href="/en/develop/monitoring-analysis/step-by-step-tracing">
+    Follow a single request through the gateway inside Apinizer's own UI
+  </Card>
+  <Card title="API Traffic" icon="list" href="/en/develop/monitoring-analysis/api-traffic">
+    The traffic log that shares the correlation ID with every exported trace
+  </Card>
+  <Card title="OpenTelemetry Integration (javaagent)" icon="book-open" href="/en/articles/apinizer-gateway-opentelemetry-integration-part-1-setup">
+    The javaagent-based full-stack instrumentation path
+  </Card>
+</CardGroup>

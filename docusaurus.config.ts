@@ -37,8 +37,10 @@ const config: Config = {
       '@easyops-cn/docusaurus-search-local',
       {
         hashed: true,
-        // English-only language tables to keep the per-locale shard small.
-        language: ['en'],
+        // en+tr: lunr.tr trimmer/stemmer'ı Türkçe ek-formlarını birleştirerek TR shard'ını
+        // Cloudflare Pages'in 25 MiB tek-asset limitinin altında tutar (halil kararı 2026-08-07;
+        // kalıcı çözüm Pagefind'a geçiş — o merge olunca bu plugin bloğu tamamen kalkar).
+        language: ['en', 'tr'],
         indexDocs: true,
         indexPages: false,
         indexBlog: false,
@@ -113,6 +115,29 @@ const config: Config = {
           {from: '/tr/upgrade/linux-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
           {from: '/en/upgrade/upgrading-on-docker', to: '/en/upgrade/apinizer-version-upgrade'},
           {from: '/en/upgrade/upgrading-on-linux', to: '/en/upgrade/apinizer-version-upgrade'},
+          // MCP/A2A outbound connections retired as a standalone resource — servers/agents are now
+          // configured inline (Passthrough proxy routing, or the owning policy). Point old API
+          // Reference URLs at the closest living equivalent instead of a dead link.
+          {from: '/api-reference/mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/list-mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/get-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/create-mcp-connection', to: '/api-reference/api-proxies/crud/create-mcp-api-proxy'},
+          {from: '/api-reference/mcp-connections/update-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/delete-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
+          {from: '/api-reference/mcp-connections/test-mcp-connection', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/mcp-connections/parse-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/mcp-connections/list-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
+          {from: '/api-reference/a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/list-a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/get-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/create-a2a-connection', to: '/api-reference/api-proxies/crud/create-a2a-api-proxy'},
+          {from: '/api-reference/a2a-connections/update-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
+          {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          // 2026.07.0 → 2026.09.0 release rename (ALTER script pages)
+          {from: '/tr/release-notes/2026-07-0-log-tablosu-alter', to: '/tr/release-notes/2026-09-0-log-tablosu-alter'},
+          {from: '/en/release-notes/2026-07-0-log-table-alter', to: '/en/release-notes/2026-09-0-log-table-alter'},
         ],
         createRedirects(existingPath) {
           if (existingPath === '/tr') {
@@ -147,6 +172,7 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'tr', label: 'API Portal', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'operasyon', docsPluginId: 'tr', label: 'Operasyon', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'kilavuzlar', docsPluginId: 'tr', label: 'Kılavuzlar', position: 'left', className: 'navbar__item--tr'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'tr', label: 'AI Gateway', position: 'left', className: 'navbar__item--tr'},
         // English tabs.
         {type: 'docSidebar', sidebarId: 'overview', docsPluginId: 'en', label: 'Overview', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'versions', docsPluginId: 'en', label: 'Versions', position: 'left', className: 'navbar__item--en'},
@@ -157,6 +183,7 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'en', label: 'API Portal', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'operations', docsPluginId: 'en', label: 'Operations', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'guides', docsPluginId: 'en', label: 'Guides', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'en', label: 'AI Gateway', position: 'left', className: 'navbar__item--en'},
         // API Reference — shared between TR and EN contexts.
         {type: 'docSidebar', sidebarId: 'api-reference', docsPluginId: 'apiReference', label: 'API Reference', position: 'left', className: 'navbar__item--apiref'},
 

@@ -1,0 +1,127 @@
+---
+title: "Semantik Önbellek"
+description: "Aynı veya anlamca benzer isteklere önbellekteki yanıtı yeniden vererek gecikme ve maliyeti azaltın; kişisel veri maskeleme ile uyumlu güvenli önbellekleme davranışını yapılandırın."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+
+## Genel Bakış
+
+**Semantik önbellek**, daha önce yanıtlanmış bir isteğe yeniden (veya anlamca çok benzer bir isteğe) rastlandığında, modeli tekrar çağırmadan **önbellekteki yanıtı** döner. Bu, hem gecikmeyi hem de maliyeti düşürür.
+
+:::info
+Vektör-benzerlik kavramının temel tanımı için [Yapay Zeka Temel Kavramları](/tr/concepts/temel-kavramlar/yapay-zeka-temel-kavramlari) sayfasına bakabilirsiniz.
+:::
+
+:::warning Politika sırası: önbellek, prompt'u kuran politikalardan sonra
+Semantik önbellek; [Prompt Şablonu](/tr/ai-gateway/prompt-sablonlari), [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici) ve [RAG](/tr/ai-gateway/rag) politikalarından **sonra** çalışmalıdır. Önbellek anahtarı prompt'un tam kurulmuş hâlinden üretilir; bu politikalardan önce çalışırsa anahtar eksik bir metinden hesaplanır ve birbirinden farklı istekler aynı yanıtı paylaşabilir.
+
+Politika listesini bu kurala aykırı bir sırayla kaydederseniz Apinizer sırayı **kayıt anında** otomatik olarak düzeltir ve neyi neden taşıdığını bir bilgi notuyla bildirir. Böylece Develop ekranında gördüğünüz sıra ile [izleme](/tr/ai-gateway/izleme-ve-tekrar-oynatma) ekranındaki gerçek çalışma sırası her zaman aynı kalır.
+:::
+
+## Eşleşme Modları
+
+İki eşleşme modu desteklenir:
+
+- **Birebir eşleşme** — İstek, önbellekte daha önce görülen bir isteğin **aynısıysa** eşleşir
+- **Vektör-benzerlik** (isteğe bağlı) — İstek birebir aynı olmasa da, [vektör veritabanı](/tr/ai-gateway/vektor-veritabani) üzerinden **anlamca yeterince benzer** bulunursa eşleşir (örn. aynı soru farklı kelimelerle sorulduğunda da isabet alınır)
+
+## Ne Zaman Devreye Girer?
+
+Semantik önbellek, isteğin [RAG](/tr/ai-gateway/rag) ile bağlam eklenmesinden **sonra**, ancak modele iletilmeden **önce** kontrol edilir:
+
+```
+İstek → Korumalar → RAG (bağlam ekleme) → Semantik Önbellek → Yönlendirme → Model
+```
+
+Bağlamlı isteğin önbelleğe bakılması, doğru (bağlamı da hesaba katan) bir eşleşme sağlar.
+
+## Benzerlik Eşiği
+
+Vektör-benzerlik modunda bir adayın isabet sayılması için gereken en düşük benzerlik skoru **benzerlik eşiği** ile belirlenir. Eşiği düşürmek daha çok isabet, yükseltmek daha kesin isabet demektir.
+
+Eşik `0` verildiğinde eşik gerçekten devre dışı kalır — hiçbir aday skoru yüzünden elenmez. Ancak bu **"her istek eşleşir" anlamına gelmez**; eşikten önce üç filtre daha çalışır:
+
+1. **Kapsam izolasyonu** — bir aday yalnız aynı model, aynı API proxy ve aynı kimlik kapsamındaysa kabul edilir. Başka bir kapsamdaki daha yüksek skorlu kayıt bilerek elenir; aksi halde bir çağıranın yanıtı başkasına dönerdi.
+2. **Aday sayısı** — vektör veritabanından yalnız en yakın belirli sayıda kayıt çekilir. Koleksiyon büyükse aynı kapsamdaki doğru kayıt bu listenin dışında kalabilir; böyle bir durumda **en yakın komşu sayısını** artırın.
+3. **Girdinin ömrü** — vektör eşleşmesi bulunsa bile yanıt gövdesi birebir önbellek girdisinden okunur. O girdi TTL ile düşmüşse sonuç yine ıskadır.
+
+Beklediğiniz isabeti alamıyorsanız sırayla bunları kontrol edin; eşiği daha da düşürmek yardımcı olmaz.
+
+## Vektör-Benzerlik Girdisini İnce Ayarlama
+
+Varsayılan olarak vektör-benzerlik modu, embedding'e girdi olarak yalnızca isteğin **son kullanıcı mesajını** alır. Çok turlu bir konuşmada önceki turların bağlamı önemliyse, hangi mesajların embedding girdisine dahil edileceğini ayarlayabilirsiniz:
+
+| Ayar | Davranış |
+|------|----------|
+| **Geriye dönük mesaj sayısı** | Mesaj listesinin sonundan başlayarak kaç mesajın embedding girdisine dahil edileceği. Varsayılan/boş = 1 (yalnız son mesaj — önceki davranışla birebir aynı). |
+| **Sistem mesajlarını dahil et** | Geriye dönük pencereye giren `system` rollü mesajları da embedding girdisine katar. |
+| **Asistan mesajlarını dahil et** | Geriye dönük pencereye giren `assistant` rollü mesajları da embedding girdisine katar. |
+| **Araç mesajlarını dahil et** | Geriye dönük pencereye giren `tool` rollü mesajları da embedding girdisine katar. |
+
+:::info Yalnızca vektör katmanını etkiler
+Bu dört ayar **yalnızca vektör-benzerlik eşleşmesinin embedding girdisini** değiştirir. **Birebir eşleşme** anahtarı — isteğin tam gövdesinin özeti — bu ayarlardan bağımsız olarak her zaman değişmeden hesaplanır; bir ayarı değiştirmek, mevcut birebir-eşleşme önbellek girdilerini geçersiz kılmaz.
+:::
+
+## `Cache-Control` Başlığına Uyma
+
+**`Cache-Control` başlığına uy** açıldığında, istemcinin `Cache-Control` isteği başlığı önbellek davranışını etkiler:
+
+| Başlık değeri | Davranış |
+|---------------|----------|
+| `no-store` | Bu istek için önbellek ne okunur ne de yazılır — yanıt sağlayıcıdan taze alınır ve sonucu önbelleğe **yazılmaz** |
+| `no-cache` | Okuma atlanır (yanıt her zaman sağlayıcıdan taze alınır) ama yazma normal şekilde **devam eder** — sonraki isteklerin isabet alabilmesi için önbellek güncellenir |
+
+Bu ayar varsayılan olarak **kapalıdır** — kapalıyken başlık hiç okunmaz, davranış bu ayar eklenmeden önceki ile birebir aynıdır.
+
+## Kimliği Olmayan (Anonim) İstekler
+
+Önbellek anahtarı; model, API proxy ve **çağıranın kimliği** ile kurulur — böylece bir kiracının yanıtı başka bir kiracıya dönmez. Kimlik doğrulaması olmayan bir API proxy'de istek böyle bir kimlik taşımaz ve ne yapılacağı politikada seçilir:
+
+| Seçenek | Davranış |
+|---------|----------|
+| **Politikayı uygulama** (varsayılan) | Önbellek atlanır, istek doğrudan sağlayıcıya gider |
+| **Ortak havuzdan tüket** | Tüm anonim istekler **tek** bir ortak önbellek kovasında toplanır |
+| **İsteği reddet** | Anonim istek HTTP 401 ile geri çevrilir |
+
+Varsayılan seçenek, bu ayar eklenmeden önceki davranışla birebir aynıdır. "Ortak havuzdan tüket" seçildiğinde kiracı izolasyonu **beklenmez** — bir çağıranın yanıtı diğerine dönebilir; yalnızca anonim erişimin bilinçli olarak açıldığı ve yanıtların paylaşılmasında sakınca görülmeyen kurulumlar için uygundur.
+
+Aynı üç seçenek Tekrar-Fırtınası korumasında da vardır; bkz. [Gelişmiş Korumalar](/tr/ai-gateway/gelismis-korumalar).
+
+## Kişisel Veri ile Güvenli Etkileşim (Maske-Kapısı)
+
+Bir yanıt, kişisel veri (PII) maskeleme politikasından geçiyorsa, semantik önbelleğe **hiçbir zaman maskelemeden önceki ham hali yazılmaz** — yalnızca maskelenmiş hâli önbelleğe alınır. Böylece bir sonraki önbellek isabetinde maskelenmemiş veri sızması söz konusu olmaz.
+
+## TTL ve Otomatik Temizlik
+
+Önbellek girdileri sınırsız süre saklanmaz; her girdi bir **TTL (yaşam süresi)** ile oluşturulur ve süresi dolan girdiler otomatik olarak temizlenir. Bu sayede önbellek eski/güncelliğini yitirmiş yanıtlarla şişmez.
+
+## İzleme
+
+Önbelleğin ne kadar isabet aldığı (HIT oranı) ve bu isabetler sayesinde tasarruf edilen maliyet, [Raporlar ve Analitik](/tr/ai-gateway/raporlar) ekranında izlenebilir.
+
+## Yapılandırma
+
+Semantik önbellek, bir API proxy'sine eklenen **Semantic Cache** politikasıyla etkinleştirilir:
+
+1. İlgili API proxy'sinin politika listesine **Semantic Cache** politikasını ekleyin
+2. Eşleşme modunu (birebir veya vektör-benzerlik) seçin; vektör-benzerlik için kullanılacak [vektör veritabanı](/tr/ai-gateway/vektor-veritabani) bağlantısını belirleyin
+3. TTL süresini ayarlayın
+4. Kaydedin ve deploy edin
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Vektör Veritabanı" icon="database" href="/tr/ai-gateway/vektor-veritabani">
+    Vektör-benzerlik eşleşmesinin çalıştığı altyapıyı yapılandırın
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    Önbellekten önce çalışan koruma katmanlarını inceleyin
+  </Card>
+  <Card title="Raporlar ve Analitik" icon="chart-bar" href="/tr/ai-gateway/raporlar">
+    Önbellek isabet oranını ve tasarrufu izleyin
+  </Card>
+  <Card title="AI Maliyet Ayarları" icon="dollar-sign" href="/tr/ai-gateway/maliyet-ayarlari">
+    Önbellek tasarrufunun maliyet raporlarına etkisini görün
+  </Card>
+</CardGroup>

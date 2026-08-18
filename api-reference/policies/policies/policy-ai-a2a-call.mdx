@@ -1,0 +1,536 @@
+---
+title: "A2A Call Policy"
+description: "A2A Call policies let an AI proxy delegate a task to an external agent. The backend agent is always defined inline on the policy itself, so a policy carries everything it needs to send a task — endpoint, authentication, mTLS and agent-card cache settings."
+---
+
+## General Information
+
+### Policy Types
+
+Two variants share the same inline agent definition and differ only in who chooses the skill.
+
+```plaintext
+ai-a2a-call-llm
+ai-a2a-call-fixed
+```
+
+| Type | Who picks the skill |
+|------|---------------------|
+| ai-a2a-call-llm | The model picks it from its own tool-use response. The policy may narrow the choice with an allow-list. |
+| ai-a2a-call-fixed | You pin one skill by name and supply a message template. |
+
+:::note Renamed in 2026.04
+The wire values were renamed so they state who picks the target. The former values `a2a-agent-call` and `a2a-agent-invoke` are still accepted on import, so packages exported before the rename keep working.
+:::
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## The Inline A2A Agent
+
+`a2aAgent` is the **only** way to define the backend agent, and a non-blank `endpoint` is required. There is no reference to a separate, shared connection object: an external agent is not a standalone resource, and the endpoints that used to manage one are retired. A policy that omits `a2aAgent`, or supplies one with a blank `endpoint`, is rejected with `400`.
+
+:::info Why inline
+Because the definition travels with the policy, exporting or importing the policy carries its agent with it, and two policies pointing at the same URL stay independent — rotating a credential on one never disturbs the other. See [A2A Gateway](/en/ai-gateway/a2a-gateway) for the full picture.
+:::
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| endpoint | string | Yes | Base URL of the external agent — the address tasks are sent to. Must be non-blank. Agent-card discovery looks for the card at this address first and, if it isn't served there, at the standard discovery path below it (`.../.well-known/agent-card.json`), so either form works. |
+| a2aProtocolVersion | string | No | Protocol version used when talking to the agent. Default `1.0`. |
+| allowPrivateNetworkEgress | boolean | No | Permits the endpoint to resolve to a private address. Off by default; the same SSRF protection applies as for Passthrough routing. |
+| authScheme | string | No | `NONE` (default), `BEARER`, `OAUTH` or `MTLS`. |
+| bearerToken | string | Conditional | Required for `BEARER`. Write-only, see [Secret fields](#secret-fields). |
+| credentialRef | string | No | Name of a stored credential to use instead of an inline token. |
+| tokenEndpoint | string | Conditional | Required for `OAUTH`. |
+| clientId | string | Conditional | Required for `OAUTH`. |
+| clientSecret | string | Conditional | Required for `OAUTH`. Write-only, see [Secret fields](#secret-fields). |
+| scope | string | No | Space-separated scopes requested for `OAUTH`. |
+| mTLSSettings | object | Conditional | Client certificate settings, required for `MTLS`. |
+| agentCardCacheEnabled | boolean | No | Caches the agent card returned by discovery. Enabled by default. |
+| agentCardCacheTtlSeconds | integer | No | Agent-card cache lifetime in seconds. Default `300`. |
+| driftPolicy | string | No | `WARN_ONLY` or `FAIL_CLOSED`. Decides what happens when the agent's skill set changes after discovery. |
+
+:::note Differences from the MCP server definition
+An A2A agent has no transport selector — delegation always goes over the A2A protocol — and it caches an agent card rather than a tool catalog. It also has no credential-mapping field.
+:::
+
+### Secret fields
+
+`bearerToken` and `clientSecret` follow the platform's standard secret handling.
+
+- On a `GET` or list response they are **always** masked as `null`. Two read-only booleans report whether a value is stored: `a2aAgentBearerTokenSet` and `a2aAgentClientSecretSet`. Both are ignored if you send them on a write.
+- On `POST` or `PUT`, **omit the field entirely** to keep the stored value. Send a plaintext value only when the secret genuinely changes. Sending `null` or an empty string clears it.
+
+### Server-managed fields
+
+The discovered skills, health state and drift state belong to the platform. Any value submitted for them is discarded on write and the persisted state is kept:
+
+```plaintext
+discoveredSkills     skillsParsedAt
+healthStatus         lastHealthCheckAt      healthMessage
+pinnedCatalogHash    driftDetected          driftMessage
+```
+
+`driftPolicy` is **not** in this group — it is your setting and is honoured as sent.
+
+To inspect an agent's card without persisting anything, use [Discover A2A Policy Skills](/api-reference/policies/crud/discover-a2a-policy-skills).
+
+### Allow-list behaviour
+
+Delegation is **fail-closed**: a skill runs only when something explicitly vetted it. The discovered skill set and `allowedSkillNames` are combined as follows.
+
+| Discovered skills | allowedSkillNames | Result |
+|-------------------|-------------------|--------|
+| Empty or unavailable | Empty | **Denied.** Nothing has vetted the name, so no task is sent. |
+| Non-empty | Empty | Allowed if the skill is in the discovered set. Discovery alone governs. |
+| Non-empty | Non-empty | Allowed only if the skill is in **both**. The policy list narrows the discovered set and can never widen it. |
+| Empty or unavailable | Non-empty | Allowed if the skill is in `allowedSkillNames`. An agent that cannot be discovered is still usable through an explicit list. |
+
+:::warning
+An empty `allowedSkillNames` is not a blanket "allow everything" — it defers to discovery. If discovery has never succeeded, every delegation is denied.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-a2a-call-llm",
+            "name": "research-delegate",
+            "description": "Delegates research tasks to the analyst agent",
+            "active": true,
+            "enabled": true,
+            "a2aAgent": {
+              "endpoint": "https://agents.internal.example.com/analyst",
+              "a2aProtocolVersion": "1.0",
+              "authScheme": "BEARER",
+              "bearerToken": null,
+              "agentCardCacheEnabled": true,
+              "agentCardCacheTtlSeconds": 300,
+              "driftPolicy": "WARN_ONLY"
+            },
+            "a2aAgentBearerTokenSet": true,
+            "a2aAgentClientSecretSet": false,
+            "callTimeoutMs": 30000,
+            "taskWaitTimeoutMs": 60000,
+            "parallelAgentCalls": true,
+            "allowedSkillNames": ["market_research", "summarize_report"]
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+:::note Masked secrets in a read
+`bearerToken` comes back as `null` while `a2aAgentBearerTokenSet` reports `true` — the secret is stored, it is simply never returned.
+:::
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Model Picks the Skill
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-a2a-call-llm",
+    "description": "Delegates research tasks to the analyst agent",
+    "active": true,
+    "enabled": true,
+    "a2aAgent": {
+      "endpoint": "https://agents.internal.example.com/analyst",
+      "a2aProtocolVersion": "1.0",
+      "authScheme": "BEARER",
+      "bearerToken": "PLAINTEXT_TOKEN",
+      "allowPrivateNetworkEgress": false,
+      "agentCardCacheEnabled": true,
+      "agentCardCacheTtlSeconds": 300,
+      "driftPolicy": "WARN_ONLY"
+    },
+    "callTimeoutMs": 30000,
+    "taskWaitTimeoutMs": 60000,
+    "parallelAgentCalls": true,
+    "allowedSkillNames": ["market_research", "summarize_report"]
+  }
+}
+```
+
+##### Full JSON Body Example — Pinned Skill
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-a2a-call-fixed",
+    "description": "Always summarize the incoming report",
+    "active": true,
+    "enabled": true,
+    "a2aAgent": {
+      "endpoint": "https://agents.internal.example.com/analyst",
+      "authScheme": "OAUTH",
+      "tokenEndpoint": "https://idp.example.com/oauth2/token",
+      "clientId": "apinizer-gateway",
+      "clientSecret": "PLAINTEXT_SECRET",
+      "scope": "a2a.task.send"
+    },
+    "targetSkillName": "summarize_report",
+    "messageTemplate": "Summarize the following report: ${request.body}",
+    "waitMode": "SYNC_TO_VARIABLE",
+    "outputVariableName": "reportSummary",
+    "callTimeoutMs": 30000,
+    "taskWaitTimeoutMs": 60000
+  }
+}
+```
+
+#### Common Body Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | `ai-a2a-call-llm` or `ai-a2a-call-fixed`. |
+| description | string | No | Free-text description. |
+| active | boolean | No | Whether the policy takes part in the pipeline. |
+| enabled | boolean | No | Whether the delegation itself is enabled. Default `true`. |
+| a2aAgent | object | Yes | Inline agent definition. See [The Inline A2A Agent](#the-inline-a2a-agent). |
+| callTimeoutMs | integer | No | Per-send HTTP timeout in milliseconds. Default `30000`. |
+| taskWaitTimeoutMs | integer | No | Total budget in milliseconds for waiting on an asynchronous task to finish. Default `60000`. |
+
+#### Fields for `ai-a2a-call-llm`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| parallelAgentCalls | boolean | No | Dispatches several delegations at once. Default `true`. |
+| allowedSkillNames | array | No | Allow-list narrowing what the model may delegate, as a subset of the discovered skills. See [Allow-list behaviour](#allow-list-behaviour) — an empty list is not the same as "allow everything". |
+
+#### Fields for `ai-a2a-call-fixed`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| targetSkillName | string | Yes | Name of the single skill to invoke. Must be non-blank. |
+| messageTemplate | string | No | Template for the message sent to the agent. Variables are resolved at request time. |
+| waitMode | string | No | `FIRE_AND_FORGET` (default) returns without waiting; `SYNC_TO_VARIABLE` waits for the task and stores the result. |
+| outputVariableName | string | No | Name of the variable that receives the result. Only meaningful under `SYNC_TO_VARIABLE`; it is not enforced, so a `SYNC_TO_VARIABLE` policy without it is accepted and simply stores nothing. |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; missing `a2aAgent`; `a2aAgent.endpoint` blank; `targetSkillName` blank on `ai-a2a-call-fixed`; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/research-delegate/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-a2a-call-llm",
+      "description": "Research delegation",
+      "active": true,
+      "a2aAgent": {
+        "endpoint": "https://agents.internal.example.com/analyst",
+        "authScheme": "BEARER",
+        "bearerToken": "PLAINTEXT_TOKEN"
+      },
+      "allowedSkillNames": ["market_research"]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+:::warning Keeping a stored secret
+Omit `bearerToken` and `clientSecret` to preserve what is already stored. A read response masks them as `null`, so echoing a response back unchanged would clear them. Check `a2aAgentBearerTokenSet` and `a2aAgentClientSecretSet` to see whether a value exists.
+:::
+
+##### Full JSON Body Example — Tightening the Drift Policy
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-a2a-call-llm",
+    "description": "Delegates research tasks to the analyst agent",
+    "active": true,
+    "a2aAgent": {
+      "endpoint": "https://agents.internal.example.com/analyst",
+      "authScheme": "BEARER",
+      "agentCardCacheTtlSeconds": 600,
+      "driftPolicy": "FAIL_CLOSED"
+    },
+    "allowedSkillNames": ["market_research", "summarize_report"]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/research-delegate/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-a2a-call-llm",
+      "active": true,
+      "a2aAgent": {
+        "endpoint": "https://agents.internal.example.com/analyst",
+        "authScheme": "BEARER",
+        "driftPolicy": "FAIL_CLOSED"
+      },
+      "allowedSkillNames": ["market_research", "summarize_report"]
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/research-delegate/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **The inline agent is the only target.** There is no field that points at a shared, standalone agent, and the endpoints that used to manage one are retired. A configuration created before this change is migrated automatically: the agent it referenced is copied into the policy on upgrade.
+- **Shared agents become independent copies.** If several policies referenced the same agent before the migration, each now owns its own copy, credential included. Rotating that credential is a per-policy operation.
+- **An empty allow-list defers to discovery, it does not open the door.** With no discovered skills and no `allowedSkillNames`, every delegation is denied. See [Allow-list behaviour](#allow-list-behaviour).
+- **Two timeouts govern a delegation.** `callTimeoutMs` bounds each HTTP send; `taskWaitTimeoutMs` bounds the whole wait for an asynchronous task. Under `FIRE_AND_FORGET` the second one does not apply.
+- **Egress to private addresses is refused by default.** Set `allowPrivateNetworkEgress` deliberately, and only for an agent you control.
+
+## Related Documentation
+
+- [A2A Gateway](/en/ai-gateway/a2a-gateway)
+- [Discover A2A Policy Skills](/api-reference/policies/crud/discover-a2a-policy-skills)
+- [Update A2A Routing](/api-reference/api-proxies/settings/update-a2a-routing)
+- [Create A2A API Proxy](/api-reference/api-proxies/crud/create-a2a-api-proxy)
+- [MCP Call Policy](/api-reference/policies/policies/policy-ai-mcp-call)

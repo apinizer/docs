@@ -1,0 +1,220 @@
+---
+title: "Import Objects"
+description: "Imports a package produced by the export endpoint or the Apinizer interface into a project. Dependencies the package carries are bound to same-named objects in the target project and created when no such object exists, and whatever could not be carried over is reported back in the response."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/export-import/{type}/import/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | multipart/form-data | Yes |
+| X-Apinizer-Package-Passphrase | Base64 of the UTF-8 passphrase | Only when the package is encrypted |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Target project name |
+| type | string | Yes | Export/import type of the package, case-insensitive. See [List Supported Types](/api-reference/export-import/list-supported-types) |
+
+### Form Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| exportFile | file | Yes | — | The ZIP package. The file name must end with `.zip` |
+| override | boolean | No | false | When `false`, the objects are imported as new. When `true`, a same-named object in the target project is replaced |
+| environmentMapping | string (JSON) | No | — | Maps an environment name in the package to an environment name on this installation, for example `{"UAT": "Production"}`. An empty value marks that environment as deliberately not transferred. Without it, same-named environments match and unmatched ones are dropped. Applies to `override=false` (Import as New) only — with `override=true` the mapping is ignored, because Replace Existing merges onto the target object's own environment assignment, which the two `certEnvironment*` fields below govern |
+| certEnvironmentMergeMethod | string | No | MATCH_BY_NAME | For certificate and key packages imported with `override=true`: `MATCH_BY_NAME` writes to the environments named in the package, `OVERWRITE_ALL` writes to every target environment |
+| certEnvironmentUncoveredAction | string | No | — | For certificate and key packages imported with `override=true`: what happens to a target environment the package does not cover — `FILL_FROM_PACKAGE` writes the package's data onto it, `REMOVE_FROM_TARGET` drops it from the object. If such an uncovered environment actually exists and this is not supplied, the import is rejected with 400 rather than silently leaving it with stale material |
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+When part of the package could not be carried over, the response says so:
+
+```json
+{
+  "status": "SUCCESS",
+  "unresolvedReferences": [
+    "The following imported objects are not deployed to any worker: CERTIFICATE: partner-cert"
+  ]
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | string | `SUCCESS` or `FAILURE` |
+| unresolvedReferences | array of string | What the import could not carry over — dropped references, blanked secrets, objects that still need deploying. Absent when everything transferred |
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Import as New cannot proceed: openai-prod (LLM_PROVIDER) — an object of this kind and name already exists in the target project. Use Replace Existing where the object already exists in this project, or rename the object(s) before importing."
+}
+```
+
+Each rejected name carries its own reason, so a script can tell the three causes apart: `already exists in the target project` (Replace Existing is the remedy), `this name is carried twice by this import package` (the package itself is the problem), and `already exists elsewhere on this installation …` for object types whose names must be unique across all projects — credential usernames, environment variables, AI preset catalogs and model definitions. The last one is refused even when the target project holds no such object, and Replace Existing has nothing to update there:
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Import as New cannot proceed: svc-partner (CREDENTIAL) — an object of this kind and name already exists elsewhere on this installation (another project, the shared admin scope, or a built-in item) and this kind's names must be unique across ALL projects, not only the target project. Use Replace Existing where the object already exists in this project, or rename the object(s) before importing."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "This package holds no IP_GROUP object — it looks like a CREDENTIAL package; nothing was imported."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "exportFile parameter must be in zip file format and must end with zip extension!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "User does not have required EXPORT_IMPORT permission for SECRETS to import this package!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Package is encrypted; a passphrase is required."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Replace Existing of CERTIFICATE 'partner-cert' cannot proceed: the package carries no data for the target environment(s) UAT, so they would keep their old material while the rest is replaced. Send the certEnvironmentUncoveredAction parameter with either FILL_FROM_PACKAGE (write the package's data onto them) or REMOVE_FROM_TARGET (drop them from the object) and import again."
+}
+```
+
+#### Common Causes
+
+- `override=false` and an object of the same name already exists in the target project
+- The package holds objects of a different type than the one in the path
+- The uploaded file is not a ZIP file, or its name does not end with `.zip`
+- The package carries objects whose asset categories the token lacks `EXPORT_IMPORT` on
+- The package is encrypted and no passphrase — or a wrong one — was supplied
+- `override=true` on a certificate/key package where the target has an environment the package does not cover, and `certEnvironmentUncoveredAction` was not supplied
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+### Example 1: Import as New
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/TargetProject/export-import/LLM_PROVIDER/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "exportFile=@openai-prod.zip" \
+  -F "override=false"
+```
+
+### Example 2: Replace an Existing Object
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/TargetProject/export-import/LLM_PROVIDER/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "exportFile=@openai-prod.zip" \
+  -F "override=true"
+```
+
+### Example 3: Map Environments While Importing
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/TargetProject/export-import/CERTIFICATE/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "exportFile=@partner-cert.zip" \
+  -F 'environmentMapping={"UAT":"Production"}'
+```
+
+### Example 4: Import an Encrypted Package
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/TargetProject/export-import/CREDENTIAL/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -F "exportFile=@partner-credential.zip" \
+  -F "override=false"
+```
+
+## Notes and Warnings
+
+- **Dependencies bind by name**: every object the package carries that already exists in the target project under the same name is bound to it; everything else is created. This is the automatic form of the "map to existing by name" step in the Apinizer interface.
+- **Wrong-kind matches are never made**: for the groups that carry several kinds behind one reference — connections, API creators, authentication services, MCP servers, A2A agents — only a same-kind object is an eligible match, so a database connection can never be bound to a file transfer connection.
+- **Ambiguous matches are not guessed**: when a packaged dependency matches more than one object by name, it is imported as new instead. A wrong binding would be silent and permanent; a duplicate is visible and can be fixed.
+- **Read `unresolvedReferences`**: it reports everything the import could not carry over. A package that transferred only partially never returns a bare success.
+- **Secrets are not carried in the clear**: secret values of imported connection objects are blanked and must be re-entered in the target project, unless the package itself was encrypted end to end.
+- **Imported objects are not deployed**: objects that need deployment to take effect are persisted but not pushed to the workers by the import. Deploy them afterwards.
+- **Type must match the package**: the type in the path is what the import looks for inside the package. If the package holds something else, nothing is written and the response names the type it actually found.
+
+## Permissions
+
+- User must have **the type's own asset category + `EXPORT_IMPORT`**, or **`PROJECT_MANAGEMENT` + `EXPORT_IMPORT`**, in the target project
+- Every asset category present in the package is additionally checked against the **target** project, since that is where the objects land
+
+## Related Documentation
+
+- [Export / Import API](/api-reference/export-import) - Overview and shared concepts
+- [Export Objects](/api-reference/export-import/export-objects) - Produce the package imported here
+- [List Objects of a Type](/api-reference/export-import/list-objects) - Verify what landed in the target project

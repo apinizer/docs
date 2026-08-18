@@ -1,0 +1,157 @@
+---
+title: "Token Quotas and Rate Limiting"
+description: "You can define token and cost quotas at multiple ownership levels, apply limits across minute/hour/day/month windows, and choose what happens automatically when a quota is exceeded."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Quota Scopes
+
+You can define quotas at **four ownership levels**. When more than one level applies to a request, the **strictest (lowest) limit** is the one enforced:
+
+<CardGroup cols={2}>
+  <Card title="Credential" icon="key">
+    The tightest scope — a limit tied to a single API credential (LLM provider connection).
+  </Card>
+  <Card title="Organization" icon="building">
+    Shared across every credential that belongs to the same organization.
+  </Card>
+  <Card title="Application" icon="plug">
+    A credential's usage through a specific API proxy.
+  </Card>
+  <Card title="Project" icon="folder">
+    The broadest scope — all AI traffic under a project (the tenant boundary in multi-tenant setups).
+  </Card>
+</CardGroup>
+
+Within any scope, you can also set **model-specific limits** — for example, a lower quota for a premium model and a higher one for a budget model. A model-specific limit overrides the scope's base limit only for requests that use that model; every other model keeps using the base limit.
+
+## Time Windows
+
+Each scope can carry limits across four token windows, plus cost windows in USD:
+
+<CardGroup cols={2}>
+  <Card title="Per Minute" icon="timer">
+    A hard ceiling on tokens consumed in the current minute — useful for smoothing sudden traffic bursts.
+  </Card>
+  <Card title="Per Hour" icon="clock">
+    The most commonly used window for everyday rate control, with its own optional USD budget.
+  </Card>
+  <Card title="Per Day" icon="calendar">
+    A daily ceiling on token usage, with its own optional USD budget.
+  </Card>
+  <Card title="Per Month" icon="calendar-days">
+    A monthly ceiling on token usage, with its own optional USD budget — the most common way to cap overall spend.
+  </Card>
+</CardGroup>
+
+:::note
+Token limits and USD budgets are independent — you can set only token limits, only a USD budget, or both together at any window.
+:::
+
+## Configuring a Quota
+
+<Steps>
+  <Step title="Open Quota Settings">
+    Go to **AI Gateway** → **Token Quotas**.
+  </Step>
+
+  <Step title="Select a Scope">
+    Choose Credential, Organization, Application, or Project.
+  </Step>
+
+  <Step title="Set Base Limits">
+    Enter token limits for the minute, hour, day, and/or month windows. These apply to every model by default.
+  </Step>
+
+  <Step title="Add a Model-Specific Limit (optional)">
+    Select a model and enter a different set of limits for it. This overrides the base limit only for requests using that model.
+  </Step>
+
+  <Step title="Add a Budget (optional)">
+    Enter a USD amount for the hourly, daily, and/or monthly window.
+  </Step>
+
+  <Step title="Save">
+    Quotas take effect immediately for new requests.
+  </Step>
+</Steps>
+
+<img
+  src="/images/ai-gateway/token-quota-overflow.png"
+  alt="Token Quotas — Overflow Policies, token limits, and monthly budget"
+  width="1000"
+/>
+
+## Overflow Actions
+
+When a request would exceed a quota, you choose what happens next:
+
+<CardGroup cols={2}>
+  <Card title="Block" icon="ban">
+    The request is rejected outright.
+  </Card>
+  <Card title="Failover" icon="route">
+    The request is routed to the next provider or model in the [failover chain](/en/ai-gateway/routing-and-failover) instead of being rejected.
+  </Card>
+  <Card title="Alert Only" icon="bell">
+    The request goes through as usual; only a warning is raised.
+  </Card>
+  <Card title="Downgrade to a Cheaper Model" icon="trending-down">
+    The request is automatically redirected to a lower-cost model instead of being blocked.
+  </Card>
+</CardGroup>
+
+## Per-Request Size Limit
+
+Separate from the quota scopes above, you can cap the size of a **single request** — checked before the time-windowed quota, as a cheap pre-flight step. This lives in the same Token Rate Limit policy, under **Oversized Guard**:
+
+| Field | Description | Default |
+|---|---|---|
+| **Max Tokens Per Request** | Blocks a single request whose estimated token count exceeds this value. Empty = no limit. | — |
+| **Max Prompt Characters** | Blocks a single request whose prompt character count exceeds this value — only the prompt text itself is counted, not JSON envelope fields such as `model` or `stream`. Empty = no limit. | — |
+| **Limit Source** | Where the effective token limit comes from: **Explicit** uses Max Tokens Per Request above; **Model Catalog** derives it from the selected model's context window instead (context window minus max output tokens minus a safety margin). If the model's context window is unknown, the limit is skipped for that request rather than blocking it. | Explicit |
+| **On Overflow** | What happens when the token limit is exceeded: **Block** rejects the request; **Truncate Oldest Messages** drops the oldest conversation turns instead, until the request fits. Character-count overflow always blocks, regardless of this setting. | Block |
+
+:::info Truncation is visible, not silent
+When a request is truncated, Apinizer always preserves every `system` message and the last `user` message — if those alone still exceed the limit, it falls back to Block rather than send a partial conversation. A successful truncation is tracked in three places: the `X-Apinizer-AI-Truncated` response header (number of dropped messages), the [Guardrail Hits report](/en/ai-gateway/reports#security-and-guardrails-tab) (as `truncated`, alongside `oversized`), and — if [AI Trace](/en/ai-gateway/tracing-and-replay) is active on the proxy — that request's trace detail.
+:::
+
+This is a different concept from the quota-tier **Overflow Actions** above: quota overflow is about a scope's minute/hour/day/month budget running out over time; the per-request size limit is about a single request being too large for the model's context window, independent of any quota.
+
+## Threshold Alarms
+
+<Card title="Usage Alerts" icon="triangle-alert">
+  You can raise alerts as usage approaches a quota, independent of the overflow action: at **50%**, **80%**, **90%**, and **100%** of the limit. These alerts appear alongside your other AI alerts so you can react before a quota actually blocks traffic.
+</Card>
+
+## How Quota Tracking Stays Accurate
+
+:::info
+Before a request is sent to the model, Apinizer estimates its token cost and reserves that amount against every applicable scope and window. Once the response finishes — including streamed responses — the reservation is adjusted to match the actual tokens consumed. This keeps concurrent requests from over-counting or under-counting against your quotas.
+:::
+
+## Monitoring Quota Usage
+
+View real-time quota consumption in [Reports and Analytics](/en/ai-gateway/reports):
+
+- **Tokens Used** and **Tokens Remaining** for the current window
+- **Cost to Date** against any configured budget
+- **Alerts** raised as usage approaches a limit
+
+Token quotas can also be viewed and updated through the APIops REST API; see [API Reference: AI Budgets](/api-reference/ai-budgets).
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
+    Configure the failover chain used when a quota routes traffic elsewhere
+  </Card>
+  <Card title="Cost Settings" icon="dollar-sign" href="/en/ai-gateway/cost-settings">
+    Set per-model pricing that USD budgets are calculated against
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    Monitor quota and cost usage over time
+  </Card>
+</CardGroup>

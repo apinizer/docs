@@ -1,0 +1,288 @@
+---
+title: "A2A Gateway"
+description: "A2A (Agent2Agent) artık Apinizer'da birinci sınıf bir API proxy tipidir — proxy'niz kendi LLM backend'iyle bir ajan olarak yayın yapabilir, dış bir A2A ajanına passthrough yapabilir ya da bir politika üzerinden dış ajanlara görev gönderebilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+**A2A (Agent2Agent)**, farklı sağlayıcılara ait AI ajanlarının birbirleriyle standart bir protokol üzerinden görev alışverişi yapmasını sağlayan açık bir protokoldür. Apinizer'da A2A, diğer proxy tipleriyle (REST, SOAP, AI, MCP) aynı seviyede **birinci sınıf bir API Proxy tipidir** — kendi başına ayrı bir yönetim ekranı veya kimlik doğrulama modeli taşımaz, mevcut API Proxy yaşam döngüsünün (deploy, redeploy, rollback, export/import) tamamını paylaşır.
+
+:::info[Eski modelden fark]
+Önceki sürümlerde bir ajan yayınlamak, kendi CRUD ekranına, tek bir hedef proxy'ye ve kendi kimlik doğrulama moduna (Yok / API Anahtarı) sahip **ayrı bir "A2A Inbound Agent" kaydı** gerektiriyordu. Bu model tamamen kaldırıldı. Artık ajan yayınlamak, **A2A tipinde bir API Proxy** oluşturup onun yönlendirme modunu seçmekten ibarettir; kimlik doğrulama da proxy'nin normal politika zincirinden gelir. Ayrıca yeni modelde dış bir A2A ajanına **passthrough** yapabilme ve **birden çok** dış ajanı tek proxy arkasında birleştirebilme gibi eski modelde bulunmayan yetenekler eklendi. Ayrıntı için bu sayfanın sonundaki [Eski Sürümden Geçiş](#eski-sürümden-geçiş) bölümüne bakın.
+:::
+
+A2A iki yönde çalışır:
+
+- **Gelen (Inbound)** — A2A tipinde bir API Proxy oluşturup Apinizer'ı bir A2A ajanı olarak yayınlarsınız; proxy'nin yönlendirme moduna göre ya proxy kendi LLM backend'iyle bir ajan olur ya da dış bir A2A ajanına passthrough yapılır. Bu proxy'ler, diğer AI Gateway'lerle aynı kart görünümünde listelenir ve oluşturulur — menüdeki **A2A Gateway** girişi bu listeyi açar.
+- **Giden (Outbound)** — Apinizer üzerinden dış A2A ajanlarına görev gönderirsiniz (**A2A Çağrısı (LLM)** politikası). Hedef ajan artık ayrı bir bağlantı kaydı değil, **politikanın kendisinin içinde** tanımlanır — bkz. [Giden Ajan Çağrısı](#giden-ajan-çağrısı).
+
+:::info
+A2A protokolü JSON-RPC 2.0 üzerine kuruludur. Apinizer, hem senkron görev gönderimini hem de Sunucu Tarafından Gönderilen Olaylar (SSE) ile akış (streaming) yanıtları destekler.
+:::
+
+## Hızlı Başlangıç
+
+<Steps>
+  <Step title="A2A tipinde bir API Proxy oluşturun">
+    A2A tipinde bir API Proxy oluşturma akışını başlatın — proxy tipi zaten A2A olarak seçili gelir, bir tip seçim ekranı gösterilmez ve doğrudan minimal bir oluşturma formu açılır. Proxy'ye tek bir istemci relative path'i (örn. `/a2a/asistan`) atanır — bu tek yol, hem JSON-RPC trafiğini hem de discovery belgesini taşır.
+  </Step>
+
+  <Step title="Yönlendirme modunu seçin">
+    Proxy'nin **A2A Routing** sekmesinde iki moddan birini seçin: proxy'nin kendi ajanı olarak yayın yapması için **Agent Yayınla**, dış bir A2A ajanına geçiş yapması için **Passthrough**. Aşağıdaki [Modlar](#modlar) bölümüne bakın.
+  </Step>
+
+  <Step title="Moda göre yapılandırın">
+    Agent Yayınla modunda proxy'nin **AI Routing** sekmesinde bir LLM backend'i tanımlamanız zorunludur — bu ayarlanmadan A2A Routing kaydedilemez. Passthrough modunda arka uç A2A ajanını/ajanlarını satır içi tanımlayın ve gerekiyorsa skill izin listesini daraltın.
+  </Step>
+
+  <Step title="Deploy edin">
+    Proxy'yi normal bir API Proxy gibi bir ortama deploy edin. Deploy geçmişi, redeploy ve rollback davranışı diğer proxy tipleriyle birebir aynıdır.
+  </Step>
+
+  <Step title="İstemciyi bağlayın">
+    Bir A2A istemcisi önce `{relativePath}/.well-known/agent-card.json` üzerinden ajanı keşfeder, ardından proxy'nin relative path'ine JSON-RPC ile görev gönderir (`SendMessage`, ...). Discovery belgesi kimlik doğrulamadan muaftır; asıl erişim kontrolü, istek proxy'nin politika zincirinden geçerken uygulanır.
+  </Step>
+</Steps>
+
+## Modlar
+
+### Agent Yayınla (Agent Expose)
+
+Proxy kendi Agent Card'ını yayınlar ve görevleri **kendi LLM backend'i** (AI Routing sekmesindeki yönlendirme) üzerinden işler — başka bir proxy'ye devir (loopback) yoktur. Agent Card ayarlarında açıklama override'ı, girdi/çıktı modaliteleri ve manuel bir skill listesi tanımlanabilir; skill listesi boş bırakılırsa proxy'nin adı ve açıklamasından tek bir varsayılan skill türetilir — kart hiçbir zaman boş/doğrulanmamış yayınlanmaz.
+
+Push bildirimleri bu modda proxy bazında açılıp kapatılabilir; ayrıca cluster-içi (private network) hedeflere push gönderilmesine izin verecek ayrı bir anahtar vardır (bkz. [Güvenlik ve Governance](#güvenlik-ve-governance)).
+
+### Passthrough
+
+Proxy'ye gelen her A2A çağrısını, arka uç bir A2A ajanına iletir. Dış ajanın Agent Card'ı, bu proxy'nin kendi adresini ve gerçek kimlik doğrulama şemasını yansıtacak şekilde **yeniden yazılarak** (hostname + güvenlik şeması rewrite) yayınlanır — istemci hiçbir zaman dış ajanın gerçek adresini görmez. Bir **skill izin listesi** ile Agent Card'da hangi skill'lerin yayınlanacağı daraltılabilir.
+
+:::warning
+Skill izin listesi (ve aşağıdaki kimlik bazlı erişim listesi) Passthrough modunda yalnızca **Agent Card yayınında** uygulanır — A2A'nın kablo protokolü, MCP'nin araç çağrısındaki gibi çağrı-anında hangi skill'in hedeflendiğini taşıyan bir alan içermez. Bu nedenle bir görev gönderme çağrısı (`SendMessage`) çağrı anında skill bazında filtrelenemez: izinsiz bir skill Agent Card'da hiç görünmez, ama o skill adını başka bir yoldan zaten bilen bir çağıran yine de bir görev gönderebilir. Gerçek yetkilendirme bu durumda dış ajanın kendi tarafına kalır.
+:::
+
+Passthrough modundaki arka uç A2A ajanı/ajanları, proxy'nin **A2A Routing** sekmesinde, ayrı bir bağlantı ekranına gitmeden **doğrudan tanımlanır**:
+
+<Steps>
+  <Step title="Arka uç ajanı ekleyin">
+    **A2A Routing** sekmesinin Passthrough bölümünde **Sunucu Ekle** ile bir satır açın; ajanın uç nokta adresini, kimlik doğrulama bilgilerini ve gerekiyorsa mTLS ayarlarını aynı satırda girin.
+  </Step>
+  <Step title="Deploy edin ve Agent Card'ı doğrulayın">
+    Proxy ilk kez deploy edildiğinde Apinizer, tanımlı ajanın/ajanların Agent Card'ını otomatik getirir; yetenekler ve desteklenen modaliteler doğrulanır.
+  </Step>
+  <Step title="Görev izleme">
+    Gönderilen görevlerin durumunu proxy detayındaki **Görevler** sekmesinden canlı izleyin.
+  </Step>
+</Steps>
+
+Arka uç ajan, hedefin gerektirdiği kimlik doğrulama şemasına göre yapılandırılır; **OAuth2 client credentials** akışı da dahil olmak üzere token gerektiren hedeflere bağlanabilirsiniz — token alımı çalışma zamanında otomatik yapılır.
+
+Passthrough yapılandırması APIops REST API ile de yönetilebilir; bkz. [API Referansı: API Proxies — Update A2A Routing](/api-reference/api-proxies/settings/update-a2a-routing).
+
+## Giden Ajan Çağrısı
+
+Apinizer üzerinden dış bir A2A ajanına görev göndermek istediğinizde, bu görevi fiilen ileten bileşen **A2A Çağrısı (LLM)** politikasıdır (bir AI Gateway'ine eklenir). Hedef ajan, Passthrough modundaki gibi **politikanın kendi ekranında satır içi tanımlanır**:
+
+<Steps>
+  <Step title="Politikayı ekleyin">
+    Bir AI Gateway'ine **A2A Çağrısı (LLM)** politikasını ekleyin.
+  </Step>
+  <Step title="Ajanı tanımlayın">
+    **A2A Ajanı (Satır İçi)** bölümünde uç nokta adresini, kimlik doğrulama bilgilerini ve gerekiyorsa mTLS ayarlarını girin.
+  </Step>
+  <Step title="Skill'leri keşfedin">
+    **Skill'leri Keşfet** butonu ajana bağlanır, Agent Card'ı getirir ve skill listesini doğrular — kaydetmeden önce çalışır, ayrı bir "bağlantıyı test et" adımı yoktur.
+  </Step>
+  <Step title="İzinli skill'leri daraltın (opsiyonel)">
+    Boş bırakılırsa keşfedilen tüm skill'lere izin verilir. Kısıtlamak için **İzinli Skill'ler** listesinden seçim yapın.
+  </Step>
+</Steps>
+
+Bu ajan tanımı da Passthrough modundakiyle aynı SSRF korumasına tabidir (bkz. [Güvenlik ve Governance](#güvenlik-ve-governance)). Politika ekranındaki **A2A Bağlantısı** alanı geriye dönük uyumluluk için korunur: satır içi ajan tanımlıyken devre dışı kalır, çalışma zamanında ikisinden yalnızca biri kullanılır.
+
+:::note
+Girdiğiniz uç nokta, görevlerin gönderildiği adrestir. Ajanın Agent Card'ı önce aynı adreste aranır; kart orada yayınlanmıyorsa bu adresin altındaki standart keşif yolunda (`.../.well-known/agent-card.json`) aranır. Yani ajanın görev uç noktasını girmeniz keşif için yeterlidir; doğrudan kart adresini girmek de eskisi gibi çalışmaya devam eder.
+:::
+
+Bu politika da APIops REST API ile eklenip güncellenebilir; bkz. [API Referansı: Policies](/api-reference/policies/crud/add-policy).
+
+## Agent Card, Görev Yaşam Döngüsü ve Streaming
+
+### Agent Card
+
+Her ajan (Agent Yayınla modunda proxy'nin kendisi, Passthrough modunda yeniden yazılmış dış ajan) `.well-known/agent-card.json` üzerinden kendini tanıtan bir Agent Card yayınlar:
+
+```json
+{
+  "name": "Asistan Proxy",
+  "description": "Müşteri destek ajanı",
+  "version": "1.0",
+  "capabilities": { "streaming": true, "pushNotifications": true },
+  "defaultInputModes": ["text", "image", "data"],
+  "defaultOutputModes": ["text"],
+  "skills": [
+    { "id": "asistan-proxy", "name": "Asistan Proxy", "description": "Müşteri destek ajanı" }
+  ],
+  "securitySchemes": {
+    "bearerAuth": { "type": "http", "scheme": "bearer" }
+  }
+}
+```
+
+Kartın `securitySchemes` alanı **kart yalan söylemez** ilkesiyle, sabit bir listeden değil, proxy'nin fiilen tanımlı olan auth politikalarından türetilir — hiç auth politikası yoksa alan boş kalır, asla yanlış bir şema ilan edilmez. Agent Card bu sürümde **imzasız** yayınlanır ve insan-onaylı (human-in-the-loop) görev onayı desteklenmez.
+
+Kimlik doğrulaması gerektiren bir kanaldan (istekte proxy'nin auth politika zinciri geçildikten sonra) aynı kart `GetExtendedAgentCard` JSON-RPC metoduyla da alınabilir — kimlik bazlı erişim listesi tanımlıysa bu çağrı, çağıranın kimliğine göre kişiselleştirilmiş bir skill kümesi döndürebilir; herkese açık discovery uç noktası ise her zaman kimliklenmemiş bir çağıranmış gibi değerlendirilir.
+
+### Protokol Sürümü
+
+A2A protokolünün tek desteklenen sürümü `1.0`'dır (alan gelecekteki bir sürüm genişlemesi için ayrı tutulmuştur) — MCP'nin aksine bir sürüm seçimi yapmanız gerekmez.
+
+### Görev Yaşam Döngüsü
+
+İstemciler `SendMessage` metodu ile görev gönderir; görev durumu `GetTask`/`ListTasks` ile sorgulanabilir, `CancelTask` ile iptal edilebilir:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{ "type": "text", "text": "Siparişimin durumu nedir?" }]
+    }
+  }
+}
+```
+
+**Agent Yayınla** modunda Apinizer'ın kendi ajanı bir görevi yalnızca şu durumlar arasında ilerletir: `submitted` → `working` → `completed` / `failed` / `canceled` / `rejected`. Diğer iki durum (`input-required`, `auth-required`) Apinizer'ın kendi ajanı tarafından **hiç üretilmez**; bunlar yalnızca Apinizer'ın **giden istemci** olarak konuştuğu dış ajanlarda gözlemlenebilecek durumlardır.
+
+| Durum | Anlamı |
+|-------|--------|
+| `submitted` | Görev alındı, işleme henüz başlamadı |
+| `working` | Görev işleniyor |
+| `completed` | Görev başarıyla tamamlandı |
+| `failed` | Görev hata ile sonuçlandı |
+| `canceled` | Görev iptal edildi |
+
+**Passthrough** modunda görevlerin sahibi arka uç ajandır; bu yüzden `GetTask` ve `CancelTask` iki adımda çözülür: proxy önce kendi izlediği görevler arasında arar (akış/streaming relay'i gateway tarafından izlenir), gelen kimlik bunlardan biri değilse çağrı arka uç ajana iletilir ve ajanın yanıtı olduğu gibi döndürülür — görev orada da bilinmiyorsa ajanın kendi "görev bulunamadı" yanıtı dahil. İstemcinin, Passthrough `SendMessage` çağrısından aldığı görev kimliğini doğrudan sorgulayabilmesini sağlayan davranış budur. Bir görev kimliğinin okunup okunamayacağına/iptal edilip edilemeyeceğine, iletilen mesajın yetkilendirmesinde olduğu gibi arka uç ajan karar verir. `ListTasks` ve `SubscribeToTask` her zaman gateway'in kendi görev kayıtlarından yanıtlanır, arka uca iletilmez; birden fazla ajanı birleştiren bir proxy'de ise `GetTask`/`CancelTask`, görevin hangi ajana ait olduğunu tahmin etmek yerine hata döndürür.
+
+:::note
+Gateway'in kendi tuttuğu görev kayıtları terminal durumlara (`completed`/`failed`/`canceled`) ulaştığında bir süre sonra otomatik temizlenir; aktif görevler süresiz saklanır. Passthrough modunda akış dışı bir çağrıyla oluşan görevin saklama süresine arka uç ajan karar verir.
+:::
+
+Gelen A2A ajanları APIops REST API ile de yönetilebilir; bkz. [API Referansı: API Proxies](/api-reference/api-proxies).
+
+### Akış (Streaming) ve Yeniden Abone Olma
+
+İstemciler `SendStreamingMessage` metoduyla görev güncellemelerini baştan itibaren SSE üzerinden chunk chunk alabilir. Bağlantı kesilirse istemci `SubscribeToTask` metoduyla, saklanan görev geçmişinden yeniden oynatma ile kaldığı yerden akışa **yeniden abone olarak** devam edebilir.
+
+### Push (Webhook) Tamamlanma Bildirimi
+
+Uzun süren görevler için istemciler, `CreateTaskPushNotificationConfig` metoduyla görev başına bir **webhook hedefi + kimlik doğrulama bilgisi** kaydedebilir (yönetimi için ayrıca `GetTaskPushNotificationConfig`/`ListTaskPushNotificationConfigs`/`DeleteTaskPushNotificationConfig` metotları vardır). Görev tamamlandığında/başarısız olduğunda Apinizer bu webhook'a bir bildirim isteği gönderir. Bu, uzun süren ajan görevleri için sürekli sorgulamaya (polling) göre **birincil tamamlanma bildirim kanalıdır**.
+
+### Çok-Modaliteli Görev Parçaları
+
+Bir görev, metin dışında **görsel** ve **yapılandırılmış veri** içeren parçalar (part) taşıyabilir.
+
+:::note
+Desteklenen görev parçası türleri metin, yapılandırılmış veri ve görseldir. Ses ve video türleri bu kapsamda değildir.
+:::
+
+## Çoklu Hedef (Aggregation)
+
+Passthrough modunda, **A2A Routing** sekmesindeki satır içi ajan listesine en fazla 10 arka uç A2A ajanı eklenebilir. Apinizer bu ajanların **Agent Card skill kataloglarını** tek bir kartta birleştirir; farklı ajanlarda aynı isme sahip skill'ler deterministik biçimde `ajanAdı__skillAdı` şeklinde isimlendirilerek çakışma önlenir.
+
+:::warning
+Bu birleştirme **yalnızca Agent Card/skill keşfi** seviyesindedir. Birden fazla hedef yapılandırıldığında `SendMessage` dispatch'i desteklenmez — A2A'nın kablo protokolünde MCP'nin araç çağrısındaki gibi bir hedef-skill alanı olmadığından, isteği hangi ajana yönlendireceğini güvenle seçmek mümkün değildir; bu durumda çağrı sessizce ilk hedefe yönlendirilmek yerine açık bir hata döner. Tek bir ajan yeterliyse listeye tek satır eklemek yeterlidir; davranış önceki (tek-hedef) sürümle birebir aynı kalır.
+:::
+
+## Güvenlik ve Governance
+
+Kimlik doğrulama artık **proxy'nin normal politika zincirinden** gelir — JWT, OIDC, API Anahtarı, Basic gibi mevcut tüm auth politikaları A2A Gateway'lerinde de kullanılabilir; eski modeldeki Yok/API Anahtarı ikilisiyle sınırlı değildir. Discovery belgesi (`.well-known/agent-card.json`) bu zincirden **muaftır** ve her zaman açık erişimlidir.
+
+Aynı politika zincirinden Kişisel Veri (PII) Maskeleme, İstem Koruması, Veri Sızıntısı Koruması (DLP), Konu-Dışı Koruması ve Tekrar-Fırtınası (Loop) Koruması gibi [gelişmiş korumalar](/tr/ai-gateway/gelismis-korumalar) da geçer — gönderilen görevin mesaj parçalarına (`parts[]`, hem metin hem yapılandırılmış veri) uygulanır. Bir A2A Gateway'ine yalnızca bu beş koruma eklenebilir; bir LLM çağrısına doğrudan bağlı diğer AI politikaları (Semantik Önbellek, Token Kotaları, Prompt Süsleyici, Prompt Şablonları, RAG, Bağlam Bütünlüğü Koruması) kaydetme adımında reddedilir. İstem Koruması ve Konu-Dışı Koruması bir A2A Gateway'inde kullanıldığında, aynı politikaların taşıdığı [dış sağlayıcı guardrail](/tr/ai-gateway/gelismis-korumalar#dış-sağlayıcı-guardrail) desteği de bu proxy'de aynen çalışır — görevin mesaj parçaları, tanımlıysa bir dış LLM hakemine de gönderilir.
+
+Aşağıdaki governance özellikleri şu an bir yönetim ekranı üzerinden değil, **API proxy yapılandırmasının bir parçası olarak (APIops)** ayarlanır:
+
+- **Kimlik bazlı erişim listesi (identity-ACL)** — yalnızca **Passthrough** modunda uygulanır; Agent Yayınla modunda bu liste hiç değerlendirilmez, proxy kendi Agent Card'ını her zaman herkese aynı şekilde yayınlar. Passthrough'ta opsiyoneldir: boş bırakılırsa mevcut skill izin listesi/keşif davranışı aynen sürer. Doldurulursa **default-deny** olur: kimlik bilgisi (credential), rol veya organizasyon bazında tanımlanan kurallarla eşleşmeyen bir çağıran hiçbir skill'i Agent Card'da göremez. Yukarıdaki uyarıda belirtildiği gibi, bu yalnızca kart yayınını daraltır, `SendMessage` çağrısını çağrı-anında gate'lemez.
+- **Çağrı kotası (call-quota)** — dakika/saat/gün periyodunda bir çağrı limiti tanımlanabilir. Varsayılan kapalıdır. Gelen `SendMessage` çağrısının A2A protokolünde bir skill adı taşımaması nedeniyle, araç bazlı kota bu yüzeyde proxy başına tek bir kovaya, "araç + kimlik bilgisi" bazlı kota ise doğrudan kimlik bilgisi bazlı kovaya indirgenir; giden A2A ajan çağrısı politikaları bu sınırlamadan etkilenmez (her zaman gerçek bir skill adı taşırlar).
+- **Katalog sapması (catalog drift) koruması** — bir A2A ajanının skill kataloğu ilk keşfedildiğinde (veya elle yeniden keşfedildiğinde) onaylanan katalog bir özet (hash) olarak sabitlenir; periyodik bir sağlık kontrolü canlı kataloğu bu özetle karşılaştırır. Varsayılan davranış (**yalnızca uyar**) sapmayı loglar ve uyarı üretir ama çağrıları engellemez; **kapalı-güvenli** davranış seçilirse, katalog yeniden onaylanana kadar sapma tespit edilen ajan üzerindeki çağrılar reddedilir. MCP ile aynı mekanizmayı paylaşır.
+- **Token passthrough (opt-in)** — çağıranın kendi token'ının backend agent'a iletilmesi varsayılan olarak **her yerde kapalıdır**. A2A Routing sekmesindeki "istemci token'ını ilet" seçeneği tek başına yeterli değildir; iletimin fiilen etkinleşmesi için ayrıca (APIops ile) açık bir onay + opsiyonel bir hedef-kitle (audience) izin listesi yapılandırılması gerekir. Bir iletim denemesi başarısız olursa (özellik kapalı, token bulunamadı veya hedef kitle eşleşmedi) ajanın kendi kimlik bilgisi kullanılmaya devam eder — kimliksiz bir çağrı asla arka uca sessizce geçmez.
+
+Passthrough çağrıları (Agent Card getirme + görev gönderimi) **SSRF (Server-Side Request Forgery) koruması** altındadır:
+
+:::danger
+Hedef URL; bulut metadata uç noktaları, loopback, link-local, multicast ve carrier-grade-NAT (CGNAT) aralıklarına karşı her zaman doğrulanır — bu adreslere yönelik istekler, yapılandırmadan bağımsız olarak **her zaman** engellenir. Bir ajan tanımı ya da proxy, opsiyonel olarak diğer özel ağ aralıklarına (RFC1918 / IPv6 ULA — örn. cluster-içi bir ajan) erişecek şekilde ayrıca izinlendirilebilir, ancak bu opt-in yukarıdaki adresleri asla açmaz.
+:::
+
+Push bildirimleri için de aynı mantık geçerlidir: webhook hedefleri varsayılan olarak özel IP aralıklarına gönderilemez; yalnızca güvenilir cluster-içi hedefler için ayrı bir anahtarla bu kısıtlama proxy bazında gevşetilebilir.
+
+Bu koruma [MCP Gateway](/tr/ai-gateway/mcp-gateway) giden sunucu tanımları tarafından da paylaşılır.
+
+## Yapılandırmada Ortam Değişkenleri
+
+A2A Gateway yapılandırmasına yazdığınız metinlerin çoğu `${DEGISKEN_ADI}` biçiminde [ortam değişkeni](/tr/develop/environment-variables) referansı kabul eder; değer proxy'nin çalıştığı ortama göre çözülür ve aynı yapılandırma test ortamından canlıya elle düzenlenmeden taşınır.
+
+Değişken kabul eden alanlar:
+
+| Nerede | Alanlar |
+|---|---|
+| Giden ajan çağrısı | Yetenek adı, mesaj şablonu |
+| Erişim kuralları | İzinli yetenek listesi, kimlik kuralındaki kullanıcı/rol/organizasyon adı, izin ve ret listeleri |
+| Token aktarımı | Kabul edilen hedef kitle listesi |
+
+Mesaj şablonu ayrıca `#{...}` biçimindeki [bağlam değişkenlerini](/tr/develop/politikalar/mesaj-olusturucu) de kabul eder; bunlar ortam değişkenleri yerleştirildikten sonra her istek için değerlendirilir.
+
+:::caution
+Çözümleme, [MCP Gateway](/tr/ai-gateway/mcp-gateway#yapılandırmada-ortam-değişkenleri) tarafındaki ile birebir aynı şekilde fail-closed çalışır: tanımsız bir değişkende metin yazıldığı gibi kalır, bu da gerçek hiçbir yetenek veya hedef kitle ile eşleşmez; çağrı yanlış bir eşleşmeye düşmek yerine reddedilir. Çağıran taraf da yetenek adı olarak birebir `${DEGISKEN_ADI}` metnini gönderip erişim kuralını aşamaz.
+:::
+
+Push bildirim ayarları bilinçli tek istisnadır: webhook adresi ve token'ı operatörden değil, çalışma anında çağıran istemciden gelir; bu nedenle her zaman düz metin kabul edilir. Bunların çözülmesi, çağıran tarafın gateway'e kendi ortam değerlerinden birini kendi kontrolündeki bir webhook'a yazdırabilmesi anlamına gelirdi.
+
+## Loglama ve Analytics
+
+Proxy detayındaki Trace/Traffic/Analytics sekmeleri, A2A tipindeki proxy'lerde **A2A Trace**, **A2A Trafiği** ve **A2A Analitikleri** adını taşır — REST/SOAP proxy'lerindeki eşdeğer sekmelerle aynı yapıdadır; ayrıca yalnızca A2A Gateway'lerinde görünen bir **Görevler** sekmesi, gateway'in kendi izlediği görevleri canlı listeler: Agent Yayınla modundaki tüm görevler ve Passthrough modunda akış (streaming) çağrısıyla oluşan görevler. Passthrough'ta akış dışı bir çağrıyla oluşan görevin sahibi arka uç ajandır; bu görev trafik logunda görünür ancak bu sekmede listelenmez — istemcinin `GetTask` sorgusu da o ajan tarafından yanıtlanır (bkz. [Görev Yaşam Döngüsü](#görev-yaşam-döngüsü)). Her A2A çağrısı (gelen görev gönderimi/sorgulama/iptal, giden ajan çağrısı ve giden sağlık yoklaması), gecikme/boyut/istemci IP'si gibi standart alanların yanında A2A'ya özgü alanlarla birlikte trafik logunda görünür. **Analitik** sayfasının **Trafik** tab'ındaki "Flags" rozet kolonu bir isteğin önbellek/koruma/PII/streaming durumunu tek bakışta gösterir; ayrıntılı kullanım, maliyet ve koruma metrikleri aynı **Analitik** sayfasında izlenebilir — bkz. [Raporlar ve Analitik](/tr/ai-gateway/raporlar).
+
+Bir AI Gateway'in dış ajanlara birden çok görev gönderdiği durumlarda, her görevin süresi ve sonuç durumu ayrı ayrı uçtan uca izleme kaydında (trace) görünür. Uçtan uca bir görev zincirini takip etmek için [İzleme ve Tekrar Oynatma](/tr/ai-gateway/izleme-ve-tekrar-oynatma) sayfasına bakın.
+
+## Eski Sürümden Geçiş
+
+Aşağıdaki ekranlar ve kavramlar kaldırıldı; **otomatik bir geçiş yoktur** — eşdeğerini A2A tipinde yeni bir API Proxy olarak yeniden oluşturmanız gerekir:
+
+- Ayrı "A2A Inbound Agent" listeleme/oluşturma/düzenleme ekranı; bu kayıt tek bir hedef proxy'ye bağlıydı ve bu kayda özgü ajan bazlı kimlik doğrulama modları (Yok / API Anahtarı) taşıyordu.
+- Eski istemci uç noktası `/a2a/{id}` — yerini proxy'nin kendi relative path'i aldı.
+- A2A ajanına özgü ayrı bir deploy tipi — artık standart API Proxy deploy akışının bir parçası.
+
+Passthrough modu, çoklu hedef birleştirme ve tam auth politika zinciri desteği, eski modelde bulunmayan **yeni** yeteneklerdir.
+
+| Eski kavram | Yeni karşılığı |
+|-------------|-----------------|
+| A2A Inbound Agent kaydı | A2A tipinde API Proxy |
+| Ajan bazlı Yok/API Anahtarı modu | Proxy'nin normal auth politika zinciri |
+| `/a2a/{id}` | Proxy'nin relative path'i |
+
+### Giden Bağlantı Ekranının Kaldırılması
+
+Ayrı bir **giden A2A bağlantısı** listeleme/oluşturma ekranı (ve buna karşılık gelen bağımsız APIops uç noktaları) da kaldırıldı; ajan tanımı artık yukarıda anlatıldığı gibi Passthrough modunda **A2A Routing** sekmesinde, görev gönderiminde ise **A2A Çağrısı (LLM)** politikasının kendisinde satır içi tutulur. Ajan kartı (agent card) keşfi, sağlık yoklaması, katalog kayması (drift) koruması ve token passthrough aynı şekilde çalışmaya devam eder; artık paylaşılan bir kayda değil, ajanın kendi tanımına bağlıdır.
+
+Bu değişiklik için **otomatik bir geçiş vardır**: bu eski ekrandan önceden oluşturulmuş bağlantılara sahip mevcut proxy ve politika yapılandırmaları, bir sonraki yükseltmede otomatik olarak satır içi ajan tanımına taşınır — yeniden oluşturmanız gerekmez. Aynı bağlantı birden fazla proxy/politika tarafından paylaşılıyorsa, yükseltme sonrasında her biri kendi bağımsız (kimlik bilgisi dahil) kopyasını taşır; kimlik bilgisini rotasyona sokarken bunu göz önünde bulundurun.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="MCP Gateway" icon="server" href="/tr/ai-gateway/mcp-gateway">
+    API'lerinizi araç olarak sunun ya da dış araçlara bağlanın
+  </Card>
+  <Card title="Gelişmiş Korumalar" icon="shield" href="/tr/ai-gateway/gelismis-korumalar">
+    DLP, döngü ve konu-dışı korumalarını yapılandırın
+  </Card>
+  <Card title="İzleme ve Tekrar Oynatma" icon="route" href="/tr/ai-gateway/izleme-ve-tekrar-oynatma">
+    A2A görevlerini trace zinciriyle izleyin ve yeniden çalıştırın
+  </Card>
+  <Card title="Yapay Zeka Temel Kavramları" icon="book-open" href="/tr/concepts/temel-kavramlar/yapay-zeka-temel-kavramlari">
+    Ajan protokolleri hakkında temel kavramları öğrenin
+  </Card>
+</CardGroup>

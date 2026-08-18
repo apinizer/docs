@@ -27,6 +27,7 @@ Authorization: Bearer YOUR_TOKEN
 |--------|-------|----------|
 | Authorization | Bearer \{token\} | Yes |
 | Content-Type | multipart/form-data | Yes |
+| X-Apinizer-Package-Passphrase | Base64 of the UTF-8 passphrase | Only if the uploaded package is encrypted |
 
 ### Path Parameters
 
@@ -34,11 +35,18 @@ Authorization: Bearer YOUR_TOKEN
 |-----------|------|----------|-------------|
 | projectName | string | Yes | Project name where the API Proxy will be imported |
 
+### Query Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| withDependencies | boolean | No | false | When `true`, the dependencies carried in the package (if any) are resolved against the target project: an object with the SAME NAME in the target is reused, otherwise the dependency is imported as new. When `false` (default), the package is imported as-is (previous behavior). Has no effect if the package carries no dependencies |
+
 ### Form Data
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | apiProxyExportFile | file | Yes | ZIP file containing the API Proxy export. Must have `.zip` extension |
+| environmentMapping | string (JSON) | No | Maps an environment name in the package to an environment name on this installation, e.g. `{"UAT":"Production"}`. An empty value marks that environment as deliberately not transferred. Without it, same-named environments match and unmatched ones are dropped |
 
 ### Notes
 
@@ -46,6 +54,8 @@ Authorization: Bearer YOUR_TOKEN
 - File must end with `.zip` extension (case-insensitive)
 - ZIP file must contain a valid API Proxy export JSON file
 - If an API Proxy with the same name exists, a suffix will be added automatically
+- Every name in `deployTargetEnvironmentNameList` is validated **before** the package is imported. If a name does not exist (or is not accessible to the user), the request fails with `400 Bad Request` and nothing is imported
+- The imported API Proxy always starts undeployed in every environment of the target project; the deployment state stored in the package is not carried over
 
 ## Response
 
@@ -67,8 +77,8 @@ Authorization: Bearer YOUR_TOKEN
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "projectName value can not be empty!"
+  "status": "FAILURE",
+  "resultMessage": "projectName value can not be empty!"
 }
 ```
 
@@ -76,8 +86,8 @@ or
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "apiProxyExportFile value can not be empty!"
+  "status": "FAILURE",
+  "resultMessage": "apiProxyExportFile value can not be empty!"
 }
 ```
 
@@ -85,8 +95,44 @@ or
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "apiProxyExportFile parameter must be in zip file format and must end with zip extension!"
+  "status": "FAILURE",
+  "resultMessage": "apiProxyExportFile parameter must be in zip file format and must end with zip extension!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Package is encrypted; a passphrase is required."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Package could not be decrypted with the given passphrase."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Encrypted package could not be read."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "environmentMapping must be a JSON object of \"package environment name\":\"target environment name\" pairs (an empty value means \"do not transfer this environment\"). Received: {not valid json"
 }
 ```
 
@@ -97,24 +143,20 @@ or
 - File is not a ZIP archive
 - File does not have `.zip` extension
 - Invalid API Proxy export format
+- The uploaded package is encrypted but the `X-Apinizer-Package-Passphrase` header was not provided
+- The supplied passphrase does not open the package
+- The file is not a package this version can read — corrupted or unsupported format
+- `environmentMapping` was supplied but is not a valid JSON object of environment-name pairs
 
 ### Error Response (401 Unauthorized)
 
 ```json
 {
-  "error": "unauthorized_client",
-  "error_description": "Invalid token"
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
 }
 ```
 
-### Error Response (404 Not Found)
-
-```json
-{
-  "error": "not_found",
-  "error_description": "Project(MyProject) was not found or user does not have privilege to access it!"
-}
-```
 
 ## cURL Example
 
@@ -136,12 +178,48 @@ curl -X POST \
   -F "apiProxyExportFile=@my-api-export.zip"
 ```
 
+### Example 3: Import an Encrypted Package
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip"
+```
+
+### Example 4: Import a Package with its Dependencies
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/import/?withDependencies=true" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip"
+```
+
+### Example 5: Import with Environment Mapping
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip" \
+  -F 'environmentMapping={"UAT":"Production"}'
+```
+
 ## Notes and Warnings
 
 - **No Override**:
   - This endpoint does not override existing API Proxies
   - If an API Proxy with the same name exists, a suffix will be added automatically
   - Original API Proxy remains unchanged
+  - This endpoint never replaces an existing certificate/keystore/key object either, so it does not accept the `certEnvironmentMergeMethod` / `certEnvironmentUncoveredAction` parameters at all — they belong to the With Override variant
+
+- **Environment Mapping**:
+  - `environmentMapping` maps an environment name in the package to an environment name on this installation, e.g. `{"UAT":"Production"}`
+  - An empty value (`{"UAT":""}`) marks that environment as deliberately not transferred
+  - Without it, same-named environments match and unmatched ones are dropped — today's default behavior
+  - Applies whether or not `withDependencies` is used
 
 - **Automatic Naming**:
   - Imported API Proxy name may be modified if a conflict exists
@@ -152,6 +230,12 @@ curl -X POST \
   - File must be a valid ZIP archive
   - File must end with `.zip` extension (case-insensitive)
   - ZIP file must contain valid API Proxy export JSON
+
+- **Encrypted Packages**:
+  - Whether the uploaded package is encrypted is detected automatically
+  - If it is encrypted, the same passphrase used during export must be supplied in the `X-Apinizer-Package-Passphrase` header
+  - The header is ignored for plain (unencrypted) packages
+  - A package cannot be opened with an incorrect passphrase
 
 - **Project Validation**:
   - Project must exist
@@ -167,6 +251,11 @@ curl -X POST \
   - Imported API Proxy is not deployed by default
   - Deployment status from export is preserved
   - You may need to deploy the imported API Proxy manually
+
+- **Dependency Resolution (`withDependencies`)**:
+  - When omitted or `false`, the package is imported as-is (previous, default behavior)
+  - When `true` and the package carries dependencies (exported with `withDependencies=true`), each dependency is matched against an existing object of the SAME NAME in the target project, or imported as a new object if none exists
+  - Has no effect on a package that carries no dependencies (every package produced before `withDependencies` existed)
 
 ## Permissions
 
@@ -185,7 +274,6 @@ curl -X POST \
 ## Related Documentation
 
 - [Export API Proxy](/api-reference/api-proxies/crud/export-api-proxy) - Export API Proxy to ZIP file
-- [Import API Proxy (Without Override)](/api-reference/api-proxies/crud/import-api-proxy-without-override) - Import API Proxy without overriding existing one
 - [Import API Proxy (With Override)](/api-reference/api-proxies/crud/import-api-proxy-and-override) - Import API Proxy with override option
 - [List API Proxies](/api-reference/api-proxies/crud/list-api-proxies) - List all API Proxies in project
 

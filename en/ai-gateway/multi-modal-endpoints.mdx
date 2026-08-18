@@ -1,0 +1,166 @@
+---
+title: "Multi-Modal Endpoints"
+description: "Use OpenAI-compatible speech-to-text (STT), text-to-speech (TTS), image generation, and embeddings endpoints through Apinizer AI Gateway — with the same quota, cost, and masking controls as chat completions."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Overview
+
+Beyond text-based chat completions, Apinizer AI Gateway supports four additional modalities, plus an alternative endpoint shape for text generation itself:
+
+- **Speech to Text (STT)** — `/v1/audio/transcriptions`
+- **Text to Speech (TTS)** — `/v1/audio/speech`
+- **Image Generation** — `/v1/images/generations`
+- **Embeddings** — `/v1/embeddings`
+- **Responses API** — `/v1/responses`
+
+All five endpoints use the **OpenAI-compatible request/response format**; your existing OpenAI SDK clients work without code changes beyond pointing `base_url` at Apinizer. Every one of them goes through the same gateway pipeline as chat completions — token/USD quotas, cost tracking, and guardrails such as PII masking all apply.
+
+## Speech to Text (STT)
+
+Transcribes an audio file into text:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-apinizer-credential-key",
+    base_url="https://your-apinizer-gateway.com/api/ai/v1"
+)
+
+with open("recording.mp3", "rb") as audio_file:
+    transcript = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio_file
+    )
+
+print(transcript.text)
+```
+
+- The request is sent as **multipart/form-data**
+- Usage is metered based on **audio duration**, rather than token count
+- The response text can be passed through the existing **PII masking** policy — personal data detected in the transcript is masked using the same rules as other text endpoints
+
+## Text to Speech (TTS)
+
+Converts text into speech; the response is returned as a **binary audio stream**:
+
+```python
+response = client.audio.speech.create(
+    model="tts-1",
+    voice="alloy",
+    input="Hello, this is a test message."
+)
+
+response.stream_to_file("output.mp3")
+```
+
+:::note
+
+The TTS response is not JSON, but an audio file (binary) returned directly — the gateway passes this response type through transparently, preserving the content type.
+
+:::
+
+## Image Generation
+
+Generates an image from a text prompt:
+
+```python
+response = client.images.generate(
+    model="gpt-image-1",
+    prompt="Sunset over the ocean, digital art",
+    n=1,
+    size="1024x1024"
+)
+
+print(response.data[0].url)
+```
+
+## Embeddings
+
+Converts text into a vector representation — the same interface used by [Knowledge Bases](/en/ai-gateway/knowledge-bases), [RAG](/en/ai-gateway/rag-injection), and the [Semantic Cache](/en/ai-gateway/semantic-cache) to store and search content in a [Vector Database](/en/ai-gateway/vector-database):
+
+```python
+response = client.embeddings.create(
+    model="text-embedding-3-small",
+    input="The quick brown fox jumps over the lazy dog."
+)
+
+print(response.data[0].embedding)
+```
+
+Usage is metered on **input tokens only** — an embedding call has no output token cost. Before routing a request, Apinizer checks that the target model actually supports embeddings, so a request can't accidentally be sent to a chat-only model.
+
+## Responses API
+
+`/v1/responses` is OpenAI's newer, alternative shape for text generation — the same underlying capability as chat completions, with a different request/response envelope: an `input` field instead of `messages[]`, and an `output[]` array instead of `choices[]`.
+
+```python
+response = client.responses.create(
+    model="gpt-4o",
+    input="Tell me a three-sentence bedtime story about a unicorn."
+)
+
+print(response.output_text)
+```
+
+Streaming works the same way as chat completions — pass `stream=True` and consume the returned event stream.
+
+### Provider Support
+
+Only **OpenAI-native** providers speak the Responses API's wire format: **OpenAI**, **Azure OpenAI**, and **Custom OpenAI-Compatible** connections. Routing a Responses request to any other provider (Anthropic, Google Vertex/Gemini, AWS Bedrock, a self-hosted engine, and so on) returns **HTTP 400** rather than silently falling back to a chat-shaped translation — several Responses-specific fields have no chat-completions equivalent, so a silent translation could quietly drop part of the request.
+
+:::note Current Scope
+`/v1/responses` support in this release covers plain text generation, with the same quota, cost-tracking, and guardrail coverage as Chat Completions. Two things work differently for now:
+
+- **Tool calls** — a Responses request that results in a function/tool call is returned to the client as-is; the gateway's automatic tool-calling loop (used with the [MCP Gateway](/en/ai-gateway/mcp-gateway)) currently runs only for Chat Completions requests.
+- **Structured-prompt features** — [Prompt Decorator](/en/ai-gateway/prompt-decorator), [Prompt Template](/en/ai-gateway/prompt-templates), [Topic Guard](/en/ai-gateway/advanced-guardrails), RAG injection, and the semantic cache's similarity match all read the standard `messages[]` array. Since a Responses request carries `input` instead, Prompt Decorator and Prompt Template currently pass such a request through unaffected, while Topic Guard, RAG, and the semantic cache fall back to scanning the request's raw text rather than parsing it message-by-message.
+:::
+
+## Pricing and Usage Metrics
+
+The additional modalities are integrated into the existing **AI Cost Settings** and **Reports** infrastructure:
+
+| Modality | Pricing Unit | Usage Metric |
+|----------|--------------|--------------|
+| STT (whisper) | Per minute | Audio duration (seconds/minutes) |
+| TTS | Per character | Input character count |
+| Image generation | Per image (by size) | Number of images generated |
+| Embeddings | Per 1M input tokens | Input token count |
+
+These metrics are visible in **Reports and Analytics** alongside other LLM models, broken down by person/team/model.
+
+:::tip
+
+New models (such as whisper, TTS, and gpt-image) ship with **pre-configured prices** in the catalog; you can customize model pricing from the **AI Cost Settings** page if needed.
+
+:::
+
+## Endpoint Routing
+
+The gateway automatically recognizes the target path of the incoming request (`/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/responses`) and routes it to the modality-specific processing pipeline (including binary response support, multipart parsing, and duration-based usage calculation) — no additional configuration is required, and all modalities can be served through the same AI Gateway.
+
+<img
+  src="/images/ai-gateway/model-catalog-multimodal.png"
+  alt="Model Catalog — Image Generation, Embedding, Audio (Whisper/TTS) rows"
+  width="1000"
+/>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="AI Cost Settings" icon="dollar-sign" href="/en/ai-gateway/cost-settings">
+    Customize pricing per modality
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    Track usage and cost by modality
+  </Card>
+  <Card title="Advanced Guardrails" icon="shield" href="/en/ai-gateway/advanced-guardrails">
+    Configure guardrail layers, including PII masking on STT responses
+  </Card>
+  <Card title="Vector Database" icon="database" href="/en/ai-gateway/vector-database">
+    See where embeddings are stored and searched
+  </Card>
+</CardGroup>

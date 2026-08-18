@@ -1,0 +1,239 @@
+---
+title: "MCP Gateway"
+description: "MCP (Model Context Protocol) artık Apinizer'da birinci sınıf bir API proxy tipidir — mevcut proxy'lerinizi AI ajanlarına araç olarak sunabilir, dış MCP sunucularına passthrough yapabilir ya da bir politika üzerinden onların araçlarını kendi AI akışınıza katabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Genel Bakış
+
+**MCP (Model Context Protocol)**, AI ajanlarının dış sistemlere standart bir protokolle "araç" (tool) olarak bağlanmasını sağlayan açık bir protokoldür. Apinizer'da MCP, diğer proxy tipleriyle (REST, SOAP, AI) aynı seviyede **birinci sınıf bir API Proxy tipidir** — kendi başına ayrı bir yönetim ekranı veya kimlik doğrulama modeli taşımaz, mevcut API Proxy yaşam döngüsünün (deploy, redeploy, rollback, export/import) tamamını paylaşır.
+
+:::info[Eski modelden fark]
+Önceki sürümlerde bir API'yi MCP olarak yayınlamak, kendi CRUD ekranına ve kendi kimlik doğrulama moduna (Yok / API Anahtarı / OAuth2) sahip **ayrı bir "MCP Inbound Sunucusu" kaydı** gerektiriyordu. Bu model tamamen kaldırıldı. Artık MCP yayınlamak, **MCP tipinde bir API Proxy** oluşturup onun yönlendirme modunu seçmekten ibarettir; kimlik doğrulama da proxy'nin normal politika zincirinden gelir. Ayrıntı için bu sayfanın sonundaki [Eski Sürümden Geçiş](#eski-sürümden-geçiş) bölümüne bakın.
+:::
+
+MCP iki yönde çalışır:
+
+- **Gelen (Inbound)** — MCP tipinde bir API Proxy oluşturup Apinizer'ı bir MCP sunucusu olarak yayınlarsınız; proxy'nin yönlendirme moduna göre ya mevcut Apinizer proxy'leriniz araç olarak sunulur ya da dış bir MCP sunucusuna passthrough yapılır. Bu proxy'ler, diğer AI Gateway'lerle aynı kart görünümünde listelenir ve oluşturulur — menüdeki **MCP Gateway** girişi bu listeyi açar.
+- **Giden (Outbound)** — bir AI Gateway'in araç çağırma adımına eklediğiniz **MCP Çağrısı (LLM)** politikası, dış bir MCP sunucusuna bağlanıp onun araçlarını kendi AI akışınıza katar. Hedef sunucu artık ayrı bir bağlantı kaydı değil, **politikanın kendisinin içinde** tanımlanır — bkz. [Giden Araç Çağrısı](#giden-araç-çağrısı).
+
+:::info
+Model Context Protocol kavramına genel bir giriş için [Yapay Zeka Temel Kavramları](/tr/concepts/temel-kavramlar/yapay-zeka-temel-kavramlari) sayfasına bakabilirsiniz. Bu sayfa Apinizer'ın MCP desteğine odaklanır.
+:::
+
+## Hızlı Başlangıç
+
+<Steps>
+  <Step title="MCP tipinde bir API Proxy oluşturun">
+    MCP tipinde bir API Proxy oluşturma akışını başlatın — proxy tipi zaten MCP olarak seçili gelir, bir tip seçim ekranı gösterilmez ve doğrudan minimal bir oluşturma formu açılır. Proxy'ye tek bir istemci relative path'i (örn. `/mcp/asistan`) atanır — bu tek yol, hem JSON-RPC trafiğini hem de discovery belgesini taşır.
+  </Step>
+
+  <Step title="Yönlendirme modunu seçin">
+    Proxy'nin **MCP Routing** sekmesinde iki moddan birini seçin: mevcut proxy'lerinizi araç olarak sunmak için **Araçları Aç**, dış bir MCP sunucusuna geçiş yapmak için **Passthrough**. Aşağıdaki [Modlar](#modlar) bölümüne bakın.
+  </Step>
+
+  <Step title="Moda göre yapılandırın">
+    Araçları Aç modunda hangi API proxy/metotların hangi araç adıyla sunulacağını ekleyin. Passthrough modunda arka uç MCP sunucusunu/sunucularını satır içi tanımlayın ve gerekiyorsa araç izin listesini daraltın.
+  </Step>
+
+  <Step title="Deploy edin">
+    Proxy'yi normal bir API Proxy gibi bir ortama deploy edin. Deploy geçmişi, redeploy ve rollback davranışı diğer proxy tipleriyle birebir aynıdır.
+  </Step>
+
+  <Step title="İstemciyi bağlayın">
+    Bir MCP istemcisi, proxy'nin relative path'ine JSON-RPC ile bağlanır (`tools/list`, `tools/call`, ...) ya da önce `{relativePath}/.well-known/mcp/manifest.json` üzerinden proxy'yi keşfeder. Discovery belgesi kimlik doğrulamadan muaftır; asıl erişim kontrolü, istek proxy'nin politika zincirinden geçerken uygulanır.
+  </Step>
+</Steps>
+
+`/mcp/asistan` relative path'ine sahip bir proxy için discovery yanıtı örneği:
+
+```json
+{
+  "schema_version": "v1",
+  "name_for_human": "Asistan Proxy",
+  "name_for_model": "apinizer_mcp_64f2a1",
+  "description_for_human": "Apinizer API Management Platform — MCP Gateway",
+  "description_for_model": "Provides access to Apinizer proxy endpoints as MCP tools.",
+  "auth": { "type": "user_http", "authorization": { "authorization_type": "bearer" } }
+}
+```
+
+## Modlar
+
+### Araçları Aç (Tool Expose)
+
+Mevcut bir API proxy'nin uç noktalarını MCP aracı olarak yayınlar. Her satırda bir kaynak API proxy, (opsiyonel) belirli bir metot, sunulacak araç adı/açıklaması, gerekirse bir şema override'ı ve OAuth2 için zorunlu scope'lar tanımlanır.
+
+:::note
+Zorunlu scope alanı yalnızca çağıran **OAuth2 ile kimlik doğrulamışsa** uygulanır; diğer kimlik doğrulama tiplerinde (API Anahtarı, JWT, Basic, vb.) yok sayılır.
+:::
+
+Bir istemcinin `siparis_sorgula` adlı bir aracı çağırma isteği şu şekilde görünür:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "siparis_sorgula",
+    "arguments": { "siparisNo": "SP-10245" }
+  }
+}
+```
+
+### Passthrough
+
+Proxy'ye gelen her MCP çağrısını, arka uç bir MCP sunucusuna olduğu gibi iletir. Bir **araç izin listesi** ile hangi araçların dışarıya açılacağı daraltılabilir:
+
+- İzin listesi boş ve sunucuda en az bir araç keşfedilmişse, keşfedilen kataloğun **tamamı** kullanılabilir olur.
+- İzin listesi boş ve keşfedilen katalog boşsa, **hiçbir araç** kullanılamaz — sessiz/varsayılan bir açık erişim yoktur. (Sunucu keşif anında hiç yanıt vermezse istek zaten bir hata döner; bu madde yalnızca sunucunun geçerli ama boş bir katalog döndürdüğü duruma ilişkindir.)
+- İzin listesi doluysa, yalnızca hem keşfedilen kataloğun hem de izin listesinin kesişimindeki araçlar kullanılabilir.
+
+Bir aracın çalıştırdığı işlem, her iki modda da Apinizer'ın **normal politika zincirinden** geçer — Kişisel Veri (PII) Maskeleme, İstem Koruması, Veri Sızıntısı Koruması (DLP), Konu-Dışı Koruması ve Tekrar-Fırtınası (Loop) Koruması gibi [gelişmiş korumalar](/tr/ai-gateway/gelismis-korumalar) hem araç çağrısının argümanlarına (`params.arguments`) hem araç sonucuna uygulanır. Bir MCP Gateway'ine yalnızca bu beş koruma eklenebilir; bir LLM çağrısına doğrudan bağlı diğer AI politikaları (Semantik Önbellek, Token Kotaları, Prompt Süsleyici, Prompt Şablonları, RAG, Bağlam Bütünlüğü Koruması) kaydetme adımında reddedilir. Ayrıca araç çıktısı, PII maskeleme ve engelleme desenleri (regex) ile ayrıca filtrelenebilir. İstem Koruması ve Konu-Dışı Koruması bir MCP Gateway'inde kullanıldığında, aynı politikaların taşıdığı [dış sağlayıcı guardrail](/tr/ai-gateway/gelismis-korumalar#dış-sağlayıcı-guardrail) desteği de bu proxy'de aynen çalışır — araç argümanları/sonucu, tanımlıysa bir dış LLM hakemine de gönderilir.
+
+Passthrough modundaki arka uç MCP sunucusu/sunucuları, proxy'nin **MCP Routing** sekmesinde, ayrı bir bağlantı ekranına gitmeden **doğrudan tanımlanır**:
+
+<Steps>
+  <Step title="Arka uç sunucuyu ekleyin">
+    **MCP Routing** sekmesinin Passthrough bölümünde **Sunucu Ekle** ile bir satır açın; sunucunun adresini, kimlik doğrulama bilgilerini ve gerekiyorsa mTLS ayarlarını aynı satırda girin. Her satır tek bir endpoint taşır — ayrı bir failover/yedek sunucu alanı yoktur.
+  </Step>
+  <Step title="Deploy edin ve kataloğu doğrulayın">
+    Proxy ilk kez deploy edildiğinde Apinizer, tanımlı sunucunun/sunucuların araç kataloğunu otomatik olarak keşfeder.
+  </Step>
+  <Step title="Sağlık durumunu izleyin">
+    Her sunucu periyodik olarak yoklanır (health probe); erişilemeyen bir sunucu proxy'nin durumunda işaretlenir.
+  </Step>
+</Steps>
+
+Passthrough yapılandırması APIops REST API ile de yönetilebilir; bkz. [API Referansı: API Proxies — Update MCP Routing](/api-reference/api-proxies/settings/update-mcp-routing).
+
+## Giden Araç Çağrısı
+
+Bir AI Gateway'in LLM'i bir araç çağırmak istediğinde (tool_use / function calling), bu isteği fiilen dış bir MCP sunucusuna ileten bileşen **MCP Çağrısı (LLM)** politikasıdır (proxy'nin araç çağırma adımına eklenir). Hedef sunucu, Passthrough modundaki gibi **politikanın kendi ekranında satır içi tanımlanır**:
+
+<Steps>
+  <Step title="Politikayı ekleyin">
+    Bir AI Gateway'in araç çağırma adımına **MCP Çağrısı (LLM)** politikasını ekleyin.
+  </Step>
+  <Step title="Sunucuyu tanımlayın">
+    **MCP Sunucusu (Satır İçi)** bölümünde adresi, protokol sürümünü, kimlik doğrulama şemasını (Bearer / OAuth2 Client Credentials / mTLS / Yok) ve capability cache ayarlarını girin. Tek bir endpoint taşır — failover/çoklu-sunucu listesi yoktur; birden çok dış sunucuya araç çağrısı için ayrı politika örnekleri eklenir.
+  </Step>
+  <Step title="Araçları keşfedin">
+    **Araçları Keşfet** butonu sunucuya bağlanır, bağlantının çalıştığını doğrular ve araç kataloğunu getirir — kaydetmeden önce çalışır, ayrı bir "bağlantıyı test et" adımı yoktur.
+  </Step>
+  <Step title="İzinli araçları daraltın (opsiyonel)">
+    Boş bırakılırsa keşfedilen tüm araçlara izin verilir; araçlar henüz hiç keşfedilmemişse çağrı fail-closed reddedilir. Kısıtlamak için **İzin Verilen Araçlar** listesinden seçim yapın.
+  </Step>
+</Steps>
+
+Bu sunucu tanımı da Passthrough modundakiyle aynı SSRF korumasına tabidir (bkz. [Güvenlik ve Governance](#güvenlik-ve-governance)). Politika ekranındaki **MCP Bağlantısı** alanı geriye dönük uyumluluk için korunur: satır içi sunucu tanımlıyken devre dışı kalır, çalışma zamanında ikisinden yalnızca biri kullanılır.
+
+Bu politika da APIops REST API ile eklenip güncellenebilir; bkz. [API Referansı: Policies](/api-reference/policies/crud/add-policy).
+
+## Protokol Sürümleri
+
+Her MCP Gateway'inin istemcilere bildirdiği protokol sürümü ayrı ayrı yapılandırılabilir (**MCP Routing** sekmesi, MCP Protokol Sürümü alanı):
+
+| Sürüm | Davranış |
+|-------|----------|
+| `2024-11-05` | Eski (legacy) taşıma — HTTP + Sunucu Tarafından Gönderilen Olaylar (SSE), `GET .../sse` push kanalı |
+| `2025-06-18` | Streamable HTTP, yanıtlarda `MCP-Protocol-Version` başlığı — **varsayılan** |
+| `2026-07-28` | Stateless taşıma — `initialize` el sıkışması gerekmez |
+
+Sürüm değişikliği proxy'yi yeniden deploy etmenizi gerektirir. Alan boş bırakılırsa gateway varsayılanı (`2025-06-18`) kullanılır; tanınmayan/hatalı yazılmış bir sürüm değeri, en yakın alt sürüme düşürülür ve bu durum bir uyarı olarak loglanır — istek reddedilmez.
+
+## Çoklu Hedef (Aggregation)
+
+Passthrough modunda, **MCP Routing** sekmesindeki satır içi sunucu listesine en fazla 10 arka uç MCP sunucusu eklenebilir. Apinizer bu sunucuların tamamının araç kataloglarını **tek bir `tools/list` yanıtında** birleştirir:
+
+- Farklı sunucularda aynı isme sahip araçlar, deterministik biçimde `sunucuAdı__araçAdı` şeklinde isimlendirilerek çakışma önlenir.
+- **Fail-soft**: hedeflerden biri yavaş veya erişilemez durumdaysa, diğer hedeflerin araçları etkilenmeden sunulmaya devam eder.
+- Tek bir sunucu yeterliyse listeye tek satır eklemek yeterlidir; sıralama, satırları yukarı/aşağı taşıyarak değiştirilebilir.
+
+## Güvenlik ve Governance
+
+Kimlik doğrulama artık **proxy'nin normal politika zincirinden** gelir — JWT, OIDC, API Anahtarı, Basic gibi mevcut tüm auth politikaları MCP Gateway'lerinde de kullanılabilir; ayrı bir "MCP kimlik doğrulama modu" yoktur. Discovery belgesi (`.well-known/mcp/manifest.json`) bu zincirden **muaftır** ve her zaman açık erişimlidir; manifest, proxy'de en az bir politika tanımlıysa istemciye genel bir "bearer token bekleniyor" ipucu verir, ancak gerçek erişim kontrolü her zaman istek asıl politika zincirinden geçerken uygulanır.
+
+Aşağıdaki governance özellikleri şu an bir yönetim ekranı üzerinden değil, **API proxy yapılandırmasının bir parçası olarak (APIops)** ayarlanır:
+
+- **Kimlik bazlı erişim listesi (identity-ACL)** — yalnızca **Passthrough** modunda uygulanır; Araçları Aç modunda bu liste hiç değerlendirilmez, o moddaki erişim tamamen yukarıda anlatılan zorunlu scope alanına dayanır. Opsiyonel: boş bırakılırsa mevcut araç izin listesi/keşif davranışı aynen sürer. Doldurulursa **default-deny** olur: kimlik bilgisi (credential), rol veya organizasyon bazında tanımlanan kurallarla eşleşmeyen bir çağıran hiçbir aracı ne `tools/list` yanıtında görebilir ne de çağırabilir; bir kuralın engelleme listesi, aynı veya başka bir kuralın izin listesine her zaman önceliklidir.
+- **Araç argüman kısıtları** (yalnızca MCP — A2A'da karşılığı yoktur, çünkü A2A skill çağrılarının MCP'deki gibi bir giriş şeması yoktur) — bir aracın argümanlarına nokta-gösterimli bir yol üzerinden (örn. `user.email`) REGEX, MAX_LENGTH, ENUM veya REQUIRED tipinde doğrulama kuralı tanımlanabilir. Regex kuralları ReDoS'a karşı sınırlıdır (4096 karakter üst sınırı + 200ms zaman aşımı). Hatalı yazılmış bir kural (boş yol, geçersiz regex vb.) sessizce atlanır ve trafiği asla durdurmaz.
+- **Çağrı kotası (call-quota)** — dakika/saat/gün periyodunda, araç bazlı / kimlik bilgisi bazlı / ikisinin birleşimi bazlı bir çağrı limiti tanımlanabilir. Varsayılan kapalıdır (hiç yapılandırılmamışsa kota kontrolü hiç çalışmaz). Yapılandırıldığında kontrol, tüm yetkilendirme ve argüman doğrulama adımlarından **sonra**, çağrı gerçek hedefe gitmeden hemen **önce** yapılır — yetkisiz veya hatalı bir çağrı kota hakkı tüketmez.
+- **Katalog sapması (catalog drift) koruması** — bir MCP sunucusunun aracı ilk keşfedildiğinde (veya elle yeniden keşfedildiğinde) onaylanan katalog bir özet (hash) olarak sabitlenir; periyodik bir sağlık kontrolü canlı kataloğu bu özetle karşılaştırır. Varsayılan davranış (**yalnızca uyar**) sapmayı loglar ve uyarı üretir ama çağrıları engellemez; **kapalı-güvenli** davranış seçilirse, katalog yeniden onaylanana kadar sapma tespit edilen sunucu üzerindeki çağrılar reddedilir.
+- **Token passthrough (opt-in)** — çağıranın kendi token'ının backend'e iletilmesi varsayılan olarak **her yerde kapalıdır**. MCP Routing sekmesindeki "istemci token'ını ilet" seçeneği tek başına yeterli değildir; iletimin fiilen etkinleşmesi için ayrıca (APIops ile) açık bir onay + opsiyonel bir hedef-kitle (audience) izin listesi yapılandırılması gerekir. Bir iletim denemesi başarısız olursa (özellik kapalı, token bulunamadı veya hedef kitle eşleşmedi) sunucunun kendi kimlik bilgisi kullanılmaya devam eder — kimliksiz bir çağrı asla arka uca sessizce geçmez.
+
+Passthrough çağrıları (araç keşfi, araç çalıştırma, sağlık yoklaması), [A2A Gateway](/tr/ai-gateway/a2a-gateway) ile aynı çıkış (egress) korumasını paylaşır:
+
+:::danger
+Hedef adres; bulut metadata uç noktaları, loopback, link-local, multicast ve carrier-grade-NAT (CGNAT) aralıklarına karşı her zaman doğrulanır — bu adreslere yönelik istekler, yapılandırmadan bağımsız olarak **her zaman** engellenir. Bir sunucu tanımı, opsiyonel olarak diğer özel ağ aralıklarına (RFC1918 / IPv6 ULA — örn. cluster-içi bir MCP sunucusu) erişecek şekilde ayrıca izinlendirilebilir, ancak bu opt-in yukarıdaki adresleri asla açmaz.
+:::
+
+## Yapılandırmada Ortam Değişkenleri
+
+MCP Gateway yapılandırmasına yazdığınız metinlerin çoğu `${DEGISKEN_ADI}` biçiminde [ortam değişkeni](/tr/develop/environment-variables) referansı kabul eder; değer, proxy'nin çalıştığı ortama göre çözülür. Böylece aynı yapılandırma test ortamından canlıya elle düzenlenmeden taşınabilir — her ortamda farklı adlandırılan bir araç, kabul edilen bir hedef kitle değeri veya ortama özel bir yetki adı tek sefer değişken olarak yazılır.
+
+Değişken kabul eden alanlar:
+
+| Nerede | Alanlar |
+|---|---|
+| Giden araç çağrısı | Araç adı, argüman şablonu |
+| Erişim kuralları | İzinli araç listesi, kimlik kuralındaki kullanıcı/rol/organizasyon adı, izin ve ret listeleri |
+| Argüman kısıtları | Argüman yolu ve kural değeri |
+| Yayınlanan araçlar | Gerekli yetkiler |
+| Token aktarımı | Kabul edilen hedef kitle listesi |
+
+Argüman şablonu ayrıca `#{...}` biçimindeki [bağlam değişkenlerini](/tr/develop/politikalar/mesaj-olusturucu) de kabul eder; bunlar ortam değişkenleri yerleştirildikten sonra her istek için ayrıca değerlendirilir.
+
+:::caution
+Çözümleme fail-closed çalışır. Değişken, proxy'nin çalıştığı ortamda tanımlı değilse metin yazıldığı gibi kalır — ve gerçekte hiçbir araç, yetki ya da hedef kitle birebir `${DEGISKEN_ADI}` adını taşımadığı için çağrı yanlış bir eşleşmeye düşmek yerine reddedilir. Çağıran taraf da araç adı olarak birebir `${DEGISKEN_ADI}` metnini gönderip erişim kuralını aşamaz; böyle bir istek doğrudan reddedilir.
+:::
+
+:::note
+Araç tespit desenleri ve çıktı engelleme desenleri değişken kabul **etmez**. Bunlar düzenli ifadedir ve Apinizer her birini kayıt anında, gateway'i kilitleyebilecek desenlere karşı sınar. Ortam değişkeninden gelen bir desen motora bu sınamadan geçmeden ulaşırdı; yani sizi koruyan kontrolün kendisi devre dışı kalırdı. Aynı gerekçe, kaydederken doğrulanan elle girilmiş araç giriş şeması için de geçerlidir.
+:::
+
+## Loglama ve Analytics
+
+Proxy detayındaki Trace/Traffic/Analytics sekmeleri, MCP tipindeki proxy'lerde **MCP Trace**, **MCP Trafiği** ve **MCP Analitikleri** adını taşır — REST/SOAP proxy'lerindeki eşdeğer sekmelerle aynı yapıdadır. Her MCP çağrısı (gelen araç çağrısı, giden araç çağrısı ve giden sağlık yoklaması), gecikme/boyut/istemci IP'si gibi standart alanların yanında MCP'ye özgü alanlarla birlikte trafik logunda görünür. **Analitik** sayfasının **Trafik** tab'ındaki "Flags" rozet kolonu bir isteğin önbellek/koruma/PII/streaming durumunu tek bakışta gösterir; ayrıntılı kullanım, maliyet ve koruma metrikleri aynı **Analitik** sayfasında izlenebilir — bkz. [Raporlar ve Analitik](/tr/ai-gateway/raporlar).
+
+Bir AI Gateway'in birden çok aracı art arda çağırdığı durumlarda (agentic loop), her çağrının süresi ve sonuç durumu ayrı ayrı uçtan uca izleme kaydında (trace) görünür. Uçtan uca bir araç çağrısı zincirini takip etmek için [İzleme ve Tekrar Oynatma](/tr/ai-gateway/izleme-ve-tekrar-oynatma) sayfasına bakın.
+
+## Eski Sürümden Geçiş
+
+Aşağıdaki ekranlar ve kavramlar kaldırıldı; **otomatik bir geçiş yoktur** — eşdeğerini MCP tipinde yeni bir API Proxy olarak yeniden oluşturmanız gerekir:
+
+- Ayrı "MCP Inbound Sunucusu" listeleme/oluşturma/düzenleme ekranı ve bu kayda özgü sunucu bazlı kimlik doğrulama modları (Yok / API Anahtarı / OAuth2) ile bunlara ait issuer/audience/JWKS alanları.
+- Eski istemci uç noktası `/aimcp/{id}` — yerini proxy'nin kendi relative path'i aldı.
+- MCP sunucusuna özgü ayrı bir deploy tipi — artık standart API Proxy deploy akışının bir parçası.
+
+| Eski kavram | Yeni karşılığı |
+|-------------|-----------------|
+| MCP Inbound Sunucusu kaydı | MCP tipinde API Proxy |
+| Sunucu bazlı Yok/API Anahtarı/OAuth2 modu | Proxy'nin normal auth politika zinciri |
+| `/aimcp/{id}` | Proxy'nin relative path'i |
+
+### Giden Bağlantı Ekranının Kaldırılması
+
+Ayrı bir **giden MCP bağlantısı** listeleme/oluşturma ekranı (ve buna karşılık gelen bağımsız APIops uç noktaları) da kaldırıldı; sunucu tanımı artık yukarıda anlatıldığı gibi Passthrough modunda **MCP Routing** sekmesinde, araç çağrısında ise **MCP Çağrısı (LLM)** politikasının kendisinde satır içi tutulur. Keşif, sağlık yoklaması, katalog kayması (drift) koruması ve token passthrough aynı şekilde çalışmaya devam eder; artık paylaşılan bir kayda değil, sunucunun kendi tanımına bağlıdır.
+
+Bu değişiklik için **otomatik bir geçiş vardır**: bu eski ekrandan önceden oluşturulmuş bağlantılara sahip mevcut proxy ve politika yapılandırmaları, bir sonraki yükseltmede otomatik olarak satır içi sunucu tanımına taşınır — yeniden oluşturmanız gerekmez. Aynı bağlantı birden fazla proxy/politika tarafından paylaşılıyorsa, yükseltme sonrasında her biri kendi bağımsız (kimlik bilgisi dahil) kopyasını taşır; kimlik bilgisini rotasyona sokarken bunu göz önünde bulundurun.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="A2A Gateway" icon="network-wired" href="/tr/ai-gateway/a2a-gateway">
+    Ajanlar arası görev devrini yapılandırın
+  </Card>
+  <Card title="Global Politikalar" icon="shield" href="/tr/develop/global-configurations/global-policies">
+    Araç çağrısı politikalarını merkezi olarak yönetin
+  </Card>
+  <Card title="Kimlik Bilgileri" icon="key" href="/tr/admin/identity-management/kimlik-bilgileri">
+    MCP Gateway'iniz için kimlik doğrulama politikası tanımlayın
+  </Card>
+  <Card title="İzleme ve Tekrar Oynatma" icon="route" href="/tr/ai-gateway/izleme-ve-tekrar-oynatma">
+    Araç çağrısı zincirlerini trace üzerinde izleyin
+  </Card>
+</CardGroup>

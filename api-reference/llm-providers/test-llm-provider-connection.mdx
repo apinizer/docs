@@ -1,0 +1,197 @@
+---
+title: "Test LLM Provider Connection"
+description: "Tests an AI Gateway LLM provider connection Manager-side (in-process), without persisting it. The request body is optional: omit it to test the stored provider as-is, or supply one to test different settings. A blank secret is only backfilled from the stored provider when the connection target (endpoint/authScheme/authHeaderName/providerType/deploymentType) is unchanged — otherwise the request is rejected as a secret-exfiltration guard."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/llm-providers/{providerName}/test-connection/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Only if a body is sent |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|--------------|
+| projectName | string | Yes | Project name |
+| providerName | string | Yes | LLM provider name (must already exist) |
+
+### Query Parameters
+
+None
+
+### Request Body
+
+**Optional.** This is the one write-shaped APIops endpoint whose body may be omitted entirely.
+
+- **Omitted / empty body**: the currently stored provider (as persisted, with its stored encrypted credential) is tested exactly as-is.
+- **Body supplied**: it is a `ConnectionConfigLlm` object and, because the type carries the connection-config polymorphic discriminator, it **must** include `"_class": "llm"`. `name` may be left blank (falls back to the `providerName` path value) but if present must match it. Blank `apiKey` / `apiSecret` / `serviceAccountJson` fields are backfilled from the stored provider's encrypted values — **but only if the connection target has not changed** (see the secret-exfiltration guard below).
+
+#### Full JSON Body Example — testing modified settings
+
+```json
+{
+  "_class": "llm",
+  "name": "deepseek-primary",
+  "providerType": "DEEPSEEK",
+  "endpoint": "https://api.deepseek.com/v1",
+  "authScheme": "BEARER",
+  "authHeaderName": "Authorization",
+  "apiKey": "sk-a-different-key-to-try",
+  "deploymentType": "CLOUD"
+}
+```
+
+#### Request Body Fields
+
+Same shape as [Create LLM Provider](/api-reference/llm-providers/create-llm-provider#request-body-fields). The fields that participate in the secret-exfiltration guard are called out below:
+
+| Field | Type | Role in the guard |
+|-------|------|--------------------|
+| endpoint | string | Part of the "connection target" — must be unchanged for a blank secret to be reused |
+| authScheme | string | Part of the "connection target" |
+| authHeaderName | string | Part of the "connection target" |
+| providerType | string | Part of the "connection target" |
+| deploymentType | string | Part of the "connection target" |
+| apiKey / apiSecret / serviceAccountJson | string | Backfilled from the stored value **only** when the target above is unchanged; otherwise must be supplied in plaintext |
+
+### Notes
+
+- Body is fully optional — send `{}` or no body at all to test the provider exactly as stored.
+- `_class: "llm"` is mandatory whenever a body is sent.
+
+## Response
+
+The test always returns `200 OK` when the request itself is valid; the connectivity outcome is carried in `deploymentResult.success` — a connectivity/auth failure is `success: false` with the reason in `detail`, not an HTTP error.
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "envName": "apimanager",
+    "detail": "LLM provider connection test successful"
+  }
+}
+```
+
+Failed connectivity (still `200 OK`, `status: SUCCESS`, but `deploymentResult.success: false`):
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": false,
+    "envName": "apimanager",
+    "detail": "401 Unauthorized from provider endpoint"
+  }
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|--------------|
+| status | string | Envelope status — `SUCCESS` when the test was executed (`FAILURE` only for request errors) |
+| deploymentResult | object | Result of the in-process connectivity probe |
+| deploymentResult.success | boolean | `true` if the provider accepted the test call |
+| deploymentResult.envName | string | Always `apimanager` — the test runs in-process on the Manager, no worker round-trip |
+| deploymentResult.detail | string | `"LLM provider connection test successful"` on success, or the raw provider/transport failure reason on failure |
+
+### Error Response (400 Bad Request) — Not Found / Validation
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "LLM provider (name: deepseek-primary) was not found!"
+}
+```
+
+### Error Response (400 Bad Request) — Secret-Exfiltration Guard
+
+Returned when a body is supplied that changes the connection target (`endpoint`/`authScheme`/`authHeaderName`/`providerType`/`deploymentType`) while leaving a secret field blank:
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Connection target changed — re-enter the credential before testing"
+}
+```
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+Test the stored provider as-is (no body):
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/llm-providers/deepseek-primary/test-connection/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+Test with a different API key against the same target:
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/llm-providers/deepseek-primary/test-connection/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "_class": "llm",
+    "name": "deepseek-primary",
+    "providerType": "DEEPSEEK",
+    "endpoint": "https://api.deepseek.com/v1",
+    "authScheme": "BEARER",
+    "authHeaderName": "Authorization",
+    "apiKey": "sk-a-different-key-to-try",
+    "deploymentType": "CLOUD"
+  }'
+```
+
+## Permissions
+
+- User must have **`AI_DEVELOPMENT` + `MANAGE`** permission in the project
+
+## Notes and Warnings
+
+- **Body Is Optional**: Unlike every other write endpoint in this API, the body may be omitted. Omitting it tests the stored provider exactly as persisted (its stored, encrypted credential is decrypted in-process for the call — never returned).
+- **Secret-Exfiltration Guard (critical)**: When a body is supplied, a blank `apiKey`/`apiSecret`/`serviceAccountJson` is normally backfilled from the stored provider's credential — but **only if `endpoint`, `authScheme`, `authHeaderName`, `providerType` and `deploymentType` are all unchanged** from the stored provider. If any of those changed while a secret is left blank, the request is rejected with `credentialReentryRequired` instead of silently sending the stored credential to a (possibly attacker-controlled) new `endpoint`. To test a new endpoint, supply the real secret explicitly.
+- **No Persistence**: This endpoint never saves the tested configuration — use [Create LLM Provider](/api-reference/llm-providers/create-llm-provider) or [Update LLM Provider](/api-reference/llm-providers/update-llm-provider) to persist changes after a successful test.
+- **Manager-Side Only**: The probe runs in-process on the Manager (`envName: "apimanager"`); it is not sent through a gateway worker, so it does not reflect worker-side network policy.
+- **Outcome In The Body**: A failed connectivity test still returns `200 OK` with `status: "SUCCESS"` — always check `deploymentResult.success`.
+
+## Related Documentation
+
+- [Create LLM Provider](/api-reference/llm-providers/create-llm-provider) - Persist a provider after a successful test
+- [Update LLM Provider](/api-reference/llm-providers/update-llm-provider) - Update an existing provider
+- [Get LLM Provider](/api-reference/llm-providers/get-llm-provider) - Retrieve a provider by name
+- [LLM Providers API](/api-reference/llm-providers) - Resource overview

@@ -98,6 +98,62 @@ For descriptions of **Conditions** and **Error Message Customization** panels, y
 
 For a complete guide on all layers, priority order and scenario examples of the error message configuration system, see the [Error Message Configuration Guide](/en/concepts/core-concepts/error-message-configuration) page.
 
+## DPoP Proof Generation (RFC 9449)
+
+This policy can add **ownership proof (DPoP proof)** to the request when going as a **client** to a DPoP-protected upstream service (authorization or resource server). DPoP renders a stolen access token useless: the token can only be used by the owner of the key that generated the proof.
+
+:::info Client-side role only (RFC 9449)
+This policy implements the DPoP **client** role: Apinizer generates a proof and attaches it to an outgoing request toward a DPoP-protected upstream. It does **not** issue access tokens or write the token-to-key binding (`cnf.jkt`) — that is the authorization server's job. To validate incoming DPoP proofs at the gateway (the resource-server role), use the [JOSE Verification](/en/develop/policies/jose-verification) policy instead.
+:::
+
+:::info Separate working mode
+When DPoP is turned on, the policy generates a DPoP proof with a fixed structure instead of normal JWT generation. Therefore, **Claim settings, Expiration, Encryption and Target** settings are not used in this mode; they are automatically hidden in the interface. The only configuration that continues to be used is **the signature key** (proof is signed) and, if desired, **fields added via Additional Claims**.
+:::
+
+The structure of the DPoP proof is fixed according to the standard: it only carries the request method (`htm`), target address (`htu`), generation time (`iat`) and unique identifier (`jti`); optionally token hash (`ath`) can be added. It does **not contain** duration (`exp`), issuer, audience or subject and **cannot be encrypted**.
+
+<img src="/images/develop/politikalar/jose-imp-dpop.png" alt="DPoP Proof Generation" width="1000" />
+
+### DPoP Configuration Fields
+
+| Field | Description |
+|-------|-------------|
+| **Generate DPoP Proof** | Main switch. When turned on, the policy generates a DPoP proof and the JWT/claim/encryption sections below are closed. This switch is at the top of the configuration page; therefore, when you turn it on, unrelated fields are closed before you fill them. |
+| **Proof Header Name** | Request header where the generated proof is written; default `DPoP`. Supports variables. |
+| **htu Source** | How the target address (`htu`) that the proof will be bound to is determined. **Manual Entry:** you enter the address (recommended, predictable). **Derive from Backend Routing Address:** derived from the proxy's routing address (best-effort) — use carefully as under load balancer/failover the actual address may differ. |
+| **htu (Target URI)** | Required when htu Source = Manual Entry. Target address the proof will be bound to; query string and fragment are automatically stripped. Supports variables. |
+| **htm (HTTP Method) Override** | If left empty, the method of the outgoing request is used. Supports variables. |
+| **Add Access Token Hash (ath)** | Adds the access token hash (`ath`) to the proof. If the proof is used with an access token, the standard requires this; if off, the other side may reject the proof. Default is on. |
+| **Access Token Source** | Where the token is read from (for ath and schema rewriting): Authorization Header, Body, or Choose from Variable. |
+| **Access Token Variable** | Required when Source = Choose from Variable; the project variable holding the token. |
+| **Rewrite Authorization Scheme to DPoP** | Rewrites the `Authorization` header in the outgoing request from `Bearer <token>` to `DPoP <token>`. DPoP-protected resource servers reject the `Bearer` scheme. Default is on. |
+| **Nonce Variable** | Its value is added as the `nonce` claim. It is your responsibility to store the nonce returned by the server and pass it to this variable (script/cache). |
+
+:::tip Signature key
+When DPoP is on, the proof is signed with the key you selected in the **JWS Application** section. DPoP requires asymmetric (RSA/EC/EdDSA) key; symmetric keys are rejected. If you are not signing with client credentials, you must select a signature key.
+:::
+
+:::warning htu mismatch
+The most common field issue is `htu` mismatch. Behind a reverse proxy / TLS termination, the auto-derived address may differ from what the resource server expects. In this case, use **htu Source = Manual Entry** to enter the public address seen by the resource server.
+:::
+
+### DPoP client flow
+
+When **Generate DPoP Proof** is on, Apinizer acts as the DPoP client toward the upstream:
+
+```mermaid
+sequenceDiagram
+    participant APZ as Apinizer (Client)
+    participant UP as DPoP-protected upstream
+
+    Note over APZ: JOSE Application policy, Generate DPoP Proof = on
+    APZ->>APZ: Build proof: htm + htu + iat + jti (+ ath), sign with the signature key
+    APZ->>APZ: Rewrite Authorization: Bearer to DPoP
+    APZ->>UP: Request + DPoP proof header + DPoP token
+    UP-->>APZ: Response (if the proof is valid)
+    Note over APZ,UP: Token issuance and cnf.jkt are NOT Apinizer's job — the upstream's AS writes them
+```
+
 ## Deleting the Policy
 
 For deletion steps of this policy and operations to be applied when in use, you can refer to the [Removing Policy from Flow](/en/develop/api-proxy-configuration/policy-management#removing-policy-from-flow) section on the [Policy Management](/en/develop/api-proxy-configuration/policy-management) page.
@@ -118,6 +174,28 @@ For the process of how this policy will be connected to APIs, you can refer to t
 | **Embedded JWK Signing/Encryption** | - In signature or encryption panel, when Key Source Mode = Embedded, open the relevant JWK selector.<br />- Select existing key or go to Secret Manager with **New**.<br />- Policy form is automatically updated when current JWK is saved. |
 | **Dynamic HTTP Key Fetching** | - Select Key Source Mode = Dynamic HTTP.<br />- Define service URL and request in HTTP Request field with Test Console.<br />- Under **Settings**, use **Configure** for secure connection (same as [Test Console](/en/develop/test-debug-tools/test-console#settings)).<br />- Configure Key Extraction Variable (required), Key Format, Key Algorithm; if enabling cache fill Apply By variable, Capacity, TTL and other cache fields.<br />- Test with **Parse Response (Try It)**; on success, detected format/algorithm can be auto-assigned. |
 | **Token Chain Manipulation** | - From **Injection Target for generated JWT/JWE**, select target where token will be written (Body, Authorization Header, or Choose from Variable).<br />- If Choose from Variable, define **Target variable for decoded claims** to pass decoded data to another policy.<br />- Complete data flow by using the same variable as source in the relevant second policy. |
+
+
+### Retry for Dynamic Key Fetching
+
+When the key is fetched over HTTP, a transient network failure at the key endpoint would otherwise fail signing or validation altogether. Under **Retry** in the dynamic key settings you can make the key request be sent again automatically.
+
+| **Field** | **Description** |
+|:----------|:----------------|
+| **Retry on failure** | Master toggle. Disabled by default; the key request is attempted once as before. |
+| **Retry Count** | Number of additional attempts after the first one. |
+| **Delay Strategy** | `No Delay`, `Fixed Delay` or `Exponential Backoff`, with the related delay fields. |
+| **Status Codes To Retry** | Which HTTP status codes trigger a retry. Defaults to `502`, `503`, `504`. |
+
+Connection-phase failures (connection refused, connect timeout, DNS or TLS failure) are always retried because the request never reached the key endpoint. Failures that occur after the request was sent are retried only for idempotent methods. The behaviour is identical to the API Call policy; see [API Call — Retry on Failure](/en/develop/policies/api-call#retry) for the full table.
+
+:::note
+
+This is **not** the same as **Retry on key error**, which sits one level above: that option clears the cached key and fetches it once more when the key itself turns out to be cryptographically unusable. Retry described here applies to the key request itself when it fails at the network level. Both can be enabled together; each fetch stays within its own retry limit.
+
+:::
+
+When the key is served from the key cache no HTTP request is made, so retry does not come into play. A fetched key is written to the cache only after a successful response.
 
 ## Best Practices
 

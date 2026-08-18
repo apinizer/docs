@@ -27,6 +27,7 @@ Authorization: Bearer YOUR_TOKEN
 |--------|-------|----------|
 | Authorization | Bearer \{token\} | Yes |
 | Content-Type | multipart/form-data | Yes |
+| X-Apinizer-Package-Passphrase | Base64 of the UTF-8 passphrase | Only if the uploaded package is encrypted |
 
 ### Path Parameters
 
@@ -35,12 +36,20 @@ Authorization: Bearer YOUR_TOKEN
 | projectName | string | Yes | Project name where the API Proxy will be imported |
 | apiProxyName | string | Yes | API Proxy name (will override existing API Proxy with this name) |
 
+### Query Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| withDependencies | boolean | No | false | When `true`, the dependencies carried in the package (if any) are resolved against the target project: an object with the SAME NAME in the target is reused, otherwise the dependency is imported as new. When `false` (default), the package is imported as-is (previous behavior). Has no effect if the package carries no dependencies |
+
 ### Form Data
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | metadata | string (JSON) | Yes | Metadata for API Proxy creation/update. See [Metadata Object](#metadata-object) |
 | apiProxyExportFile | file | Yes | ZIP file containing the API Proxy export. Must have `.zip` extension |
+| certEnvironmentMergeMethod | string | No | When the package carries certificate/keystore/key objects (e.g. backend TLS material): how their environment-scoped data merges onto the existing objects. `MATCH_BY_NAME` (default) writes only the environments named in the package, `OVERWRITE_ALL` writes the package's first entry onto every target environment |
+| certEnvironmentUncoveredAction | string | No | For the same certificate/keystore/key objects: what happens to a target environment the package does not cover. `FILL_FROM_PACKAGE` writes the package's data onto it, `REMOVE_FROM_TARGET` drops it from the object. If such an uncovered environment actually exists and this is not supplied, the import is rejected with 400 rather than silently leaving it with stale material |
 
 ### Metadata Object
 
@@ -137,6 +146,8 @@ The `metadata` parameter is a JSON string containing optional configuration for 
 - File must end with `.zip` extension (case-insensitive)
 - ZIP file must contain a valid API Proxy export JSON file
 - If `deploy=true`, requires `API_MANAGEMENT` + `DEPLOY_UNDEPLOY` permission
+- Every name in `deployTargetEnvironmentNameList` is validated **before** the package is imported. If a name does not exist (or is not accessible to the user), the request fails with `400 Bad Request` and nothing is imported
+- When an existing API Proxy is overridden, its current deployment state is preserved: environments it is already deployed to stay deployed and are flagged as requiring a redeploy. The deployment state stored in the package is never carried over to the target installation
 - Routing configuration is optional and can be set later
 - Maintenance mode can be enabled/disabled during import
 
@@ -196,8 +207,8 @@ The `metadata` parameter is a JSON string containing optional configuration for 
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "projectName value can not be empty!"
+  "status": "FAILURE",
+  "resultMessage": "projectName value can not be empty!"
 }
 ```
 
@@ -205,8 +216,8 @@ or
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "apiProxyName value can not be empty!"
+  "status": "FAILURE",
+  "resultMessage": "apiProxyName value can not be empty!"
 }
 ```
 
@@ -214,8 +225,8 @@ or
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "apiProxyExportFile parameter can not be empty!"
+  "status": "FAILURE",
+  "resultMessage": "apiProxyExportFile parameter can not be empty!"
 }
 ```
 
@@ -223,8 +234,44 @@ or
 
 ```json
 {
-  "error": "bad_request",
-  "error_description": "apiProxyExportFile parameter must be in zip file format and must end with zip extension!"
+  "status": "FAILURE",
+  "resultMessage": "apiProxyExportFile parameter must be in zip file format and must end with zip extension!"
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Package is encrypted; a passphrase is required."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Package could not be decrypted with the given passphrase."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Encrypted package could not be read."
+}
+```
+
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Replace Existing of CERTIFICATE 'backend-tls-cert' cannot proceed: the package carries no data for the target environment(s) UAT, so they would keep their old material while the rest is replaced. Send the certEnvironmentUncoveredAction parameter with either FILL_FROM_PACKAGE (write the package's data onto them) or REMOVE_FROM_TARGET (drop them from the object) and import again."
 }
 ```
 
@@ -237,24 +284,20 @@ or
 - Invalid API Proxy export format
 - Invalid metadata JSON format
 - Deployment failed (if deploy=true)
+- The uploaded package is encrypted but the `X-Apinizer-Package-Passphrase` header was not provided
+- The supplied passphrase does not open the package
+- The file is not a package this version can read — corrupted or unsupported format
+- The package carries a certificate/keystore/key object whose target has an environment the package does not cover, and `certEnvironmentUncoveredAction` was not supplied
 
 ### Error Response (401 Unauthorized)
 
 ```json
 {
-  "error": "unauthorized_client",
-  "error_description": "Invalid token"
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
 }
 ```
 
-### Error Response (404 Not Found)
-
-```json
-{
-  "error": "not_found",
-  "error_description": "Project(MyProject) was not found or user does not have privilege to access it!"
-}
-```
 
 ## cURL Example
 
@@ -298,19 +341,51 @@ curl -X PUT \
   -F "apiProxyExportFile=@apiProxyExportFile.zip"
 ```
 
+### Example 5: Import an Encrypted Package
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAPI/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -F "metadata={\"deploy\":false}" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip"
+```
+
+### Example 6: Import a Package with its Dependencies
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAPI/import/?withDependencies=true" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "metadata={\"deploy\":false}" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip"
+```
+
+### Example 7: Replace Existing with Uncovered-Environment Handling
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAPI/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "metadata={\"deploy\":false}" \
+  -F "apiProxyExportFile=@apiProxyExportFile.zip" \
+  -F "certEnvironmentMergeMethod=MATCH_BY_NAME" \
+  -F "certEnvironmentUncoveredAction=FILL_FROM_PACKAGE"
+```
+
 ## Notes and Warnings
 
 - **Override Behavior**:
   - This endpoint overrides existing API Proxies with the same name
   - Existing API Proxy configuration will be replaced
   - Original API Proxy data is lost after override
-## Permissions
+  - This endpoint also accepts an `environmentMapping` part — a malformed value is still rejected with 400, but a valid one has no effect since `override` is always true here (the mapping only applies to Import as New — the "Without Override" variant of this endpoint)
 
-- User must have **`API_MANAGEMENT` + `EXPORT_IMPORT`** permission in the project
-- Alternatively, user can have project admin role
-- If `deploy=true` is set, user must also have **`API_MANAGEMENT` + `DEPLOY_UNDEPLOY`** permission
-
-## Notes and Warnings
+- **Certificate/Key Environment Merge**:
+  - When the package carries certificate/keystore/key objects (e.g. backend TLS material) that already exist by name in the target project, `certEnvironmentMergeMethod` decides how their environment-scoped data merges onto the existing object: `MATCH_BY_NAME` (default) only touches environments the package names, `OVERWRITE_ALL` writes the package's first entry onto every target environment
+  - If a target environment is left uncovered by the package under `MATCH_BY_NAME`, the import used to silently keep that environment's old material — a partial transfer with no warning. It is now blocked with a 400 unless `certEnvironmentUncoveredAction` says what to do with it (`FILL_FROM_PACKAGE` or `REMOVE_FROM_TARGET`)
+  - Has no effect when the package carries no certificate/keystore/key objects
 
 - **Deployment**:
   - If `deploy=true`, API Proxy will be deployed after import
@@ -327,6 +402,11 @@ curl -X PUT \
   - File must be a valid ZIP archive
   - File must end with `.zip` extension (case-insensitive)
   - ZIP file must contain valid API Proxy export JSON
+- **Encrypted Packages**:
+  - Whether the uploaded package is encrypted is detected automatically
+  - If it is encrypted, the same passphrase used during export must be supplied in the `X-Apinizer-Package-Passphrase` header
+  - The header is ignored for plain (unencrypted) packages
+  - A package cannot be opened with an incorrect passphrase
 - **Metadata Format**:
   - Metadata must be valid JSON
   - Metadata is passed as a form field (string)
@@ -339,9 +419,10 @@ curl -X PUT \
   - Import includes all API Proxy configurations
   - Includes all associated policies
   - Includes routing, cache, CORS, and other settings
-## Permissions
-
-User must have **`API_MANAGEMENT` + `EXPORT_IMPORT`** permission in the project. For deployment operations (when `deploy: true` is set), user must also have **`API_MANAGEMENT` + `DEPLOY_UNDEPLOY`** permission.
+- **Dependency Resolution (`withDependencies`)**:
+  - When omitted or `false`, the package is imported as-is (previous, default behavior)
+  - When `true` and the package carries dependencies (exported with `withDependencies=true`), each dependency is matched against an existing object of the SAME NAME in the target project, or imported as a new object if none exists
+  - Has no effect on a package that carries no dependencies (every package produced before `withDependencies` existed)
 - **File Size**:
   - Large export files may take longer to import
   - Ensure sufficient network bandwidth and server resources
@@ -354,10 +435,16 @@ User must have **`API_MANAGEMENT` + `EXPORT_IMPORT`** permission in the project.
   - Check `deploymentResult` for deployment status
   - Each environment deployment result is included separately
 
+## Permissions
+
+- User must have **`API_MANAGEMENT` + `EXPORT_IMPORT`** permission in the project
+- Alternatively, user can have project admin role
+- If `deploy=true` is set, user must also have **`API_MANAGEMENT` + `DEPLOY_UNDEPLOY`** permission
+
 ## Related Documentation
 
 - [Export API Proxy](/api-reference/api-proxies/crud/export-api-proxy) - Export API Proxy to ZIP file
-- [Import API Proxy (Without Override)](/api-reference/api-proxies/crud/import-api-proxy-without-override) - Import API Proxy without override
+- [Import API Proxy](/api-reference/api-proxies/crud/import-api-proxy) - Import API Proxy without override
 - [Deploy API Proxy](/api-reference/api-proxies/deployment/deploy-api-proxy) - Deploy API Proxy to environments
 - [Update Routing Addresses](/api-reference/api-proxies/settings/update-routing-addresses) - Update routing configuration
 

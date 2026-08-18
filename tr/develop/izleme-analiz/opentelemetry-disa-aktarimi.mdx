@@ -1,0 +1,125 @@
+---
+title: "OpenTelemetry Dışa Aktarımı"
+description: "OpenTelemetry (OTLP) trace ve metriklerini her proxy tipi için doğrudan gateway'den dışa aktarın — javaagent kurmadan tüm trafik için W3C trace yayılımı ve retrospektif span ağacı."
+---
+
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+## Genel Bakış
+
+Apinizer, [OpenTelemetry](https://opentelemetry.io/) (OTLP) trace ve metriklerini doğrudan gateway'den dışa aktarabilir — javaagent yok, sidecar yok. Gateway'in işlediği her istek, proxy tipinden bağımsız olarak, W3C `traceparent` yayılımı taşır ve OTLP toplayıcınızda retrospektif bir span ağacı üretir; böylece Apinizer üzerinden geçen bir istek, önündeki ve arkasındaki sistemlerle aynı dağıtık trace'in parçası olarak görünür.
+
+Bu sayfa platform-genel referanstır: dışa aktarımın nasıl açıldığı, her proxy tipinin hangi span ve öznitelikleri ürettiği ve native dışa aktarımın javaagent yoluyla karşılaştırması. AI Gateway trafiği, buradaki her şeyin üzerine ek bir GenAI semantik-kural katmanı taşır — token kullanımı, maliyet ve model öznitelikleri — bu katman ayrıca [AI Gateway OpenTelemetry](/tr/ai-gateway/acik-telemetri) altında belgelenmiştir.
+
+:::note Semantik kurallar belirli bir registry anlık görüntüsüne pinlidir
+Bu sayfadaki öznitelik ve metrik adları OpenTelemetry semantic-conventions registry'sinin **2026-08** anlık görüntüsünü izler. Apinizer registry'yi ileriye doğru takip eder; gelecekteki bir yükseltme bir özniteliği yeniden adlandırırsa bu, release notes'ta belirtilir.
+:::
+
+## Ne Dışa Aktarılır?
+
+Dışa aktarımı açtığınızda her istek için, gateway'in isteği gerçekte nasıl işlediğini yansıtan küçük bir span ağacı üretilir:
+
+| Span | Tür | Neyi temsil eder |
+| --- | --- | --- |
+| İstek span'i | SERVER | Gateway'in isteği kabul ettiği andan yanıtı bitirdiği ana kadar tüm istek yaşam döngüsü |
+| Backend deneme span'i | CLIENT | Bir backend'e ulaşma **denemesi başına** bir span — bir retry veya başka bir hedefe failover kendi span'idir; iki kez failover yapmış bir istek üç CLIENT span gösterir |
+| Pipeline span'leri | INTERNAL | İstek-işleme ve yanıt-işleme fazları, istek span'inin çocukları olarak |
+
+Span'ler, gateway'in zaten kaydettiği zamanlamalardan **retrospektif** olarak kurulur; dolayısıyla dışa aktarımı açmak istek başına yeni bir ölçüm işi eklemez — trafik günlüğünü zaten besleyen aynı veriyi yeniden kullanır.
+
+:::info Trace devamlılığı
+Bir istek zaten bir W3C `traceparent` taşıyarak geldiğinde, Apinizer yeni bir trace başlatmak yerine o trace'e katılır ve çağırdığı backend'e taze bir çocuk bağlam yayar. `traceparent` taşımadan gelen bir istek yeni bir trace başlatır. Önündeki bir API gateway'i, bir tarayıcı ya da çağıran bir servis ile Apinizer'ın arkasındaki backend'in tek bir uçtan-uca trace üzerinde buluşması bu şekilde gerçekleşir.
+:::
+
+## Öznitelik Referansı
+
+Başlık değerleri, istek/yanıt gövdeleri, sorgu dizeleri ve kimlik bilgileri span'lere **asla** yazılmaz. Span adları API proxy'sinin şablon yolunu kullanır — ham istek URI'sini asla — böylece istemcileriniz kaç farklı URL çağırırsa çağırsın trace kardinalitesi sınırlı kalır.
+
+| Öznitelik | Span türü | Anlamı |
+| --- | --- | --- |
+| `http.request.method` | SERVER, CLIENT | HTTP metodu |
+| `http.response.status_code` | SERVER, CLIENT | Durum kodu |
+| `url.path` | SERVER | Yalnız istek yolu — sorgu dizesi asla yakalanmaz |
+| `network.peer.address` | CLIENT | Gerçekte bağlanılan upstream adresi |
+| `http.request.resend_count` | CLIENT | Yalnız retry yapılan denemelerde set edilir |
+| `error.type` | SERVER, CLIENT | Bir istek veya deneme başarısız olduğunda hata sınıflandırması |
+| `apinizer.routing.dns_ns` / `.tcp_connect_ns` / `.tls_handshake_ns` / `.ttfb_ns` / `.body_read_ns` / `.pool_wait_ns` | CLIENT | Deneme için faz-başına ağ zamanlaması; her biri yalnız gerçekten ölçüldüğünde bulunur |
+| `apinizer.cache_hit` | SERVER | Yanıtın yanıt önbelleğinden karşılanıp karşılanmadığı |
+| `apinizer.result_type` | SERVER | Başarı / hata / engellendi sınıflandırması |
+| `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | SERVER, CLIENT | Her span ile paylaşılan kimlik alanları — bkz. [Korelasyon](#korelasyon) |
+
+## Metrikler
+
+Native dışa aktarım, gateway'in mevcut Prometheus uç noktasını değiştirmez. Zaten topladığınız `apinizer_*` Prometheus sayaçları ve zamanlayıcıları, OTLP dışa aktarım açık olsun olmasın, öncesiyle tamamen aynı şekilde çalışmaya devam eder — ikisi birbirinden bağımsızdır. OTLP dışa aktarımı açmak trace verisi ekler; hiçbir Prometheus metriğini taşımaz veya yeniden adlandırmaz.
+
+AI Gateway trafiği ayrıca GenAI'a özgü OTLP metrik histogramları üretir (token kullanımı, işlem süresi, maliyet). Bunlar AI katmanının geri kalanıyla birlikte [AI Gateway OpenTelemetry](/tr/ai-gateway/acik-telemetri#metrikler) altında belgelenmiştir.
+
+:::note Span'ler her proxy türünü kapsar, OTLP metrikleri kapsamaz
+Bu ayrım bilinçlidir ve dashboard'larınızı planlamadan önce bilmeniz gerekir. **Span'ler** her proxy türü için üretilir — REST, SOAP, AI, MCP, A2A fark etmeksizin. **OTLP metrikleri** ise yalnız AI Gateway trafiği için üretilir; çünkü GenAI histogramları düz bir REST proxy'sinde karşılığı olmayan büyüklükleri (token, model maliyeti) ölçer. AI olmayan proxy'lerin hız, hata ve süre değerleri OTLP üzerinden gönderilmez.
+
+Bu, gateway RED metriklerinden yoksun kaldığınız anlamına gelmez. Yığınınıza uyanı seçin:
+
+- **Prometheus uç noktasını toplayın.** `apinizer_*` serileri her proxy türü için eksiksizdir ve OTLP dışa aktarımından etkilenmez.
+- **Span'lerden türetin.** Toplayıcınızın `spanmetrics` connector'ını Apinizer span'lerine yöneltin; her istek `http.response.status_code`, `error.type` ve süre taşıyan bir SERVER span ürettiği için hız/hata/süre serileri doğrudan trace'lerden çıkar. Prometheus'u hiç toplamayan, yalnız OTLP kullanan kurulumlarda olağan tercih budur.
+:::
+
+## Yapılandırma
+
+<Steps>
+  <Step title="Bir OTLP Toplayıcı connector'ı oluşturun">
+    Bağlantı yönetimi altında yeni bir **OTLP Toplayıcı** connector'ı oluşturun. **Endpoint**'i toplayıcınızın **temel URL**'ine ayarlayın (örneğin `http://collector:4318`) — Apinizer sinyal yolunu (`/v1/traces`, `/v1/metrics`) kendisi ekler, dahil etmeyin. **Protokol** (HTTP/protobuf veya gRPC), isteğe bağlı **Gzip Sıkıştırma**, **Zaman Aşımı**, isteğe bağlı bir **Kimlik Doğrulama Başlık Adı**/**Değeri** çifti (şifreli saklanır) ve herhangi bir **Ek Başlık** yapılandırın. **Toplu İşleme / Dışa Aktarım Ayarı** bölümü (maksimum kuyruk boyutu, maksimum dışa aktarım toplu boyutu, zamanlama gecikmesi, metrik dışa aktarım aralığı) dışa aktarıcının toplu işleme davranışını denetler — varsayılanlar çoğu toplayıcı için uygundur.
+  </Step>
+  <Step title="Bağlantıyı test edin">
+    Connector üzerinde **Bağlantıyı Test Et**'i kullanın. Bu bir TCP ping değildir — Apinizer kaydedilmiş ayarlardan geçici bir dışa aktarıcı kurar ve toplayıcıya gerçek bir sentetik span gönderir; böylece toplayıcının Apinizer'ın OTLP yükünü (kimlik doğrulama, TLS ve yol dahil) gerçekten kabul ettiği, dağıtımdan önce kanıtlanır.
+  </Step>
+  <Step title="Dışa aktarımı ortamda etkinleştirin">
+    Hedef ortamın **OpenTelemetry Dışa Aktarım** bölümünde **Dışa Aktarım Modu**'nu `NATIVE` yapın ve az önce oluşturduğunuz connector'ı **OTLP Toplayıcı** olarak seçin. Mod, burada onay verene kadar varsayılan olarak `OFF` (sıfır maliyet) kalır — bu ortam-başına bir ayardır, yani üretime dokunmadan önce bir hazırlık ortamında pilot uygulama yapabilirsiniz.
+  </Step>
+  <Step title="Örneklemeyi ayarlayın">
+    **Örnekleme Oranı**, yeni bir trace başlatan istekler için ebeveyn-tabanlı `traceIdRatio` örneklemesini denetler. Mevcut örneklenmiş bir `traceparent` ile gelen bir istek, bu orandan bağımsız olarak daima ebeveynin kararını devralır. Yüksek trafikli proxy'lerde temkinli başlayın ve toplayıcı kapasitesini doğruladıktan sonra artırın.
+  </Step>
+</Steps>
+
+## javaagent'e Karşı Native
+
+Apinizer, gateway'den OpenTelemetry verisi almanın iki yolunu destekler ve ikisini aynı anda çalıştırmanızı bilinçli olarak engeller.
+
+| | javaagent | Native (bu sayfa) |
+| --- | --- | --- |
+| Kurulum | OpenTelemetry Java agent'ını worker JVM'ine ekleyin | Kurulacak bir şey yok — bir connector artı bir ortam ayarı yapılandırın |
+| Kapsam | Tam JVM oto-enstrümantasyonu (HTTP istemci/sunucu, veritabanı çağrıları ve daha fazlası) | Apinizer'ın kendi istek yaşam döngüsü, iş bağlamı (korelasyon kimliği, proje, proxy) yerleşik |
+| Çift dışa aktarım | Yok | **Otomatik tespit edilir ve devre dışı bırakılır.** Bir ortamın dışa aktarım modu `NATIVE` iken Apinizer JVM'e eklenmiş bir OpenTelemetry javaagent tespit ederse, her span'i iki kez göndermek yerine native dışa aktarımı zorla kapatır ve bir uyarı loglar. javaagent yolunu seçtikten sonra uyarıyı susturmak için modu açıkça `AGENT` yapın. |
+
+Hiçbir dağıtım değişikliği olmadan Apinizer-farkında trace'lere en hızlı ulaşım için native'i seçin. Gateway'in kendi ürettiğinin ötesinde tam-yığın JVM enstrümantasyonu gerektiğinde javaagent'i seçin — [OpenTelemetry Entegrasyonu makale serisi](/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum) bu kurulumu adım adım anlatır. İkisini aynı ortama karşı çalıştırmak desteklenmez; otomatik veto tam da bunun sessizce olmasını engellemek için vardır.
+
+## Korelasyon
+
+`apinizer.correlation_id` her span'e işlenir ve API trafik günlüklerinde zaten gördüğünüz `APINIZER-CORRELATION-ID` ile eşleşir. APM aracınızdaki bir trace'i Apinizer'daki ilgili [trafik kaydına](/tr/develop/izleme-analiz/api-trafigi) bağlayan tek kimliktir — toplayıcınızda yavaş bir span'den başlayıp aynı değeri kullanarak Apinizer'ın trafik günlüğünde tam isteği açabilirsiniz.
+
+AI Gateway trafiği için korelasyon çift yönlü ve daha zengindir; trace'i AI Trace kaydına her iki yönde bağlar — bkz. [AI Gateway OpenTelemetry: Korelasyon](/tr/ai-gateway/acik-telemetri#korelasyon).
+
+## Bilinen Sınırlar
+
+- **WebSocket ve gRPC sunucu tarafı span alır, W3C yayılımı almaz.** WebSocket/gRPC trafiği için de her istek gibi bir istek span'i üretilir, ancak gelen bir `traceparent`'i okumak ve backend'e bir tane yaymak şu an yalnız HTTP/SOAP içindir. Bir WebSocket/gRPC isteği, çağıranından bir trace'i sürdürmek yerine daima yeni bir trace başlatır.
+- **Politika ve koruma span'leri Live Trace gerektirir.** Gateway, tekil politika adımları için INTERNAL çocuk span'leri üretebilir, ancak yalnız o istek için Live Trace aktifse; tek başına her-zaman-açık dışa aktarım bunları üretmez.
+- **Semantik kurallar 2026-08 registry anlık görüntüsüne pinlidir**, yukarı akışta hâlâ Development statüsünde — registry stabilize oldukça gelecekteki bir Apinizer sürümünde olası öznitelik yeniden adlandırmaları bekleyin.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="AI Gateway OpenTelemetry" icon="bot" href="/tr/ai-gateway/acik-telemetri">
+    GenAI öznitelik ve metrik katmanı, sağlayıcı-adı eşlemesi, içerik yakalama ve indirilebilir Grafana dashboard'u
+  </Card>
+  <Card title="Adım Adım İzleme" icon="route" href="/tr/develop/izleme-analiz/adim-adim-izleme">
+    Tek bir isteği Apinizer'ın kendi arayüzünde gateway boyunca takip edin
+  </Card>
+  <Card title="API Trafiği" icon="list" href="/tr/develop/izleme-analiz/api-trafigi">
+    Her dışa aktarılan trace ile korelasyon kimliğini paylaşan trafik günlüğü
+  </Card>
+  <Card title="OpenTelemetry Entegrasyonu (javaagent)" icon="book-open" href="/tr/articles/apinizer-gateway-opentelemetry-entegrasyonu-bolum-1-kurulum">
+    javaagent tabanlı tam-yığın enstrümantasyon yolu
+  </Card>
+</CardGroup>

@@ -1,0 +1,173 @@
+---
+title: "Prompt Templates"
+description: "You can publish reusable, parameterized prompts to a shared catalog and let a client reference one by name — sending only a short alias and a few parameter values — instead of repeating the full message list on every request."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+:::warning Policy order: Prompt Template runs first
+Prompt Template must come **before** [Prompt Decorator](/en/ai-gateway/prompt-decorator), [RAG Injection](/en/ai-gateway/rag-injection), every [guardrail](/en/ai-gateway/advanced-guardrails) and [Semantic Cache](/en/ai-gateway/semantic-cache). The template expands the caller's short request into the full message list, and every later policy — guardrail scanning, the cache key, the token count — must work on that expanded prompt.
+
+If you save the policy list in an order that breaks this rule, Apinizer corrects the order **when you save** and tells you what was moved and why. This keeps the order you see on the Develop screen identical to the real execution order shown in [tracing](/en/ai-gateway/tracing-and-replay).
+:::
+
+## The Prompt Template Catalog
+
+A **Prompt Template** is a reusable, named catalog entry made of one or more messages (`system`, `user`, `assistant`, and so on), each of which may contain `{{paramName}}` placeholders. It carries:
+
+- **Name** — the reference key other screens use to find this template; must be unique within what you can see (built-in, shared, and your own project's templates)
+- **Description**
+- **Messages** — a role plus content for each message, with `{{paramName}}` placeholders anywhere in the content
+- **Parameters** — the names the messages reference, each optionally marked required and given a default value
+- **Enabled**
+
+Each template belongs to one of three scopes:
+
+| Scope | Who sees it | Who can edit it |
+|-------|-------------|------------------|
+| **Built-in** | Everyone | Read-only |
+| **Shared** | Every project in the installation | A system administrator |
+| **Project-owned** | Just that project | Members of that project |
+
+A caller always sees the union of built-in, shared, and their own project's templates.
+
+:::note Catalog Edits Reach the Policies
+A binding picked from the catalog stays **bound** to that catalog record: editing the template and saving pushes the new messages and parameters into every policy using it. See [Bound and Localized Bindings](#bound-and-localized-bindings) below for the details — and for what to do when you want the opposite.
+:::
+
+## The Prompt Template Policy
+
+A **Prompt Template policy** picks one or more templates from the catalog into its own list of **bindings**, then expands a matching binding into the request's message list at gateway time. Each binding has:
+
+- **Alias** — the value a client's request sends to select it (defaults to the catalog template's name at pick time, but can be changed per binding without affecting the catalog)
+- **Messages** and **parameters** — copied from the catalog template when it is picked, and kept in sync with it for as long as the binding stays bound (see below)
+
+### Bound and Localized Bindings
+
+Every binding is in one of two states, shown in the **Source** column of the binding row.
+
+| State | What it means |
+|-------|---------------|
+| **Catalog-bound** | The catalog template owns the content. Editing the template and saving rewrites this binding's messages and parameters and marks the affected deployments "redeploy required". The binding's content is read-only in the policy screen. |
+| **Localized** | A detached, independent copy. Catalog edits never reach it, and you can edit its messages and parameters freely in the policy screen. |
+
+A binding picked from the catalog starts out **catalog-bound**. The binding row's action menu switches between the two states:
+
+- **Localize** — cuts the link. The current content is kept, but the binding stops receiving catalog updates and becomes editable. Use this when you want to customise one place.
+
+**Alias and description are always binding-local** — a catalog update never touches them.
+
+:::warning Editing a Shared Template Reaches the Whole Installation
+Because every project can pick a **Shared** template (a system administrator's record), editing one refreshes its bound bindings **in every project of the installation** and marks the affected deployments "redeploy required". Only a system administrator can edit such a template, and the usage list they see before saving covers the whole installation. A user viewing the same template from a project screen sees **only their own project's** usages — other projects' configuration is never shown to them. For **project-owned** templates both the update and the list stay inside that project.
+:::
+
+:::note Older Bindings and Imports
+Bindings created before this behaviour carry no catalog reference, so they count as **localized** and will not sync on their own.
+
+**Localizing is one-way**: there is no action that re-binds a localized binding to the catalog. Matching by name would not be trustworthy — the alias is editable, so name similarity risks binding to the wrong template. If you want a binding back in sync, **delete it and add it again from the catalog**; the new binding starts out catalog-bound.
+
+Importing a configuration into another environment also lands its bindings localized, because the target environment's catalog records are different. The same applies there: delete and re-add from the catalog.
+:::
+
+### Deleting and Renaming a Template
+
+- **Deleting**: if the template is bound anywhere, a warning lists where before the delete goes through. On confirmation the template is removed and its bound bindings are **localized** — their content is preserved, and no deployed policy breaks.
+- **Renaming**: does not affect bound bindings; they track the template by id, not by name, and their alias is unchanged. Only clients that send the old name directly, and localized bindings whose alias still carries the old name, need attention.
+
+The **Used by** section on the template screen lists every policy bound to that template.
+
+<Steps>
+  <Step title="Pick Templates">
+    Attach a Prompt Template policy to the relevant API proxy, and pick one or more templates from the catalog — each becomes a catalog-bound binding.
+  </Step>
+
+  <Step title="Set the Alias">
+    Give each binding the alias a client will send to select it.
+  </Step>
+
+  <Step title="Configure Behavior">
+    Choose how an unknown alias and a missing parameter are handled, and how expanded messages combine with anything the client itself sent.
+  </Step>
+
+  <Step title="Deploy">
+    Saving and deploying are separate steps — a saved policy only takes effect after you deploy it.
+  </Step>
+</Steps>
+
+### How a Request Uses It
+
+A client sends the alias — and, if the template has parameters, their values — in two request body fields (**`template`** and **`template_params`** by default; both field names are configurable per policy):
+
+```json
+{
+  "template": "greeting",
+  "template_params": {
+    "name": "Ada"
+  }
+}
+```
+
+The gateway looks up `greeting` among the policy's bindings, substitutes `{{name}}` with `"Ada"` in every message, and forwards the expanded `messages[]` array to the LLM provider — the `template`/`template_params` fields themselves are removed from the body first, since most LLM providers reject an unrecognized top-level field.
+
+A request that doesn't include the template field at all passes through unaffected — this policy only acts when a client is actually using it.
+
+### Unknown Alias and Missing Parameters
+
+| Setting | Options | Behavior |
+|---------|---------|----------|
+| **Unknown Template Behavior** | Pass Through (default) / Block | What happens when the alias matches no binding on this policy. Pass Through forwards the body completely unchanged, including the template fields; Block rejects the request (HTTP 400). |
+| **Missing Parameter Behavior** | Block (default) / Substitute Empty / Use Default | What happens when a `{{param}}` referenced by the matched template has no client-supplied value. Block rejects the request (HTTP 400); Substitute Empty replaces it with an empty string; Use Default falls back to the parameter's declared default value (or an empty string if none was declared). |
+
+### Merge Mode
+
+Controls how the expanded template messages combine with any `messages[]` the client itself sent:
+
+| Mode | Result |
+|------|--------|
+| **Replace** (default) | The template's messages replace the client's own entirely |
+| **Prepend** | Template messages first, then the client's own |
+| **Append** | Client's own messages first, then the template |
+
+### Expanded-Content Budget
+
+The **Expanded Content Budget** bounds the total character count across every expanded message's substituted content. Exceeding it **rejects the request** (HTTP 400) rather than injecting a truncated prompt.
+
+:::warning Parameter Substitution Is Single-Pass
+A parameter value is substituted literally, even if it happens to contain `{{...}}` itself — it is never expanded a second time. This is a deliberate protection: a client-supplied parameter value can never smuggle in another template reference or otherwise change what gets sent beyond the one placeholder it was meant to fill.
+:::
+
+### Environment and Context Variables in Template Text
+
+Template message text and a parameter's default value both accept an [environment variable](/en/develop/environment-variables) reference in `${VARIABLE_NAME}` form and a `#{...}` [context variable](/en/develop/policies/message-builder). Variables are substituted first, and the `{{parameter}}` placeholders are filled in afterwards.
+
+:::caution
+That order is deliberate and is a security boundary: a parameter **value supplied by the caller** is never scanned for variables. Only text an operator authored — the template body and the catalog's default values — is resolved. Were it the other way round, a caller could send a parameter whose value is a variable reference and have the gateway substitute one of its own environment values into the prompt.
+:::
+
+## Execution Order
+
+Prompt Template expansion runs at the very front of the AI request lane — even before [Prompt Decorator](/en/ai-gateway/prompt-decorator). Every downstream feature (guardrails, the semantic cache, RAG injection, token-quota counting) sees the fully expanded message list, never a bare `template`/`template_params` pair.
+
+## Centralized Management
+
+:::info
+Prompt Template policies are managed centrally from the [Global Policies](/en/develop/global-configurations/global-policies) screen, alongside other global policy types. This page describes what the policy does; use Global Policies to create, update, and bulk-deploy it across the API proxies that use it.
+:::
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Prompt Decorator" icon="list-plus" href="/en/ai-gateway/prompt-decorator">
+    Add fixed instructions on top of the expanded prompt
+  </Card>
+  <Card title="Advanced Guardrails" icon="shield-alert" href="/en/ai-gateway/advanced-guardrails">
+    Add masking, DLP, and topic protections
+  </Card>
+  <Card title="AI Gateway Overview" icon="route" href="/en/ai-gateway/overview">
+    See where prompt assembly fits in the request pipeline
+  </Card>
+  <Card title="Global Policies" icon="settings" href="/en/develop/global-configurations/global-policies">
+    Create, update, and bulk-deploy this policy
+  </Card>
+</CardGroup>

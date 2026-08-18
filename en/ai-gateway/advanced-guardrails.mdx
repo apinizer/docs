@@ -1,0 +1,417 @@
+---
+title: "Advanced Guardrails"
+description: "You can protect AI, MCP, and A2A traffic with masking for personal data and secrets, protection against prompt attacks, and controls against off-topic use and request loops — plus structural-injection and oversized-request protection on AI Gateways, and you can pair the prompt and off-topic checks with a second opinion from your own external LLM judge."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+
+:::warning Policy order: guardrails run after the policies that build the prompt
+Prompt protection, data-loss protection and context integrity must run **after** [Prompt Template](/en/ai-gateway/prompt-templates), [Prompt Decorator](/en/ai-gateway/prompt-decorator) and [RAG Injection](/en/ai-gateway/rag-injection). Inspection has to happen on the prompt exactly as it will reach the model; a guardrail that runs earlier cannot see content added afterwards.
+
+**Personal-data masking is deliberately exempt.** Whether masking runs before or after RAG is your own data-boundary decision, and Apinizer never moves that policy. Placing masking before RAG keeps the caller's personal data from ever reaching the embedding provider.
+
+If you save the policy list in an order that breaks this rule, Apinizer corrects the order **when you save** and tells you what was moved and why. This keeps the order you see on the Develop screen identical to the real execution order shown in [tracing](/en/ai-gateway/tracing-and-replay).
+:::
+
+## Guardrail Types
+
+<CardGroup cols={2}>
+  <Card title="Personal Data Masking" icon="eye-off">
+    Detects and masks personal data — such as Turkish national ID numbers, IBANs, and phone numbers — in both regular requests and streamed responses.
+  </Card>
+  <Card title="Prompt Protection" icon="shield-alert">
+    Detects jailbreak and injection attempts in incoming prompts before they reach the model. Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
+  </Card>
+  <Card title="Data-Loss Protection (DLP)" icon="shield-check">
+    Detects and masks secrets — such as API keys, certificates, and JWTs — that could otherwise leak through a request or response.
+  </Card>
+  <Card title="Off-Topic Protection" icon="compass">
+    Flags or blocks requests that fall outside the topics you define for a gateway, such as a support bot being used for unrelated chit-chat. Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
+  </Card>
+  <Card title="Retry-Storm (Loop) Protection" icon="repeat">
+    Detects the same request being sent repeatedly within a short time window, such as a client or agent stuck retrying.
+  </Card>
+  <Card title="Oversized Protection" icon="ruler">
+    Blocks — or optionally truncates the oldest conversation turns instead of blocking — a request that exceeds a configured token count or character limit. See [Per-Request Size Limit](/en/ai-gateway/token-quotas#per-request-size-limit).
+  </Card>
+  <Card title="Context-Integrity Protection" icon="git-merge">
+    Detects structural injection attempts — fabricated conversation turns or fake system/assistant markers embedded in user content to manipulate the model.
+  </Card>
+</CardGroup>
+
+## MCP and A2A Gateways
+
+Five of the seven guardrails above — Personal Data Masking, Prompt Protection, Data-Loss Protection (DLP), Off-Topic Protection, and Retry-Storm (Loop) Protection — aren't limited to AI Gateways: you can attach them to an [MCP Gateway](/en/ai-gateway/mcp-gateway) or an [A2A Gateway](/en/ai-gateway/a2a-gateway) as well, and they run through the exact same policy pipeline. What they inspect differs by surface, since neither protocol carries an OpenAI-format chat body:
+
+- On an **MCP Gateway**, a guardrail scans the JSON-RPC tool-call arguments (`params.arguments`) on the request side, and the tool result content on the response side.
+- On an **A2A Gateway**, a guardrail scans the JSON-RPC message parts (`params.message.parts[]` — text and other part types) on the request side, and the task/message result envelope on the response side.
+
+Oversized Protection, Context-Integrity Protection, and every other AI policy type — [Semantic Cache](/en/ai-gateway/semantic-cache), [Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas), [Prompt Decorator](/en/ai-gateway/prompt-decorator), [Prompt Templates](/en/ai-gateway/prompt-templates), [RAG Injection](/en/ai-gateway/rag-injection), and the AI routing policy itself — stay AI-Gateway only: they depend on an actual LLM invocation or on an OpenAI-format chat message array, neither of which an MCP or A2A Gateway has. Attaching one of these to an MCP or A2A Gateway is rejected when you save.
+
+## Personal-Data Types
+
+Personal-data masking recognizes the following built-in types out of the box, and you can add your own custom patterns for anything installation-specific:
+
+| Type | Example | Validation |
+|------|---------|------------|
+| Turkish National ID (TCKN) | `12345678950` | Checksum |
+| IBAN (Turkey) | `TR330006100519786457841326` | Checksum (mod 97) |
+| Phone (Turkey) | `05321234567` | Structural |
+| Email | `user@example.com` | Structural |
+| Credit Card | `4111111111111111` | Checksum (Luhn) |
+| IP Address | `203.0.113.5` | Structural (IPv4/IPv6) |
+| URL | `https://example.com/path` | Structural |
+| Passport Number | `P1234567` | Structural only |
+| Social Security Number (US) | `123-45-6789` | Structural |
+| Driver License Number (Turkey) | `A12345678` | Structural only |
+| IBAN (Generic, any country) | `DE89370400440532013000` | Checksum (mod 97) |
+| Crypto Wallet Address | `0x71C7656EC7ab88b098defB751B7401B5f6d8976` | Checksum (Bitcoin / Ethereum) |
+
+The Turkish and checksum-validated types produce far fewer false positives than a plain regular expression, since a random string of digits has to actually satisfy the check-digit formula to match.
+
+:::warning Passport and Driver License Numbers Have No Checksum
+Unlike most of the other built-in types, passport numbers and Turkish driver's license numbers have no reliable check digit to validate against — these two match on structure only (a letter followed by digits, or a generic alphanumeric code), so they carry a materially higher false-positive rate. If you enable either broadly, pair it with a custom pattern that also requires a matching field name, rather than scanning free-form text for it.
+:::
+
+### Managing the Rule List
+
+A new personal-data masking policy opens with an **empty rule list** — the same behaviour as every other Apinizer form: you add only the rules you want. The bulk actions above the list are:
+
+| Action | What it does |
+|--------|--------------|
+| **Add Default Set** | Adds one masking rule for **every** built-in type listed above, in a single click. Rules that are already defined are skipped, so pressing it twice never duplicates the list. |
+| **Add from Preset** | Adds the patterns you pick from the PII Patterns catalog. The box in the modal header selects the whole catalog at once. |
+| **Add Definition** | Creates a single rule from scratch. |
+| **Clear All** | Removes every rule in one step, after a confirmation. Also the quickest way to reset the pre-filled **Default PII Mask** policy that ships with a newly created AI proxy. |
+
+:::note
+Rule-list changes are not persisted until you **save** the policy. A policy left with an empty rule list masks nothing — the screen flags this as a warning.
+:::
+
+## Data-Loss Protection Patterns
+
+Data-loss protection ships with ready-made patterns for common secret formats, and you can add your own custom patterns for your organization:
+
+| Pattern | Example |
+|---------|---------|
+| AWS access key | `AKIAIOSFODNN7EXAMPLE` |
+| OpenAI API key | `sk-...` |
+| GitHub personal access token | `ghp_...` |
+| PEM private key block | `-----BEGIN PRIVATE KEY-----` |
+| JWT (JSON Web Token) | `eyJhbGci...` |
+
+:::warning
+For streamed responses, data-loss protection scans the response in chunk groups. Once a match triggers a block in one chunk group, every remaining chunk group in that stream is masked as well — this keeps a secret that happens to be split across chunk boundaries from leaking.
+:::
+
+## Writing and Testing Patterns
+
+Patterns use **Java regular-expression** syntax (`java.util.regex.Pattern`) — that is the engine the gateway matches with. It is not identical to JavaScript or PCRE: lookbehind must be fixed-width, named groups are written `(?<name>...)`, and Unicode classes such as `\p{L}` are supported.
+
+The **Test the pattern** panel on the PII Patterns screen runs a pattern against sample text before you save it. The test executes **server-side**, on the same engine as the gateway, so the matches and masked output you see there are exactly what will happen at runtime.
+
+:::warning
+Patterns that can backtrack catastrophically are **skipped** at runtime. The gateway screens every pattern with a ReDoS check, and one that fails is never applied while a request is processed — the rule looks enabled but masks nothing. The test panel reports this as a "ReDoS risk" before you save.
+:::
+
+## Actions
+
+Every guardrail applies one of three actions when it matches:
+
+- **Block** — the request or response is rejected entirely
+- **Flag** — processing continues, but the match is recorded for review
+- **Mask** — the matched value is replaced before continuing
+
+### Mask Shapes
+
+For personal-data rules the mask shape is chosen per rule:
+
+| Shape | Input | Output |
+|-------|-------|--------|
+| **Replace entirely** (default) | `05321234567` | `***` |
+| **Keep first N characters** (N=4) | `05321234567` | `0532*******` |
+| **Keep last N characters** (N=4) | `05321234567` | `*******4567` |
+| **Mask first N characters** (N=4) | `05321234567` | `****1234567` |
+
+The default shape replaces the whole value with `***` and leaks nothing. Partial shapes preserve the output length and **deliberately** leave part of the value visible; since the remaining fragment can identify a person on its own (the last four digits of a phone number, say), choose one on purpose. The replacement text is configurable too — in partial shapes its first character is used as the mask character.
+
+If the number of characters to keep is greater than or equal to the value length nothing would be masked at all; in that case it falls back to the safe side and replaces the whole value.
+
+### Anonymization: Sequential Placeholders and Synthetic Values
+
+Beyond the fixed and partial mask shapes above, two further shapes replace a matched value with something that reads naturally in the rest of the conversation, instead of a block of asterisks:
+
+| Shape | Input (a TCKN, for example) | Output |
+|-------|------------------------------|--------|
+| **Sequential placeholder** | `12345678950` | `<TCKN_1>` |
+| **Synthetic value** | `12345678950` | a different, checksum-valid TCKN, e.g. `98765432106` |
+
+**Sequential placeholder** replaces every match with a type-tagged token — `<TCKN_1>`, `<EMAIL_2>`, and so on — numbered in the order each distinct value was first seen. The token format is configurable (`{TYPE}` and `{N}` placeholders).
+
+**Synthetic value** replaces the match with a fake value of the same kind, generated so it still satisfies that type's own validation — a synthetic IBAN passes the mod-97 checksum, a synthetic credit card passes the Luhn check, and so on — using a reserved test range (card numbers use the `4111` test BIN, IP addresses use the documentation-reserved `203.0.113.0/24` block) so it's distinguishable from a real one on inspection.
+
+Both shapes are **consistent within one request/response cycle**: the same original value always maps to the same placeholder or synthetic value everywhere it appears in that exchange, including inside a tool call and its result. They are **not** consistent, and deliberately so, **across two different requests** — the same real value maps to a different placeholder or synthetic value each time, so a value observed in one conversation can't be correlated back to the same value in another.
+
+:::warning No Way Back
+Both shapes are one-directional. Apinizer never stores a mapping from the placeholder or synthetic value back to the original — there is no "reveal" action for these two shapes, unlike Encrypt below. Choose Mask or Anonymize only for data you don't need to reconstruct later.
+:::
+
+Each request tracks a bounded number of distinct values for this purpose; if that ceiling is reached, any further new value falls back to the default **Replace entirely** shape rather than failing the request — a value already assigned earlier in the same exchange keeps working normally.
+
+### Reading a Value Back
+
+Besides masking, a rule can **delete**, **hash**, **encrypt** or merely **detect** a match:
+
+- **Encrypt** — the value is encrypted with AES/GCM/NoPadding and written as Base64. The key is embedded in the Apinizer installation and is never supplied by the user, so the value can **only** be decrypted inside that same installation. The practical route is to call `UtilCommon.decryptWithDefaultAlgorithm(<base64value>)` from a Groovy script policy and print the output with `request_log()` / `response_log()`. Decrypting with an external tool (openssl and friends) is not possible — the key is not exported.
+- **Hash** — SHA-256 plus an installation-specific salt is applied, and it is **not reversible**. The same input always yields the same output, so it can be used for correlation, but the original value cannot be recovered.
+
+Choose encryption for data that may need to be read later, hashing or masking for data that will not.
+
+## Anonymous Requests
+
+The retry-storm (loop) guardrail keys its counter on the model, the API proxy and the **caller's identity**, so one caller's repeats never consume another caller's budget. On an API proxy without authentication a request carries no such identity, and the policy decides what to do:
+
+| Option | Behaviour |
+|--------|-----------|
+| **Do not apply the policy** (default) | The request passes and no repeat counter is kept |
+| **Consume from a shared pool** | All anonymous traffic is counted in a **single** bucket |
+| **Reject the request** | Anonymous requests are turned away with HTTP 401 |
+
+The default matches the behaviour before this setting existed: on an anonymous request the guardrail is silently inactive. With the shared pool, tenant isolation is **not expected** — one caller's consumption spends everyone else's budget; it is meant for installations that deliberately allow anonymous access but still want a ceiling.
+
+:::info
+This is distinct from the proxy-level **block anonymous requests** setting, which rejects such requests before they ever reach the policy. The choice here applies on a proxy where anonymous access is allowed.
+:::
+
+The semantic cache offers the same three options, for the same reason — see [Semantic Cache](/en/ai-gateway/semantic-cache).
+
+## Execution Modes
+
+<CardGroup cols={1}>
+  <Card title="Inline (Blocking)" icon="octagon-pause">
+    The guardrail is evaluated before the request continues. This is required for a **Block** action to reliably prevent a match from going through.
+  </Card>
+  <Card title="Asynchronous" icon="zap">
+    The guardrail is evaluated in the background so it doesn't add latency to the request path; matches are still recorded and reported. This is the default mode for off-topic protection.
+  </Card>
+  <Card title="Observe-Only" icon="eye">
+    The guardrail runs and reports matches without ever blocking or masking — useful for tuning thresholds before turning on enforcement.
+  </Card>
+</CardGroup>
+
+When an external provider is attached to Prompt Protection or Off-Topic Protection, Asynchronous mode's wait budget and Observe-Only mode's comparison behavior both extend to the external call as well — see [External Provider Guardrails](#external-provider-guardrails).
+
+## Off-Topic Protection: Allowed and Denied Topics
+
+Off-topic protection compares an incoming prompt's embedding against the topics you define, using cosine similarity — if the prompt's closest match falls below the similarity threshold, it's treated as off-topic and flagged or blocked before the request is forwarded (to the model on an AI Gateway, or to the tool/agent on an MCP or A2A Gateway).
+
+Two independent topic lists exist, and you can configure either one or both. With the built-in (embedding) engine enabled the screen asks for **at least one topic definition** — a guardrail with nothing to compare against silently does nothing at runtime, so Save stays disabled while both lists are empty. A denied-only setup is a legitimate mode and is not blocked. When the engine is set to external-only, the built-in comparison never runs and no topic list is required.
+
+- **Allowed Topics** — what this proxy is supposed to answer about. A prompt that falls below the threshold on every allowed topic is treated as off-topic.
+- **Denied Topics** — topics this proxy must never answer about, no matter how well the same prompt also matches an allowed topic. Useful for carving an exception out of an otherwise broad allowed scope — for example, denying "legal advice" on a banking assistant that allows broad financial questions.
+
+:::warning Denied Always Wins
+When a prompt matches both an allowed topic and a denied topic, the denied match takes precedence — the request is flagged or blocked as denied even though it would otherwise have passed the allowed-topics check. If a request is being blocked unexpectedly, check the denied list first.
+:::
+
+Denied topics have their own similarity threshold and action, each optional and falling back to the corresponding allowed-topics setting when left blank:
+
+| Denied-topic setting | Falls back to |
+|-----------------------|----------------|
+| Denied Similarity Threshold | Similarity Threshold |
+| Denied Topic Action | Action |
+
+Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
+
+## External Provider Guardrails
+
+Two of the seven guardrails — **Prompt Protection** and **Off-Topic Protection** — can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. The other five guardrails (Personal Data Masking, Data-Loss Protection, Retry-Storm Protection, Oversized Protection, Context-Integrity Protection) do not have this option.
+
+Today, the only supported external judge is an **LLM judge** — an existing [LLM Provider](/en/ai-gateway/llm-providers) connection you already use elsewhere in the AI Gateway, called with a chat-completion request and asked for a safety (or topic-relevance) verdict. This uses your existing connection; there's no separate credential or connection type to set up.
+
+### Evaluation Engine
+
+| Evaluation Engine | Behavior |
+|---|---|
+| **Built-in only** (default) | Only the built-in check runs — today's behavior, unchanged. |
+| **Built-in + External provider** | Both run. Either one judging the content unsafe (or, for Off-Topic Protection, denied) is enough for the guardrail to act. |
+| **External provider only** | The built-in check is skipped entirely; the external judge's verdict is the only one that counts. |
+
+In Inline and Asynchronous mode, when both checks run, a **Block** verdict from the built-in check short-circuits — the external provider is never called, saving the round-trip cost and latency. In Observe-Only mode both always run, since the comparison described below needs both results.
+
+### Adding an External Judge
+
+<Steps>
+  <Step title="Pick the connection">
+    Choose an existing [LLM Provider](/en/ai-gateway/llm-providers) connection. Only OpenAI-compatible chat providers are accepted for this purpose: OpenAI, Azure OpenAI, vLLM, Ollama, Custom OpenAI-Compatible, DeepSeek, Groq, Moonshot (Kimi), Mistral, Zhipu (GLM), or Qwen (DashScope). A connection of any other provider type is rejected before any call is attempted.
+  </Step>
+  <Step title="Set the model">
+    Enter the judge model's name (for example `llama-guard3` or `gpt-4o-mini`). Unlike some other AI Gateway fields, there is no fallback to a provider default here — leaving it empty makes every judge call fail, which (under the default failure setting below) blocks every request until you fill it in.
+  </Step>
+  <Step title="Tune the optional settings">
+    **Timeout** bounds the judge's own HTTP call (default 2000 ms). **Max Input Characters** truncates an overly long prompt before it reaches the judge (default 8000). **Max Output Tokens** caps the judge's reply (default 64 — see the reasoning-model warning below). **JSON Mode** asks the judge to reply with a structured verdict instead of a line of text, for providers that support it.
+  </Step>
+</Steps>
+
+### Judge Prompt: Native vs. Template Mode
+
+The **Judge Prompt Template** field controls how the reviewed text is presented to the judge, and it behaves differently depending on which of the two guardrails you're configuring.
+
+Leaving it **blank** is a deliberate, supported configuration for **Prompt Protection**: the (truncated) text is sent to the judge exactly as-is, with no wrapping instructions. This is the right choice for a model trained specifically for safety judging — Llama Guard 3 or ShieldGemma, for example — which already carries its own safety taxonomy inside its own chat template. Wrapping the text in another set of instructions on top of that confuses the model into treating your instructions as content to evaluate rather than as its task, and can silently produce the wrong verdict.
+
+For a general-purpose instruct model with no safety-judging behavior of its own — `gpt-4o-mini`, for instance — fill in a template that tells the model what to look for and how to answer. Apinizer ships a ready-made safety template (13 numbered categories, from violent crime to election-related content) that the **Fill default taxonomy** button drops in with a single click; edit it or write your own from scratch. Every template must contain the `<<<PROMPT>>>` placeholder — this is where the (neutralized) reviewed text is substituted in at evaluation time.
+
+:::warning Off-Topic Protection Always Requires a Template
+For **Off-Topic Protection**, an empty Judge Prompt Template is not accepted — saving is rejected. A generic safety template answers "is this content safe," not "does this content belong to one of my allowed topics," so a blank template would silently produce meaningless off-topic verdicts. Describe your allowed and denied topics directly in the template instead.
+:::
+
+### Reasoning Models as the Judge
+
+:::warning
+If the judge is a reasoning model — one that "thinks" before answering — its reasoning tokens are deducted from the same Max Output Tokens budget as the final verdict. With the default of 64, the model can spend its entire budget thinking and never emit the safe/unsafe line, which the guardrail then treats as a parse failure (and, under the default failure setting, a blocked request). Raise Max Output Tokens to 1024 or higher, or turn off the model's reasoning mode if it offers that option. The more reliable fix is to use a guard-tuned model in Native mode instead of a reasoning model in Template mode.
+:::
+
+### Self-Hosted Example
+
+A self-hosted, guard-tuned model is a good starting point: no data leaves your infrastructure, and Native mode needs no prompt engineering.
+
+<Steps>
+  <Step title="Run the model">
+    With **Ollama**: `ollama pull llama-guard3`, then start Ollama normally. With **vLLM**: serve `llama-guard3` (or another guard-tuned model) behind its OpenAI-compatible endpoint. Both platforms apply the model's own chat template automatically when called through `/v1/chat/completions` — that automatic template handling is exactly what Native mode relies on.
+  </Step>
+  <Step title="Add an LLM Provider connection">
+    Provider type Ollama or vLLM, endpoint pointing at your running instance (for example `http://<host>:11434/v1` for Ollama), authentication set to none for a local or otherwise trusted network.
+  </Step>
+  <Step title="Configure the guardrail">
+    On Prompt Protection or Off-Topic Protection, set Evaluation Engine to Built-in + External provider (or External provider only), pick the connection you just created, set Model to the model name you pulled, and leave Judge Prompt Template blank for Native mode (Prompt Protection) — or filled in with your topic description for Off-Topic Protection, where a template is required.
+  </Step>
+</Steps>
+
+### Comparing Verdicts in Observe-Only Mode
+
+When an external provider is configured, Observe-Only mode does more than record its own matches: it also computes the built-in decision and compares it against the external judge's verdict, without ever applying either one. This comparison is recorded only as a metric, for calibrating a new judge or a gradual rollout before switching to a mode that actually enforces it — it is not part of the Guardrail Hits report described below in [Observability](#observability).
+
+### Call Timing and Failure Handling
+
+The judge's own HTTP call timeout (the **Timeout** setting above, default 2000 ms) is enforced by the judge connection itself no matter which execution mode you pick. On top of that, Asynchronous mode bounds how long the guardrail waits for a result using the guardrail's **Max Wait** setting — for the built-in check this defaults to 500 ms; for an external provider call it defaults independently to 2000 ms when left blank. In Inline mode without Max Wait set, the request thread waits directly on the judge's own Timeout value — a slow provider adds directly to request latency, so consider Asynchronous or Observe-Only when attaching an external provider (Apinizer surfaces this same warning next to the setting).
+
+| External Failure Mode | Behavior |
+|---|---|
+| **Block on failure** (default) | If the external provider call itself errors out or times out, the request is blocked. |
+| **Allow on failure** | The request continues, unguarded by the external judge for that call, and the failure is still recorded visibly rather than passing silently. |
+
+:::info
+This setting only governs an actual call failure or timeout — not what the judge decides. If the evaluation engine is set to use an external provider but no usable connection is actually configured (for example, a gap reached through APIops or export/import that bypasses the UI's own checks), Apinizer degrades to the built-in check instead of failing the request outright, and records the degradation visibly for troubleshooting. The external failure mode above never applies to this case.
+:::
+
+### Configuring via APIops
+
+The external-provider settings on Prompt Protection and Off-Topic Protection travel through the APIops surface the same way the rest of each policy does: the LLM provider is referenced by **name**, never by its internal ID, resolved against your project's connections on import. When Evaluation Engine is left at its default (built-in only), omit the external-provider block entirely — supplying one, even an empty one, still requires a valid, supported adapter type and is rejected on import.
+
+### Security Considerations
+
+:::warning
+The judge receives the (truncated) reviewed text as-is — the same text your model would otherwise see. If a personal-data masking guardrail runs earlier in the same policy chain, the judge sees the masked version; if it runs later, or isn't configured at all, the judge sees the raw value. Check the ordering of your guardrails if that matters for your data-handling requirements. For sensitive traffic, prefer a judge you host yourself — on-premises or inside your own VPC — over a third-party cloud judge.
+:::
+
+Apinizer never writes the judge's raw response, the rendered prompt, or the underlying failure detail to the trace or to logs — only sanitized safety-category labels and, when the judge provides one, a numeric score are recorded.
+
+### Observability
+
+The [Guardrail Hits report](/en/ai-gateway/reports#security-and-guardrails-tab) breaks results down by provider (the built-in check or the external judge) and by verdict (blocked, timed out, errored, or skipped due to misconfiguration) — safe verdicts aren't included, since the report exists to surface what triggered, not every evaluation that passed. The Observe-Only comparison described above is metric-only and is not part of this report.
+
+## Adding a Guardrail
+
+<Steps>
+  <Step title="Add the Policy">
+    Add the guardrail you need to the relevant API proxy or policy group.
+  </Step>
+
+  <Step title="Select Patterns or Thresholds">
+    For data-loss protection, choose the built-in pattern sets or define your own; for the other guardrails, set the relevant threshold and time window.
+  </Step>
+
+  <Step title="Choose the Action and Mode">
+    Pick Block, Flag, or Mask, and whether the guardrail runs inline, asynchronously, or in observe-only mode.
+  </Step>
+
+  <Step title="Deploy">
+    Saving and deploying are separate steps — a saved guardrail only takes effect after you deploy it.
+  </Step>
+</Steps>
+
+<img
+  src="/images/ai-gateway/guardrail-pii-create.png"
+  alt="PII Pattern Create form — Pattern Type, Rule, Operation, and Mask settings"
+  width="1000"
+/>
+
+## Presets and Policies: Bound or Localized
+
+The personal-data, prompt-guard and data-loss protection policies do not read their rules from the catalog at request time — each rule is a **copy** taken when you picked it. What decides whether that copy keeps tracking the catalog is its state, shown in the **Source** column of the rule row.
+
+| State | What it means |
+|-------|---------------|
+| **Catalog-bound** | The preset owns the content. Editing the preset and saving rewrites this rule in every policy using it and marks the affected deployments "redeploy required". The rule's catalog-owned fields are read-only in the policy screen. |
+| **Localized** | A detached, independent copy. Preset edits never reach it, and you can edit it freely in the policy screen. |
+
+A rule added from the catalog starts out **catalog-bound**. The rule row switches between the two states:
+
+- **Localize** — cuts the link. The current content is kept, but the rule stops receiving catalog updates and becomes editable. Use this when you want to customise one policy only.
+
+**Which fields the catalog owns** differs slightly per guardrail, and everything else stays per-policy:
+
+| Guardrail | Refreshed from the preset | Always stays per-policy |
+|---|---|---|
+| Prompt guard / Data-loss protection | Pattern, action, category, description | **Name** and enabled/disabled |
+| Personal-data masking | Field name, operation, pattern type, regex, masking settings | Enabled/disabled |
+
+Personal-data masking has no separate per-policy label: its **field name** is functional (it is the field actually matched in field-name mode), so the preset owns it.
+
+:::warning Editing a Shared Preset Reaches the Whole Installation
+Because every project can pick a **shared** preset (a system administrator's record), editing one refreshes its bound rules **in every project of the installation** and marks the affected deployments "redeploy required". Only a system administrator can edit such a preset, and the usage list they see before saving covers the whole installation. A user viewing the same preset from a project screen sees **only their own project's** usages. For **project-owned** presets both the update and the list stay inside that project.
+:::
+
+:::note Older Rules and Imports
+Rules created before this behaviour carry no preset reference, so they count as **localized** and will not sync on their own.
+
+**Localizing is one-way**: there is no action that re-binds a localized rule to a preset. Matching by name would not be trustworthy (the name is editable, so name similarity risks binding to the wrong preset), and a bound rule takes its pattern and action from the preset on every later edit — so a wrong binding turns into a silent change in security behaviour. If you want a rule back in sync, **delete it and add it again from the catalog**.
+
+Importing a configuration into another environment also lands its rules localized, because the target environment's preset records are different. The same applies there: delete and re-add from the catalog.
+:::
+
+### Deleting a Preset
+
+Deleting is never blocked. If the preset is bound anywhere, a warning lists where before the delete goes through. On confirmation the preset is removed and its bound rules are **localized** — their content is preserved, no deployed policy breaks, and no redeploy is requested (only the link changed, not the effective content).
+
+Renaming a preset does not affect bound rules: they track the preset by id, not by name.
+
+## Centralized Management
+
+:::info
+All AI guardrail policies are managed centrally from the [Global Policies](/en/develop/global-configurations/global-policies) screen, alongside other global policy types. This page describes what each guardrail does; use Global Policies to create, update, and bulk-deploy them across the API proxies that use them.
+:::
+
+Personal-data, prompt-guard, and data-loss protection presets can also be managed through the APIops REST API; see [API Reference: AI Privacy Presets](/api-reference/ai-privacy-presets), [AI Prompt-Guard Presets](/api-reference/ai-prompt-guard-presets), and [AI DLP Presets](/api-reference/ai-dlp-presets).
+
+## Guardrails and the Semantic Cache
+
+When response masking or data-loss protection is active, the [semantic cache](/en/ai-gateway/semantic-cache) stores the masked response rather than the raw one — so a cache hit can never bypass your masking rules.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Global Policies" icon="settings" href="/en/develop/global-configurations/global-policies">
+    Create, update, and bulk-deploy guardrail policies
+  </Card>
+  <Card title="Semantic Cache" icon="database" href="/en/ai-gateway/semantic-cache">
+    See how cached responses interact with masking
+  </Card>
+  <Card title="A2A Gateway" icon="network-wired" href="/en/ai-gateway/a2a-gateway">
+    The same protection principles apply to agent-to-agent traffic
+  </Card>
+  <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
+    Monitor guardrail trigger rates
+  </Card>
+</CardGroup>

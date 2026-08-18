@@ -58,6 +58,9 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/get-api-proxy",
                 "api-proxies/crud/create-api-proxy-from-url",
                 "api-proxies/crud/create-api-proxy-from-file",
+                "api-proxies/crud/create-ai-api-proxy",
+                "api-proxies/crud/create-mcp-api-proxy",
+                "api-proxies/crud/create-a2a-api-proxy",
                 "api-proxies/crud/update-api-proxy",
                 "api-proxies/crud/update-api-proxy-from-url",
                 "api-proxies/crud/update-api-proxy-from-file",
@@ -65,7 +68,7 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/export-api-proxy",
                 "api-proxies/crud/import-api-proxy",
                 "api-proxies/crud/import-api-proxy-and-override",
-                "api-proxies/crud/import-api-proxy-without-override"
+                "api-proxies/crud/get-invoke-info"
               ]
             },
             {
@@ -80,7 +83,20 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/deployment/list-deploy-history",
                 "api-proxies/deployment/get-deploy-history-detail",
                 "api-proxies/deployment/delete-deploy-history",
-                "api-proxies/deployment/rollback-deploy-history"
+                "api-proxies/deployment/rollback-deploy-history",
+                "api-proxies/deployment/get-deploy-status",
+                "api-proxies/deployment/get-route-health"
+              ]
+            },
+            {
+              "type": "category",
+              "label": "Promotion",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "api-proxies/promotion",
+                "api-proxies/promotion/list-api-proxies-for-promotion",
+                "api-proxies/promotion/save-api-proxy-for-promotion"
               ]
             },
             {
@@ -127,6 +143,11 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/settings/update-circuit-breaker-settings",
                 "api-proxies/settings/update-proxy-server-settings",
                 "api-proxies/settings/update-mtls-settings",
+                "api-proxies/settings/update-ai-routing",
+                "api-proxies/settings/update-mcp-routing",
+                "api-proxies/settings/update-a2a-routing",
+                "api-proxies/settings/update-idempotency-settings",
+                "api-proxies/settings/update-spec-access-type",
                 "api-proxies/settings/update-ntlm-settings",
                 "api-proxies/settings/update-traffic-log-settings",
                 "api-proxies/settings/update-maintenance-mode",
@@ -159,6 +180,19 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Export / Import",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "export-import",
+            "export-import/list-supported-types",
+            "export-import/list-objects",
+            "export-import/export-objects",
+            "export-import/import-objects"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Policies",
           "collapsed": true,
           "collapsible": true,
@@ -174,7 +208,9 @@ const sidebars: SidebarsConfig = {
                 "policies/crud/list-policies",
                 "policies/crud/add-policy",
                 "policies/crud/update-policy",
-                "policies/crud/delete-policy"
+                "policies/crud/delete-policy",
+                "policies/crud/discover-mcp-policy-tools",
+                "policies/crud/discover-a2a-policy-skills"
               ]
             },
             {
@@ -184,6 +220,8 @@ const sidebars: SidebarsConfig = {
               "collapsible": true,
               "items": [
                 "policies/policies",
+                "policies/policies/policy-ai-a2a-call",
+                "policies/policies/policy-ai-mcp-call",
                 "policies/policies/policy-api-authentication",
                 "policies/policies/policy-api-based-quota",
                 "policies/policies/policy-api-based-throttling",
@@ -231,6 +269,34 @@ const sidebars: SidebarsConfig = {
                 "policies/policies/policy-log"
               ]
             }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Global Policies",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "global-policies",
+            "global-policies/list-global-policies",
+            "global-policies/get-global-policy",
+            "global-policies/create-global-policy",
+            "global-policies/update-global-policy",
+            "global-policies/delete-global-policy"
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Policy Groups",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "policy-groups",
+            "policy-groups/list-policy-groups",
+            "policy-groups/get-policy-group",
+            "policy-groups/create-policy-group",
+            "policy-groups/update-policy-group",
+            "policy-groups/delete-policy-group"
           ]
         },
         {
@@ -361,6 +427,28 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Credential Organizations",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "credential-organizations/credential-organizations",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "credential-organizations/crud/crud",
+                "credential-organizations/crud/create-credential-organization",
+                "credential-organizations/crud/get-credential-organization",
+                "credential-organizations/crud/update-credential-organization",
+                "credential-organizations/crud/delete-credential-organization"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
           "label": "Keys & Secrets",
           "collapsed": true,
           "collapsible": true,
@@ -382,7 +470,9 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/parse-jwk-from-clipboard",
                 "keys-secrets/crud/parse-jwk-from-certificate",
                 "keys-secrets/crud/parse-jwk-from-key",
-                "keys-secrets/crud/parse-jwk-from-keystore"
+                "keys-secrets/crud/parse-jwk-from-keystore",
+                "keys-secrets/crud/export-jwk-file",
+                "keys-secrets/crud/import-jwk-file"
               ]
             },
             {
@@ -395,7 +485,11 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/get-keystore",
                 "keys-secrets/crud/create-keystore",
                 "keys-secrets/crud/update-keystore",
-                "keys-secrets/crud/delete-keystore"
+                "keys-secrets/crud/delete-keystore",
+                "keys-secrets/crud/export-keystore",
+                "keys-secrets/crud/import-keystore",
+                "keys-secrets/crud/export-keystore-file",
+                "keys-secrets/crud/import-keystore-file"
               ]
             },
             {
@@ -408,7 +502,11 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/get-key",
                 "keys-secrets/crud/create-key",
                 "keys-secrets/crud/update-key",
-                "keys-secrets/crud/delete-key"
+                "keys-secrets/crud/delete-key",
+                "keys-secrets/crud/export-key",
+                "keys-secrets/crud/import-key",
+                "keys-secrets/crud/export-key-file",
+                "keys-secrets/crud/import-key-file"
               ]
             },
             {
@@ -423,7 +521,10 @@ const sidebars: SidebarsConfig = {
                 "keys-secrets/crud/update-certificate",
                 "keys-secrets/crud/delete-certificate",
                 "keys-secrets/crud/export-certificate",
-                "keys-secrets/crud/get-truststore-certificates"
+                "keys-secrets/crud/import-certificate-file",
+                "keys-secrets/crud/get-truststore-certificates",
+                "keys-secrets/crud/export-truststore-file",
+                "keys-secrets/crud/import-truststore-file"
               ]
             }
           ]
@@ -515,6 +616,8 @@ const sidebars: SidebarsConfig = {
                 "ip-groups/crud",
                 "ip-groups/crud/create-ip-group",
                 "ip-groups/crud/delete-ip-group",
+                "ip-groups/crud/get-ip-group",
+                "ip-groups/crud/list-ip-groups",
                 "ip-groups/crud/update-ip-group"
               ]
             },
@@ -548,6 +651,8 @@ const sidebars: SidebarsConfig = {
                 "rlcl/crud",
                 "rlcl/crud/create-rlcl",
                 "rlcl/crud/delete-rlcl",
+                "rlcl/crud/get-rlcl",
+                "rlcl/crud/list-rlcls",
                 "rlcl/crud/update-rlcl"
               ]
             },
@@ -596,9 +701,30 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "geolocation",
+            "geolocation/get-geolocation-status",
             "geolocation/enable-geolocation",
             "geolocation/disable-geolocation",
             "geolocation/upload-mmdb-file"
+          ]
+        },
+        {
+          "type": "category",
+          "label": "AI Gateway",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "ai-gateway",
+            { "type": "category", "label": "LLM Provider Definitions", "collapsed": true, "collapsible": true, "items": ["llm-provider-definitions", "llm-provider-definitions/list-llm-provider-definitions", "llm-provider-definitions/get-llm-provider-definition", "llm-provider-definitions/create-llm-provider-definition", "llm-provider-definitions/update-llm-provider-definition", "llm-provider-definitions/delete-llm-provider-definition"] },
+            { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/test-llm-provider-connection"] },
+            { "type": "category", "label": "Model Catalog", "collapsed": true, "collapsible": true, "items": ["llm-models", "llm-models/list-llm-models", "llm-models/get-llm-model", "llm-models/create-llm-model", "llm-models/update-llm-model", "llm-models/delete-llm-model"] },
+            { "type": "category", "label": "VectorDB Connections", "collapsed": true, "collapsible": true, "items": ["vector-dbs", "vector-dbs/list-vector-dbs", "vector-dbs/get-vector-db", "vector-dbs/create-vector-db", "vector-dbs/update-vector-db", "vector-dbs/delete-vector-db", "vector-dbs/test-vector-db-connection"] },
+            { "type": "category", "label": "Knowledge Bases", "collapsed": true, "collapsible": true, "items": ["knowledge-bases", "knowledge-bases/list-knowledge-bases", "knowledge-bases/get-knowledge-base", "knowledge-bases/create-knowledge-base", "knowledge-bases/update-knowledge-base", "knowledge-bases/delete-knowledge-base", "knowledge-bases/reindex-knowledge-base", { "type": "category", "label": "Documents", "collapsed": true, "collapsible": true, "items": ["knowledge-bases/documents/upload-document", "knowledge-bases/documents/list-documents", "knowledge-bases/documents/get-document", "knowledge-bases/documents/delete-document", "knowledge-bases/reindex-knowledge-document"] }] },
+            { "type": "category", "label": "AI Budgets", "collapsed": true, "collapsible": true, "items": ["ai-budgets", "ai-budgets/get-budget-scope-rules", "ai-budgets/get-budget-hierarchy", "ai-budgets/get-effective-limit", "ai-budgets/update-budget"] },
+            { "type": "category", "label": "AI Privacy Presets", "collapsed": true, "collapsible": true, "items": ["ai-privacy-presets", "ai-privacy-presets/list-ai-privacy-presets", "ai-privacy-presets/get-ai-privacy-preset", "ai-privacy-presets/create-ai-privacy-preset", "ai-privacy-presets/update-ai-privacy-preset", "ai-privacy-presets/delete-ai-privacy-preset"] },
+            { "type": "category", "label": "AI Prompt-Guard Presets", "collapsed": true, "collapsible": true, "items": ["ai-prompt-guard-presets", "ai-prompt-guard-presets/list-ai-prompt-guard-presets", "ai-prompt-guard-presets/get-ai-prompt-guard-preset", "ai-prompt-guard-presets/create-ai-prompt-guard-preset", "ai-prompt-guard-presets/update-ai-prompt-guard-preset", "ai-prompt-guard-presets/delete-ai-prompt-guard-preset"] },
+            { "type": "category", "label": "AI DLP Presets", "collapsed": true, "collapsible": true, "items": ["ai-dlp-presets", "ai-dlp-presets/list-ai-dlp-presets", "ai-dlp-presets/get-ai-dlp-preset", "ai-dlp-presets/create-ai-dlp-preset", "ai-dlp-presets/update-ai-dlp-preset", "ai-dlp-presets/delete-ai-dlp-preset"] },
+            { "type": "category", "label": "AI Prompt-Decorator Presets", "collapsed": true, "collapsible": true, "items": ["ai-prompt-decorator-presets", "ai-prompt-decorator-presets/list-ai-prompt-decorator-presets", "ai-prompt-decorator-presets/get-ai-prompt-decorator-preset", "ai-prompt-decorator-presets/create-ai-prompt-decorator-preset", "ai-prompt-decorator-presets/update-ai-prompt-decorator-preset", "ai-prompt-decorator-presets/delete-ai-prompt-decorator-preset"] },
+            { "type": "category", "label": "AI Gateway Settings", "collapsed": true, "collapsible": true, "items": ["ai-gateway-settings", "ai-gateway-settings/get-ai-gateway-settings", "ai-gateway-settings/update-ai-gateway-settings"] }
           ]
         },
         {
