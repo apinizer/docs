@@ -1,0 +1,352 @@
+---
+title: "API Trafik Loglarını Yönetmek: Ne Kadar, Nerede, Ne Kadar Süre"
+description: "Hangi ayrıntıda, nerede ve ne kadar süre log saklayacağınıza karar verebilir; uzun dönem saklamayı Elasticsearch diskini şişirmeden kurabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+:::tip Bu yazının çıkış noktası
+"Logları kaç yıl saklamalıyız?" sorusuna tek başına bir sayı yetmiyor. Konuşulması gereken dört şey var: **ne** duracak, **neden** duracak, **ne kadar süre** ve **nerede**. Bunlar netleşmeden uzun süre durması beklenen kayıt, aynı süreyle sıcak veri sanılabiliyor.
+:::
+
+Disk dolunca log konuşması başlıyor. Yanında iki cümle duruyor: bir yanda "2, 5, 8 yıl tutulması istenen durumlar oluyor", diğer yanda "zaten her isteği yanıtıyla birlikte logluyoruz." İkisi aynı cümlede durunca iş disk büyütmeye geliyor. Oysa uzun süre duracak kayıt ile teşhis için tuttuğunuz kayıt çoğu zaman aynı şey değil.
+
+Kaç yıl, hangi alanlar — bunu teknik ekip tek başına kesmez. Süreyi ve kapsamı hukuk veya uyum biriminden alın; bu yazı o cevabı aldıktan sonra veriyi nereye ve hangi ayrıntıda koyacağınızla ilgilenir.
+
+## Önce dört soru
+
+### "Neyi" saklıyoruz?
+
+"Log" deyince herkes aynı şeyi anlamıyor. Pratikte üç ayrıntı seviyesi var; boyutları da kat kat farklı:
+
+| Ne | İçeriği | Kabaca kayıt boyutu |
+|---|---|---|
+| **Erişim kaydı** | Kim, ne zaman, hangi IP'den, hangi API'ye, hangi metotla erişti; sonuç ne oldu (durum kodu, hata tipi, süre) | 1–2 KB |
+| **İstek detayı** | Erişim kaydı + istek başlıkları, parametreler ve istek gövdesi | 3–15 KB |
+| **Tam trafik kaydı** | Yukarıdakilerin tamamı + yanıt başlıkları ve yanıt gövdesi, dört mesaj bölgesi için ayrı ayrı | 10–50 KB, gövdeye göre çok daha fazlası |
+
+Üçü de meşru tercih. Hangisinin nerede duracağı maliyeti 10–50 kat değiştirebilir. Uzun süre saklanacak katmanda çoğu kurum erişim kaydıyla idare eder; tam gövdeyi yıllarca tutmak bilinçli bir tercih olsun. Ne duracağına teknik ekip tek başına karar vermesin; kapsamı ilgili ekipten alın.
+
+Kayıtta hangi alanın durduğunu görmek için [API Trafiği Log Kaydı Veri Yapısı](/tr/analytic/api-trafigi-log-kaydi-veri-yapisi) sayfasına bakabilirsiniz.
+
+### "Niçin" saklıyoruz?
+
+Gerekçe değişince hem süre hem kapsam değişiyor:
+
+<CardGroup cols={3}>
+  <Card title="Kurumsal saklama" icon="scale">
+    Süre ve kapsam ilgili ekipten gelir. Teknik taraf katmanı ona göre kurar.
+  </Card>
+  <Card title="Teşhis ve operasyon" icon="stethoscope">
+    Süre kısa, kapsam geniş. Gövdesiz log çoğu zaman işe yaramaz.
+  </Card>
+  <Card title="Analitik ve trend" icon="chart-line">
+    Süre uzun, kapsam dar. Sayılar yeter, kaydın içeriği gerekmez.
+  </Card>
+</CardGroup>
+
+Üç yıl önceki bir kayda kim bakıyor, onu sorun. İlgili ekip bakıyorsa istediği çoğu zaman erişim kaydıdır. Geliştirici bakıyorsa istediği tam mesajdır; ama üç yıl öncesini değil, dünü sorar. İş birimi bakıyorsa istediği sayıdır. Üçünü tek depoda karşılamaya çalışmak işi pahalı yapan şeydir.
+
+### "Ne kadar süre" ve "nerede"?
+
+Süreyi ortam belirler. Erişim kaydını yıllarca saklamak ile dört bölgenin gövdesini aynı süre saklamak aynı iş değildir. Yazının geri kalanı şu tabloyu merkeze alıyor:
+
+| Katman | Ne durur | Tipik süre | Nerede |
+|---|---|---|---|
+| **Sıcak** | Tam trafik kaydı | 1–6 ay | Apinizer'ın Elasticsearch'ü, sıcak düğümler |
+| **Ilık / soğuk** | Tam veya kısaltılmış kayıt | 6 ay – 1+ yıl | Aynı küme, soğuk katman düğümleri |
+| **Arşiv** | Erişim kaydı | 2–10 yıl | SIEM veya arşiv veritabanı |
+| **Özet** | Sayılar, oranlar, trendler | Süresiz | Analitik raporları |
+
+## Elasticsearch'ü baştan kapatmayın
+
+Disk konuşulunca ilk refleks bazen "o zaman logu kapatalım" oluyor. Bunu biraz bekletin.
+
+Apinizer'da Elasticsearch zorunlu değildir; logları veritabanına, Graylog'a, Syslog üzerinden bir SIEM ürününe veya Kafka'ya da yazabilirsiniz. Ama API Trafiği ekranındaki arama, Analitik raporları ve izlemenin büyük kısmı Elasticsearch'ten gelir. Orayı kapatınca platform çalışmaya devam eder; bir sorunu ekranı açıp göstermek yerine telefonda anlatmak zorunda kalırsınız.
+
+Diskiniz rahatsa Elasticsearch'te **1 yıllık geçmiş** tutmak iyi bir başlangıçtır. Bir yıl, mevsimselliği gösterir: geçen yılın aynı haftası, bayram öncesi, yıl sonu kapanışı. Altı aylık pencerede bunları göremezsiniz.
+
+:::info Uzun süre Elasticsearch'te tutulur mu?
+Tutulur. Sıcak, ılık, soğuk ve dondurulmuş katmanlar tam olarak bunun için vardır: eski veriyi daha ucuz, daha büyük diskli sunuculara indirir, erişimi yavaşlatır ama korur. Sorun Elasticsearch'ün uzun süre saklayamaması değil; her şeyi sıcak katmanda tutmaktır.
+
+Yine de sıra şöyle olsun: önce üretmeniz gerekmeyen veriyi üretmeyin, sonra katmanlayın, en son donanım ekleyin. Tersine çevirince aynı konuşma birkaç ay sonra daha büyük bir faturayla geri gelir.
+:::
+
+Belirli bir noktadan sonra ayar yetmez. Küme **20 TB'ı aşıyorsa** yeni veri düğümü eklemek daha doğrudur. Var olan düğümün diskini büyütmek kısa vadede kolay görünür; sorgu yükü, kurtarma süresi ve yeniden dengeleme tek yerde birikir.
+
+Büyük kümelerde görülen tablo aynıdır: soğuk düğümleri büyük diskli ama daha zayıf işlemcili sunucularla kurmak maliyeti ciddi düşürür; aynı veriyi sıcak ve pahalı diskte tutmak tek başına faturayı şişirir. "Her şeyi sıcak tut" teknik bir zorunluluk değildir.
+
+## Aksiyon almadan önce ölçün
+
+Log ayarlarına dokunmadan önce üç sayıyı bilin: son 1 günde, son 1 ayda ve son 1 yılda kaç kayıt ve kaç GB üretildi?
+
+Bunları Apinizer arayüzünden çıkarabilirsiniz:
+
+<Steps>
+<Step title="API Trafiği ekranı">
+Zaman aralığı seçerek belirli bir dönemde kaç kayıt oluştuğunu görürsünüz. API Proxy ve metot ile daraltınca hacmi kimin ürettiği çıkar. [Bkz.](/tr/develop/izleme-analiz/api-trafigi)
+</Step>
+<Step title="Analitik ekranı">
+Aylık toplamları yan yana konunca büyümenin düz mü, sıçramalı mı olduğu görünür. [Bkz.](/tr/analytic/analytics-reports/rapor-uretici)
+</Step>
+<Step title="Elasticsearch Monitor ekranı">
+Küme sağlığı, indeks boyutları ve disk kullanımı burada durur. Kayıt sayısını buradaki boyuta bölünce ortalama kayıt boyutu çıkar; planlamanın dayandığı sayı budur. [Bkz.](/tr/integrations/baglanti-yonetimi/elasticsearch-monitor)
+</Step>
+</Steps>
+
+İki şeyi ayrıca not edin. Biri **dönemsel sıçramalar**: ay sonu mutabakatı, maaş günü, kampanya haftası. Yıllık ortalamaya göre kurulan disk, tepede yarı yolda bırakır. Öteki **hacmin dağılımı**: neredeyse her kurulumda toplamın büyük kısmını birkaç uç nokta üretir. Onları bulunca tüm sistemi kısmak zorunda kalmazsınız.
+
+### Gövdesiz log bile bedava değil
+
+Gövde loglamayı tamamen kapatsanız bile kayıt yok olmaz. Metrikler, HTTP istek detayları, durum bilgisi ve başlıklar kayıt başına yaklaşık **2 KB** tutar. Aylık 50 milyon istekte bu, taban maliyet olarak ayda yaklaşık **100 GB** eder. Bir replika ile 200 GB, yılda 2,4 TB.
+
+:::warning Disk planında iki gizli çarpan
+**Replika**: yedek kopya diski ikiye katlar. "1 TB veri" pratikte 2 TB disk demektir.
+
+**Doluluk tavanı**: Elasticsearch disk %85'i geçince yeni parça yerleştirmeyi durdurur, %95'i geçince indeksleri salt-okunur duruma alabilir. 1 TB'lık disk gerçekte ~800 GB kullanılabilir alandır. Kalan %20 kapasite değil, emniyet payıdır.
+:::
+
+## Hacmi kaynağında azaltmak
+
+Ölçümü yaptıysanız nereye dokunacağınızı biliyorsunuz. Aşağıdaki ayarların çoğu [Log Ayarları](/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari) sekmesinden yönetilir. Gizlilik kuralları da aynı sekmede, seçilen konnektör için tanımlanır; ortam konnektörü eklenirken de aynı ayarlar vardır.
+
+### 1. Gereksiz bölgeleri kapatın
+
+Bir API Proxy'de dört mesaj bölgesi loglanabilir: istemciden gelen istek *(Request from Client)*, backend'e giden istek *(Request to Target)*, backend'den gelen yanıt *(Response from Target)* ve istemciye giden yanıt *(Response to Client)*.
+
+Prod'da **2. ve 3. bölgeyi kapatmak** iyi bir varsayılandır. Bu iki bölge geliştirme ve dönüşüm hatalarını ayıklarken işe yarar; aylardır aynı şekilde çalışan bir prod proxy'sinde nadiren açılıp okunur. İkisini kapatmak çoğu kurulumda hacmi yarıya yakın düşürür.
+
+Uç noktaya göre 4. bölge de kapatılabilir. Asgari anlamlı yapılandırma 1. bölgedir; erişim kaydının kaynağı orasıdır.
+
+:::note gRPC ve WebSocket
+Bu iki protokolde trafik, Apinizer'a gelen ve Apinizer'dan çıkan veri olarak tutulduğu için dört değil iki bölge vardır. Kapatma kararını buna göre verirsiniz.
+:::
+
+### 2. Hata durumundaki emniyet ağını gözden geçirin
+
+Belirli alanların loglaması kapalı olsa bile, istek bir politika tarafından engellendiğinde veya hata aldığında kapalı alanların yine de loglanması istenebilir. Bu davranış konnektör bazında yönetilir ve varsayılan olarak açıktır. İyi bir varsayılandır: sorunu tam da göremeyeceğiniz anda görebilmenizi sağlar.
+
+Hata oranı yüksek bir sistemde aynı ayar ana hacim kaynağına da dönüşebilir. Günde milyonlarca 4xx üreten bir API'de her hata tam kayıt demektir. Önce hata oranını düşürmek gerekir; o mümkün değilse bu anahtar kapatılabilir. [Bkz.](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi)
+
+### 3. Gövdeyi kapatmak yerine kısaltın
+
+Her bölgede gövde ve başlık için **kısmi boyut** *(Partial Size)* ayarı vardır. Gövdenin tamamı yerine ilk birkaç kilobaytını saklarsınız.
+
+Teşhis ederken çoğu zaman gövdenin başındaki alanlara bakılır: hangi müşteri, hangi işlem, hangi referans numarası. 400 KB'lık bir yanıtın tamamını saklamakla ilk 4 KB'ını saklamak arasında teşhis açısından çoğu zaman fark yoktur; disk açısından yüz kat fark vardır.
+
+### 4. Metot bazında istisna tanımlayın
+
+Bütün proxy'yi kısmak zorunda değilsiniz. **Metod Geçersiz Kılmaları** *(Method Overrides)* ile tek bir metoda özel kural tanımlarsınız. Dosya yükleyen bir uç nokta yüzünden bütün proxy'nin gövde loglamasını kapatmak yerine o metodu istisna yaparsınız.
+
+### 5. Büyük ve hassas alanları gizlilik ayarlarıyla temizleyin
+
+Gizlilik ayarları yalnızca kişisel veri için değildir; log yükünü azaltmak için de kullanılır. İhtiyacınız olmayan, yüksek hacimli veri belli alanlarda geliyorsa — örneğin teşhiste işe yaramayan bir PDF veya JPG, JSON içinde base64 byte array olarak — o alanın anahtarını bu servise özel tanımlayıp içeriğini boşaltarak loglayabilirsiniz. Mesaj backend'e olduğu gibi gider; yalnızca logdan çıkar.
+
+Burada sık karışan bir nokta var:
+
+- Dosya **form-data** olarak gidiyorsa dosya kısımları loglanmaz. Sadece diğer üstveri alanları kaydedilir.
+- Dosya **JSON veya XML gövdesine gömülerek** gidiyorsa iş değişir. Base64'e çevrilmiş bir PDF, mesajda sıradan bir metin alanıdır ve olduğu gibi loglanır. Tek alan, kayıt boyutunu yüzlerce kat büyütebilir.
+
+Aynı mekanizma kimlik numarası, kart numarası, adres gibi kişisel veriler için de kullanılır: silmek, maskelemek veya hash'lemek. Kuralı [Log Ayarları](/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari) sekmesinde seçilen konnektörün Gizlilik tablosundan ekleyebilirsiniz; ortam konnektörü eklenirken de aynı ayarlar vardır. [Bkz.](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi)
+
+:::tip Gizlilik ayarı mı, Redaction politikası mı?
+İkisi farklı yerde çalışır. **Gizlilik ayarları** yalnızca log yazılırken devreye girer; mesaj backend'e olduğu gibi gider. **Redaction politikası** mesaj akışının içindedir; veriyi mesajdan çıkarır, backend de göremez.
+
+Amacınız "loglarda görünmesin" ise gizlilik ayarları, "hiçbir yere gitmesin" ise Redaction doğru araçtır. [Bkz.](/tr/develop/politikalar/redaction)
+:::
+
+### 6. Ortamları birbirinden ayırın
+
+Her ortamın kendi indeksine yazması düzen meselesi değil, politika sınırıdır. Ortamlar ayrılınca test için 1 ay, pre-prod için 3 ay, prod için 6 ay tanımlanabilir. Ayrılmayınca hepsi aynı süreye oturur; genelde en uzun olan kazanır.
+
+Aynı ayrım, bir ortamın loglamasını tamamen kapatmayı da mümkün kılar. Yük testi trafiğini prod indeksine yazmanın kimseye faydası yoktur.
+
+## Saklama süresini yönetmek
+
+### Önce bir karışıklığı giderelim
+
+:::warning Yönetim ekranındaki saklama ayarları Elasticsearch'ü kapsamaz
+Apinizer'ın sistem ayarlarındaki **Log Saklama** *(Log Retention)* bölümü, Apinizer'ın kendi veritabanındaki koleksiyonlar içindir: uygulama logları, token trafiği, alarm geçmişi, izleme sonuçları, iz kayıtları. [Bkz.](/tr/admin/system-settings/sistem-ayarlari-ve-limitler)
+
+Ekranda "trafik" benzeri bir satır görünse bile **Elasticsearch'teki API trafik logları bu ayarla silinmez.** Onların ömrü, Elasticsearch bağlantısındaki indeks yaşam döngüsü politikası ile yönetilir. İkisini karıştırmak, "ayarı 30 güne çektim ama disk hâlâ doluyor" tablosunun en sık görülen sebebidir.
+
+Politika, Elasticsearch bağlantısında **Administrate** açıkken **Edit ILM Policy** ile kurulur. [Bkz.](/tr/integrations/baglanti-yonetimi/elasticsearch)
+
+Administrate kapalıysa veya politikayı doğrudan Elasticsearch'te yönetiyorsanız: [ILM Politikası ve Template Oluşturma](/tr/installation/elasticsearch/manuel-ilm-politikasi-ve-template-olusturma)
+
+Apinizer veritabanındaki koleksiyonların temizliği ayrı bir konudur: [Veritabanı Büyüme Yönetimi](/tr/operations/database-buyume-yonetimi/genel-bakis)
+:::
+
+### Süresi dolanı ILM düşürür, elle silinmez
+
+Elasticsearch tarafında log silmek önerilen yol değildir. Yedek olsa bile indeksi veya belgeyi elle silmeyin. Süre dolduğunda indeks yaşam döngüsü politikası *(ILM)* günü gelen indeksi kendisi düşürür; politika zaman ekseninde kurulur, indeksler dönemsel olarak devredilir *(rollover)*.
+
+Uzun süre duracak kayıt için alternatif SIEM'dir. Elasticsearch'te gereksiz log tutulmaz; hacim kaynağında kısılır, ihtiyaç duyulan erişim kaydı SIEM'e gider.
+
+### Ne kadar süre yeterli?
+
+Şu üç durumdan biri sizde varsa, Apinizer tarafında 1–3–6 aylık bir pencere çoğu zaman yeter:
+
+- Uygulamalar zaten kendi loglarını tutuyorsa,
+- Uzun süreli saklama SIEM veya arşiv veritabanında yapılıyorsa,
+- Ekip pratikte son birkaç haftadan öteye bakmıyorsa.
+
+Son maddeyi ölçmekte fayda vardır; tahminler genelde şaşar. "En az bir yıl lazım" denir, açılan en eski kayıt iki hafta öncesinden çıkar. Diskiniz rahatsa 1 yıl tutmakta bir sakınca yoktur; sıkıntı varsa bu sorunun açık cevabı epey yer kazandırır.
+
+### Sırayı doğru kurun
+
+Saklama süresini kısaltmak listenin başında değil, ortasında olsun:
+
+<Steps>
+<Step title="Gereksiz veriyi hiç üretmeyin">
+Bölge kapatma, kısmi gövde, gizlilik ayarları. En ucuz kazanç burada durur; sakladığınız her baytı ayrıca yedekliyor, taşıyor ve arıyorsunuz.
+</Step>
+<Step title="Katmanlayın">
+Eski veriyi soğuk katmana indirin. Erişim yavaşlar ama veri durur. Bir yıl geriye bakabilmek çoğu zaman anlık sorgu hızından daha değerlidir.
+</Step>
+<Step title="Uzun süreyi SIEM'e bırakın">
+Uzun dönem saklamanın yeri özellikle SIEM ürünleridir. Elasticsearch'te gereksiz log durmaz; erişim kaydı SIEM'e gider, süresi dolan sıcak indeks ILM ile düşer.
+</Step>
+<Step title="Donanım ekleyin">
+20 TB'ı geçtiyseniz veya yukarıdakiler bittiyse yeni veri düğümü eklemek doğru karardır. Ertelemek maliyeti düşürmez.
+</Step>
+</Steps>
+
+## Uzun dönem arşiv: veriyi dışarı taşımak
+
+Saklama süreniz Elasticsearch sıcak penceresinden uzunsa, bu veriyi bağımsız bir yerde tutmak çoğu kurumda daha rahat durur. İki yol vardır. Ne kadar süre, hangi alanlar — bunu hukuk veya uyum biriminden alın; burada yalnızca o cevabı teknik olarak nereye koyacağınız duruyor.
+
+### Syslog ile SIEM'e göndermek
+
+Kurumda bir SIEM zaten varsa uzun dönem saklamanın doğal adresi orasıdır: erişim yetkileri tanımlıdır, saklama politikası işletilir.
+
+Apinizer'da log konnektörleri arasında Syslog bulunur. API Proxy bazında hangi konnektöre ne gönderileceğini ayrı ayrı seçebilirsiniz. Elasticsearch'e tam kaydı, SIEM'e yalnızca erişim kaydını göndermek mümkündür. Adımlar için: [Trafik Loglarının Syslog'a Aktarılması](/tr/operations/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma)
+
+:::tip SIEM'e her şeyi göndermeyin
+SIEM lisansları çoğunlukla saniyedeki olay hacmi veya günlük veri miktarı üzerinden ücretlendirilir. Dört bölgenin gövdesini SIEM'e akıtmak teknik olarak mümkün olsa da ilk faturadan sonra genelde geri alınır.
+
+İşleyen kurgu: SIEM'e erişim kaydı, Elasticsearch'e teşhis için gereken ayrıntı.
+:::
+
+### Arşiv veritabanına yazmak
+
+SIEM yoksa veya erişim kayıtlarının ilişkisel durması isteniyorsa, veritabanı konnektörü ile arşiv tablolarına yazabilirsiniz. Tablo yapıları ve oluşturma komutları belgelenmiştir. [Bkz.](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari)
+
+Bu yolu seçerken üç şeyi baştan planlayın: tabloların tarih bazında bölümlenmesi *(partitioning)*, hangi alanların indeksleneceği ve veritabanı tarafındaki kendi temizleme işi. Aksi halde birkaç yıl sonra Elasticsearch'te yaşadığınız sorunun aynısı bu kez veritabanında çıkar.
+
+### Peki snapshot?
+
+Elasticsearch'ün snapshot mekanizması **yedekleme** için doğru araçtır ve kurulmalıdır. Arşiv çözümü olarak öne çıkarmıyoruz; snapshot bir felaket kurtarma aracıdır. İçindeki tek bir kaydı sorgulamak için önce geri yükleme gerekir, bu da veri boyutuyla orantılı zaman ve disk ister. "İki yıl önceki şu isteği bulun" talebine snapshot'tan cevap vermek saatler sürebilir.
+
+Kurarken iki noktayı atlamayın: snapshot'ın hedefi asıl veriyle **aynı disk olmamalıdır**, ve geri yükleme tatbikatı yapılmamış bir yedek henüz yedek sayılmaz. [Bkz.](/tr/installation/elasticsearch/yedekleme-politikasi)
+
+### Üç yolun karşılaştırması
+
+| | Elasticsearch soğuk katman | SIEM (Syslog) | Arşiv veritabanı |
+|---|---|---|---|
+| Eski kayda erişim | Doğrudan, arayüzden | SIEM arayüzünden | SQL ile |
+| Saklama maliyeti | Orta | Lisansa bağlı, yüksek olabilir | Düşük–orta |
+| Kayıt bütünlüğü | Orta | Yüksek | Orta–yüksek |
+| İşletim yükü | Düşük | Düşük (ekip zaten var) | Orta |
+| Uygun olduğu durum | 1 yıla kadar geçmiş | Uzun dönem saklama | SIEM olmayan kurumlar |
+
+## Uzun süre duracak kayıt: mesele süre değil, değiştirilemezlik
+
+Sıcak bir Elasticsearch indeksi güncellenebilir; yetkisi olan biri kaydı değiştirebilir veya silebilir. Günlük operasyon için sorun değildir. Kayıtların uzun süre, sonradan dokunulmadan durması bekleniyorsa arşiv katmanına bakın: erişim sınırlı ve kayıt altında olsun, silme işleminin kendisi de loglansın. SIEM ürünleri bunu genelde hazır sunar; veritabanında ayrıca kurgulanması gerekir.
+
+Kişisel veri alanlarını logda maskelemek veya hash'lemek ayrı bir konu; gizlilik ayarları bunun için var. Hangi alanın duracağı, hangisinin durmayacağı yine ilgili ekipten gelir.
+
+## Loglar nasıl yazılıyor, hedef çökerse ne oluyor?
+
+API trafik logları varsayılan olarak **asenkron** yazılır. Gönderim istek akışının dışında, arka planda yapılır; Elasticsearch yavaşladığında istemci bunu yanıt süresinde hissetmez.
+
+:::note Senkron loglama ayrı bir konu
+[Loglama politikası](/tr/develop/politikalar/loglama) ile pipeline'ın istediğiniz noktasında senkron log da alabilirsiniz. Bu, genel trafik loglamasından bağımsız bir araçtır; belirli bir akışı adım adım izlemek veya bir kaydın kesinlikle yazıldığından emin olmak istediğinizde kullanılır.
+:::
+
+Hedef tamamen erişilemez hale gelirse, konnektörde failover tanımlıysa loglar yedek hedefe düşer. Burada kritik bir kural vardır:
+
+:::danger Failover veritabanı ayrı bir kurulum olmalı
+Failover hedefi olarak Apinizer'ın kendi konfigürasyon veritabanı seçilebilir. Pratik bir çözümdür, ama **o veritabanının Apinizer'ın ana veritabanından ayrı bir kurulum olması gerekir.**
+
+Aksi halde Elasticsearch kaynaklı bir sorun yönetim veritabanını da doldurup platformun kendisini riske atar.
+:::
+
+Failover'a düşen kayıtlar orada kalıcı durmaz; asıl hedef düzeldikten sonra taşınmaları gerekir. Bunun için hazır bir ekran vardır. [Bkz.](/tr/analytic/gonderilmemis-api-trafik-loglari-tasima)
+
+Disk eşiklerini de alarma bağlayın. Elasticsearch diski dolduğunda indeksler salt-okunur duruma düşer ve log yazımı durur. Bunu ertesi sabah fark etmek ile eşiği geçtiği anda haber almak arasında kaybedilen bir günlük log vardır. Küme metrikleri için: [Elasticsearch Monitor](/tr/integrations/baglanti-yonetimi/elasticsearch-monitor)
+
+## Kafka üzerinden gönderiyorsanız
+
+Bazı kurumlar logları doğrudan Elasticsearch'e değil, önce Kafka'ya yazar. Mantıklı bir kurgu; tek cümle yeterlidir: **Kafka bir tampondur, depo değildir.**
+
+Konu bazında saklama süresi ve boyut sınırı tanımlayın, sıkıştırmayı açın, toplu gönderimi hedefin kapasitesine göre ayarlayın. İzlenecek metrik tüketici gecikmesidir *(consumer lag)*.
+
+Gecikme büyümeye başladıysa sorun Kafka'da değil, **hedefin yetişemediğindedir**. Kafka'yı büyütmek sorunu erteler; patladığında iki sistemi birden kurtarmanız gerekir. Müdahale, hedefteki darboğazı gidermek veya gönderilen veri miktarını azaltmaktır.
+
+## Yapılmaması gerekenler
+
+<AccordionGroup>
+<Accordion title="Canlı veri dizinini cp veya mv ile taşımak">
+Kopyalama sürerken Elasticsearch aynı dosyalara yazmaya devam eder. Sonuç, tutarsız kopyalanmış ve açılamayan bir indekstir. Bunu genelde işler yolundayken değil, tam da veriye ihtiyaç duyulduğu anda fark edersiniz.
+
+`rsync` küme durdurulmadan çalıştırıldığında aynı riski taşır; önerilmez. Veriyi taşımanın yolu snapshot'tır.
+</Accordion>
+
+<Accordion title="Logu elle veya sorguyla silmek">
+Yedek olsa bile Elasticsearch'ten log elle silinmez. Süresi dolan indeksi ILM düşürür. Uzun süre duracak kayıt SIEM'dedir; gereksiz log baştan üretilmez.
+</Accordion>
+
+<Accordion title="Tek düğümlü ve replikasız bir kurulumu yedekli saymak">
+Replikası olmayan tek düğüm, disk arızasında toplam veri kaybı demektir. "Elasticsearch dağıtık bir sistem" cümlesi, tek sunucuda çalışan bir kurulum için bir şey ifade etmez.
+</Accordion>
+
+<Accordion title="Değişikliği doğrudan prod'da denemek">
+Log ayarı değişiklikleri geri alınabilir, silinen log geri gelmez. Yeni yapılandırmayı önce tek bir ortamda uygulayın, birkaç gün ölçün, sonra yaygınlaştırın.
+</Accordion>
+
+<Accordion title="Düğüm arızasında yeniden dengelemeyi serbest bırakmak">
+Büyük parçalarla çalışan kümelerde bir düğüm geçici olarak düşünce Elasticsearch parçaları başka düğümlere taşımaya başlar; bu saatler sürebilir. Dengelemeyi geçici olarak bloklamak, düğüm geri geldiğinde diskteki veriyi yeniden tanımasını sağlar. Toparlanma çok daha kısa sürer.
+</Accordion>
+</AccordionGroup>
+
+## Nereden başlamalı?
+
+1. **Ölçün.** Son 1 gün, 1 ay ve 1 yıldaki kayıt sayısı ve boyutu; ortalama kayıt boyutu; hacmi üreten ilk beş uç nokta.
+2. **Karar verin.** Uzun süre saklanacak kayıtların kapsamını hukuk veya uyum biriminden alın. Bu yazı o kapsamı varsaymaz; teknik ekibin tahminiyle plan yapılmaz.
+3. **Hızlı kazanımları uygulayın.** 2. ve 3. bölgeyi kapatın, kısmi gövdeyi açın, büyük ve hassas alanlar için gizlilik kuralı tanımlayın. Bir hafta sonra tekrar ölçün.
+4. **Saklama politikasını kurun.** Ortamları ayırın, her ortama süresini verin, indeks yaşam döngüsünü tanımlayın.
+5. **Arşiv hattını kurun.** Erişim kaydını SIEM'e veya arşiv veritabanına akıtın.
+6. **İzlemeye bağlayın.** Disk doluluğu, günlük log hacmindeki sapma ve varsa Kafka gecikmesi için alarm tanımlayın.
+
+Bu kadarı çoğu kurulumda disk büyümesini tutmaya yeter. Yetmiyorsa sorun ayarda değildir; o noktada veri düğümü eklemek gerekir.
+
+Adım adım uygulamalı sürüm için [API Trafik Logu Hacim Yönetimi](/tr/operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi) kılavuzuna bakabilirsiniz.
+
+## İlgili sayfalar
+
+<CardGroup cols={2}>
+  <Card title="API Trafik Logu Hacim Yönetimi" icon="list-checks" href="/tr/operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi">
+    Ölçüm, ayar, ILM ve arşiv adımları
+  </Card>
+  <Card title="API Proxy Trafik Log Ayarları" icon="sliders" href="/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari">
+    Bölgeler, kısmi boyut, metod geçersiz kılmaları
+  </Card>
+  <Card title="Log Konnektörü Eklenmesi" icon="plug" href="/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi">
+    Gizlilik ayarları ve failover yapılandırması
+  </Card>
+  <Card title="Elasticsearch Bağlantısı" icon="database" href="/tr/integrations/baglanti-yonetimi/elasticsearch">
+    ILM politikasının bağlantı üzerinden kurulması
+  </Card>
+  <Card title="Elasticsearch Yedekleme Politikası" icon="database" href="/tr/installation/elasticsearch/yedekleme-politikasi">
+    Snapshot ve geri yükleme yaklaşımları
+  </Card>
+  <Card title="Trafik Loglarını Syslog'a Aktarma" icon="share-2" href="/tr/operations/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma">
+    Uzun dönem saklama için SIEM
+  </Card>
+  <Card title="Kibana ile Log Görselleştirme" icon="chart-line" href="/tr/articles/gurultuden-icgoruye-kibanada-teshis-odakli-api-dashboard-mimarisi">
+    Sakladığınız veriden içgörü çıkarmak
+  </Card>
+</CardGroup>

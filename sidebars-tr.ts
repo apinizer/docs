@@ -1062,6 +1062,7 @@ const sidebars: SidebarsConfig = {
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
             "operations/yonetici-kilavuzlari/elasticsearch-index-alan-temizleme",
+            "operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi",
             "operations/yonetici-kilavuzlari/coredns-host-alias-yapilandirmasi",
             "operations/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
             "operations/yonetici-kilavuzlari/mongodb-otomatik-yedekleme",
@@ -1563,7 +1564,8 @@ const sidebars: SidebarsConfig = {
         "articles/api-gateway-olmadan-guvenlik-olmaz-dogru-siralama-rehberi",
         "articles/apinizer-rate-limit-mekanizmalari-karsilastirmasi",
         "articles/api-guvenligi-ve-api-gatewayin-api-guvenligindeki-rolu",
-        "articles/gurultuden-icgoruye-kibanada-teshis-odakli-api-dashboard-mimarisi"
+        "articles/gurultuden-icgoruye-kibanada-teshis-odakli-api-dashboard-mimarisi",
+        "articles/api-trafik-loglarini-yonetmek-ne-kadar-nerede-ne-kadar-sure"
       ]
     }
   ]

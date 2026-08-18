@@ -1,0 +1,360 @@
+---
+title: "API Trafik Logu Hacim Yönetimi"
+description: "API trafik log hacmini ölçebilir, kaynağında azaltabilir, saklama süresi ve arşiv hattını kurarak disk büyümesini kontrol altında tutabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
+import {Accordion, AccordionGroup} from '@site/src/components/Accordion';
+
+Bu kılavuz, log hacmini yedi adımda kontrol altına almak için izlenecek sırayı verir. Her adımın sonunda kısa bir kontrol vardır; bir sonrakine geçmeden önce o kontrole bakın.
+
+Kararın neden böyle kurulduğu için [API Trafik Loglarını Yönetmek](/tr/articles/api-trafik-loglarini-yonetmek-ne-kadar-nerede-ne-kadar-sure) yazısına bakabilirsiniz.
+
+:::warning Prod ortamında çalışmadan önce
+Bu kılavuzdaki komutların bir kısmı veri üzerinde kalıcı etki yaratır. Prod'da uygulamadan önce test ortamında deneyin ve güncel yedeğinizin olduğundan emin olun. Log ayarı değişiklikleri geri alınabilir; silinen log geri gelmez.
+:::
+
+## Ön hazırlık
+
+Başlamadan önce dört bilginin elinizde olması gerekir:
+
+| Bilgi | Kimden alınır | Neden gerekli |
+|---|---|---|
+| Saklama süresi ve kapsamı | Hukuk / uyum birimi | Varsa arşiv katmanının süresini ve içeriğini onlar söyler |
+| Mevcut disk kapasitesi ve büyüme bütçesi | Sistem yönetimi | Sıcak pencerenin üst sınırını belirler |
+| Ortam listesi ve kritiklikleri | API yönetimi ekibi | Ortam bazlı saklama süresi için gerekli |
+| Var olan SIEM veya arşiv veritabanı | Güvenlik / veritabanı ekibi | Arşiv hattının hedefini belirler |
+
+:::note Kapsamı ilgili ekipten alın
+Kaç yıl, hangi alanlar — bunu teknik ekip tahmin etmesin. Hukuk veya uyum biriminden netleştirin. Süre kısaltılmadan önce o cevap elinizde olsun; geri dönüşü olmayan tek adım budur.
+:::
+
+---
+
+## Adım 1 — Ölçün
+
+Hiçbir ayara dokunmadan önce mevcut durumu sayılarla ortaya koyun. Aşağıdaki tabloyu doldurmadan sonraki adıma geçmeyin.
+
+| Ölçüm | Değer |
+|---|---|
+| Son 1 günde üretilen kayıt sayısı | |
+| Son 30 günde üretilen kayıt sayısı | |
+| Son 365 günde üretilen kayıt sayısı | |
+| Toplam indeks boyutu (replika dahil) | |
+| Ortalama kayıt boyutu | |
+| Hacmi üreten ilk 5 API Proxy / uç nokta | |
+| Mevcut disk doluluk oranı | |
+
+### Arayüzden
+
+<Steps>
+<Step title="API Trafiği ekranı">
+Zaman aralığı seçerek kayıt sayısını okuyun. API Proxy ve metot filtreleriyle daraltarak hacmi kimin ürettiğini çıkarın. [Bkz.](/tr/develop/izleme-analiz/api-trafigi)
+</Step>
+<Step title="Analitik ekranı">
+Aylık toplamları yan yana koyarak büyümenin düz mü, sıçramalı mı olduğunu görün. Dönemsel tepe noktalarını (ay sonu, kampanya, mutabakat) not edin. [Bkz.](/tr/analytic/analytics-reports/rapor-uretici)
+</Step>
+<Step title="Elasticsearch Monitor ekranı">
+Küme sağlığını, indeks boyutlarını ve disk kullanımını buradan okuyun. [Bkz.](/tr/integrations/baglanti-yonetimi/elasticsearch-monitor)
+</Step>
+</Steps>
+
+### Komutla
+
+Trafik logları veri akışı *(data stream)* olarak tutulur; arkalarındaki gerçek indeksler `.ds-` önekiyle başlar ve gizlidir. Bu yüzden listeleme komutları `.ds-` deseniyle yazılır. Aşağıdaki `<INDEX_KEY>`, ortamın Elasticsearch bağlantısındaki indeks anahtarıdır (örnek: `prod`, `default`).
+
+Veri akışının toplam boyutu ve belge sayısı:
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/_data_stream/apinizer-log-apiproxy-<INDEX_KEY>/_stats?human&pretty"
+```
+
+Arkadaki indeksler, boyutlarıyla birlikte:
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/_cat/indices/.ds-apinizer-log-apiproxy-<INDEX_KEY>-*?v&h=index,docs.count,store.size&s=index"
+```
+
+Belirli bir dönemde üretilen kayıt sayısı (son 1 gün örneği; `now-30d` ve `now-365d` ile tekrarlayın):
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/apinizer-log-apiproxy-<INDEX_KEY>/_count?pretty" -H 'Content-Type: application/json' -d'
+{
+  "query": {
+    "range": {
+      "@timestamp": {
+        "gte": "now-1d/d",
+        "lt": "now/d"
+      }
+    }
+  }
+}'
+```
+
+Düğüm bazında disk durumu:
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/_cat/allocation?v&h=node,disk.used,disk.avail,disk.total,disk.percent"
+```
+
+### Hesaplama
+
+Ortalama kayıt boyutunu bulun:
+
+```
+Ortalama kayıt boyutu = Toplam indeks boyutu / Toplam belge sayısı
+```
+
+Ardından 12 aylık projeksiyonu çıkarın:
+
+```
+Aylık büyüme = Günlük kayıt sayısı x 30 x Ortalama kayıt boyutu x (1 + replika sayısı)
+12 aylık ihtiyaç = Aylık büyüme x 12 / 0,80
+```
+
+Sondaki `0,80` emniyet payıdır: Elasticsearch disk %85'i geçtiğinde yeni parça yerleştirmeyi durdurur, %95'i geçtiğinde indeksleri salt-okunur duruma alabilir. Diskin tamamı kullanılabilir alan değildir.
+
+:::tip Kontrol
+Tablodaki yedi satır doluysa bu adım biter. "İlk 5 uç nokta" satırını atlamayın; sonraki işin çoğu o beş yerde olacak.
+:::
+
+---
+
+## Adım 2 — Kapsamı belirleyin
+
+Hangi verinin ne kadar süre saklanacağına karar verin. Tabloyu kendi ortamlarınız için doldurun:
+
+| Ortam | Loglanacak bölgeler | Gövde | Sıcak saklama | Arşive gidecek mi |
+|---|---|---|---|---|
+| Prod | 1 (ve gerekirse 4) | Kısmi | 6 ay | Evet, erişim kaydı |
+| Pre-Prod | 1, 4 | Kısmi | 3 ay | Hayır |
+| Test | 1, 2, 3, 4 | Açık | 1 ay | Hayır |
+
+Bunlar tipik bir başlangıç noktasıdır; kendi kritikliğinize göre değiştirin. Karar verirken iki soru yeter: bu ortamın logu sonradan istenecek mi, ve burada bir sorun çıktığında geriye kaç gün bakmam gerekir?
+
+---
+
+## Adım 3 — Hızlı kazanımları uygulayın
+
+Aşağıdaki değişikliklerin çoğu [Log Ayarları](/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari) sekmesinden yapılır ve **Kaydet ve Yayınla** ile ilgili ortama dağıtılır. Gizlilik kuralları da aynı sekmede, seçilen konnektör için tanımlanır.
+
+<Steps>
+<Step title="2. ve 3. bölgeyi kapatın">
+Prod ortamındaki API Proxy'lerde **Request to Target** ve **Response from Target** bölgelerinin başlık, parametre ve gövde loglamasını kapatın. Bu iki bölge geliştirme aşamasında değerlidir; oturmuş bir prod proxy'sinde nadiren açılır.
+</Step>
+<Step title="Kalan bölgelerde kısmi gövdeyi açın">
+Açık bıraktığınız bölgelerde gövdeyi tamamen kapatmak yerine **Kısmi boyut** *(Partial Size)* ayarını kullanın. Teşhis için gövdenin ilk birkaç kilobaytı çoğu zaman yeterlidir.
+</Step>
+<Step title="Büyük ve hassas alanlar için gizlilik kuralı tanımlayın">
+Gizlilik ayarlarını log yükünü azaltmak için de kullanın. İhtiyacınız olmayan, yüksek hacimli veri belli alanlarda geliyorsa — örneğin teşhiste işe yaramayan bir PDF veya JPG, JSON içinde base64 byte array olarak — o alanın anahtarını bu servise özel tanımlayıp içeriğini boşaltarak loglayın. Kişisel veri alanlarını maskeleyin veya hash'leyin. Kuralı Log Ayarları sekmesinde seçilen konnektörün Gizlilik tablosundan ekleyin. Ortam konnektörü eklenirken de aynı ayarlar vardır. [Bkz.](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi)
+</Step>
+<Step title="İlk 5 uç nokta için metot bazında istisna tanımlayın">
+Adım 1'de bulduğunuz yüksek hacimli uç noktalar için **Metod Geçersiz Kılmaları** ile ayrı kural tanımlayın. Böylece diğer metotların log ayrıntısını düşürmeniz gerekmez.
+</Step>
+<Step title="Hata durumundaki emniyet ağını gözden geçirin">
+Hata veya engellenme durumunda kapalı alanların yine de loglanması varsayılan olarak açıktır ve genelde açık kalmalıdır. Hata oranınız yüksekse bu ayar tek başına ana hacim kaynağı olabilir; önce hata oranını düşürün, mümkün değilse ayarı kapatın.
+</Step>
+</Steps>
+
+:::tip Kontrol
+Değişiklikten **bir hafta sonra** Adım 1'deki günlük kayıt boyutu ölçümünü tekrarlayın. Kuruluma göre günlük hacimde görünür bir düşüş beklenir. Düşüş yoksa değişiklikler ilgili ortama dağılmamış olabilir; **Kaydet ve Yayınla** yapıldığını kontrol edin.
+:::
+
+---
+
+## Adım 4 — Saklama politikasını kurun
+
+### Önce ortamları ayırın
+
+Her ortamın kendi veri akışına yazması, ortam bazlı saklama süresinin ön koşuludur. Ortamlar ayrılmadan farklı süreler tanımlanamaz.
+
+### Sonra yaşam döngüsü politikasını tanımlayın
+
+Saklama süresi Elasticsearch tarafında indeks yaşam döngüsü politikası ile yönetilir.
+
+Apinizer Elasticsearch bağlantısında **Administrate** açıksa politikayı **Edit ILM Policy** ile oradan kurun. [Bkz.](/tr/integrations/baglanti-yonetimi/elasticsearch)
+
+Administrate kapalıysa veya politikayı doğrudan Elasticsearch'te yönetiyorsanız: [ILM Politikası ve Template Oluşturma](/tr/installation/elasticsearch/manuel-ilm-politikasi-ve-template-olusturma)
+
+Politikayı kurarken üç değere karar verirsiniz:
+
+| Değer | Öneri | Gerekçe |
+|---|---|---|
+| Devretme *(rollover)* eşiği | Parça başına 10–50 GB | Bu aralığın dışına çıkan parçalar hem sorguyu hem kurtarmayı yavaşlatır |
+| Soğuk katmana indirme | 1–3 ay sonra | Eski veri nadiren sorgulanır, ucuz düğümde durabilir |
+| Silme *(ILM delete)* | Ortamın saklama süresi dolunca | Elle silinmez; günü gelen indeksi ILM düşürür |
+
+Soğuk katman için ayrı bir düğüm tanımlarsanız Elasticsearch logları oraya kendisi taşır; elle kopyalamanız gerekmez. Soğuk düğümdeki kayıtlara daha seyrek bakarsınız, baktığınızda da daha uzun beklersiniz. Bu, ucuz diskin karşılığıdır.
+
+Yedek olsa bile indeksi elle silmeyin. Uzun süre duracak kayıt SIEM'dedir; Elasticsearch'te gereksiz log tutulmaz. Politikanın **silme (delete) fazı** yoksa süre dolsa bile indeks durur. Varsayılan örnek politikalarda bu faz bazen kapalı gelir; açık olduğundan emin olun.
+
+:::danger Yönetim ekranındaki saklama ayarlarıyla karıştırılmamalı
+Apinizer sistem ayarlarındaki **Log Saklama** *(Log Retention)* bölümü, Apinizer'ın kendi veritabanındaki koleksiyonlar içindir (uygulama logları, token trafiği, alarm geçmişi, izleme sonuçları). Ekranda "trafik" benzeri bir satır görünse bile **Elasticsearch'teki API trafik logları bu ayarla silinmez.** [Bkz.](/tr/admin/system-settings/sistem-ayarlari-ve-limitler)
+
+"Saklama süresini 30 güne çektim ama disk hâlâ doluyor" durumunun en sık görülen sebebi budur.
+
+Apinizer veritabanındaki koleksiyonların temizliği ayrı bir konudur: [Veritabanı Büyüme Yönetimi](/tr/operations/database-buyume-yonetimi/genel-bakis)
+:::
+
+:::tip Kontrol
+Bir indeksin politikanın neresinde olduğunu kontrol edin:
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/.ds-apinizer-log-apiproxy-<INDEX_KEY>-*/_ilm/explain?pretty"
+```
+
+Çıktıda politikanın adı görünüyor ve indeks bir aşamada ilerliyorsa politika bağlanmış demektir.
+:::
+
+---
+
+## Adım 5 — Arşiv hattını kurun
+
+Uzun dönem saklamanın yeri özellikle SIEM ürünleridir. Elasticsearch'te gereksiz log tutulmaz; sıcak pencereden uzun duracak erişim kaydı SIEM'e gider. Hedefi şu tabloya göre seçin:
+
+| Durum | Önerilen hedef |
+|---|---|
+| Kurumda SIEM var | Syslog konnektörü ile SIEM |
+| SIEM yok, ilişkisel sorgu isteniyor | Veritabanı konnektörü ile arşiv tabloları |
+| Uzun saklama gereksinimi yok, sadece geçmiş görünürlüğü isteniyor | Elasticsearch soğuk katmanı yeterli |
+
+Hedef ne olursa olsun kural aynıdır: **arşive tam trafik kaydı değil, erişim kaydı gider.** Log Ayarları sekmesinde her konnektör bağımsız yapılandırıldığı için Elasticsearch'e ayrıntılı, arşiv hedefine sade kayıt gönderebilirsiniz.
+
+SIEM hedefi için: [Trafik Loglarının Syslog'a Aktarılması](/tr/operations/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma)
+
+Veritabanı hedefi seçtiyseniz tablo yapıları hazırdır: [Apinizer Log Tabloları Oluşturma Komutları](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari)
+
+Veritabanı tarafında üç şeyi baştan planlayın: tabloların tarih bazında bölümlenmesi, hangi alanların indeksleneceği ve veritabanının kendi temizleme işi.
+
+:::tip Kontrol
+Arşiv hedefine bir gün boyunca akan kayıt sayısını, aynı gün Elasticsearch'e yazılan kayıt sayısıyla karşılaştırın. İkisi arasında büyük bir fark varsa konnektör seçimi veya filtre yapılandırması eksiktir.
+:::
+
+---
+
+## Adım 6 — Dayanıklılık kontrolleri
+
+Bu adım hacmi azaltmaz; yapılan işin kalıcı kalmasını sağlar.
+
+<AccordionGroup>
+<Accordion title="Failover veritabanı ayrı bir kurulum mu?">
+Log konnektöründe failover hedefi olarak Apinizer'ın konfigürasyon veritabanı seçilebilir. Bu durumda o veritabanının **Apinizer'ın ana veritabanından ayrı bir kurulum olması gerekir.**
+
+Aynı kurulum kullanılırsa, Elasticsearch kaynaklı bir kesinti yönetim veritabanını da doldurur ve tek bir olay iki sistemi birden düşürür. Bu kontrolü yapmadan diğer adımlara geçmeyin.
+</Accordion>
+
+<Accordion title="Failover'da biriken kayıtlar taşındı mı?">
+Asıl hedef düzeldikten sonra failover'a düşen kayıtların taşınması gerekir; orada kalıcı olarak durmazlar. İşlem manuel başlatılır ve hata durumunda veri kaybı olmayacak şekilde yarıda kesilir. [Bkz.](/tr/analytic/gonderilmemis-api-trafik-loglari-tasima)
+</Accordion>
+
+<Accordion title="Disk eşikleri alarma bağlı mı?">
+Elasticsearch diski dolduğunda indeksler salt-okunur duruma düşer ve log yazımı durur. Doluluk oranı için alarm yoksa bu durum genelde ertesi gün fark edilir; aradaki fark kaybedilen bir günlük logdur. Küme metrikleri için: [Elasticsearch Monitor](/tr/integrations/baglanti-yonetimi/elasticsearch-monitor)
+
+Düğüm bazında anlık durum:
+
+```bash
+curl -X GET "<ELASTICSEARCH_IP>:9200/_cat/nodes?v&h=name,node.role,heap.percent,disk.used_percent"
+```
+</Accordion>
+</AccordionGroup>
+
+---
+
+## Adım 7 — İzlemeye bağlayın
+
+Aşağıdaki üç metrik için alarm tanımlayın:
+
+| Metrik | Eşik önerisi | Neyi haber verir |
+|---|---|---|
+| Disk doluluk oranı | %75 uyarı, %85 kritik | Kapasite tükenmeden önce müdahale imkânı |
+| Günlük log hacmi | Haftalık ortalamadan %30 sapma | Yeni bir proxy'nin veya hatalı ayarın hacmi patlatması |
+| JVM yığın kullanımı | %85 | Düğüm kararsızlığının erken göstergesi |
+
+### Aylık gözden geçirme
+
+Ayda bir şu dört soruya bakın:
+
+1. Günlük log hacmi geçen aya göre nasıl değişti?
+2. Yeni eklenen API Proxy'lerin log ayarları standarda uygun mu?
+3. Yaşam döngüsü politikası süresi dolan indeksleri beklenen günde düşürüyor mu?
+4. Disk projeksiyonu hâlâ tutuyor mu?
+
+Dördüncü sorunun cevabı "hayır" ise ve Adım 3'teki kaldıraçlar tükenmişse, doğru karar yeni veri düğümü eklemektir. Kümenin 20 TB'ı aşması bu karar için pratik bir eşiktir; tek düğümün diskini büyütmek sorgu yükünü, kurtarma süresini ve yeniden dengeleme maliyetini aynı yerde biriktirir.
+
+---
+
+## Olağanüstü durum: disk doldu
+
+Planlı çalışma değil, acil müdahale sırasıdır. En hızlı ve en güvenli yol disk eklemektir. Yedek olsa bile bu anda log elle silinmez; süresi dolanı ILM düşürür.
+
+<Steps>
+<Step title="Yazma engelini teşhis edin">
+Disk taşma eşiği aşıldığında indeksler salt-okunur duruma geçmiş olabilir. Doluluk oranını `_cat/allocation` ile kontrol edin.
+</Step>
+<Step title="Disk ekleyin">
+Yer açmanın yolu kapasite eklemektir. Elle silme, yedek olsa bile, bu kılavuzun önerdiği yol değildir.
+</Step>
+<Step title="Salt-okunur engelini kaldırın">
+Yer açıldıktan sonra engel otomatik kalkmazsa ilgili backing indeks için sıfırlayın. `<INDEX_NAME>` tam indeks adıdır (örnek: `.ds-apinizer-log-apiproxy-prod-000025`), ortam anahtarı değildir.
+
+```bash
+curl -X PUT "<ELASTICSEARCH_IP>:9200/<INDEX_NAME>/_settings" -H 'Content-Type: application/json' -d'
+{
+  "index.blocks.read_only_allow_delete": null
+}'
+```
+</Step>
+<Step title="Kök nedeni giderin">
+Acil müdahale sonrası Adım 1'e dönün. Disk aynı sebeple ikinci kez dolarsa sorun kapasitede değil, yapılandırmadadır. Gereksiz log kaynağında kısılır; uzun süre SIEM'de durur; Elasticsearch'te günü gelen indeks ILM ile düşer.
+</Step>
+</Steps>
+
+:::danger Dosya sistemine elle müdahale edilmemeli
+Canlı veri dizini `cp` veya `mv` ile taşınmamalıdır. Kopyalama sürerken Elasticsearch aynı dosyalara yazmaya devam eder; sonuç açılamayan bir indekstir ve bu genelde veriye ihtiyaç duyulduğu anda fark edilir. `rsync` de küme durdurulmadan aynı riski taşır. Veri taşımanın yolu snapshot'tır. [Bkz.](/tr/installation/elasticsearch/yedekleme-politikasi)
+:::
+
+---
+
+## Kontrol listesi
+
+- [ ] Adım 1 ölçüm tablosu dolduruldu
+- [ ] Saklama kapsamı ilgili ekipten alındı
+- [ ] Ortam bazlı kapsam tablosu belirlendi
+- [ ] 2. ve 3. bölge loglaması kapatıldı
+- [ ] Kısmi gövde ayarı açıldı
+- [ ] Gizlilik kuralları tanımlandı
+- [ ] Yüksek hacimli uç noktalar için metot istisnaları tanımlandı
+- [ ] Değişiklik sonrası ölçüm tekrarlandı ve düşüş doğrulandı
+- [ ] Ortamlar ayrı veri akışlarına yazıyor
+- [ ] Yaşam döngüsü politikası tanımlandı ve silme fazı açık
+- [ ] Arşiv hattı kuruldu ve akış doğrulandı
+- [ ] Failover veritabanının ayrı kurulum olduğu teyit edildi
+- [ ] Disk, hacim ve yığın alarmları tanımlandı
+- [ ] Aylık gözden geçirme takvime alındı
+
+## İlgili sayfalar
+
+<CardGroup cols={2}>
+  <Card title="API Trafik Loglarını Yönetmek" icon="book-open" href="/tr/articles/api-trafik-loglarini-yonetmek-ne-kadar-nerede-ne-kadar-sure">
+    Bu kılavuzun arkasındaki kararlar
+  </Card>
+  <Card title="API Proxy Trafik Log Ayarları" icon="sliders" href="/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari">
+    Bölgeler, kısmi boyut, metod geçersiz kılmaları
+  </Card>
+  <Card title="Log Konnektörü Eklenmesi" icon="plug" href="/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi">
+    Gizlilik ayarları ve failover yapılandırması
+  </Card>
+  <Card title="Elasticsearch Bağlantısı" icon="database" href="/tr/integrations/baglanti-yonetimi/elasticsearch">
+    ILM politikasının bağlantı üzerinden kurulması
+  </Card>
+  <Card title="Trafik Loglarını Syslog'a Aktarma" icon="share-2" href="/tr/operations/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma">
+    Erişim kaydını SIEM'e gönderme
+  </Card>
+  <Card title="Elasticsearch Yedekleme Politikası" icon="database" href="/tr/installation/elasticsearch/yedekleme-politikasi">
+    Snapshot ve geri yükleme
+  </Card>
+  <Card title="Elasticsearch Sık Kullanılan Komutlar" icon="terminal" href="/tr/operations/faydali-komutlar/elasticsearch">
+    Sorgulama ve yönetim komutları
+  </Card>
+</CardGroup>
