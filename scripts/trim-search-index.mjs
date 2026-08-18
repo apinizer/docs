@@ -2,22 +2,64 @@
 /**
  * Post-build: trim long preview strings inside the @easyops-cn/docusaurus-
  * search-local index shards so no single file exceeds Cloudflare Pages's
- * 25 MB per-asset limit.
- *
- * Each `search-index-*.json` is a tuple of shards (0..N), each shaped like
- * `{ documents: [{ i, t, u, h, p, s, b }, ...], index: <lunr-data> }`.
- * The Lunr index (`index`) is untouched — that drives the actual search;
- * we only shorten the user-visible preview fields (`p`, `s`, `t`, `b`)
- * to MAX_PREVIEW chars, which is enough for the dropdown snippet.
+ * 25 MB per-asset limit, then rebuild each Lunr inverted index from the
+ * trimmed document text (the plugin builds indexes from full section bodies,
+ * which dominates file size even after preview trimming).
  *
  * Wired into `npm run build` via package.json.
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+import lunr from 'lunr';
+
+const require = createRequire(import.meta.url);
 
 const BUILD_DIR = path.resolve(process.cwd(), 'build');
-const MAX_PREVIEW = 200; // chars per preview field
+const MAX_PREVIEW = 200; // chars per preview / indexed text field
 const TRIM_FIELDS = ['p', 's', 't', 'b'];
+const SEARCH_LANGUAGE = ['en', 'tr'];
+
+let lunrPluginInitialized = false;
+let lunrPlugin;
+
+function initLunrPlugin() {
+  if (lunrPluginInitialized) return;
+  lunrPluginInitialized = true;
+
+  require('lunr-languages/lunr.stemmer.support.js')(lunr);
+  require('lunr-languages/lunr.tr.js')(lunr);
+  require('lunr-languages/lunr.multi.js')(lunr);
+  lunrPlugin = lunr.multiLanguage(...SEARCH_LANGUAGE);
+}
+
+/** Mirrors @easyops-cn/docusaurus-search-local buildIndex pipeline. */
+function rebuildLunrIndex(documents) {
+  initLunrPlugin();
+
+  return lunr(function () {
+    this.use(lunrPlugin);
+    // removeDefaultStopWordFilter: true in docusaurus.config.ts
+    this.pipeline.remove(lunr.stopWordFilter);
+    if (lunr.tr?.stopWordFilter) {
+      this.pipeline.remove(lunr.tr.stopWordFilter);
+    }
+    // removeDefaultStemmer: true
+    this.pipeline.remove(lunr.stemmer);
+
+    this.ref('i');
+    this.field('t');
+    this.metadataWhitelist = ['position'];
+
+    for (const doc of documents) {
+      this.add({
+        ...doc,
+        i: String(doc.i),
+        t: typeof doc.t === 'string' ? doc.t : '',
+      });
+    }
+  }).toJSON();
+}
 
 if (!fs.existsSync(BUILD_DIR)) {
   console.log('No build/ directory — skipping search-index trim.');
@@ -39,6 +81,12 @@ function trimValue(v) {
   return v;
 }
 
+function getShards(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data.documents)) return [data];
+  return Object.values(data);
+}
+
 let totalBefore = 0;
 let totalAfter = 0;
 for (const f of files) {
@@ -46,16 +94,16 @@ for (const f of files) {
   const beforeBytes = fs.statSync(full).size;
   const data = JSON.parse(fs.readFileSync(full, 'utf8'));
 
-  // The top-level object can be either a plain `{documents, index}` shape
-  // or a numeric-keyed shard map (`{0: {...}, 1: {...}}`). Walk both.
-  const shards = Array.isArray(data.documents) ? [data] : Object.values(data);
-  for (const shard of shards) {
+  for (const shard of getShards(data)) {
     if (!shard || !Array.isArray(shard.documents)) continue;
+
     for (const doc of shard.documents) {
       for (const field of TRIM_FIELDS) {
         if (field in doc) doc[field] = trimValue(doc[field]);
       }
     }
+
+    shard.index = rebuildLunrIndex(shard.documents);
   }
 
   fs.writeFileSync(full, JSON.stringify(data));
@@ -69,13 +117,11 @@ for (const f of files) {
 const mb = (n) => (n / 1024 / 1024).toFixed(2);
 console.log(`Total: ${mb(totalBefore)} MB → ${mb(totalAfter)} MB`);
 
-// Hard guard: if any single file is still over 25 MB, fail loudly so we
-// catch the regression before the Pages deploy does.
 const offenders = files
-  .map((f) => ({f, size: fs.statSync(path.join(BUILD_DIR, f)).size}))
-  .filter(({size}) => size > 25 * 1024 * 1024);
+  .map((f) => ({ f, size: fs.statSync(path.join(BUILD_DIR, f)).size }))
+  .filter(({ size }) => size > 25 * 1024 * 1024);
 if (offenders.length) {
   console.error('ERROR: search-index files still exceed 25 MB:');
-  for (const {f, size} of offenders) console.error(`  ${f}: ${mb(size)} MB`);
+  for (const { f, size } of offenders) console.error(`  ${f}: ${mb(size)} MB`);
   process.exit(1);
 }
