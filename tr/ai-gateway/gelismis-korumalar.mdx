@@ -18,6 +18,8 @@ Apinizer AI Gateway, istek ve yanıtları aşağıdaki koruma katmanlarından ge
 - **Aşırı Boyut Koruması** — aşırı büyük isteklerin reddedilmesi
 - **Bağlam Bütünlüğü Koruması** — sohbet geçmişine sahte rol/talimat enjekte edilmesinin engellenmesi
 
+Bu korumaların dördü (kişisel veri maskeleme, istem koruması, veri sızıntısı koruması ve konu-dışı koruması) ayrıca **kodlanmış içeriği çözerek** tarayabilir — bkz. [Kodlanmış İçeriğin Çözülmesi](#kodlanmis-icerik-cozme).
+
 :::warning Politika sırası: korumalar prompt'u kuran politikalardan sonra
 İstem koruması, veri sızıntısı koruması ve bağlam bütünlüğü; [Prompt Şablonu](/tr/ai-gateway/prompt-sablonlari), [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici) ve [RAG](/tr/ai-gateway/rag) politikalarından **sonra** çalışmalıdır. Denetim, modele gidecek prompt'un tam hâli üzerinde yapılmalıdır; daha erken çalışan bir koruma sonradan eklenen içeriği göremez.
 
@@ -34,6 +36,43 @@ Yukarıdaki yedi korumadan **beşi** — Kişisel Veri (PII) Maskeleme, İstem K
 - **A2A'da** taranan içerik, gönderilen görevin mesaj parçalarıdır (`parts[]` — hem metin hem yapılandırılmış veri).
 
 Bu beş koruma dışındaki türler — Aşırı Boyut Koruması ve Bağlam Bütünlüğü Koruması dahil — bir LLM çağrısına doğrudan bağlı olduğu için (token/maliyet hesaplaması, sohbet geçmişi yapısı) yalnızca AI Gateway'lerinde kullanılabilir. Aynı kısıtlama [Semantik Önbellek](/tr/ai-gateway/semantik-onbellek), [Token Kotaları ve Hız Sınırlaması](/tr/ai-gateway/token-kotalari), [Prompt Süsleyici](/tr/ai-gateway/prompt-susleyici), [Prompt Şablonları](/tr/ai-gateway/prompt-sablonlari) ve [RAG](/tr/ai-gateway/rag) politikaları için de geçerlidir — bu politikalardan biri bir MCP veya A2A Gateway'ine eklenmeye çalışıldığında kaydetme adımında reddedilir.
+
+## Kodlanmış İçeriğin Çözülmesi {#kodlanmis-icerik-cozme}
+
+Bir kullanıcı istemini base64, onaltılık (hex), yüzde kodlaması (`%41`) ya da `\u0041` biçiminde göndermek, korumaların gördüğü metni değiştirir ama modelin anladığı metni değiştirmez. Modeller bu kodlamaları eğitim sırasında çözmeyi öğrendiği için yük hedefine ulaşır; desen tabanlı bir koruma ise telde yalnızca anlamsız bir karakter dizisi görür. OWASP, bu tekniği ayrı bir tehdit olarak değil, istem enjeksiyonunu (LLM01) filtreden geçiren bir **taşıma yöntemi** olarak sınıflandırır.
+
+Bu nedenle Kişisel Veri Maskeleme, İstem Koruması, Veri Sızıntısı Koruması ve Konu-Dışı Koruması politikalarının her birinde **Kodlanmış içeriği çöz** seçeneği bulunur. Seçenek açıkken koruma, taramadan önce istemdeki kodlanmış parçaları çözer ve çözülen metni de denetler.
+
+:::note Varsayılan olarak kapalıdır
+Seçenek kapalıyken davranış bugünkü hâliyle birebir aynıdır. Mevcut proxy'lerinizin davranışı, siz açmadıkça değişmez.
+:::
+
+### Çözülen içerik yalnızca *denetlenir*, değiştirilmez
+
+Çözülen metin taranır, ama hiçbir zaman isteğin gövdesine geri yazılmaz. Bunun pratik bir sonucu var: **kodlanmış içerikte kişisel veri veya sır bulunduğunda istek maskelenmez, reddedilir.**
+
+Nedeni teknik bir zorunluluk. Maskelenmiş bir değeri base64 bloğunun içine geri yazmak, çağıranın gönderdiği yükün yapısını bozar; iç içe veya kısmi kodlamalarda hangi baytın nereye denk geldiği de güvenilir biçimde eşlenemez. Geriye iki seçenek kalır: ya kodlanmış kişisel veriyi maskesiz olarak sağlayıcıya iletmek — ki bu tam olarak maskelemenin engellemek için var olduğu sızıntıdır — ya da isteği reddetmek. Apinizer ikincisini seçer.
+
+Buna bağlı olarak Veri Sızıntısı Koruması'nda **maskele** aksiyonlu bir kural, çözülmüş içerikte eşleştiğinde **engelle**'ye yükseltilir. **İşaretle** aksiyonu ise olduğu gibi kalır, çünkü işaretleme zaten içeriği değiştirme iddiasında değildir.
+
+İstem Koruması ve Konu-Dışı Koruması'nda böyle bir yükseltme yoktur: bu iki koruma zaten yalnızca tespit eder, kuralınızda ne yazıyorsa o uygulanır.
+
+### Yanlış eşleşmeye karşı
+
+Karma (hash) değerleri, UUID'ler ve API anahtarları da base64 ya da onaltılık *görünür*. Bunları çözmeye kalkmak anlamsız bayt yığınları üretir ve her isteği "gizli içerik taşıyor" gibi gösterirdi. Apinizer çözülen çıktının okunabilir metin oranına bakar; eşiği geçemeyen çıktı sessizce atılır. Bu sayede SHA-256 özeti veya rastgele bir anahtar içeren normal bir istem etkilenmez.
+
+Buna karşılık okunabilir bir JSON'a çözülen bir JWT yükü *denetlenir* — bu bir yanlış eşleşme değil, istenen davranıştır: içindeki kişisel veri de kapsama girer.
+
+### Sınırlar
+
+- Sıkıştırılmış içerik (gzip, deflate) çözülmez. Bu bilinçli bir karardır: desteklenen kodlamaların hepsi çözüldüğünde *küçülür*, dolayısıyla üstel büyüme riski yoktur; sıkıştırma ise bu güvenceyi ortadan kaldırırdı.
+- İç içe kodlama üç kata kadar çözülür; ayrıca girdi boyutu, aday parça sayısı ve toplam çözülen metin için üst sınırlar vardır. Bir sınıra ulaşıldığında tarama kısmi sonuçla sürer ve bu durum izleme kaydına işlenir — sessizce kesilmez.
+- Akış (streaming) yanıtlarında parça-parça çözme yapılmaz; tamponlanarak taranan yol kapsam içindedir.
+- Çözme başarısız olursa istek reddedilmez: özgün metin üzerinde yapılan tarama zaten çalışmıştır, çözme yalnızca ek bir yüzey açar. Bozuk bir base64 göndererek isteği bilerek reddettirmek mümkün değildir.
+
+### Bugün nasıl açılır
+
+Bu sürümde alan yönetim arayüzünde henüz görünmez; APIops REST API ([API Referansı: AI Gateway](/api-reference/ai-gateway)) ile ya da politika JSON'unda `decodeEncodedContent` alanı `true` yapılarak açılır. Arayüz desteği takip eden bir çalışmadır.
 
 ## Kişisel Veri (PII) Maskeleme
 

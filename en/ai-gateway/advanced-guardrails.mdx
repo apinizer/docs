@@ -49,6 +49,43 @@ Five of the seven guardrails above — Personal Data Masking, Prompt Protection,
 
 Oversized Protection, Context-Integrity Protection, and every other AI policy type — [Semantic Cache](/en/ai-gateway/semantic-cache), [Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas), [Prompt Decorator](/en/ai-gateway/prompt-decorator), [Prompt Templates](/en/ai-gateway/prompt-templates), [RAG Injection](/en/ai-gateway/rag-injection), and the AI routing policy itself — stay AI-Gateway only: they depend on an actual LLM invocation or on an OpenAI-format chat message array, neither of which an MCP or A2A Gateway has. Attaching one of these to an MCP or A2A Gateway is rejected when you save.
 
+## Decoding Encoded Content
+
+Sending a prompt as base64, hex, percent-encoding (`%41`) or `\u0041` changes the text a guardrail sees without changing the text the model understands. Models learned to decode these during pre-training, so the payload still reaches its target, while a pattern-based guardrail sees nothing but a meaningless character run on the wire. OWASP does not treat this as a separate threat: it classifies encoding as a **delivery method** that carries prompt injection (LLM01) past input filters.
+
+For that reason Personal Data Masking, Prompt Protection, Data-Loss Protection and Off-Topic Protection each offer a **Decode encoded content** option. When it is on, the guardrail decodes encoded segments of the prompt before scanning and inspects the decoded text as well.
+
+:::note Off by default
+With the option off, behaviour is byte-for-byte what it is today. Nothing about your existing proxies changes unless you turn it on.
+:::
+
+### Decoded content is inspected, never rewritten
+
+The decoded text is scanned but never written back into the request body. That has one practical consequence: **when personal data or a secret is found inside encoded content, the request is rejected rather than masked.**
+
+The reason is a technical constraint. Writing a masked value back into a base64 blob corrupts the payload the caller sent, and with nested or partial encodings there is no reliable way to map a byte back to its position. That leaves two options: forward the encoded personal data unmasked — which is exactly the leak masking exists to prevent — or reject the request. Apinizer rejects.
+
+Consistently with that, a Data-Loss Protection rule whose action is **mask** is escalated to **block** when it matches decoded content. A **flag** action is left alone, because flagging never claimed to modify anything in the first place.
+
+Prompt Protection and Off-Topic Protection have no such escalation: both only ever detect, so whatever your rule specifies is what happens.
+
+### Guarding against false matches
+
+Hashes, UUIDs and API keys also *look* like base64 or hex. Decoding them produces byte soup, and reporting that as "hidden content" would flag nearly every request. Apinizer checks how much of the decoded output is readable text and silently discards anything below the threshold, so an ordinary prompt containing a SHA-256 digest or a random key is unaffected.
+
+A JWT payload that decodes to readable JSON, by contrast, *is* inspected — that is not a false match but the intended behaviour: personal data inside the claims is in scope too.
+
+### Limits
+
+- Compressed content (gzip, deflate) is not decoded. This is deliberate: every supported encoding *shrinks* when decoded, so there is no risk of exponential growth; compression would remove that guarantee.
+- Nested encodings are decoded up to three levels, and there are ceilings on input size, candidate count and total decoded text. When a ceiling is reached the scan continues with a partial result and records the fact in the trace — it is never truncated silently.
+- Streaming responses are not decoded chunk by chunk; the buffered scan path is covered.
+- A failed decode never rejects the request: the scan of the original text has already run, and decoding only widens coverage. Sending deliberately malformed base64 cannot be used to force a rejection.
+
+### Turning it on today
+
+In this release the setting is not yet exposed in the management UI. Enable it through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `decodeEncodedContent` to `true` in the policy JSON. UI support is follow-up work.
+
 ## Personal-Data Types
 
 Personal-data masking recognizes the following built-in types out of the box, and you can add your own custom patterns for anything installation-specific:
