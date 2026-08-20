@@ -1,6 +1,6 @@
 ---
 title: "Advanced Guardrails"
-description: "You can protect AI, MCP, and A2A traffic with masking for personal data and secrets, protection against prompt attacks, and controls against off-topic use and request loops — plus structural-injection and oversized-request protection on AI Gateways, and you can pair the prompt and off-topic checks with a second opinion from your own external LLM judge."
+description: "You can protect AI, MCP, and A2A traffic with masking for personal data and secrets, protection against prompt attacks, and controls against off-topic use and request loops — plus structural-injection, oversized-request, and RAG-groundedness protection on AI Gateways, and you can pair several of these checks with a second opinion from your own external LLM judge."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -38,16 +38,19 @@ If you save the policy list in an order that breaks this rule, Apinizer corrects
   <Card title="Context-Integrity Protection" icon="git-merge">
     Detects structural injection attempts — fabricated conversation turns or fake system/assistant markers embedded in user content to manipulate the model.
   </Card>
+  <Card title="Groundedness Protection" icon="link">
+    Checks whether an LLM's response is actually supported by the RAG context this proxy injected into the same request, using an external LLM judge — see [Groundedness Protection](#groundedness-protection).
+  </Card>
 </CardGroup>
 
 ## MCP and A2A Gateways
 
-Five of the seven guardrails above — Personal Data Masking, Prompt Protection, Data-Loss Protection (DLP), Off-Topic Protection, and Retry-Storm (Loop) Protection — aren't limited to AI Gateways: you can attach them to an [MCP Gateway](/en/ai-gateway/mcp-gateway) or an [A2A Gateway](/en/ai-gateway/a2a-gateway) as well, and they run through the exact same policy pipeline. What they inspect differs by surface, since neither protocol carries an OpenAI-format chat body:
+Five of the eight guardrails above — Personal Data Masking, Prompt Protection, Data-Loss Protection (DLP), Off-Topic Protection, and Retry-Storm (Loop) Protection — aren't limited to AI Gateways: you can attach them to an [MCP Gateway](/en/ai-gateway/mcp-gateway) or an [A2A Gateway](/en/ai-gateway/a2a-gateway) as well, and they run through the exact same policy pipeline. What they inspect differs by surface, since neither protocol carries an OpenAI-format chat body:
 
 - On an **MCP Gateway**, a guardrail scans the JSON-RPC tool-call arguments (`params.arguments`) on the request side, and the tool result content on the response side.
 - On an **A2A Gateway**, a guardrail scans the JSON-RPC message parts (`params.message.parts[]` — text and other part types) on the request side, and the task/message result envelope on the response side.
 
-Oversized Protection, Context-Integrity Protection, and every other AI policy type — [Semantic Cache](/en/ai-gateway/semantic-cache), [Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas), [Prompt Decorator](/en/ai-gateway/prompt-decorator), [Prompt Templates](/en/ai-gateway/prompt-templates), [RAG Injection](/en/ai-gateway/rag-injection), and the AI routing policy itself — stay AI-Gateway only: they depend on an actual LLM invocation or on an OpenAI-format chat message array, neither of which an MCP or A2A Gateway has. Attaching one of these to an MCP or A2A Gateway is rejected when you save.
+Oversized Protection, Context-Integrity Protection, Groundedness Protection, and every other AI policy type — [Semantic Cache](/en/ai-gateway/semantic-cache), [Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas), [Prompt Decorator](/en/ai-gateway/prompt-decorator), [Prompt Templates](/en/ai-gateway/prompt-templates), [RAG Injection](/en/ai-gateway/rag-injection), and the AI routing policy itself — stay AI-Gateway only: they depend on an actual LLM invocation or on an OpenAI-format chat message array, neither of which an MCP or A2A Gateway has. Attaching one of these to an MCP or A2A Gateway is rejected when you save.
 
 ## Decoding Encoded Content
 
@@ -307,9 +310,29 @@ Denied topics have their own similarity threshold and action, each optional and 
 
 Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
 
+### Streaming Responses: Buffer-and-Scan {#streaming-buffer-and-scan}
+
+Off-Topic Protection used to scan only the **incoming request** (the user's own message). It can now also inspect **streamed responses** — the text the model itself generates is compared against the same allowed/denied topic definitions, so a response that drifts off-topic mid-stream (for example, a jailbroken model that starts answering something unrelated in detail) is detected too.
+
+The mechanism is **buffer-and-scan**: every chunk of the stream is silently appended to a buffer, and the embedding-similarity comparison runs **exactly once, at the end of the stream** — there is no per-chunk embedding call, since adding a network round trip to every one of the (often hundreds of) chunks in a streamed response would seriously hurt latency.
+
+:::note The buffer only opens when a Block rule is configured
+The buffer only opens when **at least one direction** (allowed or denied) has its action set to **Block**. If both directions are Flag-only (or no topics are configured at all), streamed responses incur **zero additional cost** — nothing is buffered, nothing is scanned, and today's zero-effect streaming behavior is preserved exactly.
+:::
+
+The `llm-judge` external judge described in [External Provider Guardrails](#external-provider-guardrails) does **not** participate in this streaming path — only the built-in (embedding) comparison runs. A policy configured with External provider only therefore scans nothing at all on a streamed response (neither built-in nor external) — the same constraint described in [External DLP Integration](#external-dlp-integration) for that adapter's own streaming behavior.
+
+If the buffer exceeds 65,536 characters (an unusually long streamed response), the scan is **skipped** and this is recorded visibly in the trace — scanning a partial prefix and silently missing a real violation past the cut point was judged worse than skipping outright.
+
+:::danger This is detection and audit, not prevention
+The stream's raw chunks continue to reach the client **in real time** — this buffering mechanism never withholds or rewrites a chunk. When a Block-configured Off-Topic Protection finds an off-topic or denied match at the end of the stream, that decision is recorded in [tracing and the Security and Guardrails report](/en/ai-gateway/reports) — but by that point the stream has already completed and the content has already reached the client. **A Block verdict cannot retract content that has already been streamed.**
+
+In short: on a Block-configured Off-Topic Protection, nothing is blocked in a streamed response until it has **already finished** reaching the client — a violation only becomes visible in the audit trail **after** the stream ends. Non-streamed (unary) responses have no such limitation — a Block verdict there is applied before the response ever reaches the client.
+:::
+
 ## External Provider Guardrails
 
-**Prompt Protection** and **Off-Topic Protection** can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. **Personal Data Masking** and **Data-Loss Protection** can use the same `llm-judge` adapter too, and additionally offer an adapter type of their own (`http-dlp`) that connects to your organization's own vendor-neutral HTTP service; these two carry some different rules for their external-provider behavior, covered separately in [External DLP Integration](#external-dlp-integration) below. Retry-Storm Protection, Oversized Protection, and Context-Integrity Protection have no external-provider option.
+**Prompt Protection** and **Off-Topic Protection** can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. **Personal Data Masking** and **Data-Loss Protection** can use the same `llm-judge` adapter too, and additionally offer an adapter type of their own (`http-dlp`) that connects to your organization's own vendor-neutral HTTP service; these two carry some different rules for their external-provider behavior, covered separately in [External DLP Integration](#external-dlp-integration) below. Retry-Storm Protection, Oversized Protection, and Context-Integrity Protection have no external-provider option. **Groundedness Protection sits at the opposite extreme**: it has no built-in check at all — an `llm-judge` is as mandatory as the policy itself — see [Groundedness Protection](#groundedness-protection).
 
 Today, the only supported external judge is an **LLM judge** — an existing [LLM Provider](/en/ai-gateway/llm-providers) connection you already use elsewhere in the AI Gateway, called with a chat-completion request and asked for a safety (or topic-relevance) verdict. This uses your existing connection; there's no separate credential or connection type to set up.
 
@@ -502,6 +525,54 @@ Personal Data Masking and Data-Loss Protection policy screens carry an **Externa
 
 Fill in the section, save the policy, and click **Deploy**. The same settings are also reachable through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `engine`, `failMode`, and `externalGuardrail` in the policy JSON.
 
+## Groundedness Protection {#groundedness-protection}
+
+Checks whether an LLM's response is actually grounded in the context that a [RAG](/en/ai-gateway/rag-injection) policy injected into the **same** request — an external judge compares the generated response against the retrieved context and decides **grounded** or **ungrounded/hallucinated**. It runs on the response lane and can only be added to AI Gateways — it is not available on MCP or A2A Gateways.
+
+:::warning Scope: your own injected RAG context, not general fact-checking
+This guardrail **only** checks groundedness against the RAG context this proxy injected into the same request. **It is not a general factuality check against world knowledge** — it never verifies anything against an external source. As a result:
+
+- A claim that is factually true but absent from the retrieved context is still treated as **ungrounded** — the guardrail only judges support from the context, not truth.
+- If the retrieved context itself is wrong (your source data is inaccurate), a response that faithfully repeats that wrong information is still judged **grounded** — the guardrail never questions the source's accuracy.
+:::
+
+### How RAG Context Is Detected — the Single Biggest Caveat
+
+This guardrail does not read a dedicated signal published by the RAG policy — it looks for a literal `<CONTEXT>...</CONTEXT>` marker pair inside the request body actually sent to the backend LLM. RAG Injection's own default Injection Template already contains exactly this marker pair (see [RAG Injection configuration](/en/ai-gateway/rag-injection#configuration)).
+
+:::danger Only works when RAG's Injection Mode is set to "Inject via Template"
+RAG Injection's **Injection Mode** field defaults to **Prepend to User Message** — in that mode the context is inserted as plain text ahead of the user's request with no marker at all. In that default mode (or in **Prepend to System Message** / **Append After System Message**), Groundedness Protection finds no detectable context in the request and **silently does nothing** — it neither blocks nor flags, because it has nothing to evaluate. This guardrail only works when RAG's Injection Mode is set to **Inject via Template** and the template in use (default or custom) still contains the `<CONTEXT>`/`</CONTEXT>` pair. **Adding this guardrail while leaving RAG on its default injection mode produces a configuration that looks active but never actually evaluates any request** — if you plan to pair RAG with Groundedness Protection, set Injection Mode to **Inject via Template**.
+:::
+
+A request where no detectable context is found (RAG never ran, or ran in an undetectable mode) is indistinguishable from one where the context happened to be empty — both fall through to the same silent no-op. This is the only behavior-preserving choice available without widening the guardrail's own scope.
+
+### Unary Responses Only
+
+This guardrail **does not run on streamed responses** — when a response streams, evaluation is never triggered at all, neither blocking nor flagging. That is a deliberate design choice: a groundedness verdict needs the **entire** answer, and a streamed response's full text is only known once the stream ends; the buffer-and-scan machinery used by [Off-Topic Protection's streaming support](#streaming-buffer-and-scan) has not been wired up for this guardrail.
+
+### The Judge Is Mandatory
+
+Unlike some other AI guardrails (Prompt Protection, Off-Topic Protection), Groundedness Protection has **no built-in/algorithmic check** — there is no cheap, deterministic way to answer "is this text supported by that text," so evaluation always goes through an `llm-judge` (see [External Provider Guardrails](#external-provider-guardrails)). Two requirements follow from that, both enforced at save time:
+
+- The policy **cannot be saved** without a judge (`externalGuardrail`) configured.
+- The judge's prompt template **cannot be left blank** — unlike Prompt Protection, where a blank template falls back to Native passthrough, a blank template here would fall back to a generic safety judge that doesn't answer a groundedness question at all, producing a meaningless verdict. A new policy is pre-filled with a groundedness-specific starting template; adapt it to your needs, but it must always ask a groundedness question.
+
+The judge's own settings (model name, timeout, JSON mode, max input/output tokens) are configured exactly like the `llm-judge` adapter in [External Provider Guardrails](#external-provider-guardrails) — including the reasoning-model warning about raising Max Output Tokens.
+
+### Action, Evaluation Mode, and Failure Handling
+
+| Setting | Default | Note |
+|---|---|---|
+| **Action** | Flag | Block rejects the ungrounded response |
+| **Evaluation Mode** | Inline | Off-Topic Protection defaults to Asynchronous; here the default is **Inline** because this is a security gate that can Block a response — correctness is prioritized over latency. Asynchronous and Observe-Only are also available. |
+| **Judge Failure Mode** | Block on failure | If the judge call errors or times out, the response is blocked. Allow on failure lets it continue, unverified, with a visible warning. |
+| **Max Context Characters** | 6000 | Truncation cap applied to the retrieved context before it reaches the judge |
+| **Max Response Characters** | 4000 | Truncation cap applied to the response text before it reaches the judge |
+
+### Ordering: After Personal Data Masking and DLP
+
+This guardrail runs on the response lane, and the judge call itself sends response content out to an external LLM provider — so it must always be ordered **after** Personal Data Masking and Data-Loss Protection, for the same reason described in the **Policy order** warning at the top of this page. If you save the policy list in an order that breaks this rule, Apinizer corrects it automatically when you save.
+
 ## Adding a Guardrail
 
 <Steps>
@@ -568,6 +639,29 @@ Deleting is never blocked. If the preset is bound anywhere, a warning lists wher
 
 Renaming a preset does not affect bound rules: they track the preset by id, not by name.
 
+### OWASP LLM Top 10 and MITRE ATLAS Signature Pack (Prompt Protection)
+
+Prompt Protection's built-in presets ship as a versioned, integrity-checked **signature pack**: each built-in rule is labeled with an [OWASP GenAI LLM Top 10](https://genai.owasp.org/) id and a [MITRE ATLAS](https://atlas.mitre.org/) (Adversarial Threat Landscape for AI Systems) technique id. Both labels appear as badges next to each rule in the rule list — the ATLAS technique shows in a tooltip on hover.
+
+:::note Coverage today: LLM01 and LLM08
+The built-in pack does not yet cover the full OWASP taxonomy — today it maps two categories: jailbreak / role-override / safety-bypass / injection patterns to **LLM01 (Prompt Injection)**, and system-prompt-leak patterns to **LLM08 (Hidden Context Exposure)**. The corresponding ATLAS techniques are `AML.T0054` (LLM Jailbreak), `AML.T0051.000` (LLM Prompt Injection: Direct), and `AML.T0056` (Extract LLM System Prompt).
+:::
+
+These labels are **display/reporting metadata only** — they never affect Prompt Protection's own matching logic at runtime; they exist to make each rule's threat classification visible from a compliance/audit angle. Your own custom rules can carry their own OWASP/ATLAS ids too — neither field is read-only.
+
+**Versioning and integrity**: the pack carries an internal version counter that ships with the product — **there is no network-based auto-update channel** (a deliberate choice for air-gapped installations); a new pack version only arrives through an Apinizer upgrade. A status banner above the rule list shows:
+
+| Field | Meaning |
+|---|---|
+| **Signature pack vN installed** | The **oldest** version stamped across the installation's built-in rows — if any row has never been stamped, the installed version is treated as unknown and the banner shows a warning color |
+| **this build ships vN** | The pack version embedded in the running Apinizer build |
+| **checksum ...** | A SHA-256 digest over every built-in row (name + rule + action + category + OWASP id + ATLAS technique, order-independent) — enabled/disabled state and description are not part of the digest |
+| **N version(s) behind** | Shown when the installed version trails the version this build ships; replaced by an **Up to date** badge when they match |
+
+:::tip Your custom presets are never overwritten
+A pack upgrade only ever targets `builtIn=true` rows — a custom rule you created, even one that happens to share a name with a built-in rule, is **never** touched by it.
+:::
+
 ## Centralized Management
 
 :::info
@@ -594,5 +688,8 @@ When response masking or data-loss protection is active, the [semantic cache](/e
   </Card>
   <Card title="Reports and Analytics" icon="chart-bar" href="/en/ai-gateway/reports">
     Monitor guardrail trigger rates
+  </Card>
+  <Card title="RAG Injection" icon="search" href="/en/ai-gateway/rag-injection">
+    Configure the RAG policy that Groundedness Protection checks responses against
   </Card>
 </CardGroup>
