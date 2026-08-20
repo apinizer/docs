@@ -82,9 +82,17 @@ A JWT payload that decodes to readable JSON, by contrast, *is* inspected — tha
 - Streaming responses are not decoded chunk by chunk; the buffered scan path is covered.
 - A failed decode never rejects the request: the scan of the original text has already run, and decoding only widens coverage. Sending deliberately malformed base64 cannot be used to force a rejection.
 
-### Turning it on today
+### Turning It On From the Screen
 
-In this release the setting is not yet exposed in the management UI. Enable it through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `decodeEncodedContent` to `true` in the policy JSON. UI support is follow-up work.
+All four guardrails (Personal Data Masking, Prompt Protection, Data-Loss Protection, Off-Topic Protection) carry a **Decode Encoded Content** switch on their policy screen:
+
+| Guardrail | Where the switch lives |
+|---|---|
+| Personal Data Masking | **Mask Settings** section |
+| Data-Loss Protection (DLP) | **General Information** section |
+| Prompt Protection / Off-Topic Protection | **Content Scope** section |
+
+Turn it on, save the policy, and click **Deploy**. The same setting is also reachable through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `decodeEncodedContent` to `true` in the policy JSON.
 
 ## Message Role Scope
 
@@ -120,9 +128,9 @@ The mode switch changes not just what's in scope but the **size** of the text go
 
 These three switches apply only to the AI-proxy arm that reads the OpenAI/Anthropic `messages` array (and, for Prompt Protection, the Anthropic `system` field). The same policy attached to an [MCP Gateway](/en/ai-gateway/mcp-gateway) or [A2A Gateway](/en/ai-gateway/a2a-gateway) scans that protocol's own content shape (JSON-RPC arguments / `parts[]`) instead, and these switches have no effect there.
 
-### Turning It On Today
+### Turning It On From the Screen
 
-None of the three fields is exposed in the management UI yet. Enable them the same way as `decodeEncodedContent` above, through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `includeSystemPrompts` / `includeAssistantPrompts` / `includeToolPrompts` in the policy JSON.
+Prompt Protection and Off-Topic Protection carry three switches in the same **Content Scope** section as the **Decode Encoded Content** switch above: **Include System Messages**, **Include Assistant Messages**, **Include Tool Messages**. The same settings are also reachable through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `includeSystemPrompts` / `includeAssistantPrompts` / `includeToolPrompts` in the policy JSON.
 
 ## Personal-Data Types
 
@@ -301,7 +309,7 @@ Topic embeddings — for both lists — are computed once and cached, not re-emb
 
 ## External Provider Guardrails
 
-Two of the seven guardrails — **Prompt Protection** and **Off-Topic Protection** — can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. The other five guardrails (Personal Data Masking, Data-Loss Protection, Retry-Storm Protection, Oversized Protection, Context-Integrity Protection) do not have this option.
+**Prompt Protection** and **Off-Topic Protection** can call out to an external, LLM-based judge alongside (or instead of) their own built-in check: the regex rules for Prompt Protection, the embedding-similarity comparison for Off-Topic Protection. **Personal Data Masking** and **Data-Loss Protection** can use the same `llm-judge` adapter too, and additionally offer an adapter type of their own (`http-dlp`) that connects to your organization's own vendor-neutral HTTP service; these two carry some different rules for their external-provider behavior, covered separately in [External DLP Integration](#external-dlp-integration) below. Retry-Storm Protection, Oversized Protection, and Context-Integrity Protection have no external-provider option.
 
 Today, the only supported external judge is an **LLM judge** — an existing [LLM Provider](/en/ai-gateway/llm-providers) connection you already use elsewhere in the AI Gateway, called with a chat-completion request and asked for a safety (or topic-relevance) verdict. This uses your existing connection; there's no separate credential or connection type to set up.
 
@@ -395,6 +403,104 @@ Apinizer never writes the judge's raw response, the rendered prompt, or the unde
 ### Observability
 
 The [Guardrail Hits report](/en/ai-gateway/reports#security-and-guardrails-tab) breaks results down by provider (the built-in check or the external judge) and by verdict (blocked, timed out, errored, or skipped due to misconfiguration) — safe verdicts aren't included, since the report exists to surface what triggered, not every evaluation that passed. The Observe-Only comparison described above is metric-only and is not part of this report.
+
+## External DLP Integration {#external-dlp-integration}
+
+Personal Data Masking and Data-Loss Protection can, alongside their built-in (regex-based) rule list, ask an external provider for a verdict — either the same `llm-judge` judge described in [External Provider Guardrails](#external-provider-guardrails) above, **or** an adapter type of their own (`http-dlp`) that connects to your organization's **own external DLP / content-protection service**: not a general-purpose LLM, but a vendor-neutral HTTP service you write yourself or already operate.
+
+### Evaluation Engine {#external-dlp-evaluation-engine}
+
+The same three engine options apply here:
+
+| Evaluation Engine | Behavior |
+|---|---|
+| **Built-in only** (default) | Only the rule list runs; no external call is made |
+| **Built-in + External provider** | Both run; a built-in **Block** match short-circuits the external call (it is never made); the external service is called only when there is no built-in match |
+| **External provider only** | Only the external service is evaluated; the rule list is ignored even if it has entries |
+
+:::warning On Personal Data Masking, "External Provider Only" Means No Masking
+Personal Data Masking's normal job is masking. With **External provider only** selected, the rule list is disabled entirely — the policy no longer **masks** anything; it only blocks or passes the request based on the external service's verdict. Use **Built-in + External provider** if you want masking behavior preserved.
+:::
+
+Whenever the external service returns an **unsafe** verdict, the request is **blocked** — even on Data-Loss Protection, this is a block, not a mask: the external judge can only say safe or unsafe, never "mask this".
+
+### Adapter Type: LLM Judge or HTTP DLP Service {#external-dlp-adapter-type}
+
+Once the engine is set to anything other than Built-in, you separately choose which **adapter** gets called:
+
+| Adapter | What it does |
+|---|---|
+| **LLM Judge** (`llm-judge`) | The **same adapter** described for Prompt Protection and Off-Topic Protection in [External Provider Guardrails](#external-provider-guardrails) above — the LLM provider reference, judge model name, prompt template (Native passthrough / Template mode), JSON mode, and max output tokens are all configured the same way. Everything in that section (including the reasoning-model warning) applies here too. |
+| **HTTP DLP Service** (`http-dlp`) | Connects to your organization's own vendor-neutral HTTP service, following the fixed contract in [Connection and Request/Response Contract](#external-dlp-connection-contract) below. |
+
+The adapter choice only changes **who produces the verdict**. The engine options (Built-in only / Built-in + External provider / External provider only), the External Failure Mode (Block/Allow on failure), and the three behavioral differences described just below are identical for both adapters.
+
+### Three Differences from Prompt/Off-Topic Protection
+
+This integration shares the same underlying plumbing as [External Provider Guardrails](#external-provider-guardrails), but behaves differently in three ways:
+
+1. **Execution mode is always Inline.** The Inline / Asynchronous / Observe-Only choice available on Prompt Protection and Off-Topic Protection does **not** exist here — the external call always runs synchronously, on the thread handling the request; the adapter's own connection timeout is the only bound.
+2. **The external service is never called for streamed responses.** Chunk-by-chunk scanning always uses the built-in rule list only, regardless of the engine setting. The practical consequence: a policy configured with **External provider only** scans nothing at all (neither built-in nor external) on a streamed response — on non-streamed (unary) requests and responses the external service still runs normally.
+3. **A configuration inconsistency is handled separately from a runtime failure.** If the engine wants an external provider but the adapter is undefined or the connection reference can't be resolved, that's a save/deploy-time error — the engine automatically degrades to Built-in, and the failure behavior below does **not** apply. That failure behavior only kicks in once the external call is actually attempted and errors out or times out.
+
+### Failure Behavior {#external-dlp-failure-behavior}
+
+If the external call errors out or times out:
+
+| Setting | Behavior |
+|---|---|
+| **Block on failure** (default) | The request is blocked |
+| **Allow on failure** | The request continues; this is always recorded visibly — there is no silent fail-open |
+
+### Connection and Request/Response Contract {#external-dlp-connection-contract}
+
+This contract is for the **HTTP DLP Service** adapter only — when LLM Judge is selected, the fields in [External Provider Guardrails](#external-provider-guardrails) above apply instead.
+
+The external service connection is set up through an existing [Webhook connector](/en/integrations/connection-management/webhook) — no separate connection type is introduced for this; the address, HTTP method, headers (including authentication), timeout, and TLS settings all come from that connection.
+
+The fixed contract your own service must follow is:
+
+**Request** (sent by Apinizer, `application/json`):
+
+```json
+{
+  "text": "<text to scan, truncated to the configured max input characters>",
+  "direction": "REQUEST" | "RESPONSE",
+  "apiType": "AI" | "MCP" | "A2A" | null,
+  "apiProxyName": "<proxy name>" | null,
+  "apiProxyId": "<proxy id>" | null,
+  "correlationId": "<request correlation id>" | null
+}
+```
+
+**Response** (your service must return HTTP 2xx with this body):
+
+```json
+{
+  "safe": true,
+  "categories": ["secret-key"],
+  "score": 0.87
+}
+```
+
+- Exactly **one** of `safe` (boolean) or its inverse `flagged` (boolean) must be present — sending both, or neither, makes the call count as failed.
+- `categories` is optional, taken as an array of strings.
+- `score` is optional and taken only when it is a number between 0 and 1; otherwise it is ignored.
+- Any non-2xx status code, an invalid or missing JSON body, or a missing/non-boolean `safe`/`flagged` field counts the call as **failed** and triggers the Failure Behavior setting above. There is no silent safe/unsafe assumption.
+
+The default timeout is **2000 ms** and the default max input characters is **8000**; both are configurable on the policy screen.
+
+### Turning It On From the Screen {#external-dlp-turning-it-on}
+
+Personal Data Masking and Data-Loss Protection policy screens carry an **External Provider** section in the same place as the [External Provider Guardrails](#external-provider-guardrails) section described above:
+
+| Field | Corresponds to |
+|---|---|
+| **Evaluation Engine** | The three options in the [Evaluation Engine](#external-dlp-evaluation-engine) table above |
+| **External Failure Mode** | Shown once the engine is set to anything other than Built-in; the Block/Allow on failure choice from [Failure Behavior](#external-dlp-failure-behavior) |
+| **Adapter Type** | The LLM Judge/HTTP DLP Service choice from the [Adapter Type](#external-dlp-adapter-type) table above; depending on the choice, an LLM provider reference or a Webhook connection, timeout, and max input characters fields appear |
+
+Fill in the section, save the policy, and click **Deploy**. The same settings are also reachable through the APIops REST API ([API Reference: AI Gateway](/api-reference/ai-gateway)) or by setting `engine`, `failMode`, and `externalGuardrail` in the policy JSON.
 
 ## Adding a Guardrail
 

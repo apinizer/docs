@@ -103,6 +103,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/raporlar",
+        "ai-gateway/ai-varlik-envanteri",
         "ai-gateway/izleme-ve-tekrar-oynatma",
         "ai-gateway/acik-telemetri",
         "ai-gateway/erisim-kontrolu-rbac"

@@ -103,6 +103,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/reports",
+        "ai-gateway/ai-asset-inventory",
         "ai-gateway/tracing-and-replay",
         "ai-gateway/opentelemetry",
         "ai-gateway/access-control-rbac"
