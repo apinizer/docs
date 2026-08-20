@@ -191,6 +191,20 @@ Data-loss protection ships with ready-made patterns for common secret formats, a
 For streamed responses, data-loss protection scans the response in chunk groups. Once a match triggers a block in one chunk group, every remaining chunk group in that stream is masked as well — this keeps a secret that happens to be split across chunk boundaries from leaking.
 :::
 
+### Built-in Pattern Versioning {#dlp-builtin-pattern-versioning}
+
+The built-in patterns above ship as a versioned, checksummed package rather than being fixed in the product's code — in the same spirit as Prompt Protection's own signature pack described further down this page, applied here to secret-detection patterns instead. The package's integrity is verified automatically as part of an Apinizer upgrade: if a pattern in the package doesn't match its recorded checksum — a sign the package was corrupted or tampered with — **none of its patterns are applied**, and a warning is written to the application logs rather than the mismatch failing silently or blocking the upgrade. Patterns already in effect from a previously verified package are left exactly as they are.
+
+A verified package only ever touches the built-in patterns Apinizer itself ships — a custom pattern you added under your own name is never overwritten or removed by it, no matter what changes in a later package.
+
+:::note No on-screen version indicator yet
+Unlike Prompt Protection's signature-pack banner (installed version, checksum, an "up to date" badge), the Data-Loss Protection pattern list does not show a package version on screen today — verification happens automatically in the background during an upgrade, and a failure is visible only in the application logs.
+:::
+
+### Matching Stays Fast as Your Pattern List Grows
+
+Data-loss protection is built so that scanning latency doesn't grow linearly with the size of your pattern list, whether the extra patterns are built-in or your own: a cheap internal pre-filter runs ahead of the more expensive pattern checks to narrow down which patterns are even worth evaluating against a given request or response. This is purely an internal performance mechanism — it never changes which patterns match, what action they take, or the result you see; there is nothing to configure for it today.
+
 ## Writing and Testing Patterns
 
 Patterns use **Java regular-expression** syntax (`java.util.regex.Pattern`) — that is the engine the gateway matches with. It is not identical to JavaScript or PCRE: lookbehind must be fixed-width, named groups are written `(?<name>...)`, and Unicode classes such as `\p{L}` are supported.
@@ -239,11 +253,35 @@ Beyond the fixed and partial mask shapes above, two further shapes replace a mat
 
 Both shapes are **consistent within one request/response cycle**: the same original value always maps to the same placeholder or synthetic value everywhere it appears in that exchange, including inside a tool call and its result. They are **not** consistent, and deliberately so, **across two different requests** — the same real value maps to a different placeholder or synthetic value each time, so a value observed in one conversation can't be correlated back to the same value in another.
 
-:::warning No Way Back
-Both shapes are one-directional. Apinizer never stores a mapping from the placeholder or synthetic value back to the original — there is no "reveal" action for these two shapes, unlike Encrypt below. Choose Mask or Anonymize only for data you don't need to reconstruct later.
+:::warning One-Directional by Default
+Both shapes are one-directional by default. Apinizer does not store a mapping from the placeholder or synthetic value back to the original unless you deliberately turn on reversible pseudonymization for that rule — see [Reversible Pseudonymization (Unmask)](#reversible-pseudonymization-unmask) below. With the default setting, choose Mask or Anonymize only for data you don't need to reconstruct later.
 :::
 
 Each request tracks a bounded number of distinct values for this purpose; if that ceiling is reached, any further new value falls back to the default **Replace entirely** shape rather than failing the request — a value already assigned earlier in the same exchange keeps working normally.
+
+### Reversible Pseudonymization (Unmask) {#reversible-pseudonymization-unmask}
+
+Sequential Placeholder and Synthetic Value can each optionally be made reversible, so an authorized operator — or, in one mode, an authorized caller of the AI proxy itself — can recover the original value later without permanently exposing it in every response. This is off by default, and it applies to the **whole policy**, not to one masking rule at a time — set it on the policy screen's **Re-identification (Unmask)** section, or through the policy JSON's `unmaskMode` field or the APIops REST API. Three modes are available:
+
+| Mode | Behavior |
+|---|---|
+| **None** (default) | Today's behavior, unchanged — nothing is stored, there is no way back. |
+| **Automatic (Response Inline)** | The reversible storage described below is armed, **and** every pseudonym that reappears in the response is swapped back to its original value automatically, before the response reaches the caller — but only for a caller whose role is on the policy's **Authorized Caller Roles** list below, only on a non-streamed response, and outside a zero-retention profile (see the note further down). |
+| **Unmask API** | Reversible storage is armed; an authorized Manager operator resolves a placeholder or synthetic value back to the original afterwards, through the Management API. |
+
+**Authorized Caller Roles.** Automatic mode needs at least one entry here — the gateway-caller roles (the same scope values a credential is granted) allowed to receive the original value back automatically. This list is **deny-by-default**: leaving it empty means nobody is restored even with Automatic mode selected — the response still ships with the placeholder or synthetic value in it, and the policy screen visibly warns about the empty list.
+
+**Where the original value is kept.** The original value is never written to a log, a trace, or any durable database. It exists only as an entry in the distributed cache, encrypted with AES-GCM, keyed to the request's trace ID, the rule, and the exact placeholder or synthetic text that was produced. That entry expires after **one hour** — once it does, the original value cannot be recovered by anyone, including Apinizer support.
+
+**Automatic restoration is audited before it happens, not after.** Every automatic restoration writes an audit record first; only once that write succeeds is the original value substituted into the response. If the audit write itself fails, restoration is skipped and the response ships with the placeholder or synthetic value still in it — an automatic restoration never happens without a matching audit record.
+
+**When automatic restoration doesn't run.** Besides an unauthorized caller role, automatic restoration is skipped — and the response ships exactly as if Automatic mode were off — on a **streamed** response (not supported in this version) and on an API proxy running under any non-Standard [data-retention profile](/en/admin/system-settings/system-settings-and-limits#data-retention-profile) — **No Payload** or **No Persist**, either one. Each skip is recorded in the application log with its reason; there is no separate on-screen indicator for it today.
+
+**Resolving a value manually.** An authorized operator calls `POST /api/ai-pii-unmask` with the project id, the request's trace ID (see [Tracing and Replay](/en/ai-gateway/tracing-and-replay)), the rule's identifier, and the exact placeholder or synthetic text as recorded in the traffic. Access requires the AI Development **Manage** permission on that project — denied by default — and every attempt is written to the audit trail, whether it succeeds, is denied, or the entry has already expired. The recovered value itself is never written to that audit trail, only who asked, when, and the outcome. Both the automatic path above and this manual path write to the **same** audit trail.
+
+:::info Retention profile and reversible storage
+Turning on Automatic or Unmask API mode arms the reversible cache entry regardless of the proxy's [data-retention profile](/en/admin/system-settings/system-settings-and-limits#data-retention-profile) — a **No Payload** or **No Persist** proxy does not by itself stop the reverse mapping from being written. What a non-Standard profile changes is Automatic mode's own automatic-substitution step: as noted above, that step is skipped outright there, so the response still ships masked even for an otherwise-authorized caller — the mapping remains recoverable afterwards through the Unmask API, within its TTL. If your installation runs under No Payload or No Persist deliberately and you don't want reversible storage of any kind, leave `unmaskMode` at **None**.
+:::
 
 ### Reading a Value Back
 
@@ -328,6 +366,34 @@ If the buffer exceeds 65,536 characters (an unusually long streamed response), t
 The stream's raw chunks continue to reach the client **in real time** — this buffering mechanism never withholds or rewrites a chunk. When a Block-configured Off-Topic Protection finds an off-topic or denied match at the end of the stream, that decision is recorded in [tracing and the Security and Guardrails report](/en/ai-gateway/reports) — but by that point the stream has already completed and the content has already reached the client. **A Block verdict cannot retract content that has already been streamed.**
 
 In short: on a Block-configured Off-Topic Protection, nothing is blocked in a streamed response until it has **already finished** reaching the client — a violation only becomes visible in the audit trail **after** the stream ends. Non-streamed (unary) responses have no such limitation — a Block verdict there is applied before the response ever reaches the client.
+:::
+
+## Content Safety Categories (AILuminate) {#content-safety-categories-ailuminate}
+
+Off-Topic Protection's Allowed and Denied Topics are free text — you write your own topic descriptions. As a starting point for content-safety risks specifically, Apinizer ships a **read-only catalog of 14 hazard categories** taken from the [MLCommons AILuminate](https://mlcommons.org/ailuminate/) v1.1 taxonomy, grouped the way the standard itself groups them:
+
+| Group | Categories |
+|---|---|
+| **Physical** (5) | Violent Crimes, Sex-Related Crimes, Child Sexual Exploitation, Suicide & Self-Harm, Indiscriminate Weapons (CBRNE) |
+| **Non-Physical** (5) | Intellectual Property Violations, Defamation, Non-Violent Crimes, Hate, Privacy |
+| **Contextual** (4) | Specialized Advice — Elections, Specialized Advice — Financial, Specialized Advice — Health, Sexual Content — Pornographic |
+
+Find the catalog on the **Guardrails** hub's **Content Safety (AILuminate)** tab. Each entry shows its category name, group, and a short definition, plus — where one exists — the Llama Guard 3 safety code it corresponds to. This is useful when your [external judge](#external-provider-guardrails) is Llama Guard or a model trained on the same taxonomy: its verdict comes back as an `S`-code, and this catalog is where you trace that code back to the matching AILuminate category. `S6` ("Specialized Advice") covers both the Financial and Health categories here; every other code maps one-to-one.
+
+### Not a Bound Preset {#content-safety-not-bound}
+
+Unlike the personal-data, prompt-guard and data-loss protection presets described earlier on this page, this catalog has no "Add from Preset" button and no catalog-bound rule state — there is nothing here for a policy to bind to or fall out of sync with. Each entry carries its own **Copy** action: click it to copy that category's definition text to your clipboard, then paste it into Off-Topic Protection's Denied Topics list yourself. There is no create, edit, or delete action on this catalog, for the same reason Prompt Protection's signature pack is read-only: rewording a standard taxonomy's categories would break the meaning the standard depends on. If you want your own wording for a topic, write it directly into the Denied Topics list instead of starting from this catalog.
+
+### GDPR Article 9 Marker {#content-safety-gdpr-article-9}
+
+Four of the fourteen categories — Hate, the Elections- and Health-related Specialized Advice categories, and Sexual Content — are flagged as touching a GDPR Article 9 **special category of personal data** (health data, political opinions, and so on). This flag exists because those categories are open-ended, contextual concepts: "does this text reveal someone's health condition" isn't something a fixed regular expression can reliably decide, so coverage for it belongs to this semantic (embedding-similarity) layer rather than the pattern-based Personal Data Masking or Data-Loss Protection guardrails above, which only ever match a fixed structural or literal shape.
+
+:::info Attribution
+This catalog reproduces category names and definitions from the MLCommons AILuminate v1.1 hazard taxonomy, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See [mlcommons.org/ailuminate](https://mlcommons.org/ailuminate/) for the source standard.
+:::
+
+:::note No published accuracy numbers
+Apinizer does not publish false-positive/false-negative rates for this catalog. Measuring that reliably needs a labeled, multi-lingual corpus specific to your own traffic — a number calibrated on someone else's data would not describe your false-positive rate.
 :::
 
 ## External Provider Guardrails
