@@ -134,6 +134,52 @@ The client interface is always OpenAI-format — there is no separate Anthropic 
 
 For a full step-by-step walkthrough — connecting a provider and sending your first request — see the [AI Gateway Quickstart](/en/ai-gateway/quickstart).
 
+## Model Discovery: GET /v1/models
+
+The gateway serves an OpenAI-compatible model-listing endpoint at `GET /v1/models`, so `client.models.list()` in the OpenAI Python SDK — and OpenAI-compatible tooling built on it, such as LangChain and LiteLLM — can discover which models are available instead of having the model name hardcoded:
+
+```python
+models = client.models.list()
+for model in models:
+    print(model.id)
+```
+
+The response body:
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "gpt-4o", "object": "model", "created": 0, "owned_by": "openai" },
+    { "id": "claude-3-5-sonnet", "object": "model", "created": 0, "owned_by": "anthropic" }
+  ]
+}
+```
+
+:::info `created` is always `0`
+Apinizer's model catalog carries no creation timestamp for a model — OpenAI SDKs parse the field but don't attach meaning to it. Extra catalog detail such as context window, pricing, and capabilities is **deliberately** left out of this response as well; the discovery endpoint isn't a surface for exposing that.
+:::
+
+### The List Is This Proxy's Serving Surface, Not the Provider Catalog
+
+The response is not the LLM provider's full catalog — it's the union of models this specific AI proxy's `aiRouting` configuration can actually serve (the primary model, plus any [primary pool](/en/ai-gateway/routing-and-failover#load-balancing-across-equal-priority-primaries), [conditional routing](/en/ai-gateway/routing-and-failover#conditional-routing), and [failover chain](/en/ai-gateway/routing-and-failover#failover-chains) entries), after three elimination checks run in order:
+
+1. A candidate whose provider connection is **not deployed or disabled** is dropped.
+2. A candidate whose model id isn't in that provider connection's own allow-list (when one is configured) is dropped.
+3. A candidate past its catalog **sunset date** is dropped — a model that would already fail with a 400 at request time isn't advertised here. A model merely flagged deprecated, with no sunset date reached, still appears.
+
+An empty result is not an error: `{"object":"list","data":[]}` with HTTP 200 is a valid response when nothing survives the checks above.
+
+This endpoint only **lists**; OpenAI's single-model retrieval endpoint (`GET /v1/models/{model_id}`, `client.models.retrieve(...)` in the SDK) is out of scope and does not match here.
+
+### Authentication and the Normal Policy Chain Still Apply
+
+Discovery is not a `.well-known`-style authentication-exempt path — the proxy's normal policy chain, including any auth policy and its **block anonymous requests** setting, runs on this request exactly as it does on any other, so an unauthenticated discovery call against a proxy with that setting on still gets a 401.
+
+:::note No Upstream Call, No Metering
+A discovery request never reaches an LLM provider, so no token or cost usage is recorded for it. The call still shows up in the Traffic report, but its usage and cost columns stay empty. The endpoint accepts `GET` only — any other method returns 405.
+:::
+
 ## Next Steps
 
 <CardGroup cols={2}>
