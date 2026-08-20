@@ -37,7 +37,7 @@ import {Accordion} from '@site/src/components/Accordion';
       </Card>
       
       <Card title="Queue and Connection Management" icon="layer-group">
-        In TCP mode, one or more persistent sockets are opened for each environment (Connection Count); log messages are queued asynchronously and sent in order — this is not a connection pool, it is a queuing model built on top of persistent socket(s). When the queue is full (whichever limit is reached first — message count or buffer memory), new messages are routed to the failover connector. Automatic reconnection is applied when the active connection closes or a write timeout occurs; stateless sending is performed in UDP mode.
+        In TCP mode, one or more persistent sockets are opened for each environment (Connection Count); log messages are queued asynchronously and sent in order — this is not a connection pool, it is a queuing model built on top of persistent socket(s). When the queue is full (whichever limit is reached first — message count or buffer memory), new messages are routed to the failover connector if one is enabled on the Syslog Connector; otherwise (the default) they are dropped. Automatic reconnection is applied when the active connection closes or a write timeout occurs; stateless sending is performed in UDP mode.
       </Card>
       
       <Card title="Authentication" icon="key">
@@ -286,7 +286,7 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
 
   <Card title="Queue Capacity" icon="list-ol">
-    **Description:** Maximum number of log messages in the TCP async send queue. Works together with the buffer memory ceiling below — whichever limit is reached first applies. When the queue is full, new messages are routed to the failover connector.  
+    **Description:** Maximum number of log messages in the TCP async send queue. Works together with the buffer memory ceiling below — whichever limit is reached first applies. When the queue is full, the message is routed to the failover connector if one is enabled; otherwise it is dropped.  
     **Default:** 10000  
     **Min:** 100 | **Max:** 1000000  
     **Unit:** messages
@@ -325,10 +325,11 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
 
   <Card title="Offer Timeout" icon="hourglass">
-    **Description:** Maximum time the sending side waits when the queue is full before giving up on that attempt and routing the message to the failover connector.  
+    **Description:** Maximum time the sending side waits when the queue is full before giving up on that attempt. The message is then routed to the failover connector if one is enabled; otherwise it is dropped.  
     **Default:** 100  
     **Min:** 0 | **Max:** 2000  
-    **Unit:** milliseconds
+    **Unit:** milliseconds  
+    **Notes:** This wait is only applied in full on a virtual thread. When the send runs on a platform thread, the effective wait is capped at **50 ms** so it cannot hold a request thread for long.
   </Card>
 
   <Card title="Batch Flush Frames" icon="repeat">
@@ -341,7 +342,7 @@ import {Accordion} from '@site/src/components/Accordion';
 
 :::note
 
-These parameters are all optional. Connections created before this release keep working exactly as they do today — no configuration change is required.
+These parameters are all optional and can be left empty. Framing, parallel connection count, and the message-count queue limit keep today's behavior when left empty. **The one exception is the Buffer Memory Ceiling**: the 64 MB limit applies by default even if the field is never filled in, so installations with large average records reach a full queue earlier than before (at 200 KB per record, 64 MB is roughly 327 messages, where the old count limit was 10,000). Raise the ceiling deliberately on those installations.
 
 :::
 
@@ -588,13 +589,13 @@ In this step, you can use the **Syslog Connection** connection you created in di
 
 :::info
 
-The settings below matter most for API proxies with large payloads (audit trails, batch responses, stack traces) or high request volume. They are optional — a connection that never touches them keeps behaving exactly as it does today.
+The settings below matter most for API proxies with large payloads (audit trails, batch responses, stack traces) or high request volume. They are optional, but note that the Buffer Memory Ceiling applies at its 64 MB default even on connections that never set it.
 
 :::
 
 ### Why the Buffer Has a Byte Ceiling
 
-Before this release, the send queue was limited only by message count (Queue Capacity, default 10,000). For API traffic records that average around 200 KB, a full queue of that size could hold close to 2 GB in memory, and messages that wait there for a while tend to get promoted to a longer-lived memory generation, which then triggers heavier garbage collection. The Buffer Memory Ceiling parameter bounds the same queue by bytes (default 64 MB) so it can no longer grow unbounded on large-payload traffic. The two limits work together — whichever is reached first applies, and once the queue is full, new messages are routed to the failover connector rather than dropped.
+Before this release, the send queue was limited only by message count (Queue Capacity, default 10,000). For API traffic records that average around 200 KB, a full queue of that size could hold close to 2 GB in memory, and messages that wait there for a while tend to get promoted to a longer-lived memory generation, which then triggers heavier garbage collection. The Buffer Memory Ceiling parameter bounds the same queue by bytes (default 64 MB) so it can no longer grow unbounded on large-payload traffic. The two limits work together — whichever is reached first applies. Once the queue is full, new messages are routed to the failover connector if one is enabled on the Syslog Connector; failover is disabled by default, and without it those messages are dropped with a warning logged roughly every 30 seconds.
 
 ### Keeping Large Records Intact
 
@@ -623,6 +624,12 @@ global(oversizemsg.report="on")
 - `maxFrameSize` is only recognized by rsyslog 8.1905 and later; older versions reject it with `parameter maxFrameSize not known`, so confirm the server version before rolling out this configuration.
 - `oversizemsg.report="on"` makes rsyslog log records that still exceed the limit instead of dropping them without a trace.
 - rsyslog escapes line breaks inside the message body with its own control-character sequence by default, which shows up as `#012` on the SIEM side. Set `global(parser.escapeControlCharactersOnReceive="off")` if the original line breaks should be preserved as-is.
+
+:::tip
+
+Define a failover connector on the Syslog Connector. Failover is **disabled by default**; without it, records are dropped when the queue fills up or the rsyslog server becomes unreachable, and a batched warning is logged roughly every 30 seconds. With failover enabled, those records keep flowing through the backup connector instead.
+
+:::
 
 ## Best Practices
 
@@ -926,7 +933,7 @@ A multi-line JSON or stack-trace record is being cut into several syslog events,
       </Step>
 
       <Step title="Buffer and Queue Limits">
-        Check whether **Buffer Memory Ceiling** or **Queue Capacity** is being reached under peak load, sending messages to the failover connector.
+        Check whether **Buffer Memory Ceiling** or **Queue Capacity** is being reached under peak load. Messages that no longer fit go to the failover connector if one is enabled, and are dropped otherwise.
       </Step>
     </Steps>
   </Accordion>
@@ -1007,7 +1014,7 @@ Several reasons may exist:
   <Accordion title="Do I need to reconfigure existing Syslog connections after upgrading?">
     :::info
 
-No. Framing type, parallel connection count, buffer memory ceiling, offer timeout, and batch flush frames all default to today's behavior; change them only if you need the new large-record or high-volume handling.
+For most installations, no: framing type, parallel connection count, offer timeout, and batch flush frames keep today's behavior when left empty. The **Buffer Memory Ceiling**, however, applies its 64 MB default even when the field is never set, so installations with large average records (say 200 KB) reach a full queue earlier than before. Review that value after upgrading if this describes your deployment.
 
 :::
   </Accordion>

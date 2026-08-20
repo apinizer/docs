@@ -37,7 +37,7 @@ import {Accordion} from '@site/src/components/Accordion';
       </Card>
       
       <Card title="Kuyruk ve Bağlantı Yönetimi" icon="layer-group">
-        TCP modunda her ortam için bir veya daha fazla kalıcı soket açılır (Bağlantı Sayısı); log mesajları asenkron olarak kuyruğa alınır ve sırayla gönderilir — bu bir connection pool değil, kalıcı soket(ler) üzerinden çalışan kuyruklama modelidir. Kuyruk (mesaj adedi veya bellek tavanından hangisi önce dolarsa) dolduğunda yeni mesajlar failover connector'a yönlendirilir. Aktif bağlantı kapandığında veya yazma zamanaşımı aşıldığında otomatik yeniden bağlanma uygulanır; UDP modunda stateless gönderim yapılır.
+        TCP modunda her ortam için bir veya daha fazla kalıcı soket açılır (Bağlantı Sayısı); log mesajları asenkron olarak kuyruğa alınır ve sırayla gönderilir — bu bir connection pool değil, kalıcı soket(ler) üzerinden çalışan kuyruklama modelidir. Kuyruk (mesaj adedi veya bellek tavanından hangisi önce dolarsa) dolduğunda yeni mesajlar, Syslog Connector tanımında failover connector etkinleştirilmişse oraya yönlendirilir; etkin değilse (varsayılan) düşürülür. Aktif bağlantı kapandığında veya yazma zamanaşımı aşıldığında otomatik yeniden bağlanma uygulanır; UDP modunda stateless gönderim yapılır.
       </Card>
       
       <Card title="Kimlik Doğrulama" icon="key">
@@ -296,7 +296,7 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
 
   <Card title="Kuyruk Kapasitesi" icon="list-ol">
-    **Açıklama:** TCP asenkron gönderim kuyruğundaki maksimum log mesajı adedi. Artık Bellek Tavanı ile birlikte çalışan ikincil bir sınırdır — ikisinden hangisi önce dolarsa kuyruk o noktada dolu kabul edilir ve yeni mesajlar failover connector'a yönlendirilir.  
+    **Açıklama:** TCP asenkron gönderim kuyruğundaki maksimum log mesajı adedi. Artık Bellek Tavanı ile birlikte çalışan ikincil bir sınırdır — ikisinden hangisi önce dolarsa kuyruk o noktada dolu kabul edilir. Bu durumda mesaj, failover connector etkinse oraya yönlendirilir; etkin değilse düşürülür.  
     **Varsayılan:** 10000  
     **Min:** 100 | **Max:** 1000000  
     **Birim:** mesaj
@@ -325,10 +325,11 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
 
   <Card title="Kuyruğa Yazma Bekleme Süresi" icon="timer">
-    **Açıklama:** Kuyruk doluyken gönderen tarafın bekleyeceği en fazla süre. Süre dolduğunda mesaj kaybedilmez, failover connector'a yönlendirilir.  
+    **Açıklama:** Kuyruk doluyken gönderen tarafın bekleyeceği en fazla süre. Süre dolduğunda mesaj, failover connector etkinse oraya yönlendirilir; etkin değilse düşürülür.  
     **Varsayılan:** 100  
     **Min:** 0 | **Max:** 2000  
-    **Birim:** milisaniye
+    **Birim:** milisaniye  
+    **Notlar:** Bu süre yalnızca sanal thread (virtual thread) üzerinde tam olarak uygulanır. Gönderim bir platform thread'i üzerinde çalışıyorsa istek thread'ini uzun süre tutmamak için etkin bekleme **50 ms**'e sınırlanır.
   </Card>
 
   <Card title="Toplu Yazma Çerçevesi" icon="rows-3">
@@ -343,11 +344,13 @@ import {Accordion} from '@site/src/components/Accordion';
 
 :::info
 
-Yukarıdaki yeni parametrelerin tamamı opsiyoneldir; boş bırakıldığında bugünkü davranış aynen korunur ve mevcut Syslog bağlantılarında herhangi bir değişiklik yapmanız gerekmez.
+Yeni parametrelerin tamamı opsiyoneldir ve boş bırakılabilir. Çerçeveleme, paralel bağlantı sayısı ve kuyruk adedi tarafında boş bırakıldığında bugünkü davranış korunur. **Tek istisna Bellek Tavanıdır**: bu alan hiç doldurulmasa da 64 MB'lık üst sınır varsayılan olarak uygulanır — ortalama kayıt boyutu büyük olan kurulumlarda kuyruk, eskisine göre daha erken dolu duruma gelir (200 KB'lık kayıtlarda 64 MB ≈ 327 mesaj, eski adet sınırı ise 10.000 idi). Bu kurulumlarda Bellek Tavanını bilinçli olarak yükseltin.
 
 :::
 
-Ortalama API trafik kaydı boyutu büyüdükçe (örneğin 200 KB civarına çıktığında), gönderim kuyruğunun yalnızca mesaj *sayısıyla* sınırlı olması pratikte çok büyük bir bellek kullanımına karşılık gelebilir; kuyrukta uzun süre bekleyen kayıtlar JVM'de yoğun çöp toplamayı tetikleyebilir. Bellek Tavanı parametresi, kuyruğa bayt cinsinden bir üst sınır getirerek bu riski öngörülebilir bir seviyede (varsayılan 64 MB) tutar. Kuyruk Kapasitesi ve Bellek Tavanı birlikte çalışır: ikisinden hangisi önce dolarsa kuyruk o noktada dolu kabul edilir.
+### Neden Tampon Bellek Tavanı Var
+
+Önceki sürümlerde gönderim kuyruğu yalnızca mesaj *sayısıyla* sınırlıydı (Kuyruk Kapasitesi, varsayılan 10.000). Ortalama 200 KB büyüklüğündeki API trafik kayıtlarında dolu bir kuyruk bu durumda yaklaşık **2 GB** bellek anlamına gelir; ayrıca kuyrukta uzun süre bekleyen kayıtlar JVM'de daha uzun ömürlü bir bellek kuşağına terfi ederek yoğun çöp toplamayı (garbage collection) tetikler. Bellek Tavanı parametresi aynı kuyruğa bayt cinsinden bir üst sınır getirerek (varsayılan 64 MB) bu riski öngörülebilir bir seviyede tutar. Kuyruk Kapasitesi ve Bellek Tavanı birlikte çalışır: ikisinden hangisi önce dolarsa kuyruk o noktada dolu kabul edilir.
 
 ### Uzunluk Önekli Çerçeveleme (OCTET_COUNTING)
 
@@ -378,7 +381,7 @@ global(maxMessageSize="2097152" oversizemsg.report="on")
 
 :::tip
 
-Bağlantı tanımında bir yedek (failover) connector belirlemeniz önerilir: kuyruk dolduğunda veya rsyslog sunucusuna erişilemediğinde kayıtlar bu bağlayıcı üzerinden aktarılmaya devam eder, kayıt kaybı yaşanmaz.
+Syslog Connector tanımında bir yedek (failover) connector belirlemeniz önerilir. Failover **varsayılan olarak kapalıdır**; etkinleştirilmediğinde kuyruk dolduğunda veya rsyslog sunucusuna erişilemediğinde kayıtlar düşürülür ve yaklaşık 30 saniyede bir toplu uyarı loglanır. Failover etkinleştirildiğinde bu kayıtlar yedek bağlayıcı üzerinden aktarılmaya devam eder.
 
 :::
 
@@ -916,6 +919,32 @@ Integration/Connector adımında farklı connection seçili olabilir, adım yanl
     </Steps>
   </Accordion>
 
+  <Accordion title="Büyük Kayıtlar Bölünerek veya Kırpılarak Geliyor">
+    :::warning
+
+Çok satırlı bir JSON veya stack trace kaydı syslog tarafında birden fazla olaya bölünüyor ya da uzun kayıtlar hiç görünmüyor.
+
+:::
+
+    <Steps>
+      <Step title="Çerçeveleme Tipi">
+        Satır sonu içeren kayıtlar için **Çerçeveleme (Framing) Tipi** değerinin `OCTET_COUNTING` olduğunu (veya `AUTO` ile birlikte mesaj formatının `RFC_5425` seçildiğini) doğrulayın. Çerçeveleme yalnızca TCP modunda geçerlidir; UDP'de bu ayar dikkate alınmaz.
+      </Step>
+
+      <Step title="rsyslog Çerçeve Boyutu">
+        Syslog sunucusunda `maxFrameSize` ve `global(maxMessageSize=...)` değerlerini en büyük kaydınızı rahatça aşacak şekilde yükseltin.
+      </Step>
+
+      <Step title="rsyslog Sürümü">
+        Syslog sunucusunun rsyslog 8.1905 veya sonraki bir sürümü çalıştırdığını doğrulayın; `maxFrameSize` daha eski sürümlerde tanınmaz.
+      </Step>
+
+      <Step title="Tampon ve Kuyruk Sınırları">
+        Yoğun yük altında **Bellek Tavanı** veya **Kuyruk Kapasitesi** sınırına ulaşılıp ulaşılmadığını kontrol edin. Sığmayan mesajlar, failover connector etkinse oraya yönlendirilir; etkin değilse düşürülür.
+      </Step>
+    </Steps>
+  </Accordion>
+
 
 ## Sık Sorulan Sorular (SSS)
 
@@ -988,6 +1017,22 @@ Birkaç neden olabilir:
     3. Connection deploy edilmemiş olabilir
     4. Integration Flow henüz redeploy edilmemiş olabilir
   </Accordion>
+
+  <Accordion title="Sürüm yükseltmesinden sonra mevcut Syslog connection'larını yeniden yapılandırmam gerekir mi?">
+    :::info
+
+Çoğu kurulumda hayır: çerçeveleme tipi, paralel bağlantı sayısı, kuyruğa yazma bekleme süresi ve toplu yazma çerçevesi boş bırakıldığında bugünkü davranışı korur. Ancak **Bellek Tavanı** alanı doldurulmasa da 64 MB'lık üst sınır uygulanır; ortalama kayıt boyutu büyük olan (örneğin 200 KB) kurulumlarda kuyruk eskisine göre daha erken dolar. Böyle bir kurulumunuz varsa yükseltmeden sonra Bellek Tavanı değerini gözden geçirin.
+
+:::
+  </Accordion>
+
+  <Accordion title="Büyük kayıtların birden fazla syslog olayına bölünmediğinden nasıl emin olurum?">
+    :::tip
+
+Syslog Message Format olarak `RFC_5425` seçin (veya Çerçeveleme Tipi'ni açıkça `OCTET_COUNTING` yapın) ve alıcı rsyslog sunucusundaki `maxFrameSize` ile `maxMessageSize` değerlerinin en büyük kaydınızı karşılayacak şekilde yükseltildiğinden emin olun.
+
+:::
+  </Accordion>
   
 
 
@@ -1002,5 +1047,8 @@ Birkaç neden olabilir:
   </Card>
   <Card title="Logback Connector" icon="file-lines" href="/tr/integrations/konnektorler/logback-konnektor">
     Logback log kayıtları
+  </Card>
+  <Card title="Trafik Loglarının Syslog'a Aktarılması" icon="file-lines" href="/tr/operations/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma">
+    Yüksek hacimli trafik logu aktarımı için öneriler
   </Card>
 </CardGroup>
