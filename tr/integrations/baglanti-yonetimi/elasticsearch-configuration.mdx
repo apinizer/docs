@@ -33,15 +33,15 @@ Rollover, template oluşturma ve policy senkronizasyonu gibi bakım görevlerini
 
 **Bağlantı Başlatma:** Integration Flow veya Connector içerisinden Elasticsearch Connection (Bağlantı) talep edildiğinde, sistem yapılandırılmış connection parametrelerini okur.
 
-**Connection Pool Yönetimi:** HTTP client, `ioThreads`, `maxConnectionPerHost` ve `maxConnectionTotal` değerlerine göre pool'dan uygun bağlantıyı seçer veya yenisini açar.
+**Connection Pool Yönetimi:** HTTP client, kod içinde sabit değerlerle çalışan bir bağlantı havuzu kullanır (host başına 20 eşzamanlı bağlantı, toplamda 20 × host sayısı); bu havuz büyüklüğü connection formundan ayarlanamaz.
 
 **Kimlik Doğrulama:** Basic Authentication sağlandığında kullanıcı adı/şifre gönderilir; aksi halde anonim erişim veya IP tabanlı güvenlik kullanılır.
 
-**Veri İletişimi:** REST endpoint'lerine HTTP/HTTPS üzerinden JSON gövdeli CRUD istekleri gönderilir; socket ayarları (keep-alive, reuse) aktarım sürekliliğini sağlar.
+**Veri İletişimi:** REST endpoint'lerine HTTP/HTTPS üzerinden JSON gövdeli CRUD istekleri gönderilir; keep-alive süresi sabit 30 saniyedir (ayrı bir "Socket Keep Alive" veya "Socket Reuse Address" alanı yoktur).
 
-**Bağlantı Yönetimi:** İşlem tamamlanınca bağlantı pool'a geri döner, açık socket'ler keep-alive süreleri dolunca kapanır.
+**Bağlantı Yönetimi:** İşlem tamamlanınca bağlantı pool'a geri döner; inaktivite sonrası doğrulama süresi 10 saniye, bağlantı yaşam süresi (TTL) 3 dakikadır (bunlar da sabit değerlerdir).
 
-**Hata Yönetimi:** Bağlantı hatası, timeout veya authentication hatasında Apinizer Message Service bilgilendirme üretir; deployment result diyalogunda detay gösterilir.
+**Hata Yönetimi:** Bağlantı hatası, timeout veya authentication hatasında Apinizer Message Service bilgilendirme üretir; deployment result diyalogunda detay gösterilir. Log yazımı sırasında Worker'da oluşan hatalar (bkz. "Asenkron Yazım ve Failover Davranışı" bölümü) failover connector'ı tetikler.
 
 ### Kullanım Alanları
 
@@ -87,39 +87,81 @@ Rollover, template oluşturma ve policy senkronizasyonu gibi bakım görevlerini
 | Name | Connection adı (benzersiz olmalı) | Production_ElasticLog | Boşlukla başlamaz, özel karakterler kullanılmamalı |
 | Index Name | Logların yazılacağı indeks adı | apinizer-log-apiproxy-default | Administrate açıkken otomatik oluşturulur; çakışmalar kontrol edilir |
 | Elastic Host (Host & Port) | Her host için scheme/host/port | HTTPS : es-prod-01 : 9243 | En az bir host zorunlu; host ve port alanları boş bırakılamaz |
-| Connection Timeout (ms) | Bağlantı kurulumu için bekleme süresi | 5000 | Varsayılan 5000; negatif değer kabul edilmez |
-| IO Threads | HTTP istemci iş parçacığı sayısı | 32 | Minimum 1; yüksek trafik için artırılmalı |
-| Max Connection Per Host | Host başına eşzamanlı istek sınırı | 128 | Minimum 1 |
-| Max Connection Total | Toplam connection havuzu sınırı | 256 | Minimum 1 |
+| Connection Timeout (ms) | Bağlantı kurulumu için bekleme süresi — **aynı değer** yanıt bekleme ve havuzdan bağlantı alma süresi için de kullanılır (bkz. "Asenkron Yazım ve Failover Davranışı") | 5000 | UI'da yalnızca zorunluluk (required) doğrulaması vardır; ayrı bir min/max sınırı yoktur |
 | Connection Type | `READ_WRITE` veya `READ` modu | READ_WRITE | `READ` seçilirse administrate devre dışı kalır |
+| Elasticsearch Major Version | Bağlanılan cluster'ın major sürümü | AUTO_DETECT | Zorunlu alan; `AUTO_DETECT` veya boş bırakılırsa client varsayılan olarak ES 7 sürüm davranışına düşer |
 
 ### İsteğe Bağlı Parametreler
 
 | Parametre | Açıklama | Varsayılan Değer | Önerilen Değer |
 |-----------|----------|------------------|----------------|
 | Description | Connection amacı açıklaması | Boş | Operasyonel bilgi içeren kısa metin |
-| Authenticate | Basic Authentication aç/kapa | false | Production'da gereksinime göre true |
+| Authenticate | Basic Authentication aç/kapa | true | Kimlik doğrulama gerekmiyorsa kapatılabilir |
 | Elastic Username | Kullanıcı adı | Boş | Authentication aktifse zorunlu |
 | Elastic Password | Parola | Boş | Secret manager üzerinden girilmesi önerilir |
 | Administrate | Template/ILM yönetimi | true (READ_WRITE) | Harici ekip yönetiyorsa kapatılabilir |
-| Socket Keep Alive | TCP keep-alive | true | Ağ cihazları idle bağlantıları düşürüyorsa açık bırakın |
-| Socket Reuse Address | Adres yeniden kullanımı | true | Çoklu worker deployment'larında açık bırakın |
-| Disable Hostname Verification | TLS hostname doğrulaması | true | Production'da false olarak değiştirin |
+| Disable Hostname Verification | TLS hostname doğrulaması | Alan boş (null) bırakılır; sistem bunu **etkin varsayılan `true`** (doğrulama kapalı/gevşetilmiş) olarak yorumlar | Production'da bilinçli olarak `false` seçilmelidir |
 
-### Timeout ve Connection Pool Parametreleri
+### Index Template Parametreleri
 
-| Parametre | Açıklama | Varsayılan | Min | Max | Birim |
-|-----------|----------|------------|-----|-----|-------|
-| Connection Timeout | Bağlantı kurulması için maksimum bekleme süresi | 5000 | 1000 | 60000 | milisaniye |
-| Request Timeout | Elasticsearch yanıtını bekleme süresi | 60000 | 1000 | 120000 | milisaniye |
-| Pool Size | Connection pool'daki maksimum bağlantı sayısı | 256 | 1 | 2000 | adet |
-| Socket Idle Timeout | Idle bağlantının kapatılma süresi | 30000 | 1000 | 600000 | milisaniye |
+| Parametre | Açıklama | Varsayılan | Nerede |
+|-----------|----------|------------|--------|
+| Index Template Name | Oluşturulacak index template'in adı | apinizer-log-apiproxy-template-default | UI; Administrate açıkken zorunlu |
+| indexTemplateNumberOfShards | Template'teki shard sayısı | 1 | UI |
+| indexTemplateNumberOfReplicas | Template'teki replica sayısı | 0 | UI |
+| indexTemplateRefreshInterval | Template'in refresh interval değeri | "5s" | UI |
+
+### Timeout Parametresi — Gerçek Davranış
+
+Apinizer, bağlantı kurma / yanıt bekleme / havuzdan bağlantı alma için **ayrı ayrı** timeout alanları sunmaz. Tek bir **Connection Timeout** değeri, HTTP Client 5 üzerinde üç ayrı timeout ayarına birden uygulanır:
+
+| Parametre | Açıklama | Varsayılan | Birim |
+|-----------|----------|------------|-------|
+| Connection Timeout (connectionTimeoutInMs) | Bağlantı kurma (connect), yanıt bekleme (response) ve havuzdan bağlantı alma (connection request) sürelerinin **üçünde birden** kullanılan tek değer | 5000 | milisaniye |
+
+Davranışla ilgili bilinmesi gerekenler:
+
+- **Ayrı bir "Request Timeout" alanı yoktur** — yanıtı bekleme süresi de Connection Timeout ile aynı değeri kullanır.
+- Milisaniye cinsinden girilen değer saniyeye çevrilirken **tam sayı bölmesi** uygulanır (`connectionTimeoutInMs / 1000`).
+- Bölme sonucu `0` veya daha küçükse (yani 1000 ms'nin altındaki her değer — 0 ve negatif değerler dahil), saniye değeri otomatik olarak **5'e (5000 ms) sabitlenir**. Bu bir form doğrulaması değil, tam sayı bölmesi ve kod içindeki `>0` kontrolünün bir yan etkisidir — dolayısıyla 1000 ms altı bir değer girmenin pratik bir etkisi yoktur.
+
+### Sabit (Ayarlanamaz) Connection Pool Değerleri
+
+Aşağıdaki değerler kod içinde sabittir; bu connection formu üzerinden değiştirilemez:
+
+| Değer | Sabit Ayar | Açıklama |
+|-------|-----------|----------|
+| Host başına maksimum bağlantı | 20 | `setMaxConnPerRoute(20)` |
+| Toplam bağlantı havuzu | 20 × host sayısı | `setMaxConnTotal(...)` |
+| Inaktivite sonrası doğrulama | 10 saniye | Havuzdan alınan bağlantı bu süreden uzun beklemişse yeniden doğrulanır |
+| Bağlantı yaşam süresi (TTL) | 3 dakika | Bu sürenin sonunda bağlantı havuzdan atılır |
+| Keep-alive stratejisi | 30 saniye | Sabit; ayrı bir "Socket Keep Alive"/"Socket Reuse Address" alanı yoktur |
+
+### Yalnızca APIops İle Ayarlanabilen Parametreler
+
+Aşağıdaki üç alan Connection UI formunda **yer almaz**; yalnızca APIops (Connection DTO) üzerinden ayarlanabilir ve asenkron log yazım kuyruğunun davranışını belirler:
+
+| Parametre | Açıklama | Varsayılan |
+|-----------|----------|------------|
+| bulkBufferCapacity | Asenkron yazım kuyruğunun (bellek içi, `ArrayBlockingQueue`) kapasitesi | 50000 |
+| bulkFlushIntervalMs | Kuyruğun Elasticsearch'e ne sıklıkla flush edileceği | 100 (ms) |
+| bulkMaxBatchSize | Tek bir `_bulk` çağrısında gönderilecek maksimum kayıt sayısı | 2500 |
+
+## Asenkron Yazım ve Failover Davranışı
+
+Elasticsearch connection'ı log yazarken istek iş parçacığını bekletmez; yazım tamamen asenkron ilerler:
+
+- `index*` metodları, kaydı kapasitesi `bulkBufferCapacity` olan bellek içi bir kuyruğa (`ArrayBlockingQueue`) bırakıp hemen döner — isteği işleyen thread Elasticsearch'in yanıtını **beklemez**.
+- Kuyruktaki kayıtlar, adı `es-bulk-flusher-` ile başlayan ayrı bir zamanlanmış thread havuzu tarafından her `bulkFlushIntervalMs` milisaniyede bir, en fazla `bulkMaxBatchSize` kayıtlık `_bulk` çağrılarıyla Elasticsearch'e gönderilir.
+- Bu flusher **yalnızca Worker** sürecinde başlar. Manager sürecinde asenkron log yazımı yoktur; Manager'ın Elasticsearch çağrıları (rapor/sorgu ekranları) tamamen **senkrondur** ve Connection Timeout bu sorguların üst sınırını doğrudan belirler.
+- Sonuç olarak Connection Timeout, log yazan istek thread'ini değil; Worker'daki flusher thread'ini veya Manager'daki rapor sorgusunu bağlar.
+- **Failover:** Bulk çağrısı herhangi bir nedenle başarısız olursa (bağlantı kurulamaması, yanıt timeout'u, kuyruğun dolması vb.) kayıt otomatik olarak yapılandırılmış failover connector'a gönderilir. Failover **yalnızca "hiç bağlanamama" durumunda değil, timeout dahil her hata türünde** tetiklenir.
 
 ## Kullanım Senaryoları
 
 | Senaryo | Durum | Çözüm (Connection Yapılandırması) | Beklenen Davranış / Sonuç |
 |---------|-------|-----------------------------------|---------------------------|
-| Yüksek Hacimli Log Yazımı | Dakikada milyonlarca log girişi | READ_WRITE, administrate açık, `ioThreads=64`, `maxConnectionTotal=512` | ILM otomatik rollover yapar, yazma kuyruğu oluşmaz |
+| Yüksek Hacimli Log Yazımı | Dakikada milyonlarca log girişi | READ_WRITE, administrate açık, APIops ile `bulkBufferCapacity` ve `bulkMaxBatchSize` trafiğe göre artırılır, ILM rollover eşikleri sıkılaştırılır | Asenkron kuyruk taşmadan işlenir, ILM otomatik rollover yapar; kuyruk yine de dolarsa kayıtlar failover connector'a düşer |
 | Raporlama Kümesi | Salt okuma sorguları | READ, administrate kapalı, authentication=true | Cluster sadece sorgu alır, yönetim işlemleri engellenir |
 | Çoklu Host Failover | İki veri merkezi | İki HTTPS host, encrypt communication + PKCS#12 CA | Trafik otomatik olarak sağlıklı host'a yönelir |
 | Şema Güncellemesi | Yeni alanlar eklendi | Template adı ve shard/replica güncellenip "Create Index Template" çalıştırılır | Yeni indexler güncel şema ile açılır |
@@ -238,50 +280,38 @@ Bu adımda, kullanıcı yeni bir connection oluşturabilir ya da mevcut connecti
         - İlk deployment öncesi policy adını kontrol edin.
     </Step>
 
-    <Step title="Timeout ve Connection Pool Ayarları">
+    <Step title="Timeout Ayarı ve Connection Pool">
         **Connection Timeout:**
 
         - **Connection Timeout (ms)** alanına bağlantı kurulumu için bekleme süresini girin.
-        - Varsayılan: 5000 milisaniye
-        - Minimum: 1000, Maksimum: 60000 milisaniye
+        - Varsayılan: 5000 milisaniye.
+        - Form yalnızca alanın **doldurulmuş olmasını** zorunlu kılar; ayrı bir minimum/maksimum sınır doğrulaması yoktur.
+        - Bu tek değer üç ayrı süreyi birden belirler: bağlantı kurma (connect), Elasticsearch yanıtını bekleme (response) ve havuzdan bağlantı alma (connection request). Ayrı bir "Request Timeout" alanı **yoktur**.
+        - 1000 ms'nin altındaki değerler (0 ve negatif dahil) tam sayı bölmesi nedeniyle otomatik olarak 5000 ms'ye döner — bu nedenle çok düşük bir değer girmenin pratik bir etkisi olmaz.
 
-        **IO Threads:**
+        **Connection Pool (Sabit Değerler):**
 
-        - **IO Threads** alanına HTTP istemci iş parçacığı sayısını girin.
-        - Minimum: 1
-        - Yüksek trafik için artırılmalı (örn: 64)
+        - Bu formda ayarlanabilir bir "IO Threads", "Max Connection Per Host" veya "Max Connection Total" alanı **yoktur**.
+        - Bağlantı havuzu kod içinde sabittir: host başına 20 eşzamanlı bağlantı, toplamda 20 × host sayısı.
+        - Keep-alive süresi sabit 30 saniyedir; ayrı bir "Socket Keep Alive" veya "Socket Reuse Address" toggle'ı yoktur.
 
-        **Max Connection Per Host:**
+        **Asenkron Yazım Ayarları (yalnızca APIops):**
 
-        - **Max Connection Per Host** alanına host başına eşzamanlı istek sınırını girin.
-        - Minimum: 1
-        - Önerilen: 128
-
-        **Max Connection Total:**
-
-        - **Max Connection Total** alanına toplam connection havuzu sınırını girin.
-        - Minimum: 1, Maksimum: 2000
-        - Önerilen: 256
-
-        **Socket Ayarları:**
-
-        - **Socket Keep Alive** toggle'ını bulun (varsayılan: aktif).
-        - **Socket Reuse Address** toggle'ını bulun (varsayılan: aktif).
-        - Ağ cihazları idle bağlantıları düşürüyorsa keep-alive açık bırakın.
-        - Çoklu worker deployment'larında reuse address açık bırakın.
+        - `bulkBufferCapacity`, `bulkFlushIntervalMs` ve `bulkMaxBatchSize` alanları bu UI formunda **görünmez**; yalnızca APIops üzerinden ayarlanabilir.
+        - Bu değerler, log kayıtlarının Worker'da asenkron olarak Elasticsearch'e nasıl toplu (bulk) gönderileceğini belirler (bkz. "Asenkron Yazım ve Failover Davranışı" bölümü).
     </Step>
 
     <Step title="Güvenlik ve Authentication Ayarları">
         **Authentication Ayarlama:**
 
         - **Authenticate** toggle'ını bulun.
-        - SMTP sunucunuz kimlik doğrulama gerektiriyorsa toggle'ı **Aktif** konumuna getirin.
+        - Elasticsearch cluster'ınız kimlik doğrulama gerektiriyorsa toggle'ı **Aktif** konumuna getirin.
         - Çoğu production ortamında kimlik doğrulama gerektirir.
 
         **Username ve Password:**
 
         - **Authenticate** toggle'ı aktifse **Elastic Username** alanı görünür hale gelir.
-        - SMTP hesabınızın kullanıcı adını girin.
+        - Elasticsearch hesabınızın kullanıcı adını girin.
         - **Elastic Password** alanına şifreyi girin.
         - Şifre güvenlik nedeniyle maskelenmiş görünecektir.
         - Hassas bilgiler için secret manager kullanımı önerilir.
@@ -417,8 +447,8 @@ Bu adımda kullanıcı, oluşturduğu **Elasticsearch** connection'ını sistemi
 | Eksik Host Tanımı | **Neden kaçınılmalı:** Tek host arızasında tüm akış durur. **Alternatif:** En az iki host girin, health check izleyin |
 | İzin Verilmeyen TLS Tipleri | **Neden kaçınılmalı:** Yanlış dosya tipi handshake başarısızlığına yol açar. **Alternatif:** HTTPS seçimine uygun sertifika paketini kullanın |
 | Production Connection'ı Test Ortamında Kullanma | **Neden kaçınılmalı:** Test verileri production sistemine yazılabilir, gerçek kullanıcılar etkilenebilir, güvenlik riski oluşur. **Alternatif:** Her ortam için ayrı connection oluşturun, environment parametresini kullanın, connection isimlerini ortama göre prefix ekleyerek ayırın (Test_, Prod_) |
-| Çok Düşük Timeout Değerleri | **Neden kaçınılmalı:** Ağ gecikmelerinde connection sürekli timeout olur, Entegrasyon adımları başarısız olur. **Alternatif:** Gerçek kullanım senaryolarına göre timeout değerlerini ayarlayın, network latency'yi ölçün ve timeout'ları buna göre belirleyin |
-| Connection Pool Kullanmama | **Neden kaçınılmalı:** Her istekte yeni bağlantı açılır, performans düşer, kaynak tüketimi artar, hedef sistem yükü artar. **Alternatif:** Connection pool aktif edin, pool size'ı trafik hacmine göre ayarlayın, pool monitoring kurun |
+| Çok Düşük Timeout Değerleri | **Neden kaçınılmalı:** 1000 ms altındaki değerler zaten otomatik olarak 5000 ms'ye döner (bkz. Timeout bölümü); asıl risk normal aralıkta ama gerçek ağ gecikmesine göre çok düşük seçilen bir değerin yavaş ağlarda sürekli timeout üretmesidir. **Alternatif:** Gerçek network latency'yi ölçün ve Connection Timeout'u buna göre belirleyin; bu değerin aynı zamanda yanıt bekleme süresini de kapsadığını unutmayın |
+| Asenkron Yazım Kuyruğunu Trafiğe Göre Ayarlamamak | **Neden kaçınılmalı:** `bulkBufferCapacity` trafiğe göre düşük kalırsa yoğun anlarda kuyruk dolar ve kayıtlar hedef indekse değil failover connector'a yazılır. **Alternatif:** APIops üzerinden `bulkBufferCapacity`/`bulkMaxBatchSize`/`bulkFlushIntervalMs` değerlerini trafik hacmine göre ayarlayın, failover connector'a düşen kayıtları izleyin |
 
 ### Performans İpuçları
 
@@ -426,9 +456,9 @@ Bu adımda kullanıcı, oluşturduğu **Elasticsearch** connection'ını sistemi
 |--------|-------------|
 | Shard/Replica Planlaması | **Öneri:** Günlük kayıt hacmine göre shard sayısını belirleyin, replica sayısını cluster kapasitesine göre ayarlayın. **Etki:** Arama performansı artar, disk kullanımı dengelenir |
 | ILM Faz Süreleri | **Öneri:** Hot fazı kısa, cold fazı uzun tutarak depolama maliyetini azaltın. **Etki:** Pahalı düğümlerde gereksiz veri tutulmaz |
-| Thread Pool İzleme | **Öneri:** Monitor ekranından bulk/search queue uzunluklarını takip edin; eşikler aşarsa ioThreads/pool değerlerini yükseltin. **Etki:** Kuyrukta bekleyen istek sayısı azalır |
-| Connection Pool Optimizasyonu | **Öneri:** Pool size'ı peak trafiğe göre ayarlayın (önerilen: eşzamanlı istek sayısı × 1.5), idle connection timeout'ları belirleyin, pool health check yapın. **Etki:** Bağlantı açma maliyeti %80 azalır, yanıt süreleri düşer, kaynak kullanımı optimize edilir |
-| Timeout Değerleri Optimizasyonu | **Öneri:** Gerçek network latency'yi ölçün, timeout değerlerini buna göre ayarlayın, çok düşük veya çok yüksek timeout'lardan kaçının. **Etki:** Gereksiz beklemeler önlenir, hızlı fail-over sağlanır, kullanıcı deneyimi iyileşir |
+| Thread Pool İzleme | **Öneri:** Monitor ekranının Thread Pools sekmesinden Elasticsearch node'larının bulk/search queue uzunluklarını ve rejected sayılarını takip edin; kuyruk sürekli doluyorsa cluster kapasitesini artırın veya APIops ile `bulkMaxBatchSize`/`bulkFlushIntervalMs` değerlerini trafiğe göre ayarlayın. **Etki:** Kuyrukta bekleyen istek sayısı azalır |
+| Connection Pool | **Not:** Bağlantı havuzu (host başına 20, toplam = 20 × host sayısı) koddan gelen sabit değerlerdir ve bu formdan değiştirilemez. Yüksek hacimli yazımda gerçek performans kaldıracı, APIops ile ayarlanan `bulkBufferCapacity`/`bulkMaxBatchSize`/`bulkFlushIntervalMs` değerleridir. **Etki:** Asenkron kuyruk trafiğe göre boyutlandırılır, taşma riski azalır |
+| Timeout Değeri Optimizasyonu | **Öneri:** Gerçek network latency'yi ölçün, Connection Timeout değerini buna göre ayarlayın; bu tek değerin bağlantı kurma, yanıt bekleme ve havuzdan bağlantı alma sürelerinin üçünde birden kullanıldığını unutmayın. **Etki:** Gereksiz beklemeler önlenir, hızlı failover sağlanır, kullanıcı deneyimi iyileşir |
 | Connection Monitoring | **Öneri:** Connection pool kullanımını izleyin, timeout oranlarını takip edin, connection health check yapın, alerting kurun. **Etki:** Sorunlar proaktif tespit edilir, performans darboğazları erken belirlenir, kesinti süresi azalır |
 
 ## Sorun Giderme (Troubleshooting)
@@ -437,9 +467,9 @@ Bu adımda kullanıcı, oluşturduğu **Elasticsearch** connection'ını sistemi
 |---------|----------------|----------------|
 | Index Template Oluşmuyor | Administrate kapalı, Template adı çakışıyor, Elasticsearch kullanıcı yetkisi yetersiz | 1. Administrate'i etkinleştirin. 2. Template adını değiştirin. 3. Kullanıcıya `manage_index_templates` yetkisi verin |
 | ILM Policy Kaydedilmiyor | Policy adı mevcut, Hot phase devre dışı, UI modalı kapatılmamış | 1. Policy adını benzersiz yapın. 2. Hot fazı etkinleştirin. 3. Modalda Save'e basıp tekrar deneyin |
-| Connection Timeout | Network gecikmesi, Hedef sistem yavaş yanıt veriyor, Timeout değeri çok düşük | 1. Network connectivity kontrol edin. 2. Hedef sistem sağlığını kontrol edin. 3. Timeout değerlerini artırın. 4. Connection loglarını inceleyin |
+| Connection Timeout | Network gecikmesi, Hedef sistem yavaş yanıt veriyor, Timeout değeri çok düşük (unutmayın: aynı değer bağlantı kurma + yanıt bekleme + havuzdan bağlantı alma için birden kullanılır) | 1. Network connectivity kontrol edin. 2. Hedef sistem sağlığını kontrol edin. 3. Connection Timeout değerini artırın (1000 ms altı değerlerin otomatik 5000 ms'ye döndüğünü unutmayın). 4. Connection loglarını inceleyin |
 | Authentication Failed | Yanlış kullanıcı adı/şifre, Expired credentials, Yetki problemi | 1. Kimlik bilgilerini doğrulayın. 2. Hedef sistemde kullanıcının aktif olduğunu kontrol edin. 3. Gerekli yetkilerin verildiğini kontrol edin. 4. SSL/TLS sertifikalarını kontrol edin |
-| Pool Exhausted | Pool size çok düşük, Connection leak var, Trafik çok yüksek | 1. Pool size'ı artırın. 2. Connection'ların düzgün kapatıldığını kontrol edin. 3. Idle connection timeout'ları ayarlayın. 4. Connection kullanım metriklerini izleyin |
+| Asenkron Yazım Kuyruğu Doluyor | `bulkBufferCapacity` trafiğe göre düşük kalmış, Elasticsearch cluster yavaş yanıt veriyor, Flusher kuyruğa yetişemiyor | 1. APIops ile `bulkBufferCapacity`/`bulkMaxBatchSize` değerlerini artırın. 2. Elasticsearch cluster sağlığını ve yanıt sürelerini kontrol edin. 3. Kayıtların failover connector'a düştüğünü doğrulayın (kuyruk dolması da failover'ı tetikler). 4. `apinizer_es_log_buffer_size` / `apinizer_es_log_buffer_capacity` metriklerini izleyin |
 | Connection Test Başarılı Ama Entegrasyon Akışı Hata Veriyor | Integration/Connector adımında farklı connection seçili olabilir, Adım yanlış yapılandırılmış olabilir, Flow/Job redeploy edilmemiş olabilir | 1. Connection'ın enable toggle'ının aktif olduğunu kontrol edin. 2. Integration Flow'da doğru connection'ın seçildiğini doğrulayın. 3. Connection'ı tekrar deploy edin. 4. Integration Flow veya Job'ı redeploy edin. 5. Gateway loglarını kontrol edin |
 
 ## Sık Sorulan Sorular (SSS)
@@ -452,6 +482,6 @@ Bu adımda kullanıcı, oluşturduğu **Elasticsearch** connection'ını sistemi
 | Teknik | ILM politikası tüm indekslere uygulanır mı? | Aynı template ve policy adıyla oluşturulan indeksler etkilenir; farklı adlar kullanırsanız manuel atama gerekir |
 | Kullanım | Monitor ekranındaki thread pool verileri neyi gösterir? | Elasticsearch node'larının bulk/search/ingest queue uzunluklarını, rejection sayılarını ve aktif thread sayısını gösterir; performans tuning için kullanılır |
 | Genel | Aynı connection'ı birden fazla Integration Flow'da kullanabilir miyim? | Evet, aynı connection birden fazla Integration Flow veya Connector adımında kullanılabilir. Bu merkezi yönetim sağlar ve konfigürasyon tutarlılığını garanti eder. Ancak connection'da yapılan değişiklikler tüm kullanım yerlerini etkileyeceği için dikkatli olunmalıdır |
-| Teknik | Connection pool kullanmak zorunlu mudur? | Connection pool kullanımı zorunlu değildir ancak yüksek trafikli sistemlerde şiddetle önerilir. Her istekte yeni bağlantı açmak yerine mevcut bağlantıları yeniden kullanmak performansı önemli ölçüde artırır |
+| Teknik | Connection pool'u kapatabilir miyim? | Hayır. Elasticsearch connection'ı için bağlantı havuzu her zaman aktiftir ve kod içinde sabit değerlerle çalışır (host başına 20 bağlantı, toplam = 20 × host sayısı); kullanıcı tarafından kapatılamaz veya bu formdan değiştirilemez |
 | Kullanım | Test ve Production için farklı connection'lar mı oluşturmalıyım? | Evet, her ortam için ayrı connection oluşturmanız önerilir. Alternatif olarak environment parametresini kullanarak tek connection içinde tüm ortamları yönetebilirsiniz. Bu yaklaşım daha kolay yönetim ve daha az hata riski sağlar |
 | Teknik | Test Connection başarılı ama Integration Flow'da çalışmıyor, neden? | Birkaç neden olabilir: 1) Connection enable toggle'ı pasif olabilir, 2) Integration adımında farklı bir connection seçili olabilir, 3) Connection deploy edilmemiş olabilir, 4) Integration Flow henüz redeploy edilmemiş olabilir |

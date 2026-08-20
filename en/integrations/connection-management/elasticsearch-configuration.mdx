@@ -33,15 +33,15 @@ Triggers maintenance tasks such as rollover, template creation, and policy synch
 
 **Connection Initiation:** When an Elasticsearch Connection is requested from within an Integration Flow or Connector, the system reads the configured connection parameters.
 
-**Connection Pool Management:** The HTTP client selects an appropriate connection from the pool or opens a new one based on `ioThreads`, `maxConnectionPerHost`, and `maxConnectionTotal` values.
+**Connection Pool Management:** The HTTP client uses a connection pool with fixed values hard-coded in the client (20 concurrent connections per host, totaling 20 × host count); this pool size cannot be adjusted from the connection form.
 
 **Authentication:** When Basic Authentication is provided, username/password are sent; otherwise, anonymous access or IP-based security is used.
 
-**Data Communication:** JSON-bodied CRUD requests are sent to REST endpoints over HTTP/HTTPS; socket settings (keep-alive, reuse) ensure transmission continuity.
+**Data Communication:** JSON-bodied CRUD requests are sent to REST endpoints over HTTP/HTTPS; the keep-alive duration is a fixed 30 seconds (there is no separate "Socket Keep Alive" or "Socket Reuse Address" field).
 
-**Connection Management:** When the operation completes, the connection returns to the pool, and open sockets close when keep-alive periods expire.
+**Connection Management:** When the operation completes, the connection returns to the pool; the validate-after-inactivity period is 10 seconds and the connection time-to-live (TTL) is 3 minutes (these are also fixed values).
 
-**Error Management:** On connection error, timeout, or authentication error, Apinizer Message Service generates notifications; details are shown in the deployment result dialog.
+**Error Management:** On connection error, timeout, or authentication error, Apinizer Message Service generates notifications; details are shown in the deployment result dialog. Errors that occur on the Worker while writing logs (see "Asynchronous Write and Failover Behavior" below) trigger the failover connector.
 
 ### Usage Areas
 
@@ -87,39 +87,81 @@ Triggers maintenance tasks such as rollover, template creation, and policy synch
 | Name | Connection name (must be unique) | Production_ElasticLog | Cannot start with a space, special characters should not be used |
 | Index Name | Index name where logs will be written | apinizer-log-apiproxy-default | Automatically created when Administrate is enabled; conflicts are checked |
 | Elastic Host (Host & Port) | Scheme/host/port for each host | HTTPS : es-prod-01 : 9243 | At least one host is required; host and port fields cannot be left empty |
-| Connection Timeout (ms) | Wait time for connection establishment | 5000 | Default 5000; negative values are not accepted |
-| IO Threads | HTTP client thread count | 32 | Minimum 1; should be increased for high traffic |
-| Max Connection Per Host | Concurrent request limit per host | 128 | Minimum 1 |
-| Max Connection Total | Total connection pool limit | 256 | Minimum 1 |
+| Connection Timeout (ms) | Wait time for connection establishment — **the same value** is also used for response waiting and for acquiring a connection from the pool (see "Asynchronous Write and Failover Behavior") | 5000 | The UI only enforces a required-field check; there is no separate min/max validation |
 | Connection Type | `READ_WRITE` or `READ` mode | READ_WRITE | If `READ` is selected, administrate is disabled |
+| Elasticsearch Major Version | Major version of the target cluster | AUTO_DETECT | Required field; if left as `AUTO_DETECT` or empty, the client falls back to ES 7 behavior |
 
 ### Optional Parameters
 
 | Parameter | Description | Default Value | Recommended Value |
 |-----------|----------|------------------|----------------|
 | Description | Connection purpose description | Empty | Short text containing operational information |
-| Authenticate | Basic Authentication on/off | false | true based on requirements in Production |
+| Authenticate | Basic Authentication on/off | true | Can be turned off if the cluster does not require authentication |
 | Elastic Username | Username | Empty | Required if Authentication is active |
 | Elastic Password | Password | Empty | Should be entered through secret manager |
 | Administrate | Template/ILM management | true (READ_WRITE) | Can be closed if external team manages |
-| Socket Keep Alive | TCP keep-alive | true | Keep enabled if network devices drop idle connections |
-| Socket Reuse Address | Address reuse | true | Keep enabled in multi-worker deployments |
-| Disable Hostname Verification | TLS hostname verification | true | Change to false in Production |
+| Disable Hostname Verification | TLS hostname verification | The field is left empty (null); the system interprets this as an **effective default of `true`** (verification off/relaxed) | Should be deliberately set to `false` in Production |
 
-### Timeout and Connection Pool Parameters
+### Index Template Parameters
 
-| Parameter | Description | Default | Min | Max | Unit |
-|-----------|----------|------------|-----|-----|-------|
-| Connection Timeout | Maximum wait time for connection establishment | 5000 | 1000 | 60000 | milliseconds |
-| Request Timeout | Wait time for Elasticsearch response | 60000 | 1000 | 120000 | milliseconds |
-| Pool Size | Maximum number of connections in the connection pool | 256 | 1 | 2000 | count |
-| Socket Idle Timeout | Timeout for closing idle connections | 30000 | 1000 | 600000 | milliseconds |
+| Parameter | Description | Default | Where |
+|-----------|----------|------------|-------|
+| Index Template Name | Name of the index template to create | apinizer-log-apiproxy-template-default | UI; required when Administrate is enabled |
+| indexTemplateNumberOfShards | Shard count in the template | 1 | UI |
+| indexTemplateNumberOfReplicas | Replica count in the template | 0 | UI |
+| indexTemplateRefreshInterval | Refresh interval of the template | "5s" | UI |
+
+### Timeout Parameter — Actual Behavior
+
+Apinizer does not offer separate timeout fields for connection establishment, response waiting, and acquiring a connection from the pool. A single **Connection Timeout** value is applied to all three of these HTTP Client 5 timeout settings at once:
+
+| Parameter | Description | Default | Unit |
+|-----------|----------|------------|-------|
+| Connection Timeout (connectionTimeoutInMs) | Single value used for connection establishment (connect), response waiting (response), and acquiring a connection from the pool (connection request) — **all three at once** | 5000 | milliseconds |
+
+Behavior details to be aware of:
+
+- **There is no separate "Request Timeout" field** — the response wait time also uses the same value as Connection Timeout.
+- The millisecond value is converted to seconds using **integer division** (`connectionTimeoutInMs / 1000`).
+- If the result is `0` or less (i.e., any value below 1000 ms — including 0 and negative values), the second value is automatically **fixed to 5 (5000 ms)**. This is not a form validation; it is a side effect of integer division and the `>0` check in the code — so entering a value below 1000 ms has no practical effect.
+
+### Fixed (Non-Configurable) Connection Pool Values
+
+The following values are fixed in the code and cannot be changed through this connection form:
+
+| Value | Fixed Setting | Description |
+|-------|-----------|----------|
+| Maximum connections per host | 20 | `setMaxConnPerRoute(20)` |
+| Total connection pool | 20 × host count | `setMaxConnTotal(...)` |
+| Validate-after-inactivity | 10 seconds | A connection taken from the pool is re-validated if it has been idle longer than this |
+| Connection time-to-live (TTL) | 3 minutes | The connection is evicted from the pool after this period |
+| Keep-alive strategy | 30 seconds | Fixed; there is no separate "Socket Keep Alive"/"Socket Reuse Address" field |
+
+### Parameters Only Configurable via APIops
+
+The following three fields do **not** appear in the Connection UI form; they can only be set through APIops (Connection DTO), and they govern the behavior of the asynchronous log-writing queue:
+
+| Parameter | Description | Default |
+|-----------|----------|------------|
+| bulkBufferCapacity | Capacity of the asynchronous write queue (in-memory `ArrayBlockingQueue`) | 50000 |
+| bulkFlushIntervalMs | How often the queue is flushed to Elasticsearch | 100 (ms) |
+| bulkMaxBatchSize | Maximum number of records sent in a single `_bulk` call | 2500 |
+
+## Asynchronous Write and Failover Behavior
+
+The Elasticsearch connection does not block the request thread while writing logs; writes are fully asynchronous:
+
+- The `index*` methods place the record into an in-memory queue (`ArrayBlockingQueue`) whose capacity is `bulkBufferCapacity`, then return immediately — the thread handling the request does **not** wait for a response from Elasticsearch.
+- Records in the queue are sent to Elasticsearch by a separate scheduled thread pool (thread names start with `es-bulk-flusher-`) every `bulkFlushIntervalMs` milliseconds, via `_bulk` calls of at most `bulkMaxBatchSize` records each.
+- This flusher only starts **in the Worker process**. There is no asynchronous log writing in the Manager process; the Manager's Elasticsearch calls (report/query screens) are entirely **synchronous**, and Connection Timeout directly bounds those queries.
+- As a result, Connection Timeout does not bind the request thread that writes logs — it bounds the flusher thread on the Worker, or the report query on the Manager.
+- **Failover:** If a bulk call fails for any reason (connection failure, response timeout, queue full, etc.), the record is automatically sent to the configured failover connector. Failover is triggered **on any type of error, including timeouts — not only when a connection cannot be established at all**.
 
 ## Usage Scenarios
 
 | Scenario | Situation | Solution (Connection Configuration) | Expected Behavior / Result |
 |---------|-------|-----------------------------------|---------------------------|
-| High-Volume Log Writing | Millions of log entries per minute | READ_WRITE, administrate enabled, `ioThreads=64`, `maxConnectionTotal=512` | ILM automatically performs rollover, no write queue forms |
+| High-Volume Log Writing | Millions of log entries per minute | READ_WRITE, administrate enabled, `bulkBufferCapacity` and `bulkMaxBatchSize` increased via APIops to match traffic, ILM rollover thresholds tightened | The asynchronous queue processes without overflowing, ILM performs automatic rollover; if the queue still fills up, records fall through to the failover connector |
 | Reporting Cluster | Read-only queries | READ, administrate disabled, authentication=true | Cluster only receives queries, management operations are blocked |
 | Multiple Host Failover | Two data centers | Two HTTPS hosts, encrypt communication + PKCS#12 CA | Traffic automatically routes to healthy host |
 | Schema Update | New fields added | Update template name and shard/replica, then run "Create Index Template" | New indices open with current schema |
@@ -238,37 +280,25 @@ In this step, users can create a new connection or configure existing connection
         - Check the policy name before the first deployment.
     </Step>
 
-    <Step title="Timeout and Connection Pool Settings">
+    <Step title="Timeout Setting and Connection Pool">
         **Connection Timeout:**
 
         - Enter the wait time for connection establishment in the **Connection Timeout (ms)** field.
-        - Default: 5000 milliseconds
-        - Minimum: 1000, Maximum: 60000 milliseconds
+        - Default: 5000 milliseconds.
+        - The form only requires the field to be **filled in**; there is no separate minimum/maximum validation.
+        - This single value determines three separate durations at once: connection establishment (connect), waiting for the Elasticsearch response (response), and acquiring a connection from the pool (connection request). There is **no** separate "Request Timeout" field.
+        - Values below 1000 ms (including 0 and negative values) automatically fall back to 5000 ms due to integer division — so entering an extremely low value has no practical effect.
 
-        **IO Threads:**
+        **Connection Pool (Fixed Values):**
 
-        - Enter the HTTP client thread count in the **IO Threads** field.
-        - Minimum: 1
-        - Should be increased for high traffic (e.g., 64)
+        - There is **no** "IO Threads", "Max Connection Per Host", or "Max Connection Total" field configurable in this form.
+        - The connection pool is fixed in the code: 20 concurrent connections per host, totaling 20 × host count.
+        - The keep-alive duration is a fixed 30 seconds; there is no separate "Socket Keep Alive" or "Socket Reuse Address" toggle.
 
-        **Max Connection Per Host:**
+        **Asynchronous Write Settings (APIops only):**
 
-        - Enter the concurrent request limit per host in the **Max Connection Per Host** field.
-        - Minimum: 1
-        - Recommended: 128
-
-        **Max Connection Total:**
-
-        - Enter the total connection pool limit in the **Max Connection Total** field.
-        - Minimum: 1, Maximum: 2000
-        - Recommended: 256
-
-        **Socket Settings:**
-
-        - Find the **Socket Keep Alive** toggle (default: active).
-        - Find the **Socket Reuse Address** toggle (default: active).
-        - Keep keep-alive enabled if network devices drop idle connections.
-        - Keep reuse address enabled in multi-worker deployments.
+        - The `bulkBufferCapacity`, `bulkFlushIntervalMs`, and `bulkMaxBatchSize` fields do **not** appear in this UI form; they can only be set through APIops.
+        - These values determine how log records are asynchronously bulk-sent to Elasticsearch from the Worker (see "Asynchronous Write and Failover Behavior" above).
     </Step>
 
     <Step title="Security and Authentication Settings">
@@ -417,8 +447,8 @@ In this step, users can use the **Elasticsearch** connection they created in dif
 | Missing Host Definition | **Why to avoid:** All flows stop if single host fails. **Alternative:** Enter at least two hosts, monitor health check |
 | Unallowed TLS Types | **Why to avoid:** Wrong file type leads to handshake failure. **Alternative:** Use certificate package appropriate for HTTPS selection |
 | Using Production Connection in Test Environment | **Why to avoid:** Test data may be written to production system, real users may be affected, security risk occurs. **Alternative:** Create separate connections for each environment, use environment parameter, separate connection names by adding prefix according to environment (Test_, Prod_) |
-| Very Low Timeout Values | **Why to avoid:** Connection continuously times out in network delays, Integration steps fail. **Alternative:** Set timeout values according to real usage scenarios, measure network latency and set timeouts accordingly |
-| Not Using Connection Pool | **Why to avoid:** New connection opens with each request, performance decreases, resource consumption increases, target system load increases. **Alternative:** Enable connection pool, set pool size according to traffic volume, set up pool monitoring |
+| Very Low Timeout Values | **Why to avoid:** Values below 1000 ms already fall back automatically to 5000 ms (see Timeout section); the real risk is a value chosen too low for real network latency in the normal range, causing repeated timeouts on slow networks. **Alternative:** Measure real network latency and set Connection Timeout accordingly; remember it also covers response waiting |
+| Not Sizing the Asynchronous Write Queue for Traffic | **Why to avoid:** If `bulkBufferCapacity` is too low for traffic, the queue fills up during peak load and records fall through to the failover connector instead of the target index. **Alternative:** Set `bulkBufferCapacity`/`bulkMaxBatchSize`/`bulkFlushIntervalMs` via APIops according to traffic volume, and monitor records that reach the failover connector |
 
 ### Performance Tips
 
@@ -426,9 +456,9 @@ In this step, users can use the **Elasticsearch** connection they created in dif
 |--------|-------------|
 | Shard/Replica Planning | **Recommendation:** Determine shard count according to daily record volume, set replica count according to cluster capacity. **Effect:** Search performance increases, disk usage is balanced |
 | ILM Phase Durations | **Recommendation:** Reduce storage costs by keeping hot phase short and cold phase long. **Effect:** Unnecessary data is not kept on expensive nodes |
-| Thread Pool Monitoring | **Recommendation:** Track bulk/search queue lengths from monitor screen; if thresholds are exceeded, increase ioThreads/pool values. **Effect:** Number of requests waiting in queue decreases |
-| Connection Pool Optimization | **Recommendation:** Set pool size according to peak traffic (recommended: concurrent request count × 1.5), set idle connection timeouts, perform pool health check. **Effect:** Connection opening cost decreases by 80%, response times decrease, resource usage is optimized |
-| Timeout Values Optimization | **Recommendation:** Measure real network latency, set timeout values accordingly, avoid very low or very high timeouts. **Effect:** Unnecessary waits are prevented, fast fail-over is provided, user experience improves |
+| Thread Pool Monitoring | **Recommendation:** Track Elasticsearch node bulk/search queue lengths and rejected counts from the Monitor screen's Thread Pools tab; if the queue stays full, increase cluster capacity or adjust `bulkMaxBatchSize`/`bulkFlushIntervalMs` via APIops to match traffic. **Effect:** Number of requests waiting in queue decreases |
+| Connection Pool | **Note:** The connection pool (20 per host, total = 20 × host count) is fixed in the code and cannot be changed from this form. The real performance lever for high-volume writes is the `bulkBufferCapacity`/`bulkMaxBatchSize`/`bulkFlushIntervalMs` values configured via APIops. **Effect:** The asynchronous queue is sized to match traffic, reducing overflow risk |
+| Timeout Value Optimization | **Recommendation:** Measure real network latency, set Connection Timeout accordingly; remember this single value is used for connection establishment, response waiting, and acquiring a connection from the pool all at once. **Effect:** Unnecessary waits are prevented, fast failover is provided, user experience improves |
 | Connection Monitoring | **Recommendation:** Monitor connection pool usage, track timeout rates, perform connection health check, set up alerting. **Effect:** Problems are proactively detected, performance bottlenecks are identified early, downtime decreases |
 
 ## Troubleshooting
@@ -437,9 +467,9 @@ In this step, users can use the **Elasticsearch** connection they created in dif
 |---------|----------------|----------------|
 | Index Template Not Created | Administrate disabled, Template name conflicts, Elasticsearch user permission insufficient | 1. Enable Administrate. 2. Change template name. 3. Grant `manage_index_templates` permission to user |
 | ILM Policy Not Saving | Policy name exists, Hot phase disabled, UI modal not closed | 1. Make policy name unique. 2. Enable Hot phase. 3. Click Save in modal and try again |
-| Connection Timeout | Network delay, Target system responding slowly, Timeout value too low | 1. Check network connectivity. 2. Check target system health. 3. Increase timeout values. 4. Review connection logs |
+| Connection Timeout | Network delay, Target system responding slowly, Timeout value too low (remember: the same value is used for connect + response wait + acquiring a connection from the pool) | 1. Check network connectivity. 2. Check target system health. 3. Increase the Connection Timeout value (remember values below 1000 ms automatically fall back to 5000 ms). 4. Review connection logs |
 | Authentication Failed | Wrong username/password, Expired credentials, Permission problem | 1. Verify credentials. 2. Check that user is active in target system. 3. Check that necessary permissions are granted. 4. Check SSL/TLS certificates |
-| Pool Exhausted | Pool size too low, Connection leak exists, Traffic too high | 1. Increase pool size. 2. Check that connections are properly closed. 3. Set idle connection timeouts. 4. Monitor connection usage metrics |
+| Asynchronous Write Queue Filling Up | `bulkBufferCapacity` too low for traffic, Elasticsearch cluster responding slowly, Flusher unable to keep up with the queue | 1. Increase `bulkBufferCapacity`/`bulkMaxBatchSize` via APIops. 2. Check Elasticsearch cluster health and response times. 3. Verify records are reaching the failover connector (a full queue also triggers failover). 4. Monitor the `apinizer_es_log_buffer_size` / `apinizer_es_log_buffer_capacity` metrics |
 | Connection Test Successful But Integration Flow Errors | Different connection may be selected in Integration/Connector step, Step may be misconfigured, Flow/Job may not be redeployed | 1. Check that connection's enable toggle is active. 2. Verify that correct connection is selected in Integration Flow. 3. Redeploy connection. 4. Redeploy Integration Flow or Job. 5. Check Gateway logs |
 
 ## Frequently Asked Questions (FAQ)
@@ -452,7 +482,7 @@ In this step, users can use the **Elasticsearch** connection they created in dif
 | Technical | Does ILM policy apply to all indices? | Indices created with the same template and policy name are affected; if you use different names, manual assignment is required |
 | Usage | What do thread pool data in Monitor screen show? | Shows bulk/search/ingest queue lengths, rejection counts, and active thread count of Elasticsearch nodes; used for performance tuning |
 | General | Can I use the same connection in multiple Integration Flows? | Yes, the same connection can be used in multiple Integration Flow or Connector steps. This provides central management and guarantees configuration consistency. However, changes made to the connection will affect all usage locations, so care should be taken |
-| Technical | Is using connection pool mandatory? | Using connection pool is not mandatory but strongly recommended in high-traffic systems. Reusing existing connections instead of opening new ones with each request significantly increases performance |
+| Technical | Can I turn off the connection pool? | No. The connection pool for an Elasticsearch connection is always active and runs with fixed values in the code (20 connections per host, total = 20 × host count); it cannot be turned off by the user or changed from this form |
 | Usage | Should I create different connections for Test and Production? | Yes, it is recommended to create separate connections for each environment. Alternatively, you can manage all environments within a single connection using the environment parameter. This approach provides easier management and less error risk |
 | Technical | Test Connection is successful but not working in Integration Flow, why? | Several reasons may exist: 1) Connection enable toggle may be passive, 2) Different connection may be selected in Integration step, 3) Connection may not be deployed, 4) Integration Flow may not be redeployed yet |
 
