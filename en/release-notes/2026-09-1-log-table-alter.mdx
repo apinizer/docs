@@ -1,0 +1,74 @@
+---
+title: "2026.09.1 — Log Table ALTER Script"
+description: "ALTER TABLE script for existing SQL/JDBC traffic-log installations upgrading to Apinizer 2026.09.1."
+slug: /release-notes/2026-09-1-log-table-alter
+unlisted: true
+---
+
+This page is unlisted — it is not linked from the sidebar or search, and is intended to be reached only via a direct link from the 2026.09.1 release notes.
+
+## Who needs this
+
+This script is only relevant if your Apinizer installation writes API proxy traffic logs to a **relational database via the SQL/JDBC traffic-log connector** (Oracle, MySQL, PostgreSQL, or SQL Server).
+
+**If you use the Elasticsearch or MongoDB traffic-log connector, skip this page entirely** — those targets carry the new data without any manual step. On Elasticsearch the index template is updated and the index is rolled over automatically during the upgrade.
+
+## What changed
+
+Apinizer 2026.09.1 adds **policy execution times** to the traffic log: the order, type and duration in milliseconds of every policy that ran on a request. The feature is off by default and is enabled per log target under API Proxy > Log Settings.
+
+On a relational target the list is written to a single new column, `policy_exec_times`, as a capped CSV of `order:type:duration` triplets:
+
+```
+1:jwt-auth:12|2:rate-limit:3|10001:content-filter:41|10002:ai-semantic-cache:8[S]
+```
+
+The column is nullable and sparse — it stays `NULL` for every request until you enable the option, and for every target where you leave it off. The gateway write path is fail-soft: if the column is missing, that one field is skipped rather than failing the log write, so running the script late costs you data but never traffic.
+
+The value is capped at 2000 characters before it is written, and truncation is always visible (`|+N`, where `N` is the number of entries that did not fit) rather than silent. The column is declared as 4000 characters wide because on Oracle `VARCHAR2` lengths are counted in **bytes**, so a 2000-character cap needs 4000 bytes of headroom in the worst case.
+
+## When to run it
+
+Run this **once**, against each configured SQL/JDBC traffic-log database, any time before or during the 2026.09.1 upgrade — it does not need to be run inside a maintenance window. Because the column is nullable, older gateway workers still writing pre-upgrade log rows are unaffected. Test in a non-production environment first if you use a change-control process for DDL.
+
+## Oracle
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD (
+    policy_exec_times VARCHAR2(4000)
+);
+```
+
+## PostgreSQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN policy_exec_times VARCHAR(4000);
+```
+
+## MySQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN policy_exec_times VARCHAR(4000);
+```
+
+## SQL Server
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD
+    policy_exec_times NVARCHAR(4000);
+```
+
+## Verification
+
+After running the script, enable **Policy execution times** on the relational log target for one API Proxy, redeploy that proxy, and send a request through it. The column should then hold a CSV value for that request:
+
+```sql
+SELECT correlation_id, policy_exec_times
+FROM log_ApiProxyTraffic
+WHERE policy_exec_times IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+For new installations no action is needed — the `CREATE TABLE` statement on the [Apinizer Log Table Creation Commands](/en/operations/administrator-guides/apinizer-log-table-creation-commands) page already includes the column.

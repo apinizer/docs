@@ -110,6 +110,62 @@ The main fields used in log settings are summarized below.
 | Body | For each message region, controls whether body content is logged. |
 | Parameter | For each message region, controls whether parameter information is logged. |
 | Partial size | For each message region, controls whether long text fields are truncated or size-limited when logged. |
+| Policy execution times | Adds the order, type and duration (in milliseconds) of every policy that ran on the request. Off by default; see below. |
 | Privacy | Controls whether environment-level privacy rules apply to log data sent through this connector. |
 
+## Policy Execution Times
 
+When a request is slower than expected, the usual next question is *which policy consumed the time*.
+Answering it used to require enabling **Trace** on the API Proxy, which records the full before/after
+body, headers and parameters of every policy — too heavy to leave on in production.
+
+**Policy execution times** answers the same question without capturing any payload. When the option is
+enabled, each traffic log record carries a compact list of the policies that ran on that request:
+
+| Value | Meaning |
+|------|----------|
+| Order | Execution order. The value also encodes the pipeline region: `0-9999` request, `10000-19999` response, `20000` and above error. The API Traffic detail screen shows the region and the position within it. |
+| Policy type | The policy type, for example `jwt-auth` or `content-filter`. The policy *name* is deliberately not stored — it is usually an auto-generated identifier and carries no meaning on screen. |
+| Duration | How long the policy took, in milliseconds. |
+
+Records that come from the end of a streaming response, policies skipped because their condition was
+not met, and a truncation marker (when a request runs an unusually large number of policies) are shown
+with a small badge next to the policy type.
+
+The measurement itself is not new work: the gateway already computes each policy's duration on every
+request and discards it when Trace is off. Enabling this option only keeps the value.
+
+### Turning it on
+
+The option lives with the other log content flags and is set **per log target**, so you can write the
+timings to Elasticsearch while leaving them out of a relational database target. Method-level overrides
+apply as well.
+
+**Redeploy the API Proxy after changing it** — traffic log settings reach the gateway with the proxy
+deployment.
+
+### Where the data is written
+
+| Target | Representation |
+|------|----------|
+| Elasticsearch | The `pxt` field, as a `nested` object array. `nested` keeps the type and the duration correlated, so a query such as "requests where policy X took longer than 100 ms" returns the right rows. |
+| MongoDB | A sub-document array. |
+| Relational database (SQL/JDBC) | The `policy_exec_times` column, as a single capped CSV: `order:type:duration`, pipe-separated. |
+| Graylog | The same CSV as the relational target. |
+
+:::note
+The option is off by default. On the Elasticsearch side a `nested` field indexes every list item as a
+separate internal document, so a record with 10-20 policies increases the document count of that index
+accordingly. Enable it on the targets where you actually need the data.
+:::
+
+:::info Existing Elasticsearch indices
+The new field is added to the index template and the index is rolled over automatically during the
+upgrade. Because traffic logs are written to a data stream, the field is only available on backing
+indices created after the rollover; older records stay as they are.
+:::
+
+:::info SQL/JDBC log target
+If you write traffic logs to a relational database, the `policy_exec_times` column must be added once
+per environment database. See the ALTER script in the 2026.09.1 release notes.
+:::
