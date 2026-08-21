@@ -250,6 +250,66 @@ Rules you've already customized are never touched by this expansion. New built-i
 
 Data-loss protection is built so that scanning latency doesn't grow linearly with the size of your pattern list, whether the extra patterns are built-in or your own: a cheap internal pre-filter runs ahead of the more expensive pattern checks to narrow down which patterns are even worth evaluating against a given request or response. This is purely an internal performance mechanism — it never changes which patterns match, what action they take, or the result you see; there is nothing to configure for it today.
 
+### File Signature Detection {#file-signature-detection}
+
+The patterns above match **text**. A binary file — a PDF, an Office document, an archive, an executable — that someone pastes into a prompt as base64 or hex is not text: on the wire it is an opaque run of characters, so neither a built-in pattern nor one you wrote yourself can match it. There is no secret *shape* to find, because the leak is the entire file. "A user pasted a whole contract into the chat" and "the model echoed a document back" both travel this way, invisible to every pattern described above.
+
+**File Signature Detection** closes that gap by looking at bytes instead of characters. It decodes the base64 and hex candidates it finds in the body and compares the leading bytes of each against a table of known container formats — the *magic bytes* every binary format begins with. A file pasted raw, without any encoding, is recognized the same way.
+
+The feature is **off by default** and has its own **File Signature Detection** section on the Data-Loss Protection policy screen. It is configured **independently of the pattern list**: a policy with no data-loss pattern at all still does real work while this switch is on, and a policy full of patterns is completely unaffected while it stays off.
+
+**Recognized formats**
+
+| File type | Covers | `fileSignatureTypes` value |
+|---|---|---|
+| PDF document | `.pdf` | `PDF` |
+| ZIP / Office | `.docx`, `.xlsx`, `.pptx`, `.jar` and any other ZIP container | `ZIP_OOXML` |
+| PNG image | `.png` | `PNG` |
+| JPEG image | `.jpg`, `.jpeg` | `JPEG` |
+| GIF image | `.gif` | `GIF` |
+| GZIP archive | `.gz` | `GZIP` |
+| RAR archive | `.rar` | `RAR` |
+| 7-Zip archive | `.7z` | `SEVEN_ZIP` |
+| ELF executable | Linux binaries and shared objects | `ELF` |
+| PE executable | Windows `.exe` / `.dll` | `PE_EXE` |
+| OLE2 document | Legacy Office `.doc`, `.xls`, `.ppt` | `OLE2` |
+| RTF document | `.rtf` | `RTF` |
+| Java class file | Compiled `.class` bytecode | `JAVA_CLASS` |
+
+**File Types** is an allow-list: leave it **empty to detect all thirteen**. Narrow it when a format is a legitimate part of your traffic — an assistant that receives pasted screenshots can leave PNG and JPEG out of scope while still catching documents, archives and executables.
+
+**Action: Block or Flag — Mask is not offered**
+
+The action applies to the detection as a whole rather than per format, and only two choices exist: **Block** (the default) rejects the request or response, **Flag** lets it through and records the hit. **Mask is deliberately absent.** Masking replaces a matched *region* with `[REDACTED]`, which is well defined for a short secret such as an API key. A magic-byte match has no such region — it says "these bytes are the beginning of a PDF", not "characters 400 through 460 are the secret" — so there is nothing meaningful to redact, and rewriting part of an encoded blob would only corrupt the payload the caller sent. This is the same reasoning that escalates a **mask** rule to **block** inside decoded content, described under [Decoding Encoded Content](#decoding-encoded-content) above. Setting `fileSignatureAction` to `MASK` through APIops is rejected when the policy is saved, and a Mask value that reaches the gateway from an older exported policy is treated as **Block**: an entire file leaving the organization is assumed to be at least as serious as a short secret, so the safe direction is the default.
+
+**Where the signature sits is part of the signal**
+
+A signature found at the very start of a candidate means that candidate almost certainly *is* that file — a whole document was sent. A signature found further inside a larger blob is a weaker signal: the file's bytes merely occur somewhere within other content, for example appended after something else. Both are reported, and the recorded hit says which of the two it was, so someone reviewing the report can tell "a document was uploaded" apart from "a document is buried inside something else".
+
+**It works in both directions**
+
+Data-loss protection inspects both lanes, and file-signature detection follows it: prompts on the way in, model output on the way back. The response direction is the one worth enabling deliberately — a model that reproduces a base64 document out of its context window or out of a tool result is exactly the embedded-document leak this detection exists for, and it is the direction a request-only filter never sees.
+
+**A magic prefix is never trusted on its own**
+
+Short magic bytes collide with random data by chance: the Windows PE header is two bytes (`MZ`), which turns up in roughly one of every 65,536 random byte pairs. Every format in the table is therefore paired with a format-specific check that runs on the bytes *after* the magic prefix — the PE check follows the DOS header's pointer and requires the bytes it points at to read `PE\0\0`, the PNG check requires the first chunk to declare exactly the length a real PNG declares, the ZIP check requires plausible "version needed" and "compression method" fields. A candidate too short to run its format's check never matches at all. This is what keeps a hash, a token or a random identifier inside a prompt from being reported as a smuggled executable.
+
+**Limits, and never a silent cut**
+
+Scanning is bounded — on input length, on how many base64/hex candidates are examined, on total decoded bytes, and on nesting depth (base64 wrapped in base64 is decoded, but the chain does not continue indefinitely). When a ceiling is reached the scan returns what it found so far and records that it was truncated, following the same "never truncated silently" contract as the [encoded-content decoding](#decoding-encoded-content) limits. Only base64 and hex are treated as byte carriers: percent-encoding and `\uXXXX` escapes inflate binary data three- to sixfold and are not a realistic way to smuggle a file through a prompt. A base64 blob *wrapped* in those encodings is still reached, because the text produced by encoded-content decoding is scanned as well.
+
+Detection does not need the **Decode Encoded Content** switch to be on — decoding base64 and hex is part of the detection itself. When that switch is on as well, the two share the same decoding work on a given body instead of decoding the same text twice.
+
+:::warning Enabling this trades time-to-first-token for correctness on streamed responses
+While File Signature Detection is on, this policy's streamed responses are **accumulated and scanned as a whole** instead of chunk by chunk — whichever action you chose, **Flag included**. An encoded file signature can straddle any chunk boundary: the magic bytes would land in one chunk and the bytes that confirm them in the next, so a per-chunk scan would reliably find nothing at all. This is the same buffer-and-scan approach described under [Streaming Responses: Buffer-and-Scan](#streaming-buffer-and-scan), and the practical cost is that time-to-first-token is no longer preserved for this policy's streamed responses. Leave the switch off on latency-critical proxies that carry no document-leak exposure.
+:::
+
+**How a match shows up**
+
+A file-signature hit is recorded distinctly from a secret-pattern hit, so the two never blur together in the [Guardrail Hits report](/en/ai-gateway/reports#security-and-guardrails-tab): the hit is tagged `file-signature` rather than `secret`, and its label carries the format and the position — for example `File signature (PDF, at_start)`. When more than one signature matched, the label counts the rest. In [tracing](/en/ai-gateway/tracing-and-replay) the recorded entry holds the format, the position, whether the bytes arrived raw or base64/hex-encoded, and how many matches there were — never the scanned content itself.
+
+The three fields are also settable through APIops on the data-loss protection policy JSON: `fileSignatureDetectionEnabled`, `fileSignatureAction` (`BLOCK` or `FLAG`) and `fileSignatureTypes` (an array of the values in the table above, empty or omitted for all thirteen). See [API Reference: AI Gateway](/api-reference/ai-gateway).
+
 ## Writing and Testing Patterns
 
 Patterns use **Java regular-expression** syntax (`java.util.regex.Pattern`) — that is the engine the gateway matches with. It is not identical to JavaScript or PCRE: lookbehind must be fixed-width, named groups are written `(?<name>...)`, and Unicode classes such as `\p{L}` are supported.

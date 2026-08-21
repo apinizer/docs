@@ -329,6 +329,66 @@ Hâlihazırda özelleştirdiğiniz kurallar bu genişlemeden hiçbir şekilde et
 
 Veri Sızıntısı Koruması, kalıp listeniz büyüdükçe — ister yerleşik ister kendi eklediğiniz kalıplar olsun — tarama gecikmesi orantılı büyümesin diye tasarlanmıştır: daha pahalı kalıp kontrolleri çalışmadan önce, bir isteğe/yanıta karşı hangi kalıpların gerçekten değerlendirilmeye değer olduğunu daraltan ucuz bir dahili ön filtre çalışır. Bu tamamen dahili bir performans mekanizmasıdır — hangi kalıbın eşleştiğini, hangi aksiyonun uygulandığını ya da gördüğünüz sonucu asla değiştirmez; bugün bunun için yapılandırılacak bir ayar yoktur.
 
+### Dosya İmzası Tespiti {#dosya-imzasi-tespiti}
+
+Yukarıdaki kalıplar **metin** eşleştirir. Bir istemin içine base64 ya da onaltılık (hex) olarak yapıştırılmış ikili bir dosya — bir PDF, bir Office belgesi, bir arşiv, bir çalıştırılabilir dosya — ise metin değildir: telde yalnızca anlamsız bir karakter dizisi görünür, dolayısıyla ne yerleşik bir kalıp ne de sizin yazdığınız bir kalıp onu yakalayabilir. Aranacak bir sır *şekli* yoktur, çünkü sızan şey dosyanın tamamıdır. "Kullanıcı sohbete bütün bir sözleşmeyi yapıştırdı" ve "model bir belgeyi geri yansıttı" durumlarının ikisi de bu yolla taşınır ve yukarıda anlatılan kalıpların hiçbiri bunu göremez.
+
+**Dosya İmzası Tespiti** bu açığı, karakterlere değil baytlara bakarak kapatır. Gövdede bulduğu base64 ve hex adaylarını çözer ve her birinin baştaki baytlarını bilinen kapsayıcı biçimlerin tablosuyla — her ikili biçimin başladığı *sihirli baytlarla* (magic bytes) — karşılaştırır. Hiç kodlanmadan, ham olarak yapıştırılmış bir dosya da aynı şekilde tanınır.
+
+Özellik **varsayılan olarak kapalıdır** ve Veri Sızıntısı Koruması politika ekranında kendi **Dosya İmzası Tespiti** bölümüne sahiptir. **Kalıp listesinden bağımsız** yapılandırılır: hiç veri sızıntısı kalıbı olmayan bir politika bile bu anahtar açıkken gerçek iş yapar; kalıp dolu bir politika ise anahtar kapalı kaldığı sürece hiçbir şekilde etkilenmez.
+
+**Tanınan biçimler**
+
+| Dosya tipi | Kapsam | `fileSignatureTypes` değeri |
+|---|---|---|
+| PDF belgesi | `.pdf` | `PDF` |
+| ZIP / Office | `.docx`, `.xlsx`, `.pptx`, `.jar` ve diğer ZIP kapsayıcıları | `ZIP_OOXML` |
+| PNG görseli | `.png` | `PNG` |
+| JPEG görseli | `.jpg`, `.jpeg` | `JPEG` |
+| GIF görseli | `.gif` | `GIF` |
+| GZIP arşivi | `.gz` | `GZIP` |
+| RAR arşivi | `.rar` | `RAR` |
+| 7-Zip arşivi | `.7z` | `SEVEN_ZIP` |
+| ELF çalıştırılabilir dosyası | Linux ikilileri ve paylaşılan kitaplıklar | `ELF` |
+| PE çalıştırılabilir dosyası | Windows `.exe` / `.dll` | `PE_EXE` |
+| OLE2 belgesi | Eski Office `.doc`, `.xls`, `.ppt` | `OLE2` |
+| RTF belgesi | `.rtf` | `RTF` |
+| Java class dosyası | Derlenmiş `.class` bayt kodu | `JAVA_CLASS` |
+
+**Dosya Tipleri** bir izin listesidir: **on üç tipin tamamının taranması için boş bırakın**. Bir biçim trafiğinizin meşru bir parçasıysa listeyi daraltın — örneğin ekran görüntüsü yapıştırılan bir asistanda PNG ve JPEG kapsam dışında bırakılabilir, belgeler, arşivler ve çalıştırılabilir dosyalar yakalanmaya devam eder.
+
+**Aksiyon: Engelle ya da İşaretle — Maskele seçeneği yoktur**
+
+Aksiyon biçim başına değil, tespitin tamamına uygulanır ve yalnız iki seçenek vardır: **Engelle** (varsayılan) isteği ya da yanıtı reddeder, **İşaretle** geçmesine izin verir ve olayı kaydeder. **Maskele bilinçli olarak yoktur.** Maskeleme, eşleşen bir *aralığı* `[REDACTED]` ile değiştirir; bu, bir API anahtarı gibi kısa bir sır için iyi tanımlı bir işlemdir. Bir sihirli-bayt eşleşmesinin ise böyle bir aralığı yoktur — "bu baytlar bir PDF'in başlangıcıdır" der, "400 ile 460 arasındaki karakterler sırdır" demez — dolayısıyla redakte edilecek anlamlı bir bölge yoktur ve kodlanmış bir bloğun bir parçasını yeniden yazmak yalnızca çağıranın gönderdiği yükü bozar. Bu, yukarıdaki [Kodlanmış İçeriğin Çözülmesi](#kodlanmis-icerik-cozme) bölümünde anlatılan, çözülmüş içerikte bir **maskele** kuralının **engelle**ye yükseltilmesiyle aynı gerekçedir. APIops üzerinden `fileSignatureAction` alanına `MASK` verilmesi kayıt anında reddedilir; eski bir dışa aktarımdan gelen bir Maskele değeri ise gateway'de **Engelle** olarak ele alınır: bütün bir dosyanın kurumdan çıkması en az kısa bir sır kadar ciddi kabul edilir, bu yüzden varsayılan güvenli yöndür.
+
+**İmzanın nerede bulunduğu sinyalin bir parçasıdır**
+
+Bir adayın en başında bulunan imza, o adayın neredeyse kesinlikle o dosyanın *kendisi* olduğu anlamına gelir — bütün bir belge gönderilmiştir. Daha büyük bir bloğun içinde, ileri bir konumda bulunan imza ise daha zayıf bir sinyaldir: dosyanın baytları başka içeriğin içinde bir yerde, örneğin başka bir şeyin arkasına eklenmiş olarak geçmektedir. İkisi de raporlanır ve kaydedilen olay hangisi olduğunu belirtir; böylece raporu inceleyen kişi "bir belge yüklenmiş" ile "bir belge başka bir şeyin içine gömülmüş" durumlarını birbirinden ayırabilir.
+
+**İki yönde de çalışır**
+
+Veri Sızıntısı Koruması hem istek hem yanıt yönünü denetler; dosya imzası tespiti de onu izler: girişte istemler, dönüşte model çıktısı. Bilinçli olarak açılmaya değer olan yön yanıt yönüdür — bağlam penceresinden ya da bir araç (tool) sonucundan base64 bir belgeyi yeniden üreten bir model, tam olarak bu tespitin var oluş nedeni olan gömülü-belge sızıntısıdır ve yalnız istek tarafını tarayan bir filtrenin asla göremediği yön de budur.
+
+**Sihirli önek tek başına asla güvenilir sayılmaz**
+
+Kısa sihirli baytlar rastgele veriyle tesadüfen çakışır: Windows PE başlığı iki bayttır (`MZ`) ve rastgele her 65.536 bayt çiftinden yaklaşık birinde ortaya çıkar. Bu nedenle tablodaki her biçim, sihirli önekten *sonraki* baytlara bakan biçime özgü bir doğrulamayla eşleştirilmiştir — PE doğrulaması DOS başlığındaki göstericiyi izler ve gösterdiği baytların `PE\0\0` olmasını şart koşar, PNG doğrulaması ilk parçanın gerçek bir PNG'nin bildirdiği uzunluğu bildirmesini ister, ZIP doğrulaması "gereken sürüm" ve "sıkıştırma yöntemi" alanlarının makul değerler olmasını arar. Doğrulamayı çalıştırmaya yetecek kadar uzun olmayan bir aday hiç eşleşmez. Bir istemin içindeki bir özetin (hash), bir token'ın ya da rastgele bir tanımlayıcının kaçak bir çalıştırılabilir dosya olarak raporlanmasını engelleyen şey budur.
+
+**Sınırlar ve "sessiz kesme yok" ilkesi**
+
+Tarama sınırlıdır — girdi uzunluğunda, incelenen base64/hex aday sayısında, toplam çözülen bayt miktarında ve iç içe geçme derinliğinde (base64 içine sarılmış base64 çözülür, ama zincir sonsuza kadar sürmez). Bir tavana ulaşıldığında tarama o ana kadar bulduğunu döndürür ve kesildiğini kaydeder; bu, [kodlanmış içerik çözme](#kodlanmis-icerik-cozme) sınırlarındaki "asla sessizce kesilmez" ilkesinin aynısıdır. Bayt taşıyıcısı olarak yalnız base64 ve hex ele alınır: yüzde kodlaması ve `\uXXXX` kaçışları ikili veriyi üç-altı katına şişirir ve bir dosyayı istem üzerinden kaçırmak için gerçekçi bir yol değildir. Bu kodlamalarla *sarılmış* bir base64 bloğuna ise yine ulaşılır, çünkü kodlanmış içerik çözmenin ürettiği metin de taranır.
+
+Tespit için **Kodlanmış İçeriği Çöz** anahtarının açık olması gerekmez — base64 ve hex çözme, tespitin kendi parçasıdır. O anahtar da açıksa ikisi aynı gövde üzerinde çözme işini paylaşır, aynı metin iki kez çözülmez.
+
+:::warning Bu ayar, akış yanıtlarında ilk-token süresini doğruluk uğruna feda eder
+Dosya İmzası Tespiti açıkken bu politikanın akış (streaming) yanıtları parça parça değil, **bütün olarak biriktirilip taranır** — hangi aksiyonu seçmiş olursanız olun, **İşaretle dahil**. Kodlanmış bir dosya imzası herhangi bir parça sınırına yayılabilir: sihirli baytlar bir parçaya, onları doğrulayan baytlar bir sonrakine düşer; dolayısıyla parça-bazlı bir tarama neredeyse hiçbir şey bulamaz. Bu, [Akış (Streaming) Yanıtlarda: Buffer-and-Scan](#streaming-buffer-and-scan) bölümünde anlatılan aynı buffer-and-scan yaklaşımıdır ve pratik bedeli, bu politikanın akış yanıtlarında ilk-token süresinin (TTFT) artık korunmamasıdır. Belge sızıntısı riski taşımayan, gecikmeye duyarlı proxy'lerde anahtarı kapalı bırakın.
+:::
+
+**Eşleşme nerede görünür**
+
+Bir dosya imzası eşleşmesi, bir sır kalıbı eşleşmesinden ayrı olarak kaydedilir; böylece ikisi [Güvenlik ve Guardrail'ler raporunda](/tr/ai-gateway/raporlar) birbirine karışmaz: olay `secret` yerine `file-signature` olarak etiketlenir ve etiketi biçim ile konumu taşır — örneğin `File signature (PDF, at_start)`. Birden fazla imza eşleştiyse etiket kalanların sayısını da belirtir. [İzleme ve Tekrar Oynatma](/tr/ai-gateway/izleme-ve-tekrar-oynatma) kaydında biçim, konum, baytların ham mı yoksa base64/hex kodlu mu geldiği ve kaç eşleşme olduğu tutulur — taranan içeriğin kendisi asla tutulmaz.
+
+Üç alan APIops üzerinden veri sızıntısı koruması politika JSON'unda da ayarlanabilir: `fileSignatureDetectionEnabled`, `fileSignatureAction` (`BLOCK` ya da `FLAG`) ve `fileSignatureTypes` (yukarıdaki tablodaki değerlerden oluşan bir dizi; boş bırakılır ya da hiç verilmezse on üç tipin tamamı). Bkz. [API Referansı: AI Gateway](/api-reference/ai-gateway).
+
 ### Aksiyonlar
 
 - **Engelle** — istek/yanıt tamamen reddedilir
