@@ -1,6 +1,6 @@
 ---
-title: "2026.09.1 — Log Table ALTER Script"
-description: "ALTER TABLE script for existing SQL/JDBC traffic-log installations upgrading to Apinizer 2026.09.1."
+title: "2026.09.1 — Log Table ALTER Scripts"
+description: "ALTER TABLE scripts for existing SQL/JDBC traffic-log installations upgrading to Apinizer 2026.09.1."
 slug: /release-notes/2026-09-1-log-table-alter
 unlisted: true
 ---
@@ -15,17 +15,23 @@ This script is only relevant if your Apinizer installation writes API proxy traf
 
 ## What changed
 
-Apinizer 2026.09.1 adds **policy execution times** to the traffic log: the order, type and duration in milliseconds of every policy that ran on a request. The feature is off by default and is enabled per log target under API Proxy > Log Settings.
+Apinizer 2026.09.1 adds five columns to `log_ApiProxyTraffic`.
 
-On a relational target the list is written to a single new column, `policy_exec_times`, as a capped CSV of `order:type:duration` triplets:
+**Policy execution times** (`policy_exec_times`) — the order, type and duration in milliseconds of every policy that ran on a request. Answering "which policy consumed the time?" previously required enabling Trace, which captures full request and response bodies and is too heavy to leave on in production. The feature is off by default and is enabled per log target under API Proxy > Log Settings. On a relational target the list is written as a capped CSV of `order:type:duration` triplets:
 
 ```
 1:jwt-auth:12|2:rate-limit:3|10001:content-filter:41|10002:ai-semantic-cache:8[S]
 ```
 
-The column is nullable and sparse — it stays `NULL` for every request until you enable the option, and for every target where you leave it off. The gateway write path is fail-soft: if the column is missing, that one field is skipped rather than failing the log write, so running the script late costs you data but never traffic.
+The value is capped at 2000 characters before it is written, and truncation is always visible (`|+N`, where `N` is the number of entries that did not fit) rather than silent. The column is declared 4000 characters wide because on Oracle `VARCHAR2` lengths are counted in **bytes**, so a 2000-character cap needs 4000 bytes of headroom in the worst case.
 
-The value is capped at 2000 characters before it is written, and truncation is always visible (`|+N`, where `N` is the number of entries that did not fit) rather than silent. The column is declared as 4000 characters wide because on Oracle `VARCHAR2` lengths are counted in **bytes**, so a 2000-character cap needs 4000 bytes of headroom in the worst case.
+**Outbound MCP and A2A audit** (`mcp_tool_names_out`, `mcp_tool_call_count_out`, `a2a_skill_names_out`, `a2a_agent_call_count_out`) — which MCP tools and A2A skills/agents an AI proxy called on the way out, and how many calls it made. The name columns hold a distinct CSV capped at 256 characters; the count columns hold the raw, uncapped total, so a truncated name list still tells you the real call volume. These are always written for outbound MCP/A2A traffic and need no setting.
+
+All five columns are nullable and sparse — they stay `NULL` for traffic that does not involve the corresponding feature. The gateway write path is fail-soft: if a column is missing, that one field is skipped rather than failing the log write, so running the script late costs you data but never traffic.
+
+:::note Already ran the 2026.09.0 script?
+The cumulative 2026.09.0 script (for installations coming from 2026.04.x) already contains the four MCP/A2A audit columns. If you ran it, add only `policy_exec_times` below and skip the four audit columns — re-adding an existing column raises an error.
+:::
 
 ## When to run it
 
@@ -35,6 +41,10 @@ Run this **once**, against each configured SQL/JDBC traffic-log database, any ti
 
 ```sql
 ALTER TABLE log_ApiProxyTraffic ADD (
+    mcp_tool_names_out VARCHAR2(256),
+    mcp_tool_call_count_out NUMBER(10),
+    a2a_skill_names_out VARCHAR2(256),
+    a2a_agent_call_count_out NUMBER(10),
     policy_exec_times VARCHAR2(4000)
 );
 ```
@@ -43,6 +53,10 @@ ALTER TABLE log_ApiProxyTraffic ADD (
 
 ```sql
 ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN mcp_tool_names_out VARCHAR(256),
+    ADD COLUMN mcp_tool_call_count_out INTEGER,
+    ADD COLUMN a2a_skill_names_out VARCHAR(256),
+    ADD COLUMN a2a_agent_call_count_out INTEGER,
     ADD COLUMN policy_exec_times VARCHAR(4000);
 ```
 
@@ -50,6 +64,10 @@ ALTER TABLE log_ApiProxyTraffic
 
 ```sql
 ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN mcp_tool_names_out VARCHAR(256),
+    ADD COLUMN mcp_tool_call_count_out INT,
+    ADD COLUMN a2a_skill_names_out VARCHAR(256),
+    ADD COLUMN a2a_agent_call_count_out INT,
     ADD COLUMN policy_exec_times VARCHAR(4000);
 ```
 
@@ -57,6 +75,10 @@ ALTER TABLE log_ApiProxyTraffic
 
 ```sql
 ALTER TABLE log_ApiProxyTraffic ADD
+    mcp_tool_names_out NVARCHAR(256),
+    mcp_tool_call_count_out INT,
+    a2a_skill_names_out NVARCHAR(256),
+    a2a_agent_call_count_out INT,
     policy_exec_times NVARCHAR(4000);
 ```
 
@@ -68,6 +90,16 @@ After running the script, enable **Policy execution times** on the relational lo
 SELECT correlation_id, policy_exec_times
 FROM log_ApiProxyTraffic
 WHERE policy_exec_times IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+The MCP/A2A audit columns need no setting — send a request through an AI proxy that calls an MCP tool or an A2A agent:
+
+```sql
+SELECT correlation_id, mcp_tool_names_out, mcp_tool_call_count_out,
+       a2a_skill_names_out, a2a_agent_call_count_out
+FROM log_ApiProxyTraffic
+WHERE mcp_tool_names_out IS NOT NULL OR a2a_skill_names_out IS NOT NULL
 ORDER BY log_timestamp DESC;
 ```
 
