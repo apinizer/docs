@@ -427,6 +427,29 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "OIDC Providers",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "oidc-providers",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "oidc-providers/crud",
+                "oidc-providers/crud/create-oidc-provider",
+                "oidc-providers/crud/delete-oidc-provider",
+                "oidc-providers/crud/get-oidc-provider",
+                "oidc-providers/crud/list-oidc-providers",
+                "oidc-providers/crud/update-oidc-provider"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
           "label": "Credential Organizations",
           "collapsed": true,
           "collapsible": true,

@@ -675,6 +675,7 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/database-provider",
             "admin/identity-management/identity-providers/ldap-active-directory",
             "admin/identity-management/identity-providers/api-authentication-provider",
+            "admin/identity-management/identity-providers/oidc-provider",
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },

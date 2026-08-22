@@ -1,0 +1,142 @@
+---
+title: "OIDC Provider"
+description: "You can configure a shared OIDC identity provider for token-based user verification, and optionally synchronize its users, groups, and roles into Credential records."
+---
+
+:::info
+
+Accessible and manageable by roles that have the "Manage Authentication Services" permission such as "Project Owner".
+
+Identity Provider specifies the user pool to be given to clients. This predefined Identity Provider is used when creating JWT, OAuth 2, or OIDC Authentication policies, and can also be selected as the shared connection settings for the [OIDC Authentication](/en/develop/policies/oidc-authentication) policy.
+
+:::
+
+## Why a Separate Identity Provider for OIDC?
+
+Verifying an OIDC/OAuth2 access or ID token — checking its signature, issuer, audience, and expiration — is a standardized operation defined by the OIDC/OAuth2 specifications, so it can be configured once, centrally, and reused by every policy that needs it. Listing the users that exist behind that token, on the other hand, is **not** part of any OIDC/OAuth2 specification: it is a vendor-specific administrative capability. Only some providers (such as Keycloak) expose an administrative API for it.
+
+This is why the OIDC Provider is split into two independent capabilities:
+
+- **Token validation** (available for every provider): standards-based, works against any OIDC/OAuth2-compliant issuer.
+- **Identity synchronization** (available for Keycloak only, and optional even then): reads users, groups, and role memberships through Keycloak's Admin REST API and turns them into [Credential](/en/admin/identity-management/credentials) records, the same way [LDAP Active Directory](/en/admin/identity-management/identity-providers/ldap-active-directory) or a [Database Provider](/en/admin/identity-management/identity-providers/database-provider) does.
+
+A provider with synchronization turned off is still fully usable for authentication — the incoming token is validated and its claims are trusted directly. Turning synchronization on adds an extra, optional guarantee: only users that also exist as a Credential are accepted (see [Password Model and Username Contract](#password-model-and-username-contract) below).
+
+## General tab
+
+| Field | Description |
+| --- | --- |
+| Name | Name of the OIDC Provider. |
+| Description | A description can be written to facilitate management related to the created OIDC Provider. |
+| Vendor | The OIDC provider family:<br/>• **Generic** — any standards-compliant OIDC/OAuth2 provider; discovery and token validation only.<br/>• **Keycloak** — same discovery/validation behavior, plus makes the [Synchronization tab](#synchronization-tab) available. |
+| Issuer URL | The OIDC issuer (`iss`) URL, e.g. `https://keycloak.example.com/realms/acme`. Also used to derive the discovery document address when Discovery URL is left empty. |
+| Discovery URL | Overrides the default `{Issuer URL}/.well-known/openid-configuration` address. Leave empty to use the default. |
+| Auto-discover endpoints | When enabled, the endpoint fields on the [Endpoints tab](#endpoints-tab) are fetched from the discovery document and shown read-only. When disabled, every endpoint is entered manually. |
+
+## Endpoints tab
+
+| Field | Description |
+| --- | --- |
+| Discover | Fetches the discovery document from Issuer URL/Discovery URL and fills in the empty endpoint fields below. Does not overwrite fields that already have a value, and does not save the provider by itself — review the result and save separately. |
+| Token Endpoint | Token endpoint URL. |
+| Introspection Endpoint | Token introspection endpoint URL (RFC 7662) — used by [Online validation](#offline-online-and-hybrid-validation). |
+| UserInfo Endpoint | UserInfo endpoint URL — used by [Online validation](#offline-online-and-hybrid-validation) for opaque tokens. |
+| JWKS Endpoint | The JSON Web Key Set URL used to verify token signatures in [Offline validation](#offline-online-and-hybrid-validation). |
+| End-Session Endpoint | Logout/end-session endpoint URL. |
+
+When Auto-discover endpoints is enabled, these fields are read-only and reflect the last fetched discovery document.
+
+## Client tab
+
+| Field | Description |
+| --- | --- |
+| Client ID | OAuth/OIDC client identifier registered with the provider. |
+| Client Secret | Client secret (show/hide, copy). Leave unchanged to keep the current secret when editing. |
+| Client Authentication Method | How the provider client authenticates itself to the token/introspection endpoint:<br/>• **Client Secret (Basic)** — `client_id`/`client_secret` sent as an HTTP Basic header.<br/>• **Client Secret (POST body)** — sent as form fields in the request body.<br/>• **Private Key JWT** — a signed JWT assertion, no client secret required. |
+
+## Validation tab
+
+| Field | Description |
+| --- | --- |
+| Validation Mode | See [Offline, Online, and Hybrid validation](#offline-online-and-hybrid-validation) below. |
+| JWKS Source | Where signing keys come from for local signature verification:<br/>• **Discovery (remote JWKS)** — fetched from JWKS Endpoint and cached.<br/>• **Static (pasted JWKS)** — no discovery/network call; keys come from Static JWKS (JSON) or Certificate. |
+| Static JWKS (JSON) | The JWKS document (a JSON object with a `keys` array) pasted directly. Used only when JWKS Source is Static. |
+| Certificate | A [Certificate](/en/admin/secrets-management/certificates) whose key material is used for signature verification. Used only when JWKS Source is Static. |
+| Allowed Signature Algorithms | The JWT signature algorithms accepted during validation. Default: `RS256`, `RS384`, `RS512`, `ES256`. |
+| Max Clock Skew (seconds) | Tolerance applied to `iat`/`exp`/`nbf` comparisons to absorb clock drift between systems. Default: 30. |
+| Connection Timeout (seconds) | Connect timeout for calls to the provider. Default: 10. |
+| Read Timeout (seconds) | Read timeout for calls to the provider. Default: 10. |
+| Validate Issuer | Checks the token's `iss` claim. **Enabled by default** — see [Security Defaults](#security-defaults-validate-issuer-and-validate-audience) below. |
+| Expected Issuer | The issuer value tokens are compared against. If left empty while Validate Issuer is on, falls back to Issuer URL. |
+| Validate Audience | Checks the token's `aud` claim. **Enabled by default** — see [Security Defaults](#security-defaults-validate-issuer-and-validate-audience) below. |
+| Expected Audience | The audience value(s) tokens are compared against. If left empty while Validate Audience is on, falls back to Client ID. |
+
+### Offline, Online, and Hybrid validation
+
+| Mode | Behavior | Typical use |
+| --- | --- | --- |
+| **Offline** | The token's signature is verified locally against JWKS (Discovery or Static). No call to the provider on every request — low latency. | Default choice; also the only mode that works fully air-gapped when JWKS Source is Static. |
+| **Online** | Every request calls the provider's Introspection Endpoint (RFC 7662) or UserInfo Endpoint to validate the token. Immediately reflects a revoked token, at the cost of an extra network round trip per request. | Opaque (non-JWT) tokens, or deployments that need instant revocation visibility. |
+| **Hybrid** | Signature is verified locally first; introspection is used to confirm when needed. | A middle ground between the two above. |
+
+Choosing Static JWKS Source with Offline validation means the provider never needs outbound network access to validate tokens — the standard path for **air-gapped** environments where the Gateway cannot reach the identity provider's network.
+
+### Security Defaults: Validate Issuer and Validate Audience
+
+Both **Validate Issuer** and **Validate Audience** default to **enabled**, and both are **fail-closed**: turning a check on without giving it something to compare against does not silently skip that check — the provider is rejected at save time (empty Issuer URL/Expected Issuer with Validate Issuer on, or empty Client ID/Expected Audience with Validate Audience on), and if the effective value is somehow still empty at token-validation time, the token itself is rejected rather than accepted.
+
+This default matters most for a **shared-realm Keycloak (or any shared-realm OIDC) deployment**, where several applications register as separate clients under the same realm. Without audience validation, a completely valid, correctly signed, unexpired token issued for a *different* application in that realm would also be accepted here — a cross-client token replay. Requiring the expected audience to match closes that gap. Because Expected Audience falls back to Client ID when left empty, this protection does not require any additional configuration in the common case: create the provider, and audience validation applies to that client automatically.
+
+## Claim Mapping tab
+
+| Field | Description |
+| --- | --- |
+| Username Claim | The claim used to resolve the authenticated username. Default: `preferred_username`. |
+| Email Claim | The claim used to resolve the user's email. Default: `email`. |
+| Full Name Claim | The claim used to resolve the user's display name. Default: `name`. |
+| Roles Claim | The claim used to resolve the user's roles, when Role Source reads from the token. |
+| Groups Claim | The claim used to resolve the user's group memberships, when Role Source reads from the token. |
+| Require matching Credential | When on, a token that validates successfully but has no matching Credential record is rejected rather than accepted anonymously. |
+| Role Source | Where the authenticated user's roles come from:<br/>• **Token Claim** — read from Roles Claim/Groups Claim on the token itself.<br/>• **Synced Credential** *(default)* — read from the Credential/role membership created by [identity synchronization](#synchronization-tab).<br/>• **Both** — the union of the two. |
+
+### Password Model and Username Contract
+
+The user's password is **never sent to or stored in Apinizer** — it stays with the identity provider (Keycloak or any other IdP) end to end. Authentication is entirely token- and claim-based: the caller authenticates at the provider, receives a token, and Apinizer verifies that token. Consequently, records created by identity synchronization are **passwordless** Credentials; they exist to carry the synchronized username/roles/group membership, not a comparable secret.
+
+Because of this, the Username Claim on this tab and the synchronized `username` on the [Synchronization tab](#synchronization-tab) must resolve to **the same underlying identity**. The default, `preferred_username`, is deliberately matched to the Keycloak "username" field that synchronization writes into `Credential.username`. If Username Claim is changed to a different claim, the synchronized username and the validated token's resolved username can silently stop matching the same user — and with Require matching Credential on, valid tokens would then be rejected. Change this field only if you understand which claim your provider populates and keep it aligned with what the source actually treats as the username.
+
+## Synchronization tab
+
+Available only when Vendor is **Keycloak**. Synchronizes users (and, optionally, groups and role memberships) from the realm's Admin REST API into [Credential](/en/admin/identity-management/credentials) records, on a schedule or via a manual run — the same [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync) mechanism used by LDAP, Database, and API providers.
+
+| Field | Description |
+| --- | --- |
+| Enable Synchronization | When enabled, credentials are synchronized from this provider according to the configured schedule. |
+| Realm | The Keycloak realm to synchronize from. |
+| Admin API Base URL | The base URL of the Keycloak Admin REST API (e.g. `https://keycloak.example.com`), independent of the OIDC issuer/token endpoints used for login. |
+| Sync Client ID | The client used to call the Admin API — typically a separate, dedicated client from the one used for end-user login. See [Keycloak Service Account Roles](#keycloak-service-account-roles) below. |
+| Sync Page Size | The page size used when paging through Keycloak's user list. Default: 250. |
+| Synchronize Groups | When enabled, the realm's group tree is also synchronized, and each user's deepest group membership is reflected as their Credential organization. |
+| Role Sync Source | Which Keycloak role assignment is read as the synchronized user's roles:<br/>• **Realm Roles** *(default)*<br/>• **Client Roles** — read from the client identified by Sync Client ID.<br/>• **Groups** — the names of the groups (and subgroups) the user belongs to. |
+
+The Cron Expression and Deactivation Mode fields, along with the Synchronize Now action and the synchronization status/history display, follow the same shared behavior documented in [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync#sync-profile) — this page documents only the fields specific to the OIDC/Keycloak source.
+
+### Keycloak Service Account Roles
+
+Sync Client ID must be a **confidential client with a service account** that has, at minimum, the realm-management client roles **`view-users`** and **`query-groups`** assigned to its service account. Depending on which options are enabled:
+
+- **Synchronize Groups** additionally needs **`query-groups`** (already listed above) to read the group tree and membership.
+- **Role Sync Source = Client Roles** additionally needs **`view-clients`** to resolve the target client's role list.
+
+Without these roles, Keycloak's Admin REST API returns `403 Forbidden` for the corresponding calls, and the synchronization run reports the failure without deactivating any existing credentials (see [Behavior and Safety Notes](/en/admin/identity-management/identity-providers/credential-sync#behavior-and-safety-notes)).
+
+## Test Connection and Discover
+
+| Action | What it does |
+| --- | --- |
+| **Test Connection** *(top of the page)* | Fetches the discovery document, confirms the JWKS endpoint is reachable, and — when Client ID and Client Secret are both set — attempts a `client_credentials` token request against the token endpoint. Reports a descriptive error on the first failing step. When JWKS Source is Static, no network call is made at all; only the pasted JWKS/Certificate are validated locally. |
+| **Discover** *(Endpoints tab)* | Fetches the discovery document and fills in empty endpoint/issuer fields, without saving. |
+
+## Related Pages
+
+For how a JWT, OAuth 2, or Basic/Plain-Text Authentication policy selects an identity service (including OIDC), see [JWT Authentication](/en/develop/policies/jwt) and [OAuth 2 Authentication](/en/develop/policies/oauth2). For how the [OIDC Authentication](/en/develop/policies/oidc-authentication) policy can reference this provider directly instead of configuring endpoints inline, see its [Shared OIDC Provider](/en/develop/policies/oidc-authentication#connecting-to-a-shared-oidc-provider) section. For the synchronized records, see [Credentials](/en/admin/identity-management/credentials). For scheduling, deactivation behavior, and monitoring shared with the other providers, see [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync).
