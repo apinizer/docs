@@ -1233,6 +1233,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-scenarios/mysql-db2api-creation",
             "tutorials/api-proxy-scenarios/mock-api-json-transformation-script",
             "tutorials/api-proxy-scenarios/mtls-authentication",
+            "tutorials/api-proxy-scenarios/truststore-certificate-renewal",
             "tutorials/api-proxy-scenarios/jwt-validation",
             "tutorials/api-proxy-scenarios/variable-content-based-throttling",
             "tutorials/api-proxy-scenarios/json-schema-validation-rest-to-soap",
