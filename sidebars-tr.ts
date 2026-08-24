@@ -1229,6 +1229,7 @@ const sidebars: SidebarsConfig = {
             "tutorials/api-proxy-senaryolari/mysql-db2api-olusturma",
             "tutorials/api-proxy-senaryolari/mock-api-json-transformation-script",
             "tutorials/api-proxy-senaryolari/mtls-kimlik-dogrulama",
+            "tutorials/api-proxy-senaryolari/truststore-sertifika-yenileme",
             "tutorials/api-proxy-senaryolari/jwt-validasyonu",
             "tutorials/api-proxy-senaryolari/degisken-icerige-gore-throttling",
             "tutorials/api-proxy-senaryolari/json-schema-validation-rest-to-soap",
