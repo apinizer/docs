@@ -749,6 +749,7 @@ const sidebars: SidebarsConfig = {
       "items": [
         "admin/audit-compliance/genel-bakis",
         "admin/audit-compliance/denetim-kayitlari",
+        "admin/audit-compliance/acl-denetim-kayitlari",
         "admin/audit-compliance/token-istekleri",
         "admin/audit-compliance/giris-kayitlari",
         "admin/audit-compliance/audit-records",

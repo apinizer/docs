@@ -752,6 +752,7 @@ const sidebars: SidebarsConfig = {
       "items": [
         "admin/audit-compliance/overview",
         "admin/audit-compliance/audit-records",
+        "admin/audit-compliance/acl-audit-records",
         "admin/audit-compliance/token-requests",
         "admin/audit-compliance/login-records",
         "admin/audit-compliance/application-log-cleanup-tasks",
