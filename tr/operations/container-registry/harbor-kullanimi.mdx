@@ -1,31 +1,33 @@
 ---
 title: "Harbor Kullanımı"
-description: "Kurumsal Harbor registry üzerinden Apinizer container imajlarına erişim, containerd yapılandırması ve Kubernetes deployment imaj path güncellemesi."
+description: "Kurumsal Harbor registry üzerinden Apinizer container imajlarına erişim, containerd veya Docker node yapılandırması ve Kubernetes deployment imaj path güncellemesi."
 ---
 
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
-import {Steps, Step} from '@site/src/components/Steps';
 
-Kurumunuz Harbor registry kullanıyorsa, imaj path yapısı ve sertifika gereksinimleri kurum yapılandırmasına göre değişir. Genel akış Nexus ile benzerdir; registry host ve proje path'ini kurumunuzdan almanız gerekir.
+Kurumunuz Harbor registry kullanıyorsa, Kubernetes worker node'larında registry mirror yapılandırması yapılır ve Apinizer deployment dosyalarındaki imaj path'leri Harbor adresine göre güncellenir. Registry host ve proje path'ini kurumunuzdan almanız gerekir.
 
 :::info
 
-`<HARBOR_HOST>` ve `<HARBOR_PROJECT>` placeholder'larını kurumunuzun Harbor adresi ve proje adıyla değiştirin.
+Bu sayfadaki `<HARBOR_HOST>` ve `<HARBOR_PROJECT>` placeholder'larını kurumunuzun Harbor adresi ve proje adıyla değiştirin.
 
 :::
 
-## Containerd Yapılandırması
+## Node Yapılandırması
 
-Yapılandırmayı **cluster'daki tüm worker node'larda** uygulayın.
+Yapılandırmayı **cluster'daki tüm worker node'larda** uygulayın. Node'larınızda kullanılan container runtime'a göre ilgili sekmeyi seçin.
 
-<Steps>
-  <Step title="containerd config.toml dosyasını düzenleyin">
+<Tabs>
+  <TabItem value="containerd" label="Containerd">
+    Modern Kubernetes kurulumlarında containerd kullanılır. Root kullanıcıya geçip yapılandırma dosyasını açın:
+
     ```bash
-    sudo vi /etc/containerd/config.toml
+    sudo su
+    vi /etc/containerd/config.toml
     ```
 
-    Harbor host için registry mirror tanımı ekleyin:
+    `[plugins."io.containerd.grpc.v1.cri".registry]` bölümüne mirror tanımını ekleyin:
 
     ```toml
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors."<HARBOR_HOST>"]
@@ -35,51 +37,30 @@ Yapılandırmayı **cluster'daki tüm worker node'larda** uygulayın.
     **Örnek:**
 
     ```toml
-    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."harbor.kurum.gov.tr"]
-      endpoint = ["https://harbor.kurum.gov.tr"]
-    ```
-  </Step>
-
-  <Step title="containerd servisini yeniden başlatın">
-    ```bash
-    sudo systemctl restart containerd
-    sudo systemctl status containerd
-    ```
-  </Step>
-
-  <Step title="İmaj çekimini doğrulayın">
-    Kurum sertifikası güvenilir değilse `-skip-verify` gerekebilir:
-
-    ```bash
-    sudo ctr --namespace k8s.io images pull <HARBOR_HOST>/<HARBOR_PROJECT>/apinizercloud/apimanager:<APINIZER_VERSION> --skip-verify
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."harbor.apinizer.com"]
+      endpoint = ["https://harbor.apinizer.com"]
     ```
 
-    **Örnek:**
+    Harbor kurumsal bir CA sertifikası kullanıyorsa, sertifikayı node'a kopyalayıp TLS tanımını da ekleyin:
 
-    ```bash
-    sudo ctr --namespace k8s.io images pull harbor.kurum.gov.tr/apinizer/apinizercloud/apimanager:2025.07.6 --skip-verify
+    ```toml
+    [plugins."io.containerd.grpc.v1.cri".registry.configs."<HARBOR_HOST>".tls]
+      ca_file = "/etc/containerd/certs.d/<HARBOR_HOST>/ca.crt"
     ```
-  </Step>
-</Steps>
 
-## Kubernetes Deployment Yapılandırması
+    Değişikliği uygulamak için containerd servisini yeniden başlatın:
 
-```yaml
-image: <HARBOR_HOST>/<HARBOR_PROJECT>/apinizercloud/cache:<APINIZER_VERSION>
-```
-
-**Örnek:**
-
-```yaml
-image: harbor.kurum.gov.tr/apinizer/apinizercloud/cache:2025.07.6
-```
-
-## Docker Runtime Kullanıyorsanız
-
-<Tabs>
-  <TabItem value="docker-harbor" label="Docker daemon.json">
     ```bash
-    sudo vi /etc/docker/daemon.json
+    systemctl restart containerd
+    systemctl status containerd
+    ```
+  </TabItem>
+  <TabItem value="docker" label="Docker">
+    Docker runtime kullanan node'larda `/etc/docker/daemon.json` dosyasını düzenleyin:
+
+    ```bash
+    sudo su
+    vi /etc/docker/daemon.json
     ```
 
     Harbor HTTPS kullanıyorsa ve kurumsal CA sertifikası gerekiyorsa sertifikayı sisteme ekleyin. HTTP veya self-signed ortamlarda `insecure-registries` kullanılabilir:
@@ -90,20 +71,42 @@ image: harbor.kurum.gov.tr/apinizer/apinizercloud/cache:2025.07.6
     }
     ```
 
+    **Örnek:**
+
+    ```json
+    {
+      "insecure-registries": ["harbor.apinizer.com"]
+    }
+    ```
+
+    Değişikliği uygulamak için Docker servisini yeniden başlatın:
+
     ```bash
-    sudo systemctl daemon-reload
-    sudo systemctl restart docker
+    systemctl daemon-reload
+    systemctl restart docker
+    docker info
     ```
   </TabItem>
 </Tabs>
 
-:::note
+## Kubernetes Deployment Yapılandırması
 
-`x509: certificate is not valid` hatası alırsanız [Kubernetes, Docker ve Containerd Sorun Giderme](/tr/operations/sorun-giderme/kubernetes-docker-containerd-sorunlari) sayfasındaki ilgili bölüme bakın.
+Deployment, StatefulSet veya Helm values dosyalarında `image` alanını Harbor path yapınıza göre güncelleyin:
 
-:::
+```yaml
+image: <HARBOR_HOST>/<HARBOR_PROJECT>/apinizercloud/apimanager:<APINIZER_VERSION>
+```
+
+**Örnek:**
+
+```yaml
+image: harbor.apinizer.com/apinizer/apinizercloud/apimanager:2026.01.1
+```
+
+Diğer bileşenler (`worker`, `cache`, `integration`, `apiportal`) için aynı path kalıbı kullanılır.
 
 ## İlgili Dokümanlar
 
-- [Nexus Kullanımı](/tr/operations/container-registry/nexus-kullanimi) — benzer kurumsal proxy senaryosu
-- [Container İmajları ve Registry](/tr/operations/container-registry/container-imajlari-ve-registry)
+- [Container İmajları ve Registry](/tr/operations/container-registry/container-imajlari-ve-registry) — senaryo seçimi ve ortak imaj listesi
+- [Nexus Kullanımı](/tr/operations/container-registry/nexus-kullanimi) — kurumsal Nexus senaryosu
+- [Apinizer Sürüm Yükseltme — Yerel Registry](/tr/upgrade/apinizer-surum-yukseltme) — imajları registry'ye push etme ve `kubectl set image`

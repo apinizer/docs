@@ -3,6 +3,8 @@ title: "Private Registry Installation"
 description: "Setting up your own Docker Distribution registry, uploading Apinizer images, and using a private registry in Kubernetes deployment files. Includes CentOS 7 example."
 ---
 
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
 import {Steps, Step} from '@site/src/components/Steps';
 
 Use this guide when you want to set up your own private registry, pull images from the internet and push them to your local environment, or load from a `.tar` file. If you use corporate Nexus or Harbor, see [Nexus Usage](/en/operations/container-registry/nexus-usage) or [Harbor Usage](/en/operations/container-registry/harbor-usage).
@@ -95,68 +97,77 @@ Example output:
            └─16262 /usr/bin/registry serve /etc/docker-distribution/registry/...
 ```
 
-## Adding Registry to Docker Engine
+## Configuring Registry Access on Nodes
 
-:::info
+By default, container runtimes connect to the registry over HTTPS. If you are on a trusted network, you can use an insecure registry. This eliminates the need for a CA-signed certificate for internal use.
 
-The following information will be used when Kubernetes 1.18.x and Docker applications are installed together in Apinizer installation.
+Apply this configuration on **all nodes that will pull images from the registry**. Select the tab matching the container runtime used on your nodes.
 
-:::
+<Tabs>
+  <TabItem value="containerd" label="Containerd">
+    Switch to the root user and open the configuration file:
 
-By default, Docker uses HTTPS to connect to Docker registry. If you are on a trusted network, you can use an insecure registry. This eliminates the need for a CA-signed certificate for internal use or trusting a self-signed certificate on all Docker nodes.
-
-<Steps>
-  <Step title="Docker daemon.json configuration">
-    Edit the **/etc/docker/daemon.json** file:
-    
     ```bash
+    sudo su
+    vi /etc/containerd/config.toml
+    ```
+
+    Add the registry definition under `[plugins."io.containerd.grpc.v1.cri".registry]`. If the registry is served over HTTP, the endpoint starts with `http://`:
+
+    ```toml
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."dockerregistry.local:5000"]
+      endpoint = ["http://dockerregistry.local:5000"]
+    ```
+
+    Restart the containerd service to apply the change:
+
+    ```bash
+    systemctl restart containerd
+    systemctl status containerd
+    ```
+  </TabItem>
+  <TabItem value="docker" label="Docker">
+    Switch to the root user and edit the `/etc/docker/daemon.json` file:
+
+    ```bash
+    sudo su
     vi /etc/docker/daemon.json
     ```
-    
-    Delete all lines in the file and add the following line:
-    
+
+    Delete all lines in the file and add the following definition:
+
     ```json
     {
-      "insecure-registries" : ["dockerregistry.local:5000"]
+      "insecure-registries": ["dockerregistry.local:5000"]
     }
     ```
-    
-    :::warning
 
-The above line must be added to **/etc/docker/daemon.json** on all servers that will connect to the Docker registry.
+    If you access the registry by IP instead of hostname, the definition can also be written as `"insecure-registries": ["192.168.X.X:5000"]`.
 
-:::
-    
-    :::info
+    Restart the Docker service to apply the change:
 
-It can also be added as `"insecure-registries" : ["192.168.X.X:5000"]`.
-
-:::
-  </Step>
-  
-  <Step title="Hostname configuration">
-    If you don't have a DNS server, use the /etc/hosts file to map the hostname to IP address:
-    
     ```bash
-    cat /etc/hosts
-    192.168.X.X dockerregistry.local
-    ```
-    
-    :::note
-
-If a hostname is written, it must be specified in the host files of other machines in the Kubernetes cluster.
-
-:::
-  </Step>
-  
-  <Step title="Restarting Docker">
-    Restart Docker to apply changes:
-    
-    ```bash
+    systemctl daemon-reload
     systemctl restart docker
+    docker info
     ```
-  </Step>
-</Steps>
+  </TabItem>
+</Tabs>
+
+### Hostname Definition
+
+If you don't have a DNS server, use the `/etc/hosts` file to map the hostname to an IP address:
+
+```bash
+cat /etc/hosts
+192.168.X.X dockerregistry.local
+```
+
+:::note
+
+If a hostname is used, it must also be defined in the host files of the other machines in the Kubernetes cluster.
+
+:::
 
 ## Docker Registry Usage
 
@@ -167,15 +178,15 @@ Follow the steps below to upload and manage images to the Private Docker Registr
     Download images to the environment where Docker registry is installed:
     
     ```bash
-    sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
+    docker pull apinizercloud/apimanager:<APINIZER_VERSION>
     ```
   </Step>
   
   <Step title="Tagging image">
-    Tag the image as **dockerregistry.local:5000/manager:{`<APINIZER_VERSION>`}**. This creates an additional tag for the existing image:
+    Tag the image as `dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>`. This creates an additional tag for the existing image:
     
     ```bash
-    docker tag apinizercloud/manager:<APINIZER_VERSION> dockerregistry.local:5000/manager:<APINIZER_VERSION>
+    docker tag apinizercloud/apimanager:<APINIZER_VERSION> dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>
     ```
     
     :::info
@@ -189,7 +200,7 @@ When the first part of the tag is a hostname and port, Docker interprets this as
     Push the image to the local registry:
     
     ```bash
-    docker push dockerregistry.local:5000/manager:<APINIZER_VERSION>
+    docker push dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>
     ```
     
     :::info
@@ -208,39 +219,16 @@ If the image upload was successful, you should get a sha256 hash at the end. Tra
   </Step>
 </Steps>
 
-### Example Usage
+Repeat the same steps for the other components (`worker`, `cache`, `integration`, `apiportal`). To load all components at once, you can use the [automatic image loading script](#automatic-image-loading-script) below.
 
-#### Loading Manager, Worker and Cache Images
-
-To push images pulled to local registry:
-
-```bash
-# Loading Apinizer Image
---- Manager ---
-sudo docker pull apinizercloud/manager:<APINIZER_VERSION>
-sudo docker tag apinizercloud/manager:<APINIZER_VERSION> <YOUR_IP>:5000/manager:<APINIZER_VERSION>
-sudo docker push <YOUR_IP>:5000/manager:<APINIZER_VERSION>
-
---- Worker ---
-sudo docker pull apinizercloud/worker:<APINIZER_VERSION>
-sudo docker tag apinizercloud/worker:<APINIZER_VERSION> <YOUR_IP>:5000/worker:<APINIZER_VERSION>
-sudo docker push <YOUR_IP>:5000/worker:<APINIZER_VERSION>
-
---- Cache ---
-sudo docker pull apinizercloud/cache:<APINIZER_VERSION>
-sudo docker tag apinizercloud/cache:<APINIZER_VERSION> <YOUR_IP>:5000/cache:<APINIZER_VERSION>
-sudo docker push <YOUR_IP>:5000/cache:<APINIZER_VERSION>
-```
-
-#### Loading Image from .tar File
+### Loading Image from .tar File
 
 Loading an Apinizer image received as .tar to registry:
 
 ```bash
-# Loading Apinizer Image
-docker image load < apinizer-manager.tar
-docker tag apinizer-manager:latest <YOUR_IP>:5000/apinizer-manager:latest
-docker push <YOUR_IP>:5000/apinizer-manager:latest
+docker image load < apinizercloud-apimanager.tar
+docker tag apinizercloud/apimanager:<APINIZER_VERSION> dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>
+docker push dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>
 ```
 
 ## Adding Images to Local Docker Registry with Linux Shell Script
@@ -258,33 +246,36 @@ Script content:
 ```bash
 #!/bin/bash
 
-localRepositoryUrl=<YOUR_IP>:5000
-
-if [ "$localRepositoryUrl" == "$localRepositoryUrl" ]; then
-  echo "Please enter your local Docker Repository URL"
-else
-  echo "Your Local Repository Url : "$localRepositoryUrl
-fi
+localRepositoryUrl=dockerregistry.local:5000
 
 if [ $# -eq 0 ]; then
   echo "Please enter the version information as a parameter."
   exit
 fi
 
-echo 'Version = ' $1
+echo "Your Local Repository Url : $localRepositoryUrl"
+echo "Version = $1"
 version=$1
 
-docker pull apinizercloud/manager:"$version"
-docker tag apinizercloud/manager:$version $localRepositoryUrl/manager:$version
-docker push $localRepositoryUrl/manager:$version
+docker pull apinizercloud/apimanager:"$version"
+docker tag apinizercloud/apimanager:$version $localRepositoryUrl/apinizercloud/apimanager:$version
+docker push $localRepositoryUrl/apinizercloud/apimanager:$version
 
 docker pull apinizercloud/worker:$version
-docker tag apinizercloud/worker:$version $localRepositoryUrl/worker:$version
-docker push $localRepositoryUrl/worker:$version
+docker tag apinizercloud/worker:$version $localRepositoryUrl/apinizercloud/worker:$version
+docker push $localRepositoryUrl/apinizercloud/worker:$version
 
 docker pull apinizercloud/cache:$version
-docker tag apinizercloud/cache:$version $localRepositoryUrl/cache:$version
-docker push $localRepositoryUrl/cache:$version
+docker tag apinizercloud/cache:$version $localRepositoryUrl/apinizercloud/cache:$version
+docker push $localRepositoryUrl/apinizercloud/cache:$version
+
+docker pull apinizercloud/integration:$version
+docker tag apinizercloud/integration:$version $localRepositoryUrl/apinizercloud/integration:$version
+docker push $localRepositoryUrl/apinizercloud/integration:$version
+
+docker pull apinizercloud/apiportal:$version
+docker tag apinizercloud/apiportal:$version $localRepositoryUrl/apinizercloud/apiportal:$version
+docker push $localRepositoryUrl/apinizercloud/apiportal:$version
 
 echo "Image pull operation completed."
 ```
@@ -302,7 +293,7 @@ sh pullApinizerImages.sh <APINIZER_VERSION>
 To list all repositories in the registry:
 
 ```bash
-curl http://<YOUR_IP>:5000/v2/_catalog
+curl http://dockerregistry.local:5000/v2/_catalog
 ```
 
 Example output:
@@ -310,9 +301,11 @@ Example output:
 ```json
 {
   "repositories": [
-    "cache",
-    "manager",
-    "worker"
+    "apinizercloud/apimanager",
+    "apinizercloud/worker",
+    "apinizercloud/cache",
+    "apinizercloud/integration",
+    "apinizercloud/apiportal"
   ]
 }
 ```
@@ -322,14 +315,14 @@ Example output:
 To list tags of a specific image:
 
 ```bash
-curl http://<YOUR_IP>:5000/v2/manager/tags/list
+curl http://dockerregistry.local:5000/v2/apinizercloud/apimanager/tags/list
 ```
 
 Example output:
 
 ```json
 {
-  "name": "manager",
+  "name": "apinizercloud/apimanager",
   "tags": [
     "<APINIZER_VERSION>"
   ]
@@ -341,8 +334,10 @@ Example output:
 To use private registry in Apinizer deploy files in Kubernetes:
 
 ```yaml
-image: myregistry.local:5000/apinizercloud/manager:<APINIZER_VERSION>
+image: dockerregistry.local:5000/apinizercloud/apimanager:<APINIZER_VERSION>
 ```
+
+The same path pattern is used for the other components (`worker`, `cache`, `integration`, `apiportal`).
 
 ## Repository Cleanup
 
@@ -371,5 +366,7 @@ docker image prune -a
 
 ## Related Documentation
 
-- [Container Images and Registry](/en/operations/container-registry/container-images-and-registry)
-- [Apinizer Version Upgrade — Local Registry](/en/upgrade/apinizer-version-upgrade)
+- [Container Images and Registry](/en/operations/container-registry/container-images-and-registry) — scenario selection and common image list
+- [Nexus Usage](/en/operations/container-registry/nexus-usage) — corporate Nexus scenario
+- [Harbor Usage](/en/operations/container-registry/harbor-usage) — corporate Harbor scenario
+- [Apinizer Version Upgrade — Local Registry](/en/upgrade/apinizer-version-upgrade) — pushing images to registry and `kubectl set image`
