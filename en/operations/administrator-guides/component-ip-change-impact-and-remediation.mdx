@@ -1,33 +1,35 @@
 ---
 title: "Component IP Change Impact and Remediation"
-description: "Explains what breaks when IP or hostname changes in Kubernetes, MongoDB, Elasticsearch, and Apinizer components, and which configurations must be updated."
+description: "Explains what breaks when IP or hostname changes in Kubernetes, MongoDB, Elasticsearch, and Apinizer components, whether Apinizer Workers keep running, and which configurations must be updated."
 ---
 
 import {Steps, Step} from '@site/src/components/Steps';
 
-IP or hostname changes in infrastructure components can affect Apinizer connection points, certificates, and cluster discovery. This page consolidates what breaks when a change is made and the recommended remediation order.
+IP or hostname changes in infrastructure components can affect Apinizer connection points, certificates, and cluster discovery. This page consolidates what breaks when a change is made, whether Apinizer Workers keep running, and the recommended remediation order.
 
 :::warning
 
-Before starting IP or hostname changes, take a **MongoDB backup** and plan a **maintenance window** if possible. Pay attention to replica set and Elasticsearch cluster fault tolerance (`(n-1)/2`).
+Before starting IP or hostname changes, plan a **maintenance window** if possible. Pay attention to replica set and Elasticsearch cluster fault tolerance (`(n-1)/2`).
 
 :::
 
 ## Impact Summary
 
-| Component / Scenario | What breaks | Remediation section |
-|----------------------|-------------|---------------------|
-| Kubernetes Master (control-plane) IP | API server access, kubeconfig, apiserver certificates | [Kubernetes Master IP change](#kubernetes-master-ip-change) |
-| Kubernetes → Virtual IP migration | Multi-master access, join endpoint, HA configuration | [Virtual IP migration](#kubernetes-virtual-ip-migration) |
-| Kubernetes Worker node IP | Node `NotReady`, NodePort / access address | [Worker node IP change](#kubernetes-worker-node-ip-change) |
-| MongoDB node IP | Replica set membership, Apinizer MongoDB connection | [MongoDB IP change](#mongodb-ip-change) |
-| MongoDB hostname | Replica set identity, auth conflicts | [MongoDB hostname change](#mongodb-hostname-change) |
-| Elasticsearch node IP | Cluster discovery, log writes, Kibana access | [Elasticsearch IP change](#elasticsearch-ip-change) |
-| Apinizer access and connections | Manager / Gateway access, log connector, secret URI | [Apinizer-side updates](#apinizer-side-updates) |
+The **Apinizer Worker** column shows whether existing Worker pods continue to process API traffic. Even when Workers keep running, Manager access, log writes, or a new publish (re-publish) may still be affected.
+
+| Component / Scenario | What breaks | Apinizer Worker | Remediation section |
+|----------------------|-------------|-----------------|---------------------|
+| Kubernetes Control Plane IP | API server access, kubeconfig, apiserver certificates | Runs | [Control Plane IP change](#kubernetes-control-plane-ip-change) |
+| Kubernetes → Virtual IP migration | Control-plane access, join endpoint, HA configuration | Stops | [Virtual IP migration](#kubernetes-virtual-ip-migration) |
+| Kubernetes Worker node IP | Node `NotReady`, NodePort / access address | Stops on the affected node | [Worker node IP change](#kubernetes-worker-node-ip-change) |
+| MongoDB node IP | Replica set membership, Apinizer MongoDB connection | Stops | [MongoDB IP change](#mongodb-ip-change) |
+| MongoDB hostname | Replica set identity, auth conflicts | Stops | [MongoDB hostname change](#mongodb-hostname-change) |
+| Elasticsearch node IP | Cluster discovery, log writes, Kibana access | Runs | [Elasticsearch IP change](#elasticsearch-ip-change) |
+| Apinizer access and connections | Manager / Gateway access, log connector, secret URI | Runs | [Apinizer-side updates](#apinizer-side-updates) |
 
 ## Recommended Remediation Order
 
-1. **Backup** — Especially MongoDB (`mongodump`) and critical configuration files
+1. **Backup** — Critical configuration files (move them with `mv`; delete only after verification)
 2. **Data layer** — MongoDB, then Elasticsearch (Apinizer logs depend on these layers)
 3. **Kubernetes** — Control-plane, VIP migration if needed, worker nodes
 4. **Apinizer** — MongoDB secret / URI, Elasticsearch Connection, Gateway Access URL
@@ -35,9 +37,9 @@ Before starting IP or hostname changes, take a **MongoDB backup** and plan a **m
 
 ---
 
-## Kubernetes Master IP Change
+## Kubernetes Control Plane IP Change
 
-When the control-plane (master) server IP address changes, Kubernetes configuration files and apiserver certificates must be updated.
+When the control-plane server IP address changes, Kubernetes configuration files and apiserver certificates must be updated. Running Apinizer Worker pods continue to process API traffic; new scheduling or pod restarts are not possible while the API server is unreachable.
 
 ### Configuration files
 
@@ -54,11 +56,12 @@ Update IP addresses to the new value in the following files:
 
 ### Certificate renewal
 
-Delete existing apiserver certificates and regenerate them:
+Move existing apiserver certificates aside instead of deleting them, then regenerate:
 
 ```bash
 cd /etc/kubernetes/pki
-sudo rm -rf apiserver.* apiserver-kubelet-client.*
+sudo mkdir -p /etc/kubernetes/pki.backup
+sudo mv apiserver.crt apiserver.key apiserver-kubelet-client.crt apiserver-kubelet-client.key /etc/kubernetes/pki.backup/
 
 sudo kubeadm init phase certs apiserver-kubelet-client
 sudo kubeadm init phase certs apiserver
@@ -81,13 +84,19 @@ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 ```
 
+After cluster access and node status are verified, delete the backups:
+
+```bash
+sudo rm -rf /etc/kubernetes/pki.backup
+```
+
 ---
 
 ## Kubernetes Virtual IP Migration
 
-In environments with multiple master nodes, the cluster is reconfigured to place control-plane access behind a **Virtual IP (VIP)** or load balancer. This scenario differs from a single master IP change; it is for HA migration.
+In environments with multiple control-plane nodes, the cluster is reconfigured to place control-plane access behind a **Virtual IP (VIP)** or load balancer. This scenario differs from a single control-plane IP change; it is for HA migration. Apinizer Workers do not run during this operation.
 
-**Example environment:** Master1, Master2, Master3, Worker1, Worker2 — cluster started with `kubeadm init` on Master1.
+**Example environment:** `control-plane-1`, `control-plane-2`, `control-plane-3`, `worker-1`, `worker-2` — cluster started with `kubeadm init` on `control-plane-1`.
 
 Define a **Virtual IP** on the load balancer; all control-plane access must be routed to this VIP on port **6443**.
 
@@ -97,28 +106,30 @@ If you are not using a load balancer, see [Kubernetes Setup — High Availabilit
 
 :::
 
-### Removing master nodes from cluster
+### Removing nodes from the cluster
 
-Run the following on other masters (**master2 and master3**) **except master1**:
+Run the following on the other control-plane nodes (`control-plane-2`, `control-plane-3`) **except `control-plane-1`**, and on the worker nodes (`worker-1`, `worker-2`):
 
 ```bash
 sudo kubeadm reset
 ```
 
-From Master1, remove other master nodes from the cluster:
+From `control-plane-1`, remove the other control-plane and worker nodes from the cluster:
 
 ```bash
-kubectl delete node master2
-kubectl delete nodes master3
+kubectl delete node control-plane-2
+kubectl delete node control-plane-3
+kubectl delete node worker-1
+kubectl delete node worker-2
 ```
 
 :::info
 
-In this scenario, master1 and worker servers are expected to remain in the cluster.
+In this scenario only `control-plane-1` remains in the cluster. The other control-plane and worker nodes rejoin through the VIP.
 
 :::
 
-### Tasks on Master1 server
+### Tasks on the control-plane-1 server
 
 <Steps>
   <Step title="Stop services">
@@ -128,14 +139,20 @@ In this scenario, master1 and worker servers are expected to remain in the clust
     ```
   </Step>
 
-  <Step title="Backup and clean files">
+  <Step title="Back up files">
+    Move files instead of deleting them. Also move certificates that must not be reused into the backup directory:
+
     ```bash
     sudo mv -f /etc/kubernetes /etc/kubernetes.backup
     sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
+    sudo mv -f ~/.kube/config ~/.kube/config.backup
+
     sudo mkdir -p /etc/kubernetes/pki
     sudo cp -r /etc/kubernetes.backup/pki /etc/kubernetes
-    sudo rm -rf /etc/kubernetes/pki/{apiserver.*,etcd/peer.*}
-    sudo rm -f ~/.kube/config
+
+    sudo mkdir -p /etc/kubernetes.backup/removed-certs/etcd
+    sudo mv /etc/kubernetes/pki/apiserver.* /etc/kubernetes.backup/removed-certs/
+    sudo mv /etc/kubernetes/pki/etcd/peer.* /etc/kubernetes.backup/removed-certs/etcd/
     ```
   </Step>
 
@@ -152,7 +169,7 @@ In this scenario, master1 and worker servers are expected to remain in the clust
 
     :::warning
 
-    Note the kubeadm **join** commands; they will be used for worker and additional master nodes.
+    Note the kubeadm **join** commands; they will be used for worker and additional control-plane nodes.
 
     :::
   </Step>
@@ -168,7 +185,7 @@ In this scenario, master1 and worker servers are expected to remain in the clust
     ```
   </Step>
 
-  <Step title="Backup files">
+  <Step title="Back up files">
     ```bash
     sudo mv -f /etc/kubernetes /etc/kubernetes.backup
     sudo mv -f /var/lib/kubelet /var/lib/kubelet.backup
@@ -183,13 +200,13 @@ In this scenario, master1 and worker servers are expected to remain in the clust
   </Step>
 
   <Step title="Worker join">
-    Run the kubeadm **worker join** command from Master1 on worker nodes.
+    Run the kubeadm **worker join** command from `control-plane-1` on the worker nodes.
   </Step>
 </Steps>
 
-### Tasks on Master2 and Master3
+### Tasks on the other control-plane nodes
 
-Run the kubeadm **master join** command on master2 and master3 servers.
+Run the kubeadm **control-plane join** command on the `control-plane-2` and `control-plane-3` servers.
 
 ### Cluster status check
 
@@ -198,11 +215,21 @@ kubectl cluster-info
 kubectl get node -o wide
 ```
 
+### Deleting backup files
+
+After verification succeeds, delete the backups on **all affected nodes** in one step:
+
+```bash
+sudo rm -rf /etc/kubernetes.backup
+sudo rm -rf /var/lib/kubelet.backup
+sudo rm -f ~/.kube/config.backup
+```
+
 ---
 
 ## Kubernetes Worker Node IP Change
 
-When a worker node IP changes, the node usually enters `NotReady` state and NodePort / external access addresses are affected.
+When a worker node IP changes, the node usually enters `NotReady` state and NodePort / external access addresses are affected. Only Apinizer Workers on the node whose IP changed stop; Workers on other nodes keep running.
 
 ### What breaks
 
@@ -216,13 +243,13 @@ When a worker node IP changes, the node usually enters `NotReady` state and Node
 2. If needed, remove and re-add the node to the cluster:
 
 ```bash
-# On master node
+# On the control-plane node
 kubectl delete node <WORKER_NODE_NAME>
 sudo kubeadm token create --print-join-command
 
-# On worker node
+# On the worker node
 sudo kubeadm reset
-sudo kubeadm join <MASTER_OR_VIP_IP>:6443 --token <TOKEN> --discovery-token-ca-cert-hash sha256:<HASH>
+sudo kubeadm join <CONTROL_PLANE_OR_VIP_IP>:6443 --token <TOKEN> --discovery-token-ca-cert-hash sha256:<HASH>
 ```
 
 3. If using load balancer or DNS, update backend pool / records
@@ -232,7 +259,17 @@ sudo kubeadm join <MASTER_OR_VIP_IP>:6443 --token <TOKEN> --discovery-token-ca-c
 
 ## MongoDB IP Change
 
-MongoDB replica set member `host` fields are tied to IP addresses. When IP changes, Apinizer Manager, Worker, and Cache pods cannot connect to MongoDB.
+MongoDB replica set member `host` fields are tied to IP addresses. When IP changes, Apinizer Manager, Worker, and Cache pods cannot connect to MongoDB; Workers stop.
+
+:::warning
+
+Take a MongoDB backup before the operation. Pay attention to replica set fault tolerance (`(n-1)/2`).
+
+```bash
+sudo mongodump --host localhost --port=25080 --username=apinizer --password=<PASSWORD> -d apinizerdb --authenticationDatabase=admin --gzip --archive=/home/apinizer/mongodump/apinizer-backup-<DATE>.archive
+```
+
+:::
 
 ### Replica set update
 
@@ -264,17 +301,11 @@ After MongoDB IP change, apply mongo secret and URI steps in [Apinizer-side upda
 
 ## MongoDB Hostname Change
 
-Hostname change differs from IP change; replica set identity is defined by hostname. Renaming a node directly can cause conflicts.
-
-:::warning
-
-Take a MongoDB backup before the operation. Pay attention to replica set fault tolerance.
-
-:::
+Hostname change differs from IP change; replica set identity is defined by hostname. Renaming a node directly can cause conflicts. Workers stop because replica set identity is broken.
 
 <Steps>
   <Step title="Take MongoDB backup">
-    Connect to primary node and take a backup:
+    Connect to the primary node and take a backup. Pay attention to replica set fault tolerance (`(n-1)/2`).
 
     ```bash
     mongosh mongodb://localhost:25080 --authenticationDatabase "admin" -u "apinizer" -p
@@ -319,7 +350,7 @@ Take a MongoDB backup before the operation. Pay attention to replica set fault t
 
 ## Elasticsearch IP Change
 
-When an Elasticsearch node IP changes, cluster discovery and the transport layer are affected. Apinizer API traffic logs are written to this cluster via the Elasticsearch connector.
+When an Elasticsearch node IP changes, cluster discovery and the transport layer are affected. Apinizer API traffic logs are written to this cluster via the Elasticsearch connector. Workers continue to process API traffic; log writes break.
 
 ### What breaks
 
@@ -333,7 +364,7 @@ On the affected node, update IP-bound fields in `elasticsearch.yml`:
 
 ```yaml
 node.name: "<NEW_NODE_IP>"
-network.host: "0.0.0.0"
+network.host: "<NEW_NODE_IP>"
 cluster.initial_master_nodes: ["<NEW_NODE_IP>"]
 discovery.seed_hosts: ["<NEW_NODE_IP>"]
 ```
@@ -358,27 +389,33 @@ Management Console → **Connection Management** → Elasticsearch connector →
 
 ## Apinizer-Side Updates
 
-After infrastructure IP changes are complete, Apinizer connection points must be updated.
+After infrastructure IP changes are complete, Apinizer connection points must be updated. If Worker pods are up, API traffic continues; Manager, logs, and client access break when the secret, connector, or access URL still points to the old value.
 
 ### MongoDB connection secret (Kubernetes)
 
-Manager, Worker, and Cache deployments use the MongoDB secret. The connection string must include new IPs:
+Manager, Worker, and Cache deployments use the MongoDB secret. The connection string must include the new IPs. Update the secret directly with `kubectl` — do not create a YAML file; `kubectl` base64-encodes the values automatically:
 
 ```bash
-DB_URL='mongodb://<MONGO_USER>:<MONGO_PASSWORD>@<MONGO1_IP>:25080,<MONGO2_IP>:25080,<MONGO3_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset'
-echo -n "$DB_URL" | base64
+kubectl create secret generic mongo-db-credentials \
+  -n <NAMESPACE> \
+  --from-literal=dbUrl="mongodb://<MONGO_USER>:<MONGO_PASSWORD>@<MONGO1_IP>:25080,<MONGO2_IP>:25080,<MONGO3_IP>:25080/?authSource=admin&replicaSet=apinizer-replicaset" \
+  --from-literal=dbName="<MONGO_DBNAME>" \
+  --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Update the secret and restart pods in relevant namespaces:
+Update the secret in every namespace that uses it. Then restart the pods:
 
 ```bash
-kubectl apply -f mongo-secret.yaml
 kubectl rollout restart deployment/<MANAGER_DEPLOYMENT> -n <MANAGER_NAMESPACE>
 kubectl rollout restart deployment/<WORKER_DEPLOYMENT> -n <WORKER_NAMESPACE>
 kubectl rollout restart deployment/<CACHE_DEPLOYMENT> -n <CACHE_NAMESPACE>
 ```
 
-For secret creation steps during installation, see [Kubernetes Setup](/en/setup/kubernetes).
+:::note
+
+The secret name (`mongo-db-credentials`) must match the module `mongo.secretName` value; the key names `dbUrl` and `dbName` are fixed. For secret creation steps during installation, see [Kubernetes Setup](/en/setup/kubernetes).
+
+:::
 
 ### Gateway Runtime Access URL
 
@@ -409,6 +446,7 @@ If backend DNS resolution is IP-based, update the `hostAliases` block in deploym
 | MongoDB replica set | `rs.status()` | All members `PRIMARY` / `SECONDARY`, healthy |
 | Elasticsearch | `GET _cluster/health` | `status: green` or `yellow` (acceptable) |
 | Manager pod | `kubectl get pods -n <MANAGER_NS>` | Pod `Running` / `Ready` |
+| Worker pod | `kubectl get pods -n <WORKER_NS>` | Pod `Running` / `Ready` |
 | Manager UI | Browser to Manager URL | Login screen loads |
 | Gateway access | Health/version via Gateway Access URL | Response received |
 | Log writes | Kibana or ES index check | New log records arriving |
