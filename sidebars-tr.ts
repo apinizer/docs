@@ -1303,7 +1303,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-api-trafik-log-gorsellestirme",
-            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme"
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme",
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/grafana-api-trafik-metrik-gorsellestirme"
           ]
         },
         {

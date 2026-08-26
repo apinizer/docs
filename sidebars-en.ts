@@ -1293,7 +1293,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analytics-and-observability-scenarios/kibana-api-traffic-log-visualization",
-            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization"
+            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization",
+            "tutorials/api-analytics-and-observability-scenarios/grafana-api-traffic-metric-visualization"
           ]
         },
         {
