@@ -11,10 +11,21 @@ The AI Routing tab lays out an AI Gateway's configuration as a decision chain th
 
 Wherever a step resolves to a specific provider and model — a conditional route, a load-balancing pool entry, the primary itself, or a failover chain entry — an expandable row shows the same **model metadata panel**: the provider's endpoint, deployment type, and live health status; the model's context window, max output tokens, and per-million-token pricing (input, output, cached); and a deprecation warning with sunset date when the model is scheduled for retirement. This standard panel appears at every selection point, so you can check a model's limits and pricing without leaving the screen.
 
-:::warning A Default Target Is Always Required
-Every AI Gateway needs a provider and model selected as its **default target**, even when you intend all traffic to be steered by conditional routes or a load-balancing pool. The gateway resolves the default target *before* it evaluates any route or pool; it is what a request falls back to when no conditional route matches, and a route or pool entry that leaves its own provider or model blank inherits it. Saving a proxy without one is rejected with *"Select an LLM provider and model on the AI Routing tab."*
+## How a Target Is Chosen
 
-You do not normally set it by hand. Adding the first load-balancing pool entry — or the first conditional route that names both a provider and a model — fills the default target from that entry while it is still empty. The resulting target is shown in the read-only **Default Target** table on the routing screen.
+The gateway resolves the target for each request in **tiers**, stopping at the first one that yields a usable provider and model:
+
+1. **Conditional routes** — evaluated in order; the first match wins.
+2. **Default target group** — reached when no route matched: if a load-balancing pool is configured, its algorithm picks the active member; otherwise the single default provider and model is used.
+3. **Failover chain (error path)** — reached when the default target group is empty or unusable: the first usable chain entry is *promoted to primary* for this request, and the rest of the chain stays behind it as failover.
+4. **No suitable provider** — if no tier yields a target, the request is rejected with HTTP 503 and the message *"No suitable LLM provider found for this request"*.
+
+This means **any one tier on its own is a complete configuration**. A gateway with nothing but conditional routes works; so does one with nothing but a pool, or nothing but a failover chain. You only need to define the default provider and model if you want a fallback for requests that match no route — or if your routes and pool entries deliberately leave fields blank to inherit from it.
+
+:::note What counts as "unusable"
+A candidate is skipped — and the next tier is tried — when its provider has been deleted or disabled, or when neither the entry nor the proxy-level default supplies a model. A matched conditional route whose target is unusable is skipped too, and evaluation continues with the next route.
+
+What is **not** skipped: a model the provider does not allow, a model your credential is not allowed to call, a modality mismatch, or a retired (sunset) model. Those return an error on the selected target rather than silently rerouting you somewhere else — they are configuration or authorization problems you need to see, not conditions to route around.
 :::
 
 ## Conditional Routing
@@ -70,7 +81,7 @@ Instead of a single primary connection, you can define a **pool** of equal-prior
 
 Configure the pool from **Target Selection → Load Balancing** on the routing screen. Seven algorithms are available:
 
-Every pool entry must name a provider. Its model is optional and inherits the default target's model when left blank — the same rule applies to failover chain entries. An entry with no provider is skipped by the gateway at request time, so saving one is rejected rather than left on screen as configuration that never runs.
+Every pool entry must name a provider. Its model is optional and inherits the default target's model when left blank — the same rule applies to failover chain entries, and an entry with no model of its own is rejected at save time when there is no default model to inherit. An entry with no provider is skipped by the gateway at request time, so saving one is rejected rather than left on screen as configuration that never runs.
 
 <CardGroup cols={2}>
   <Card title="Round Robin" icon="repeat">
@@ -101,6 +112,8 @@ If the pool members sit behind a layer that already makes its own KV-cache routi
 :::
 
 **Least Cost** and **Least Latency** only take effect with **2 or more** pool members; with fewer, the pool silently uses Round Robin instead (the routing screen shows a warning when this applies to the current configuration).
+
+A pool member is skipped when its provider is deleted or disabled, or when it has no resolvable model — the pool simply load-balances across what remains. If nothing remains, routing falls through to the single default target and then to the failover chain.
 
 **Bounded-load protection**: for Prefix Affinity, if the target member's current load exceeds the pool average by more than the configurable **Bounded Load Factor** (default `1.25`), the request shifts to the next member instead — this keeps one popular conversation from overloading a single pool member.
 
