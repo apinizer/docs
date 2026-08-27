@@ -18,6 +18,7 @@ const sidebars: SidebarsConfig = {
         "getting-started/authentication",
         "getting-started/base-url",
         "getting-started/error-handling",
+        "apiops-common-contract",
         "overview",
         "auth",
         {

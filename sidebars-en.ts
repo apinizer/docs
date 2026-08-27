@@ -1074,6 +1074,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/pod-thread-count-periodic-monitoring",
             "operations/administrator-guides/jvm-garbage-collector-tuning",
             "operations/administrator-guides/multi-env-deployment-pipeline",
+            "operations/administrator-guides/management-api-common-contract",
             "operations/administrator-guides/gateway-performance-tuning",
             "operations/administrator-guides/geolocation-city-based-access-control",
             "operations/administrator-guides/kibana-maps-geographic-visualization",

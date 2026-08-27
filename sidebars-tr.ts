@@ -1074,6 +1074,7 @@ const sidebars: SidebarsConfig = {
             "operations/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme",
             "operations/yonetici-kilavuzlari/jvm-garbage-collector-ayarlama",
             "operations/yonetici-kilavuzlari/multi-env-deployment-pipeline",
+            "operations/yonetici-kilavuzlari/management-api-ortak-kontrat",
             "operations/yonetici-kilavuzlari/gateway-performans-ayarlama",
             "operations/yonetici-kilavuzlari/geolocation-sehir-bazli-erisim-kontrolu",
             "operations/yonetici-kilavuzlari/kibana-maps-cografi-gorsellestirme",

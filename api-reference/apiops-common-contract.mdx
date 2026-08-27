@@ -1,0 +1,301 @@
+---
+title: "Common Contract"
+description: "Understand the shared request and response contract the newer Management API endpoints follow: the stable error envelope and error keys, correlation IDs, status code separation, idempotency, optimistic concurrency, pagination, and deployment feedback."
+---
+
+## Scope
+
+Newer Management API endpoints share one contract. Whatever the resource is, the shape of an error, the way a page is requested, the way a write reports what happened to the running gateways, and the caching rules are the same. This page is that contract; the individual endpoint pages describe only what is specific to them.
+
+:::note
+
+Endpoints that existed before this contract keep their original `status` / `resultMessage` envelope, described in [Error Handling](/api-reference/getting-started/error-handling). Both styles are live at the same time. You can tell them apart from the response body: a response that carries an `errorKey` follows the contract on this page.
+
+:::
+
+## Base path and naming
+
+```
+/apiops/projects/{projectName}/{collection}
+```
+
+Every address is scoped to a project, and the project name is part of the path — never a query parameter and never a body field. Collection segments are lower case with hyphens (`api-proxies`, `ip-groups`).
+
+Collection URLs accept `GET` (list) and `POST` (create). `PUT`, `PATCH` and `DELETE` always address a single item and therefore carry the item key in the path. A `DELETE` never takes a request body: what is being deleted is always readable from the URL alone.
+
+Objects are addressed by the key you already know them by — a name, a code, or a public identifier. Internal database identifiers are not part of the contract and are not returned.
+
+## Authentication
+
+These endpoints accept only a personal API access token, as described in [Authentication](/api-reference/getting-started/authentication).
+
+:::warning
+
+A Manager session token obtained by signing in to the Manager user interface is **not** an API access token and is rejected with `401` and the error key `invalidToken`, even while it is still valid for the user interface. Create a personal API access token for automation.
+
+:::
+
+## Correlation ID
+
+Every request is given a correlation identifier, carried in this header on both the request and the response:
+
+```
+APINIZER-CORRELATION-ID: 7f1c9e2a-8f43-4d2e-9a11-6b5d0c3e2f77
+```
+
+Send your own value to trace a call end to end through your pipeline logs; if you do not send one, Apinizer generates it. The same value appears in the response header, in the `correlationId` field of an error body, and in the Apinizer server logs for that request. Quote it in a support request — it is the fastest way to find the exact call.
+
+The value is sanitized before use: only letters, digits and the characters `.` `_` `:` `-` are kept, and it is truncated at 64 characters.
+
+:::note
+
+This header name is fixed for the Management API. The correlation header name configurable under gateway settings applies to API traffic passing through the gateway, not to Management API calls.
+
+:::
+
+## Error response
+
+Every error returns the same envelope:
+
+```json
+{
+  "status": "FAILURE",
+  "errorKey": "resourceNotFound",
+  "message": "error.resourceNotFound",
+  "params": {
+    "project": "finance"
+  },
+  "correlationId": "7f1c9e2a-8f43-4d2e-9a11-6b5d0c3e2f77"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | string | Always `FAILURE` on error |
+| errorKey | string | Stable, machine-readable reason. Branch on this. |
+| message | string | Translation key for the reason, always `error.` followed by the error key |
+| params | object | Values that belong to this specific failure, such as the project name or the list of supported sort fields. Present only when the failure has them. |
+| correlationId | string | The identifier for this request |
+
+Empty fields are omitted from the body.
+
+:::warning
+
+Branch on `errorKey`, never on the text. The `message` field is a translation key, not a sentence, and the human-readable wording behind it may change between versions. Error keys come from a closed list and do not change.
+
+:::
+
+Error bodies never contain a stack trace, an exception class name, or any text taken from an internal failure. They are also sent with `Cache-Control: no-store`.
+
+## Error keys
+
+### 400 Bad Request
+
+| Error key | Meaning |
+|-----------|---------|
+| malformedRequest | The request could not be understood: a malformed body, an illegal value, or a missing required field |
+| immutableField | A field that can only be set when the object is created was changed |
+| unsupportedSortField | The `sort` parameter named a field this endpoint does not sort on. `params` lists the supported fields. |
+| projectNameRequired | The project name was empty |
+| idempotencyKeyRequired | The endpoint requires an `Idempotency-Key` header and it was missing or blank |
+
+### 401 Unauthorized
+
+| Error key | Meaning |
+|-----------|---------|
+| invalidToken | The API access token is missing, unknown, expired — or a Manager session token was offered in its place |
+
+### 402 Payment Required
+
+| Error key | Meaning |
+|-----------|---------|
+| licenseInvalidOrExpired | No valid Apinizer license is installed, or the installed license has expired |
+
+### 403 Forbidden
+
+| Error key | Meaning |
+|-----------|---------|
+| permissionDenied | Authenticated, but the user lacks the permission this operation requires |
+| licenseModuleNotEnabled | The license is valid, but it does not include the module this operation belongs to |
+| managementApiDisabled | The Management API is switched off for this installation |
+
+### 404 Not Found
+
+| Error key | Meaning |
+|-----------|---------|
+| resourceNotFound | The addressed object is not visible to this caller |
+
+### 409 Conflict
+
+| Error key | Meaning |
+|-----------|---------|
+| duplicateName | Another object in this project already uses this name or code |
+| versionConflict | The object changed after you read it — see [Optimistic concurrency](#optimistic-concurrency) |
+| lifecycleConflict | The object's current state does not allow this operation |
+| dependencyConflict | Other objects still depend on this one |
+| idempotencyKeyReused | This `Idempotency-Key` was already used with a different request |
+| idempotencyReplayExpired | This exact request already completed; its response is not replayed |
+| idempotencyInProgress | A request with this key is still running |
+
+### 503 Service Unavailable
+
+| Error key | Meaning |
+|-----------|---------|
+| temporarilyUnavailable | A dependency the operation needs is momentarily unavailable. The call may be retried. |
+
+## Status codes
+
+| Status | When |
+|--------|------|
+| 200 OK | The request succeeded |
+| 201 Created | The object was created |
+| 202 Accepted | The request was accepted and completes asynchronously; the `Location` header points at the result |
+| 400 Bad Request | The request itself is wrong |
+| 401 Unauthorized | The token is missing, invalid, expired, or the wrong kind of token |
+| 402 Payment Required | There is no valid license at all |
+| 403 Forbidden | Licensed and authenticated, but not allowed |
+| 404 Not Found | Nothing visible to this caller at that address |
+| 409 Conflict | The request is valid, but the current state refuses it |
+| 503 Service Unavailable | A temporary failure; retrying is reasonable |
+
+### Telling 402, 403 and 404 apart
+
+These three are the cases automation most often misreads, so they are deliberately distinct:
+
+| Situation | Status | Error key | What to do |
+|-----------|--------|-----------|------------|
+| No license installed, or it expired | 402 | licenseInvalidOrExpired | Contact your Apinizer representative — no retry will help |
+| License valid, module not included | 403 | licenseModuleNotEnabled | Ask for that module to be added to the license |
+| Management API switched off | 403 | managementApiDisabled | Ask an administrator to enable the Management API |
+| User lacks the permission | 403 | permissionDenied | Grant the permission to the user the token belongs to |
+| Object absent, or outside this user's scope | 404 | resourceNotFound | Check the name and the user's project access |
+
+:::note
+
+`404` is returned both when nothing exists at that address and when something exists but this caller may not see it. The two are answered identically, on purpose: distinguishing them would tell an unauthorized caller what exists. A `404` is therefore not proof that an object is absent — it means "not visible to you".
+
+:::
+
+## Idempotency
+
+Endpoints that create something, or that produce credentials, require an idempotency key:
+
+```
+Idempotency-Key: 9d0c8f4a-2f1e-4c7b-9c2f-8b3a1d5e7c40
+```
+
+Use a fresh value for each distinct operation, at most 255 characters. A retry of the same operation — a network timeout, a pipeline re-run — reuses the same key, and Apinizer will not perform the work twice.
+
+The key is matched together with a fingerprint of the request, so:
+
+| Situation | Result |
+|-----------|--------|
+| New key | The operation runs |
+| Same key, same request, first call still running | `409 idempotencyInProgress` — wait, then read the object |
+| Same key, same request, first call finished | `409 idempotencyReplayExpired` — the work was already done; read the object instead |
+| Same key, different request | `409 idempotencyKeyReused` — use a new key |
+| Header missing | `400 idempotencyKeyRequired` |
+
+:::warning
+
+The original response is never replayed. A completed request returns `409 idempotencyReplayExpired`, not the first response — so a secret that was generated once is never handed out a second time. Store what you receive from the first successful call; it cannot be retrieved again.
+
+:::
+
+Keys are remembered for 24 hours.
+
+## Optimistic concurrency
+
+Objects that support concurrent editing report a `resourceVersion` when you read them and when you change them. Send it back on the next write to make sure you are changing the version you actually read:
+
+```
+If-Match: 7
+```
+
+The body field `expectedVersion` does the same thing when a header is inconvenient. If the object changed in the meantime, the write is refused with `409 versionConflict`; read the object again, re-apply your change, and retry.
+
+Omitting both means "last write wins".
+
+## Pagination
+
+List endpoints are always paged.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| page | 0 | Zero-based page index |
+| size | 20 | Rows per page, capped at 200 |
+| sort | endpoint-specific | `field,asc` or `field,desc` |
+
+A `size` above the cap is reduced to 200 rather than rejected. A negative `page`, or a `sort` that is malformed, is rejected with `400 malformedRequest`; a `sort` that names a field the endpoint does not support is rejected with `400 unsupportedSortField`, and `params` then carries the supported field names. Field names are case-sensitive.
+
+A stable secondary sort is always appended, so a row never moves between pages while you are walking them.
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 137,
+  "totalPages": 7,
+  "sort": ["createdAt,desc", "name,asc"]
+}
+```
+
+## Write responses
+
+A successful write reports both what was stored and what reached the running gateways:
+
+```json
+{
+  "status": "SUCCESS",
+  "resourceVersion": 8,
+  "result": {},
+  "runtimeDeployment": {
+    "state": "DEGRADED",
+    "revision": 42,
+    "environments": [
+      { "name": "production", "acknowledged": true },
+      { "name": "test", "acknowledged": false, "detail": "gateway did not respond" }
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| status | Always `SUCCESS` — this envelope is only used for a successful write |
+| resourceVersion | The new version, to send back as `If-Match` on your next write |
+| result | The stored object |
+| runtimeDeployment | What happened to the running gateways, when the write triggers a deployment |
+
+`runtimeDeployment.state` is one of:
+
+| State | Meaning |
+|-------|---------|
+| IN_SYNC | Every environment acknowledged the change |
+| DEGRADED | Stored, but at least one environment did not acknowledge it. Read `environments` to see which. |
+| PENDING | Delivery is still in progress |
+
+:::warning
+
+`DEGRADED` arrives with a success status, and that is intentional: the change **is** saved. Treating it as a failure and retrying the write will not help. Check `environments`, resolve the unreachable environment, and redeploy. A pipeline that must not continue on a partial rollout should test `runtimeDeployment.state` explicitly rather than only the HTTP status.
+
+:::
+
+## Caching
+
+Error responses, responses that contain credentials, and downloads of raw key or certificate material are sent with:
+
+```
+Cache-Control: no-store
+Pragma: no-cache
+```
+
+Make sure any proxy or client cache between your automation and Apinizer honours these.
+
+## Next Steps
+
+- [Error Handling](/api-reference/getting-started/error-handling) - The envelope used by the older endpoints
+- [Authentication](/api-reference/getting-started/authentication) - Creating a personal API access token
+- [API reference](/api-reference/overview) - Complete endpoint documentation
