@@ -201,3 +201,54 @@ rs.add("<NODES_NEW_HOSTNAME>")
 rs.status()
 ```
 
+---
+
+## Recovering a Record Locked by an Interrupted Delete
+
+### Reason/Why
+
+While deleting a connected record such as a Credential, Organization, or Portal Application, Apinizer holds a short-lived lock so that two deletes of the same record can never overlap (see [Concurrent Deletion](/en/concepts/core-concepts/asset-lifecycle#concurrent-deletion)). If the server process holding that lock ends before the delete finishes — for example an unexpected server restart — the lock is **not** released automatically: the record stays in the "delete in progress" state, and every subsequent delete attempt is refused the same way. This is deliberate — since the record's true state is unknown (how much of the delete actually completed is not known), letting the lock expire on its own could let a second delete attempt land on top of a half-finished one.
+
+### Diagnosis
+
+The lock is held in the `lifecycle_deletion_barrier` collection. Find the document for the affected record first:
+
+```javascript
+use apinizerdb
+
+// <SUBJECT_TYPE> => CONSUMER (credential) | ORGANIZATION (organization) | APPLICATION (portal application)
+// <SUBJECT_ID>   => the record's Mongo _id value
+db.lifecycle_deletion_barrier.findOne({ _id: "<SUBJECT_TYPE>:<SUBJECT_ID>" })
+```
+
+The fields on the document clarify the state:
+
+| Field | Meaning |
+|-------|---------|
+| `state` | `HELD` means the lock is still held; `RELEASED` means it is already free — in that case the 409 has a different cause, see [Delete Blockers](/en/concepts/core-concepts/asset-lifecycle#delete-blockers). |
+| `operationId` | The id of the operation holding the lock. |
+| `acquiredAt` | When the lock was taken — how much time has passed since is what you use to judge whether the operation is genuinely stuck. |
+| `acquiredBy` | The user/account that acquired the lock. |
+| `projectId` | The project the record belongs to (if any). |
+
+If a reasonable amount of time has passed since `acquiredAt` (for example, several minutes) and a corresponding server restart or outage is confirmed to have happened at that time, the operation is stuck.
+
+### Solution
+
+Once you have confirmed the operation is genuinely finished, release the lock by hand:
+
+```javascript
+db.lifecycle_deletion_barrier.updateOne(
+    { _id: "<SUBJECT_TYPE>:<SUBJECT_ID>" },
+    { $set: { state: "RELEASED", releasedAt: new Date() } }
+)
+```
+
+This only releases the lock; it does not touch the record itself. Once released, the delete request can be retried normally, and the current [delete blockers](/en/concepts/core-concepts/asset-lifecycle#delete-blockers) are re-evaluated from scratch.
+
+:::warning
+
+This is a direct database intervention and should be performed only by an authorized Apinizer administrator, after confirming the operation has genuinely ended. Doing it without that confirmation can let a new delete attempt collide with one that is still in progress.
+
+:::
+
