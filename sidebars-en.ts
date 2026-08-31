@@ -1022,6 +1022,7 @@ const sidebars: SidebarsConfig = {
             "operations/common-problems-solutions/high-latency-slow-response-times",
             "operations/common-problems-solutions/authentication-failures",
             "operations/common-problems-solutions/database-connection-issues",
+            "operations/common-problems-solutions/Oracle-tns-timezone-error",
             "operations/common-problems-solutions/memory-leaks-oom-errors",
             "operations/common-problems-solutions/policy-execution-failures",
             "operations/common-problems-solutions/routing-issues",
