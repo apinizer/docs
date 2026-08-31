@@ -45,6 +45,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/token-kotalari",
+        "ai-gateway/limit-planlari",
         "ai-gateway/maliyet-ayarlari"
       ]
     },

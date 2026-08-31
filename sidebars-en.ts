@@ -35,6 +35,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/token-quotas",
+        "ai-gateway/limit-plans",
         "ai-gateway/cost-settings"
       ]
     },
