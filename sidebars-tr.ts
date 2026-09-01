@@ -1020,6 +1020,7 @@ const sidebars: SidebarsConfig = {
             "operations/yaygin-sorunlar-cozumleri/high-latency-slow-response-times",
             "operations/yaygin-sorunlar-cozumleri/authentication-failures",
             "operations/yaygin-sorunlar-cozumleri/database-connection-issues",
+            "operations/yaygin-sorunlar-cozumleri/Oracle-tns-timezone-error",
             "operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors",
             "operations/yaygin-sorunlar-cozumleri/policy-execution-failures",
             "operations/yaygin-sorunlar-cozumleri/routing-issues",
