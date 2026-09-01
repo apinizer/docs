@@ -45,6 +45,7 @@ Authorization: Bearer YOUR_TOKEN
 | environmentMapping | string (JSON) | No | — | Maps an environment name in the package to an environment name on this installation, for example `{"UAT": "Production"}`. An empty value marks that environment as deliberately not transferred. Without it, same-named environments match and unmatched ones are dropped. Applies to `override=false` (Import as New) only — with `override=true` the mapping is ignored, because Replace Existing merges onto the target object's own environment assignment, which the two `certEnvironment*` fields below govern |
 | certEnvironmentMergeMethod | string | No | MATCH_BY_NAME | For certificate and key packages imported with `override=true`: `MATCH_BY_NAME` writes to the environments named in the package, `OVERWRITE_ALL` writes to every target environment |
 | certEnvironmentUncoveredAction | string | No | — | For certificate and key packages imported with `override=true`: what happens to a target environment the package does not cover — `FILL_FROM_PACKAGE` writes the package's data onto it, `REMOVE_FROM_TARGET` drops it from the object. If such an uncovered environment actually exists and this is not supplied, the import is rejected with 400 rather than silently leaving it with stale material |
+| acknowledgeChecksumMismatch | boolean | No | false | When `true`, a transfer-manifest checksum mismatch (a package file whose content was edited or re-saved after export) is accepted instead of rejected, and the import proceeds. The response then carries a `warn` advisory with key `transfer.checksumMismatchAcknowledged`, and the acknowledging user is written to the operational log. Only a checksum mismatch is acknowledgeable this way — a malformed manifest and a missing/undeclared package file (an entry-count mismatch) are rejected with 400 regardless of this flag |
 
 ## Response
 
@@ -67,12 +68,34 @@ When part of the package could not be carried over, the response says so:
 }
 ```
 
+When the import ran with `acknowledgeChecksumMismatch=true` and the package did carry a mismatch, the response also carries the advisory that records it:
+
+```json
+{
+  "status": "SUCCESS",
+  "advisories": [
+    {
+      "level": "warn",
+      "key": "transfer.checksumMismatchAcknowledged",
+      "params": {
+        "entryCount": 2,
+        "acknowledgedBy": "ci-pipeline@example.com"
+      }
+    }
+  ],
+  "unresolvedReferences": [
+    "transfer.checksumMismatchAcknowledged: entryCount=2 acknowledgedBy=ci-pipeline@example.com"
+  ]
+}
+```
+
 ### Response Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | status | string | `SUCCESS` or `FAILURE` |
-| unresolvedReferences | array of string | What the import could not carry over — dropped references, blanked secrets, objects that still need deploying. Absent when everything transferred |
+| unresolvedReferences | array of string | What the import could not carry over — dropped references, blanked secrets, objects that still need deploying — as one rendered line per item. Absent when there is nothing to report |
+| advisories | array of object | The machine-readable form of `unresolvedReferences`: each entry carries `level` (`error`, `warn`, `info` or `ok`), a stable `key` a pipeline can branch on, and `params` with the raw interpolation values. The `transfer.checksumMismatchAcknowledged` warn advisory (`params.entryCount`, `params.acknowledgedBy`) is added only when `acknowledgeChecksumMismatch=true` actually accepted a mismatch. Absent when there is nothing to report |
 
 ### Error Response (400 Bad Request)
 
@@ -137,6 +160,15 @@ or
 }
 ```
 
+or
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Integrity check failed for 'openai-prod.json': its bytes differ from the exported ones since the package was exported. Use the export file Apinizer produced as-is, without editing or re-compressing it."
+}
+```
+
 #### Common Causes
 
 - `override=false` and an object of the same name already exists in the target project
@@ -145,6 +177,7 @@ or
 - The package carries objects whose asset categories the token lacks `EXPORT_IMPORT` on
 - The package is encrypted and no passphrase — or a wrong one — was supplied
 - `override=true` on a certificate/key package where the target has an environment the package does not cover, and `certEnvironmentUncoveredAction` was not supplied
+- A package file's content changed since export and `acknowledgeChecksumMismatch` was not sent as `true` — or the package is missing a declared file or carries one the manifest never declared, which stays rejected even with the flag
 
 ### Error Response (401 Unauthorized)
 
@@ -198,6 +231,17 @@ curl -X POST \
   -F "override=false"
 ```
 
+### Example 5: Acknowledge a Checksum Mismatch
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/TargetProject/export-import/LLM_PROVIDER/import/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "exportFile=@openai-prod.zip" \
+  -F "override=false" \
+  -F "acknowledgeChecksumMismatch=true"
+```
+
 ## Notes and Warnings
 
 - **Dependencies bind by name**: every object the package carries that already exists in the target project under the same name is bound to it; everything else is created. This is the automatic form of the "map to existing by name" step in the Apinizer interface.
@@ -207,9 +251,11 @@ curl -X POST \
 - **Secrets are not carried in the clear**: secret values of imported connection objects are blanked and must be re-entered in the target project, unless the package itself was encrypted end to end.
 - **Imported objects are not deployed**: objects that need deployment to take effect are persisted but not pushed to the workers by the import. Deploy them afterwards.
 - **Type must match the package**: the type in the path is what the import looks for inside the package. If the package holds something else, nothing is written and the response names the type it actually found.
-- **Package integrity is verified first**: a package that carries an integrity record (`apinizer-transfer-manifest.json`, written by [Export Objects](/api-reference/export-import/export-objects)) is checked before anything is persisted. A record that cannot be read, a file set that does not match it, a file whose content changed since export, or a package format newer than this installation understands is rejected with **400 Bad Request**, and nothing is written. As with the other refusals on this endpoint, the reason arrives as a sentence in `resultMessage`, naming the file at fault where there is one.
+- **Package integrity is verified first**: a package that carries an integrity record (`apinizer-transfer-manifest.json`, written by [Export Objects](/api-reference/export-import/export-objects)) is checked before anything is persisted. A record that cannot be read, a file set that does not match it, a file whose content changed since export (unless acknowledged — see below), or a package format newer than this installation understands is rejected with **400 Bad Request**, and nothing is written. As with the other refusals on this endpoint, the reason arrives as a sentence in `resultMessage`, naming the file at fault where there is one.
 - **Older packages still import**: a package produced before this record existed carries none, and imports exactly as it always did — the verification simply does not run. The check is what a package must pass when it *has* a record, not a requirement that every package have one.
 - **Ship packages as produced**: unzipping a package, editing a file and re-compressing it makes the file set or a fingerprint disagree with the record, and the import is refused. Make the change at the source and export again.
+- **A checksum mismatch alone can be overridden**: `acknowledgeChecksumMismatch=true` accepts a file whose content changed after export and lets the import proceed; the response then carries the `transfer.checksumMismatchAcknowledged` warn advisory (in `advisories`, and as a rendered line in `unresolvedReferences`) and the acknowledging user is written to the operational log. This is the only kind of manifest failure the flag widens — a manifest that cannot be read and a file set that does not match the record (a declared file missing, or a file the record never mentions) are rejected with **400 Bad Request** no matter what this parameter is set to.
+- **A pipeline can branch on the advisory `key`**: because `transfer.checksumMismatchAcknowledged` is a stable identifier rather than a translated sentence, an automated caller can detect that an import succeeded only because a mismatch was explicitly overridden — for example to flag the run for a human review, or to fail a stricter pipeline that expects byte-for-byte packages — without parsing `resultMessage` text.
 
 ## Permissions
 
