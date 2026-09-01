@@ -655,6 +655,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/kimlik-bilgileri",
+            "admin/identity-management/api-client-tasima",
             "admin/identity-management/portal-applications",
             "admin/identity-management/kurumlar",
             "admin/identity-management/sozlesmeler-protokoller",
