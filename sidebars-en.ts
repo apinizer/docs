@@ -1023,6 +1023,7 @@ const sidebars: SidebarsConfig = {
             "operations/common-problems-solutions/high-latency-slow-response-times",
             "operations/common-problems-solutions/authentication-failures",
             "operations/common-problems-solutions/database-connection-issues",
+            "operations/common-problems-solutions/Oracle-tns-timezone-error",
             "operations/common-problems-solutions/memory-leaks-oom-errors",
             "operations/common-problems-solutions/policy-execution-failures",
             "operations/common-problems-solutions/routing-issues",
@@ -1299,7 +1300,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analytics-and-observability-scenarios/kibana-api-traffic-log-visualization",
-            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization"
+            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization",
+            "tutorials/api-analytics-and-observability-scenarios/grafana-api-traffic-metric-visualization"
           ]
         },
         {

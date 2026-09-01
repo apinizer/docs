@@ -712,12 +712,21 @@ CREATE INDEX idx_apitraffic_result      ON log_ApiProxyTraffic(result_type);
   </TabItem>
   <TabItem value="sql-server" label="SQL Server">
 ```sql
+-- Partitioning olmadan:
 CREATE INDEX idx_apitraffic_correlation ON log_ApiProxyTraffic(correlation_id);
 CREATE INDEX idx_apitraffic_timestamp   ON log_ApiProxyTraffic(log_timestamp);
 CREATE INDEX idx_apitraffic_proxy       ON log_ApiProxyTraffic(api_proxy_id);
 CREATE INDEX idx_apitraffic_project     ON log_ApiProxyTraffic(project_id);
 CREATE INDEX idx_apitraffic_status      ON log_ApiProxyTraffic(status_code);
 CREATE INDEX idx_apitraffic_result      ON log_ApiProxyTraffic(result_type);
+
+-- Bir partition scheme kullanılıyorsa (örn. ps_logs_daily), idx_apitraffic_timestamp gereksizdir —
+-- log_timestamp üzerindeki clustered index zaten bunu karşılar. Diğer indeksleri hizalayın:
+-- CREATE INDEX idx_apitraffic_correlation ON log_ApiProxyTraffic(correlation_id)
+--   ON ps_logs_daily(log_timestamp);
+-- CREATE INDEX idx_apitraffic_proxy ON log_ApiProxyTraffic(api_proxy_id)
+--   ON ps_logs_daily(log_timestamp);
+-- ... (project, status, result için aynı desen)
 ```
   </TabItem>
 </Tabs>
@@ -1637,7 +1646,7 @@ CREATE INDEX idx_unsent_connector ON log_UnsentMessage(connector_id);
 
 ### Bölümleme (Partitioning)
 
-Bu tablo kısa bir zaman penceresi içinde tüketilen geçici kayıtları barındırır. **Partition gerekli değildir.** Tablo beklenmedik şekilde büyürse (uzun süreli kesintiler), partition yerine operasyonel temizlik daha uygun bir çözümdür.
+Bu tablo kısa bir zaman penceresi içinde tüketilen geçici kayıtları barındırır. **Partition gerekli değildir.** Tablo beklenmedik şekilde büyürse (uzun süreli kesintiler), partition yerine operasyonel temizlik daha uygun bir çözümdür. Partitioning mümkündür ve Apinizer INSERT davranışını etkilemez, ancak bu geçici kuyruk tablosu için genellikle operasyonel temizlik yeterlidir.
 
 ## Partition Söz Dizimi
 
@@ -1695,6 +1704,10 @@ DROP TABLE log_ApiProxyTraffic_p20260101;
   </TabItem>
   <TabItem value="sql-server" label="SQL Server">
 ```sql
+-- 0) Ön koşul: N sınır değeri N+1 partition üretir; scheme, her partition için tam olarak
+-- bir filegroup listelemelidir. Enterprise dağıtımlar yıllık filegroup kullanabilir; minimal
+-- örnekte tüm partition'lar [PRIMARY]'ye eşlenir.
+
 -- 1) Partition fonksiyonu (günlük sınırlar):
 CREATE PARTITION FUNCTION pf_logs_daily (DATETIME2)
   AS RANGE RIGHT FOR VALUES ('2026-01-01', '2026-01-02', '2026-01-03');
@@ -1703,17 +1716,50 @@ CREATE PARTITION FUNCTION pf_logs_daily (DATETIME2)
 CREATE PARTITION SCHEME ps_logs_daily
   AS PARTITION pf_logs_daily ALL TO ([PRIMARY]);
 
--- 3) Tabloyu scheme üzerine oluşturun:
+-- 3) Tabloyu inline PK OLMADAN oluşturun (yukarıdaki kolon listesiyle aynı):
 CREATE TABLE log_ApiProxyTraffic (
-  /* ... kolonlar ... */
+  id NVARCHAR(255) NOT NULL,
+  log_timestamp DATETIME2 NOT NULL,
+  /* ... diğer kolonlar ... */
 ) ON ps_logs_daily(log_timestamp);
+GO
 
--- 4) Zamanlanmış iş ile yeni sınırlar ekleyin:
+-- 4) Clustered bir PK partition sütununun dışında olamaz — NC PK + partition sütunu üzerinde CI:
+ALTER TABLE log_ApiProxyTraffic
+  ADD CONSTRAINT PK_log_ApiProxyTraffic_id
+  PRIMARY KEY NONCLUSTERED (id)
+  ON [PRIMARY];
+GO
+
+CREATE CLUSTERED INDEX IX_log_ApiProxyTraffic_Partitioning
+  ON log_ApiProxyTraffic (log_timestamp)
+  ON ps_logs_daily(log_timestamp);
+GO
+
+-- 5) Önerilen nonclustered indeksler (partition scheme ile hizalı):
+CREATE INDEX idx_apitraffic_correlation ON log_ApiProxyTraffic(correlation_id)
+  ON ps_logs_daily(log_timestamp);
+CREATE INDEX idx_apitraffic_proxy ON log_ApiProxyTraffic(api_proxy_id)
+  ON ps_logs_daily(log_timestamp);
+CREATE INDEX idx_apitraffic_project ON log_ApiProxyTraffic(project_id)
+  ON ps_logs_daily(log_timestamp);
+CREATE INDEX idx_apitraffic_status ON log_ApiProxyTraffic(status_code)
+  ON ps_logs_daily(log_timestamp);
+CREATE INDEX idx_apitraffic_result ON log_ApiProxyTraffic(result_type)
+  ON ps_logs_daily(log_timestamp);
+
+-- 6) Sınırları zamanlanmış bir iş ile genişletme:
 ALTER PARTITION SCHEME ps_logs_daily NEXT USED [PRIMARY];
 ALTER PARTITION FUNCTION pf_logs_daily() SPLIT RANGE ('2026-04-22');
 ```
   </TabItem>
 </Tabs>
+
+:::warning
+
+SQL Server'da, tablo `log_timestamp` veya `audit_event_date` ile anahtarlanmış bir partition scheme kullanıyorsa `id` üzerinde **clustered** PRIMARY KEY tanımlayamazsınız (Msg 1908). Clustered index partition sütunu üzerinde olmalıdır; `id` için **NONCLUSTERED** bir PK kullanın. Yıllık filegroup'lar veya üç aylık partition'lar geçerli operasyonel tercihlerdir ve Apinizer INSERT davranışını değiştirmez.
+
+:::
 
 :::warning
 
