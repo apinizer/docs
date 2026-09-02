@@ -653,7 +653,7 @@ const sidebars: SidebarsConfig = {
         "admin/identity-management/overview",
         {
           "type": "category",
-          "label": "Credential Management",
+          "label": "Consumer Management",
           "collapsed": true,
           "collapsible": true,
           "items": [

@@ -650,7 +650,7 @@ const sidebars: SidebarsConfig = {
         "admin/identity-management/genel-bakis",
         {
           "type": "category",
-          "label": "Kimlik Bilgisi Yönetimi",
+          "label": "Tüketici Yönetimi",
           "collapsed": true,
           "collapsible": true,
           "items": [
