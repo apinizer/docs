@@ -1,6 +1,6 @@
 ---
 title: "Limit Plans, Assignments & Defaults API"
-description: "Endpoint reference for the manager REST surface behind Limit Plans: the plan catalog, per-subject limit assignments, and owner-level default policies that back the AI Token Budget mechanism."
+description: "Endpoint reference for the manager REST surface behind Limit Plans: the Request Rate and AI Token Budget plan catalog (project- and platform-scope), per-subject limit assignments, owner-level default policies, and the portal subscription linking that materializes assignments from a Subscription Plan."
 ---
 
 :::caution This is the manager's own REST surface, not APIops
@@ -13,9 +13,9 @@ For the concepts behind these endpoints — plan lifecycle, publishing a revisio
 
 ### Limit Plans — `/api/limit-plans`
 
-The catalog: draft → publish → retire, plus the revision history under a plan.
+The catalog: draft → publish → retire, plus the revision history under a plan. Every endpoint below takes an optional `projectId` query parameter with the same meaning: absent addresses the installation-wide **platform** catalog (`GET`/list still returns a project's own plans plus the platform ones; every other by-key endpoint addresses the platform row directly), present addresses one project's own catalog. Writing a platform-scope row (`POST`, `PUT`, `.../draft-revisions`, `.../publish`, `.../retire`, `DELETE`) is restricted to a system administrator; a project-scoped caller naming a platform plan's key is refused.
 
-- `GET /api/limit-plans` — list a project's plans (`projectId` required; `family` optional)
+- `GET /api/limit-plans` — list plans (`projectId` optional — absent addresses the platform-wide catalog; with a project id the answer is that project's own plans plus the platform catalog; `family` optional)
 - `GET /api/limit-plans/{planKey}` — one plan
 - `GET /api/limit-plans/{planKey}/revisions` — every revision, oldest first, without the rule body
 - `GET /api/limit-plans/{planKey}/revisions/{revision}` — one revision, full body
@@ -56,27 +56,37 @@ An owner's standing offer of a limit to children it will have or already has. Th
 - `POST /api/limit-defaults/{defaultKey}/disable` — disable it (existing assignments already materialized from it are unaffected)
 - `DELETE /api/limit-defaults/{defaultKey}` — delete (refused while the row is enabled — disable it first)
 
+### Portal Subscription Linking
+
+A portal API Product's Subscription Plan (`ApiPlan`) can reference a published, platform-scope Limit Plan per family instead of carrying its own numbers — see [API Product → Limit Profiles](/en/api-portal/api-product#limit-profiles) and [Limit Plans → Referenced by a Portal Subscription Plan](/en/ai-gateway/limit-plans#referenced-by-a-portal-subscription-plan) for the concepts. These two endpoints support that surface; the Subscription Plan CRUD endpoints themselves (`/api/api-products/**`, `/api/api-product-app-register`) are the manager's own portal-management REST API and are not otherwise catalogued on this page.
+
+- `GET /api/api-products/{productId}/plans/{planId}/limit-impact` — before saving a plan whose limit-profile references (or on-exceed setting) changed, returns how many approved subscriptions and distinct applications would start enforcing the new limits: `approvedSubscriptionCount`, `familiesWithProfile` (the families the plan carries an active reference for), `affectedApplicationCount`.
+- `POST /api/limit-bindings/portal-subscriptions/backfill?apply=false|true` — **system administrator only.** One-shot repair for subscriptions that were approved before this reference model existed. `apply=false` (the default) previews the sweep without writing anything; `apply=true` performs it, one subscription at a time, so a subscription whose profile cannot be resolved does not stop the rest of the backlog. Response: `apply`, `scanned` (subscriptions examined), `wouldCreateOrJoin`, `alreadyBound` (subscription × family counts), and — on an applied run only — `created`, `updated`, `shared`, `conflicts` (one `appId:family` string per family left on another subscription's profile), `failed` (one `appId:message` string per subscription the sweep could not sync, still pending).
+
+`PUT /api/api-product-app-register` — approving or updating a subscription — additionally accepts `acknowledgeLimitProfileSwitch: true` in the request body to move an application's shared limit assignment to *this* subscription's profile when another approved subscription's profile currently holds it; omitted or `false` keeps the existing assignment and the response's `limitProfileConflicts` field names the families where the request's own preference was not applied.
+
 ## Authentication
 
 These are manager-application endpoints, authenticated the same way as the rest of the manager's own REST API — not by the Personal API Access Token that authenticates the `/apiops/**` surface documented elsewhere on this site.
 
 ## Permissions
 
-- Every endpoint additionally requires the **AI Gateway** license module — without it, every call is refused regardless of permission.
 - Reads require the **AI Budgets** permission at **View**; every write requires it at **Manage**.
-- A Limit Plan is always project-scoped: `projectId` is required on every Limit Plans endpoint.
-- A Limit Assignment or a Default Limit Policy may instead address the platform-wide scope by omitting `projectId` — reachable only by a system administrator, the same rule the rest of the manager's admin-scoped endpoints follow.
+- The **AI Gateway** license module gates only the **AI Token Budget** family — an `AI_TOKEN_BUDGET` plan or assignment is refused (`403`) without it; a `REQUEST_RATE` plan or assignment needs no license module.
+- `projectId` (query parameter on Limit Plans, Limit Assignments, and Default Limit Policies) may be omitted to address the platform-wide scope instead of one project's own catalog. Reading platform rows is open to any caller with **View** in some project (they are what that project's picker also offers, badged **Platform**); writing one is reachable only by a system administrator, the same rule the rest of the manager's admin-scoped endpoints follow.
 
 ## Notes
 
-- **Only the AI Token Budget family is usable in this version.** The schema also declares a Request Rate family, but creating or assigning anything in that family is rejected at save time with an `HTTP 400`, not silently accepted and left unenforced.
+- **Both families are usable.** `AI_TOKEN_BUDGET` and `REQUEST_RATE` plans can both be created, published, and referenced — see [Plan Families](/en/ai-gateway/limit-plans#plan-families) for what each carries, and its **Overflow Action** (`REQUEST_RATE`: `BLOCK`/`COUNT_ONLY`, `BLOCK` when absent).
 - **A published revision is immutable.** Correcting one means opening a new draft revision under the same plan and publishing that instead; the superseded revision is kept, not overwritten.
 - **A plan reference is never inlined.** A `PLAN`-mode assignment stores plan ids, not a copy of the plan's rule body — the plan's own published revision is what is resolved at request time.
 - **`OFF` narrows one subject; it does not widen anything above it.** Ancestor ceilings (organization, project, platform) still apply to a subject with an `OFF` assignment — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
+- **Typed limit enforcement still runs in shadow mode.** A binding created through any endpoint on this page — including one sourced from a portal subscription — is compared against the legacy limit mechanism but does not itself block a request in this version; see [Enforcement Status: Shadow Mode](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode).
 
 ## Related Documentation
 
 - [Limit Plans](/en/ai-gateway/limit-plans) - The manager UI screens this surface backs
+- [API Product](/en/api-portal/api-product#limit-profiles) - Referencing a platform Limit Plan from a portal Subscription Plan
 - [Token Quotas](/en/ai-gateway/token-quotas) - The scope- and window-based budget mechanism this one runs alongside
 - [AI Budgets / Quota API](/api-reference/ai-budgets) - The separate, APIops-exposed budget hierarchy surface
 - [Error Handling](/api-reference/getting-started/error-handling) - Error response formats
