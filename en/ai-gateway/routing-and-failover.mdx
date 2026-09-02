@@ -56,6 +56,48 @@ The utterances that drive semantic matching, and the header name the affinity st
 Utterance resolution happens once, when the route's embeddings are first built and cached — not per request. That is why only `${...}` environment variables are accepted here and `#{...}` context variables are not: a per-request value would be embedded on the first request and those same vectors would then be served to every later one.
 :::
 
+## Client "model" Field
+
+Two independent settings decide what the gateway does with the `model` field the client sends in the request body. Whichever value they resolve to becomes the **effective model** for that request — the same model that rate limiting, semantic cache lookups, cost calculation, and traffic logs use, regardless of what the client originally sent.
+
+### If the Request Already Has a Model Field
+
+| Option | Behavior |
+|---|---|
+| **Use the client's model** | The client's model must exist in the provider's model catalog; otherwise the request is rejected with HTTP 400. |
+| **Overwrite with the routing model** (default) | The model selected by routing replaces the client's value. |
+| **Reject the request** | Requests that carry a `model` field are rejected with HTTP 400. |
+
+### If the Request Has No Model Field
+
+| Option | Behavior |
+|---|---|
+| **Leave it absent** (default) | The body is forwarded without a `model` field. Providers that resolve the model from the URL or a deployment work this way. |
+| **Add the routing model** | The model selected by routing is added to the body. |
+| **Reject the request** | Requests without a `model` field are rejected with HTTP 400. |
+
+:::note Legacy Behavior
+Unset values keep the previous behavior: overwrite the model when the client sends one, leave it absent when the client doesn't. An existing gateway keeps working exactly as it did before, with no change required.
+:::
+
+:::note Provider Notes
+- **Gemini, Vertex, and Bedrock** carry the model in the URL path — the effective model still selects that path. On Gemini, Vertex, and Anthropic models on Bedrock the native request body never gets a `model` field. Other Bedrock models (Titan, Llama, Mistral, Nova) are still forwarded in OpenAI shape, so on those this setting applies to the body exactly as it does on any OpenAI-compatible provider.
+- **Azure OpenAI** pins the model in the endpoint: a deployment endpoint such as `https://<resource>.openai.azure.com/openai/deployments/<deployment>` already names the deployment that will answer, so the body's `model` field cannot change which model is actually called. **Use the client's model** is therefore not applied there — see below.
+- **Anthropic** always writes the effective model into the native request body itself, independent of what the client sent.
+:::
+
+:::note Azure OpenAI: "Use the client's model" Is Not Honored
+Gemini, Vertex, and Bedrock take the *effective* model from the gateway and write it into the URL themselves, so attribution and the model that actually answers always agree. An Azure OpenAI deployment endpoint is the exception: the deployment is fixed in the endpoint the operator configured, so the body's `model` field cannot change which model answers — it could only change **attribution**, meaning which catalog entry rate limits, quota, semantic cache, cost calculation, and traffic logs are booked against.
+
+Letting the client move that attribution would let it be billed and counted at a cheaper model's rate than the deployment that actually served the call. Apinizer therefore does **not** apply **Use the client's model** on such a provider: the effective model stays the configured routing model, the client's `model` field is forwarded exactly as sent, and no catalog check is run against it (the client's model is never called, so an unlisted value is not an error either). **Overwrite with the routing model**, **Reject the request**, and every option on the "no model field" axis behave exactly as described above.
+:::
+
+### Failover Legs
+
+A failover leg re-evaluates both settings against its own provider's model catalog. With **Use the client's model**, if the client's model isn't in that leg's catalog, the leg falls back to its own configured model instead of failing the request — only the primary target rejects outright on a catalog mismatch.
+
+A leg that does not define a model of its own inherits the **configured routing model**, not the effective model the primary resolved for this request. That distinction matters under **Use the client's model**: the client's model is used on a leg only when that leg's own catalog lists it, and otherwise the leg falls back to a model the provider is known to serve, rather than carrying the client's choice into a provider that never offered it.
+
 ## Failover Chains
 
 When you configure an AI Gateway, you can list more than one provider connection for a model — a **primary** and one or more **backups**. If a request to the primary fails (timeout, error response, or the primary is unavailable), Apinizer automatically retries it against the next connection in the chain, without the client seeing the failure.
