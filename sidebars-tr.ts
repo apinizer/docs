@@ -740,7 +740,8 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/lisans-yonetimi",
         "admin/system-settings/hata-mesajlari",
         "admin/system-settings/ip-geolocation-ayari",
-        "admin/system-settings/token-yonetim-ayarlari"
+        "admin/system-settings/token-yonetim-ayarlari",
+        "admin/system-settings/api-istemcisi-secret-saklama-ayarlari"
       ]
     },
     {
