@@ -7,7 +7,7 @@ description: "Endpoint reference for the manager REST surface behind Limit Plans
 Every endpoint on this page lives under `/api/**` — the same surface the manager's own Angular UI calls — not under `/apiops/**`. There is no APIops-automation counterpart for any of it in this version. See [API Client Runtime Deployment (Manager REST API)](/api-reference/credentials#api-client-runtime-deployment-manager-rest-api) for a comparable manager-only surface documented for the same reason.
 :::
 
-For the concepts behind these endpoints — plan lifecycle, publishing a revision, and the four assignment modes — see [Limit Plans](/en/ai-gateway/limit-plans).
+For the concepts behind these endpoints — plan lifecycle, publishing a revision, the four assignment modes, target scope, and rule assignments — see [Limit Plans](/en/ai-gateway/limit-plans).
 
 ## Endpoints
 
@@ -35,13 +35,55 @@ One subject's assignment lifecycle: `DRAFT` → `ACTIVE` → `ENDED`. There is n
 
 - `GET /api/limit-bindings` — list assignments (`projectId`, `family`, `status` all optional; an absent `status` includes drafts and ended rows)
 - `GET /api/limit-bindings/subject` — every assignment naming one subject (`subjectType` required; `activeOnly=true` returns only the live one, if any)
+- `GET /api/limit-bindings/covering-api-proxy?projectId=X&apiProxyId=Y` — every `ACTIVE` `REQUEST_RATE` assignment whose target covers this API proxy: explicit-subject and rule-based (`AUDIENCE_RULE`) assignments alike, installation-wide (`PLATFORM`) ones included. `apiProxyId` is required; `projectId` is optional and defaults to the proxy's own project. Returns the list-row (`LimitPolicyBindingSummaryDTO`) shape, same as every other list endpoint on this page — this is what backs the "Rate Limit" badge and its dialog on the proxy's Develop screen.
 - `GET /api/limit-bindings/{bindingKey}` — one assignment
 - `GET /api/limit-bindings/referencing-plan/{planId}` — impact analysis: every assignment that references a given plan
 - `POST /api/limit-bindings` — create an assignment (mode `PLAN`, `CUSTOM`, `INHERIT`, or `OFF`)
-- `PUT /api/limit-bindings/{bindingKey}` — edit an assignment's content (mode, plan references, custom rule body, validity window) — its subject and scope cannot be changed this way
+- `PUT /api/limit-bindings/{bindingKey}` — edit an assignment's content: `mode`, `planIds`, `customRuleSpec`, `audienceRule`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, `customMessageTemplate`/`customMessageContentType`/`customMessageHttpStatusCode`, `validFrom`/`validUntil`, and the caller's observed `version` — its subject and scope (`subjectType`, `subjectId`, `actorScope`, `family`, `target` including the HTTP method axis) cannot be changed this way; every other field on the request body is silently ignored on update
 - `POST /api/limit-bindings/{bindingKey}/activate` — turn a draft assignment live
 - `POST /api/limit-bindings/{bindingKey}/end` — end a live assignment (optional reason)
 - `POST /api/limit-bindings/validate` — dry-run every save-time rule without writing anything
+
+#### Target — `target`
+
+`target.type` narrows what the assignment counts: `ALL` (the default, no narrowing), `API_PROXY`, `API_PROXY_ENV`, `API_PROXY_GROUP`, `API_PROXY_GROUP_ENV`, `AI_MODEL`, or `AI_PROVIDER`. `target.targetId` and `target.environmentId` are present or absent depending on the type (an `_ENV` type carries both; `ALL` carries neither).
+
+`target.httpMethods` — a list of HTTP methods, on an `API_PROXY`/`API_PROXY_ENV` target only — additionally narrows the assignment to those methods; empty or absent means every method. `target.methodSignature` is **response-only**: it is derived from `httpMethods` (`GET+POST`) and echoed back on every read, but a value sent for it on `POST`/`PUT` is ignored — the server always recomputes it. A `400` with errorKey `limit.binding.methodAxisNotAllowed` is returned for an `httpMethods` list on a target type that does not support one, or for a method token the server does not recognize.
+
+The target (the HTTP method axis included) is part of the assignment's identity and cannot be changed by `PUT` — change it by ending the assignment and creating a new one.
+
+#### Rule Assignments — `subjectType: "AUDIENCE_RULE"`
+
+An assignment whose subject is a condition rather than one fixed API client or credential. `subjectType` is `AUDIENCE_RULE`; `subjectId` is assigned by the server (it is the assignment's own `bindingKey`) and any value sent for it is overwritten. `family` must be `REQUEST_RATE`.
+
+The condition itself is `audienceRule`, required for this subject type and forbidden for every other one (`400`, errorKey `limit.binding.audienceRuleShape`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `identitySource` | enum | `AUTH_RESOLVED` (default) or `VARIABLE` |
+| `variableId` | string | The global `Variable`'s id — required when `identitySource` is `VARIABLE` |
+| `operator` | enum | A comparison operator (`EQ`, `CONTAINS`, `STARTS_WITH`, `IN`, …) — required |
+| `value` | string | Required |
+| `outOfTargetAction` | enum | `BLOCK` (default) or `GENERAL_QUOTA` |
+| `generalQuotaMode` | enum | `TOTAL` (default) or `PER_IDENTITY` — read only when `outOfTargetAction` is `GENERAL_QUOTA` |
+| `generalQuotaWindows` | array | At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA` |
+
+`audienceRule` is content, not scope: unlike `target`, it **can** be changed by `PUT`.
+
+#### Enforcement Posture and Custom Message
+
+These fields exist on every assignment regardless of family, and — as of this version — are acted on for `REQUEST_RATE` assignments only (an `AI_TOKEN_BUDGET` assignment still runs shadow-only; see [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode)):
+
+| Field | Type | Meaning | Default when absent |
+|---|---|---|---|
+| `cacheErrorHandlingType` | enum | `FAIL` rejects the request when the counter service is unreachable; `CONTINUE` lets it through uncounted | `FAIL` |
+| `cacheConnectionTimeoutInSeconds` | integer | Per-reservation timeout to the counter service | Platform default |
+| `showRateLimitStatisticsInResponseHeader` | boolean | Adds `RateLimit-Remaining`/`RateLimit-Limit`/`RateLimit-Reset`/`X-RateLimit-Identity`/`X-RateLimit-Type` to the response | `false` |
+| `customMessageTemplate` | string | Replaces the standard message on a limit-exceeded block for this assignment only; same variable syntax as the platform's [Error Messages](/en/admin/system-settings/error-messages) screen | None (standard message applies) |
+| `customMessageContentType` | string | Content type of the custom message | `application/json;charset=utf-8` when a template is set |
+| `customMessageHttpStatusCode` | integer | HTTP status of the custom message | `429` |
+
+The custom message applies to a **limit-exceeded** block only (`THROTTLING_STOP`/`QUOTA_STOP`). It is not applied to a rule assignment's out-of-target block (`ENDPOINT_RATELIMIT_IDENTITY_NOT_ALLOWED`/`ENDPOINT_RATELIMIT_IDENTITY_NOT_RESOLVED`), which always uses the platform's standard error-message customization for those types.
 
 ### Default Limit Policies — `/api/limit-defaults`
 
@@ -81,7 +123,9 @@ These are manager-application endpoints, authenticated the same way as the rest 
 - **A published revision is immutable.** Correcting one means opening a new draft revision under the same plan and publishing that instead; the superseded revision is kept, not overwritten.
 - **A plan reference is never inlined.** A `PLAN`-mode assignment stores plan ids, not a copy of the plan's rule body — the plan's own published revision is what is resolved at request time.
 - **`OFF` narrows one subject; it does not widen anything above it.** Ancestor ceilings (organization, project, platform) still apply to a subject with an `OFF` assignment — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
-- **Typed limit enforcement still runs in shadow mode.** A binding created through any endpoint on this page — including one sourced from a portal subscription — is compared against the legacy limit mechanism but does not itself block a request in this version; see [Enforcement Status: Shadow Mode](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode).
+- **`REQUEST_RATE` enforcement is live; `AI_TOKEN_BUDGET` is still shadow.** An `ACTIVE` `REQUEST_RATE` binding created through any endpoint on this page — including one sourced from a portal subscription — blocks traffic for real, evaluated at the authentication moment (`429` + `Retry-After` on an exhausted window). An `ACTIVE` `AI_TOKEN_BUDGET` binding is still only compared against the legacy AI budget mechanism for parity and does not itself block a request. See [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode).
+- **The active-scope key (`subjectType` + `subjectId` + `actorScope` + `family` + `target`, HTTP methods included) is immutable.** `PUT` reads only content off the body — see the [Target](/en/ai-gateway/limit-plans#target-what-the-ceiling-narrows-to) note above; changing it means ending the assignment and creating a new one.
+- **`AUDIENCE_RULE` is its own subject type.** `subjectId` is minted by the server; the caller only ever supplies `audienceRule`. See [Rule Assignments](/en/ai-gateway/limit-plans#rule-assignments-limiting-by-identity-condition) for the concept and the [Migrating from a Rate Limit Control List](/en/ai-gateway/limit-plans#migrating-from-a-rate-limit-control-list) mapping table.
 
 ## Related Documentation
 

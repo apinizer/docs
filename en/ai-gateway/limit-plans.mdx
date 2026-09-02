@@ -128,25 +128,126 @@ A subject may have **at most one live-or-pending assignment** at a time; the opt
 Edit only applies to the current **Active** assignment. A pending **Draft** assignment has no Edit action of its own in this version — **Activate** is the only action offered on it; once it is live, Edit becomes available on it like on any other active assignment.
 :::
 
+### Target: What the Ceiling Narrows To {#target-what-the-ceiling-narrows-to}
+
+Every assignment — on the Limits tab or a [rule assignment](#rule-assignments-limiting-by-identity-condition) — also carries a **Target**: what the subject's consumption is narrowed to, shown in its own **Scope** panel on the assign/edit form. The default, **Everything**, means no narrowing at all.
+
+| Target | Meaning |
+|---|---|
+| **Everything** | No narrowing — the subject's whole consumption, on every API and environment. |
+| **One API Proxy** | This API proxy, across every environment it is deployed to. |
+| **One API Proxy + Environment** | This API proxy, in one gateway environment only. |
+| **One API Proxy Group** | The whole group, across every environment — a single shared ceiling for the group. Covers requests that land *on the group*; a proxy of the group reached directly is not governed by it. |
+| **One API Proxy Group + Environment** | The group, in one gateway environment only. |
+| **One AI Model** / **One AI Provider** | An AI Token Budget assignment narrowed to one LLM model or provider; not meaningful for Request Rate. |
+
+On a **One API Proxy** or **One API Proxy + Environment** target, an additional **HTTP methods** narrowing is available: pick one or more methods and the ceiling applies only to requests using them (case-insensitive); leave it empty and the ceiling covers every method — the typed counterpart of a [Rate Limit Control List](/en/admin/identity-management/rate-limit-control-list)'s per-endpoint limits.
+
+:::note The target cannot be changed after creation
+Like the subject, the Target (including the HTTP methods narrowing) is part of what identifies this assignment's own counter — **Edit** never offers it. To narrow a live assignment to a different API, group, environment, or method set, **End** it and **Assign Limit** again with the new target.
+:::
+
+### Cache Posture and Custom Error Message {#cache-posture-and-custom-error-message}
+
+Below the mode/plan fields, every assignment — again regardless of family — also carries its own enforcement posture and, optionally, its own rejection message, the typed counterpart of the same fields on a [Rate Limit Control List](/en/admin/identity-management/rate-limit-control-list):
+
+| Field | Meaning | Default |
+|---|---|---|
+| **Action on cache connection error** | What happens when the counter service cannot be reached: **FAIL** rejects the request (fail closed), **CONTINUE** lets it through uncounted. | FAIL |
+| **Cache connection timeout (seconds)** | Maximum time to wait when connecting to the counter service. | Left empty, the platform default applies. |
+| **Show limits in response header** | Whether `RateLimit-Remaining`, `RateLimit-Limit`, `RateLimit-Reset`, `X-RateLimit-Identity`, and `X-RateLimit-Type` are added to the response. | Off |
+
+**Custom error message** — a message template, its content type, and an HTTP status code, using the same variable syntax as the platform's [Error Messages](/en/admin/system-settings/error-messages) screen. When set, it replaces the standard message on a limit-exceeded block *for this assignment only*; leave it blank to use the standard message.
+
+:::note Fields are shown for both families, enforced for one
+The Target, Cache Posture, and Custom Error Message fields appear on every assignment regardless of family. Today they are only acted on for **Request Rate** — see [Enforcement](#enforcement-status-shadow-mode) below; on an AI Token Budget assignment they are accepted and stored but not yet enforced.
+:::
+
+## Rule Assignments: Limiting by Identity Condition {#rule-assignments-limiting-by-identity-condition}
+
+A **Rule Assignment** is a Request Rate assignment whose subject is not one fixed API client or credential but a **condition**: any identity that matches it shares the assignment's windows. It is the typed counterpart of a [Rate Limit Control List](/en/admin/identity-management/rate-limit-control-list)'s target-audience matching, and it is always project-scoped — there is no platform-wide rule assignment.
+
+Reached from **AI Gateway → Limit Plans**: switch the view toggle above the catalog table from **Plans** to **Rule assignments**. The toggle itself is hidden while the screen's scope is set to **Platform**.
+
+Each rule assignment carries:
+
+| Field | Meaning |
+|---|---|
+| **Identity source** | Where the identity is read from: the credential or API Client resolved by authentication (**Auth resolved**), or a chosen request **Variable**. |
+| **Condition** | One comparison operator + value, evaluated against the resolved identity — the same [comparison operators](/en/concepts/core-concepts/conditional-policy-execution#comparison-operators) as elsewhere in Apinizer (contains, starts with, is in a list…). |
+| **Target** | The same [Target](#target-what-the-ceiling-narrows-to) narrowing an explicit assignment carries. |
+| **Out-of-target action** | What happens to an identity the condition does not match: **Block**, or **General quota** — one shared ceiling (**Total**) or one ceiling per identity (**Per identity**), with its own windows. |
+
+Multiple rule assignments can share one target: an identity inside **any** of their conditions is counted by exactly the rules it matches and is never blocked by a sibling rule — the same multi-condition OR a Rate Limit Control List's own target audience already applies within one list, here spread across several rows instead. An **explicit** assignment on the same target (a specific API client, credential, project, and so on) always outranks every rule assignment there — the rules are skipped entirely.
+
+### Migrating from a Rate Limit Control List
+
+| Rate Limit Control List field | Typed equivalent |
+|---|---|
+| Identity Source | Identity source (Auth resolved / Variable) |
+| Apply by Variable | The chosen Variable, when Identity source is Variable |
+| Target Audience — a list of OR'd conditions on one row | One condition **per** rule assignment; put several conditions on the same target by creating several rule assignments there — they are OR'd together the same way |
+| Target Consumers — an exact identity list | An **In** condition whose value lists the identities |
+| Out-of-target Action | Out-of-target action |
+| Quota Mode and General Quota Limits | The same Total/Per identity mode, with its own windows |
+| Interval Window Type (Fixed / Sliding) | The same Window Type, per window, on the plan or custom body the assignment references |
+| Cache Connection Timeout / Action for Cache Connection Error | The assignment's own [Cache Posture](#cache-posture-and-custom-error-message) |
+| Show Rate Limit Statistics in Response Header | The same field on the assignment |
+| APIs and Endpoints — a list, one row can span several | The assignment's own [Target](#target-what-the-ceiling-narrows-to) — one target per assignment; several proxies or groups become several rule assignments |
+| Execution Order — 6 positions, before/after the proxy group, API proxy, and API method policies | None. A typed assignment always evaluates at the authentication moment — see [Enforcement](#enforcement-status-shadow-mode). There is no typed equivalent of a position running *before* authentication: an API or endpoint with no authentication policy is never covered by a typed assignment at all, whatever its identity source. |
+| Save and Deploy | Not needed. **Activate** (or **Activate immediately** on create) is enough — an active assignment reaches every worker without a separate deploy step. |
+| Error Message Customization — per error type, plus a list-wide template | The assignment's own [custom message](#cache-posture-and-custom-error-message) replaces the standard message on a limit-exceeded block only. The error *type* also changes: a typed limit-exceeded block raises `THROTTLING_STOP`/`QUOTA_STOP` — the same types the environment-level quota/throttling access control already uses — not the Rate Limit Control List's own `ENDPOINT_RATELIMIT_EXCEEDED`; if you customized that type, customize `THROTTLING_STOP`/`QUOTA_STOP` (or the assignment's own message) instead. An out-of-target block still raises the familiar `ENDPOINT_RATELIMIT_IDENTITY_NOT_ALLOWED`/`ENDPOINT_RATELIMIT_IDENTITY_NOT_RESOLVED`. |
+
+A Rate Limit Control List itself is untouched by any of this — it keeps running exactly as configured, alongside any typed Rule Assignment; see [Working Together With Your Existing Limits](#working-together-with-your-existing-limits) below.
+
 ## Working Together With Your Existing Limits
 
+Both families remain **additional** to whatever you already have configured — never a replacement, and never something to remove first.
+
+**Request Rate**: an existing [Rate Limit Control List](/en/admin/identity-management/rate-limit-control-list) or [API Proxy ACL](/en/admin/identity-management/api-proxy-acl) quota/throttling setting, if any, keeps applying exactly as before. A typed Request Rate assignment (explicit or a [rule assignment](#rule-assignments-limiting-by-identity-condition)) is a genuinely independent, additional ceiling evaluated on the very same request — see [Enforcement](#enforcement-status-shadow-mode) below. Whichever ceiling is exhausted first blocks the request; the other keeps counting normally.
+
+**AI Token Budget**: an existing [AI token budget](/en/ai-gateway/token-quotas) defined elsewhere — at the organization, project, or proxy level — if any, is still the **only** one that blocks; see [Enforcement](#enforcement-status-shadow-mode) for why. A typed AI Token Budget assignment is measured for parity against it but does not yet add a ceiling of its own.
+
 :::info This is an additional ceiling, not a replacement
-An existing [AI token budget](/en/ai-gateway/token-quotas) defined elsewhere — at the organization, project, or proxy level — if any, keeps applying **in addition to** the assignment shown here. Defining an assignment does not change or disable your existing budget; both ceilings are evaluated at the same time, and **the effective limit is always the lower of the two**. The Limits tab always reminds you of this, whether or not an assignment exists.
+Defining a typed assignment never changes or disables what you already have configured — a Rate Limit Control List, API Proxy ACL quota/throttling, and an existing AI token budget all keep working exactly as they do today, whether or not a typed assignment also exists.
 :::
 
-There is therefore no need to remove your existing budget configuration before defining a plan or a custom assignment — the two mechanisms do not override each other; they work together.
+## Enforcement {#enforcement-status-shadow-mode}
 
-## Enforcement Status: Shadow Mode
+### Request Rate: Live
 
-In this version, typed limit assignments — for both families — run in **shadow mode**. On every request, the gateway calculates what the typed assignment would enforce and compares it against the existing (legacy) limit mechanism, but blocking is still done by the legacy mechanism: a typed assignment never rejects a request on its own. The goal is to measure parity between the two for at least one full window cycle before the typed layer becomes the source of truth.
+A typed **Request Rate** assignment now enforces for real. It is evaluated inline, at the end of the authentication policy's own credential check — the same moment a legacy per-credential quota/throttling control would block a request — after every ACL-row control that policy already performs, and only for a request that is not itself a token request.
 
-**Observability**: a Prometheus counter `apinizer_limit_shadow_comparisons_total{family, outcome}` (outcome: `match` / `mismatch` / `typed_only` / `legacy_only`) tracks every comparison, and a `LIMIT_SHADOW_MISMATCH` warning log line is written on the first mismatch for a given assignment in a given window.
+Because that is the one hook, a typed Request Rate assignment (explicit or [rule-based](#rule-assignments-limiting-by-identity-condition)) only ever applies to traffic that actually runs through an authentication policy: an API or endpoint with no authentication policy is never covered by one, whatever its target.
 
-**Kill switch**: setting the JVM system property `apinizer.limit.shadow.enabled=false` on the worker skips the shadow comparison entirely — your existing limits are unaffected either way.
+Counters are reserved through the same counter service call a legacy quota/throttling/Rate Limit Control List row already makes — `FIXED` resets each period, `SLIDING` measures the trailing period from each request, bit-identical to legacy. Per window:
 
-:::note
-The Limits (assignment) panel in this version only allows an **AI Token Budget** assignment. A **Request Rate** plan can be defined and published in the catalog, but manual assignment support for it on this panel arrives in a later release — [subscription-sourced](#referenced-by-a-portal-subscription-plan) assignments are not affected by this.
+- **Granted** — the request proceeds; the response gets the statistics headers if [Show limits in response header](#cache-posture-and-custom-error-message) is on.
+- **Exceeded, Overflow Action = Block** (the default) — `429` with `Retry-After`; the error is `THROTTLING_STOP` (Second/Minute windows) or `QUOTA_STOP` (Hour/Day/Month windows) — the same types the environment-level quota/throttling access control already raises, customizable on the platform-wide [Error Messages](/en/admin/system-settings/error-messages) screen, unless the assignment's own [custom message](#cache-posture-and-custom-error-message) is set.
+- **Exceeded, Overflow Action = Count Only** — the request is counted and let through; nothing is blocked.
+- **Counter service unreachable** — the assignment's own [Cache Posture](#cache-posture-and-custom-error-message): `FAIL` rejects the request, `CONTINUE` lets it through uncounted.
+
+**Observability**: a Prometheus counter `apinizer_limit_typed_decisions_total{family, outcome}` (outcome: `granted` / `blocked` / `count_only` / `cache_error_continue` / `cache_error_fail` / `out_of_target_block`) tracks every enforcement decision.
+
+The gateway also keeps running a **parity comparison** against the legacy mechanism in parallel with real enforcement, unrelated to the blocking decision above — the same comparison AI Token Budget runs (next section), reported on `apinizer_limit_shadow_comparisons_total{family, outcome}` (outcome: `match` / `mismatch` / `typed_only` / `legacy_only`), with a `LIMIT_SHADOW_MISMATCH` warning logged on the first mismatch for a given assignment in a given window. Setting the JVM system property `apinizer.limit.shadow.enabled=false` on the worker silences **only this comparison** — it does not affect enforcement, and there is no switch that does.
+
+:::warning Upgrading from a version where Request Rate was shadow-only
+An **Active** Request Rate assignment created while this mechanism was still shadow-only starts blocking traffic for real the moment you upgrade to this version — review your active assignments beforehand if you are not ready for them to start enforcing. Their counters start at zero: no consumption carries over from the comparison period, since a shadow comparison never reserved anything.
 :::
+
+### AI Token Budget: Still Shadow
+
+A typed **AI Token Budget** assignment still runs in shadow only: on every request, the gateway calculates what it would enforce and compares that against the existing (legacy) AI budget mechanism, but blocking is still done by the legacy mechanism — a typed AI Token Budget assignment never rejects a request on its own yet. The same `apinizer_limit_shadow_comparisons_total` counter and `apinizer.limit.shadow.enabled` switch described above apply to it.
+
+### The "Rate Limit" Badge on Develop
+
+The **Rate Limit** badge shown on an API proxy's Develop screen now also lights up for a typed Request Rate assignment, not only a Rate Limit Control List. Clicking it opens a dialog listing every **Active** assignment currently covering this proxy — explicit and rule-based alike, installation-wide ones included — the same list `GET /api/limit-bindings/covering-api-proxy` returns. It sits in the same slot the legacy badge already occupies: a typed ceiling always evaluates at the authentication moment, so there is no typed equivalent of a Rate Limit Control List positioned to run *after* the method policies.
+
+### Reports and Alerts
+
+A typed Request Rate counter attributed to a **Consumer** (or an API Client migrated from one) is folded into that consumer's existing counters, shown under the [Quota Usage report](/en/admin/identity-management/quota-usage-and-alerts)'s existing **Plan** type, and caught by whatever Alert Definition already watches that consumer's Plan-type counters — no new rule needed.
+
+A typed counter attributed to any other subject (a project, an organization, an API proxy, the platform, or a rule assignment) keeps its own counter type instead. It already appears in the report with the default **All types** filter — the type filter just has no dedicated option to select it by name yet, so it is shown labeled **Other**. And, deliberately, no pre-existing Alert Definition fires on it: an alert rule written before typed limits existed must not silently start watching them. Alert notification text that does reference it labels it **Rate Limit**. Create a dedicated Alert Definition against it if you want to be notified.
 
 ## Referenced by a Portal Subscription Plan
 
@@ -154,7 +255,7 @@ A published, platform-scope plan can also be referenced from a portal API Produc
 
 A Subscription Plan may reference at most one Request Rate plan and one AI Token Budget plan, each **Off** or a specific published plan. The referenced plan's overflow posture must agree with the Subscription Plan's own on-exceed setting — **Block** needs a plan that blocks, **Continue & charge** needs a plan that only counts (Count Only for Request Rate, Alert Only for AI Token Budget) — a mismatch is refused when the Subscription Plan is saved.
 
-When a subscription of that plan is **approved**, one **Active** assignment is created automatically for the subscribing application, per referenced family — the same kind of assignment [described above](#assigning-a-limit-to-a-subject-the-limits-tab), sourced from the subscription rather than entered by hand, application-wide rather than tied to one API, and carrying the same [Shadow Mode](#enforcement-status-shadow-mode) status.
+When a subscription of that plan is **approved**, one **Active** assignment is created automatically for the subscribing application, per referenced family — the same kind of assignment [described above](#assigning-a-limit-to-a-subject-the-limits-tab), sourced from the subscription rather than entered by hand, application-wide rather than tied to one API. Its [enforcement status](#enforcement-status-shadow-mode) follows its family exactly like a manually entered assignment does: a subscription-sourced Request Rate assignment enforces for real, a subscription-sourced AI Token Budget assignment is still shadow-only.
 
 An application can have only one such assignment per family. If a second, different subscription of the same application also references a plan for that family, the existing assignment is **kept**, and the operator approving the second subscription is asked to keep it or switch to the new plan. When a subscription that owns the assignment ends, it is handed over to another still-approved subscription of the same application that references the same family, if one exists, so coverage and accumulated usage are not lost; otherwise the assignment ends with it.
 
