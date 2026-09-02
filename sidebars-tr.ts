@@ -721,6 +721,7 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/genel-bakis",
         "admin/system-settings/sistem-ayarlari-ve-limitler",
         "admin/system-settings/global-yapilandirma",
+        "admin/system-settings/siem-log-yonlendirme",
         {
           "type": "category",
           "label": "Ön Tanımlı Değerler",

@@ -1,0 +1,459 @@
+---
+title: "SIEM ve Log Yönlendirme"
+description: "Apinizer denetim, oturum, token ve uygulama olaylarını SIEM sisteminize yönlendirebilir, her hedef için hangi olayların hangi yük biçiminde gönderileceğine karar verebilir, gizlilik profili ve boyut sınırı uygulayabilir ve her hattı eski alıcı listelerinden bu sayfadaki kurallara kontrollü biçimde geçirebilirsiniz."
+---
+
+:::info
+
+**Yönetim → Sistem Ayarları → SIEM ve Log Yönlendirme** yolunu izleyerek bu ekrana erişebilirsiniz. Ekranı yalnızca **Yönetici (Admin)** rolüne sahip kullanıcılar açabilir. Değişiklikleri kaydetmek için **Kaydet ve Yükle** butonuna tıklayınız; kayıt sonrası yapılandırma çalışan ağ geçidi ortamlarına anında iletilir.
+
+:::
+
+## Genel Bakış
+
+Denetim, oturum, token ve uygulama olayları için **kayıt sistemi Apinizer yapılandırma veritabanıdır**. SIEM tarafına yönlendirdiğiniz her şey, korelasyon, alarm ve uzun süreli arşiv amacıyla üretilen bir **kopyadır**.
+
+Teslim sözleşmesi **en iyi çaba (best effort)** ilkesine dayanır:
+
+- Olay, onu üreten akış üzerinde konnektöre teslim edilir; konnektör olayı tamponlar ve gönderir.
+- Konnektörün kuyruğu dolduğunda olaylar düşürülür; olayı üreten isteğin bekletilmesi tercih edilmez.
+- UDP ve düz TCP syslog üzerinde "teslim edildi" bilgisi gözlemlenemez. Bu nedenle test butonu syslog hedefleri için **Gönderildi** değil **Kuyruğa alındı** sonucunu bildirir.
+- Kalıcı bir kuyruktan yeniden gönderim yapılmaz. SIEM erişilemez durumdaysa kayıt Apinizer veritabanında durur, ancak SIEM'e sonradan ulaşmaz.
+
+:::warning
+
+SIEM kopyasına tek başına dayanan bir uyumluluk kontrolü tasarlamayınız. Kesin yanıt gerektiğinde Apinizer veritabanındaki kayıtları (Denetim Kayıtları, Giriş Kayıtları, Token İstekleri, Uygulama Logları) sorgulayınız; SIEM kopyasını korelasyon ve alarm için kullanınız.
+
+:::
+
+## Kavramlar
+
+### Hatlar
+
+**Hat**, tek bir olay ailesidir. Her hattın kendi üreticisi, Apinizer veritabanında kendi koleksiyonu, kendi olay tipleri ve kendi sonuç türetme biçimi vardır.
+
+| Hat | Neyi kaydeder | Apinizer veritabanı koleksiyonu | Olay tipleri | Sonuç |
+|---|---|---|---|---|
+| **Denetim (Audit)** | Yönetimsel değişiklikler, Yönetim Konsolu istekleri ve reddedilen istekler | `audit_event` | `ENTITY`, `MANAGER_REQUEST`, `ACCESS_DENIED` | `SUCCESS`, `FAILURE`, `DENIED` |
+| **Oturum (Session)** | Yönetim Konsolu ve API Portal giriş, çıkış, token yenileme ve hesap kilitleme olayları | `persistent_audit_event` | `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `LOGOUT`, `TOKEN_REFRESH_SUCCESS`, `TOKEN_REFRESH_FAILURE`, `ACCOUNT_LOCKED` | Olay tipinden türetilir; `ACCOUNT_LOCKED` için `DENIED` |
+| **Token** | Ağ geçidinde token üretimi, yenilenmesi ve reddi | `log_tokentraffic` | `TOKEN_ISSUED`, `TOKEN_REFRESHED`, `TOKEN_REJECTED` | Hata yoksa `SUCCESS`, varsa `FAILURE`; kimlik doğrulama hataları `DENIED` |
+| **Uygulama (Application)** | Yönetim Konsolu, ağ geçidi, önbellek ve entegrasyon modüllerinin bileşen logları | `apinizer_log` | `LOG.TRACE` … `LOG.ERROR` | `WARN` ve `ERROR` için `FAILURE`, diğerleri `SUCCESS` |
+
+Ekranda **Planlandı** rozetiyle görünen ve henüz yapılandırılamayan üç hat daha vardır: **API Güvenliği (API Security)**, **API Erişimi (API Access)** ve **Portal**. API trafiği SIEM hatlarına dahil değildir; trafik logları ağ geçidi ortamının log konnektörleri üzerinden iletilmeye devam eder.
+
+### Hedefler
+
+**Hedef**, bir konnektör ile birlikte olay o konnektöre ulaşmadan önce uygulanan her şeydir:
+
+| Bileşen | Anlamı |
+|---|---|
+| **Konnektör** | Yükü taşıyan bağlantı yapılandırması — Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog veya bir veritabanı konnektörü. |
+| **Yük profili** | Yükün biçimi. Aşağıya bakınız. |
+| **Hat kuralları** | Hat başına: o hattın bu hedefe gönderilip gönderilmeyeceği ve hangi olaylarının seçileceği. |
+| **Gizlilik profili** | Yük Apinizer'dan çıkmadan önce uygulanan isteğe bağlı maskeleme, hash'leme, silme veya şifreleme. |
+| **Boyut politikası** | İsteğe bağlı en büyük olay boyutu ve sınır aşıldığında yapılacak işlem. |
+
+Bir hat için kuralı olmayan hedef, o hattı hiç almaz. Aynı bağlantı yapılandırması birden fazla hedef tarafından kullanılabilir.
+
+### Yük profilleri
+
+| Profil | Ne üretir | Kullanılabildiği yerler |
+|---|---|---|
+| **Legacy Raw** | Konnektör tipiniz için bugünkü çıktı, değişmeden — veritabanı konnektörü yine SQL kolonlarını yazar, Graylog konnektörü yine GELF mesajı üretir, Elasticsearch konnektörü yine kendi dokümanını yazar, metin tabanlı konnektörler ise bugün aldıkları JSON'un aynısını alır. Alan listesi **dondurulmuştur**: sonraki sürümlerde Apinizer'a eklenen alanlar bu çıktıda görünmez. | Tüm konnektör tipleri |
+| **Apinizer JSON v2** | [Şema v2](#sema-v2) bölümünde anlatılan kanonik zarf — sabit alan sırası, tipli alan listesi, önem derecesi ve yalnızca o hat için açıkça izin verilen alanları taşıyan bir `data` nesnesi. | Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog |
+| **CEF 0**, **LEEF 2.0** | Rezerve. Biçim çalışması sonraki sürümde tamamlanana kadar seçilmesi reddedilir. | Syslog (planlandı) |
+
+:::info
+
+Veritabanı konnektörleri sabit tablo kolonlarına yazdığı için v2 zarfını taşıyamaz; bu hedefler **Legacy Raw** profilinde kalır. Gizlilik profili ve boyut politikası yalnızca v2 yolunda uygulandığından, maskeleme gereken bir hedefin **Apinizer JSON v2** profiline geçirilmesi gerekir.
+
+:::
+
+Legacy Raw, yükseltme sonrası mevcut SIEM ayrıştırıcılarınızın çalışmaya devam etmesi için bayt düzeyinde uyumlu tutulur. Bugün ne gönderiyorsa onu göndermeye devam eder — token logundaki `clientInfo` gibi alanlar dahil. Alan listesinin özenle seçildiği yer v2 profilidir: token değerleri, parolalar ile `Authorization`, `Cookie` ve API anahtarı başlıkları bu profilin parçası hiçbir zaman olmaz, adı kimlik bilgisine benzeyen alanlar ise gönderimden hemen önce ikinci kez elenir.
+
+### Yetki
+
+Her hat, iki kaynaktan tam olarak biriyle beslenir ve aralarında hat bazında geçiş yaparsınız:
+
+| Yetki | Hedefler nereden gelir | Kurallar uygulanır mı? |
+|---|---|---|
+| **LEGACY** | Daha önce Genel Ayarlar altında yapılandırılmış alıcı listeleri | Hayır — her olay her alıcıya, yükseltme öncesindeki gibi gider |
+| **ACTIVE** | Bu sayfadaki hedefler | Evet — kurallar, yük profili, gizlilik profili ve boyut politikası uygulanır |
+
+Geçiş her iki yönde de anında etkilidir; hatları teker teker taşıyabilir ve olay kaybetmeden geri alabilirsiniz.
+
+## Sayfa Turu
+
+Sayfa üç sekmeden oluşur.
+
+### Hedefler
+
+Hedef listesi; adı, konnektör tipi ile bağlantı yapılandırmasını, yük profilini, o hedefe yönlendirilen her hat için bir rozeti ve hedefin etkin olup olmadığını gösterir. **Hedef Ekle** hedef penceresini açar; burada şunları yapılandırırsınız:
+
+- **Ad**, **Açıklama** ve **Etkin** anahtarı.
+- **Konnektör** — **Konnektör Seç** ile Apinizer'ın başka ekranlarında da kullanılan konnektör düzenleyicisi açılır; mevcut bir hedef için **Konnektörü Düzenle** aynı düzenleyiciyi yeniden açar.
+- **Yük Profili** — liste konnektör tipine göre filtrelenir, henüz kullanılamayan profiller *planlandı* etiketi taşır.
+- **Boyut Politikası** — *Olay boyutunu sınırla*, bayt cinsinden en büyük olay boyutu ve sınır aşıldığında yapılacak işlem.
+- **Gizlilik Profili** — *Gizlilik profilini uygula* ile birlikte kimlik kurallarını sizin yerinize dolduran **Önerilen SIEM profilini uygula** butonu.
+- **Hat Kuralları** — her hat için bir bölüm; her biri *Bu hattı bu hedefe gönder* anahtarıyla başlar.
+
+Bir hattı taşımadan önce bağlantıyı doğrulamak için kaydedilmiş hedefin **Test olayı gönder** işlemini kullanınız.
+
+### Hatlar
+
+Her hat için bir satır ve dört sütun bulunur:
+
+| Sütun | Ne yapar |
+|---|---|
+| **Hat** | Hattın adı. Rezerve hatlar *Planlandı* rozeti taşır ve yapılandırılamaz. |
+| **Apinizer Veritabanı / Yerel Saklama** | Hattın yerel olarak saklanıp saklanmadığını ve ilgili log ailesinin saklama yapılandırmasına giden **Saklama ayarları** bağlantısını gösterir. Denetim ve oturum hatları *Her zaman saklanır* olarak işaretlidir ve kapatılamaz. Token ve uygulama hatlarında *Apinizer veritabanında sakla* anahtarı bulunur. Denetim satırı ayrıca, Yönetim Konsolu isteklerinin hiç kaydedilip kaydedilmeyeceğini belirleyen ve bir Genel Ayarlar değeri olmayı sürdüren *Yönetim isteklerini denetle* anahtarını taşır. |
+| **Hedefler** | O hat için yapılandırılmış her hedefin kural özeti. Hedef yoksa hücre bunu belirtir; hâlâ LEGACY olan hatlarda *Kurallar, yetki ACTIVE olduğunda etkinleşir* uyarısı görünür. |
+| **Yetki** | LEGACY ⇄ ACTIVE anahtarı; onay penceresi ve önerilen geçiş sırası ile birlikte. |
+
+### Şema ve Örnekler
+
+Bir hat ve bir profil seçtiğinizde sekme, çalışan platformun o kombinasyon için ürettiği yükü ve izin verilen alan listesini gösterir. Ayrıştırıcınızı bu çıktıya göre kurunuz ve yanındaki notu okuyunuz: **şema sürümü artmadan yeni alanlar eklenebilir, bu nedenle ayrıştırıcınız bilinmeyen alanları yok saymalıdır**.
+
+## Kurallar
+
+Kurallar, olay bir konnektöre teslim edilmeden önce, olayı üreten akış üzerinde **kaynağında** değerlendirilir. Betik ya da düzenli ifade eşlemesi yoktur; değerlendirme sabit sıralı denetimlerden oluşur ve token yolunda bile ucuz kalır.
+
+### Değerlendirme sırası
+
+| Adım | Denetim | Eşleştiğinde sonuç |
+|---|---|---|
+| 1 | Kural kapalı | Gönderilmez |
+| 2 | Olay tipi **Hariç tutulan olay tipleri** içinde | Gönderilmez — hariç tutma her zaman dahil etmeye üstün gelir |
+| 3 | **Dahil edilen olay tipleri** boş değil ve olay tipini içermiyor | Gönderilmez |
+| 4 | **Kapsam — hariç tut** boyutlarından herhangi biri eşleşiyor | Gönderilmez |
+| 5 | **Kapsam — dahil et** boş değil ve hiçbir boyut eşleşmiyor | Gönderilmez |
+| 6 | Eşik olayı eliyor — uygulama hattında **En düşük seviye**, diğer hatlarda **Sonuçlar** | Gönderilmez |
+| 7 | **Saniyedeki en fazla olay** o saniye için tükenmiş | Kısıtlanır |
+| 8 | — | Gönderilir |
+
+Boş liste her zaman *hepsi* anlamına gelir: dahil edilen olay tipi yoksa tüm tipler, sonuç seçilmemişse tüm sonuçlar, kapsam boşsa tüm olaylar geçer. **Kapsam — dahil et** içindeki boyutlar VEYA ile birleşir; olayın doldurulmuş boyutlardan en az biriyle eşleşmesi yeterlidir. **Kapsam — hariç tut** içindeki herhangi bir boyutla eşleşen olay ise düşürülür.
+
+### Kapsam boyutları
+
+| Boyut | Neyle eşleşir | Anlamlı olduğu hatlar |
+|---|---|---|
+| **Proje kimlikleri** | Etkilenen nesnenin ait olduğu proje | Denetim, Oturum, Token |
+| **API proxy kimlikleri**, **API proxy adları** | Olayın ilişkili olduğu API proxy | Token, Uygulama |
+| **HTTP metotları** | Token isteğinin HTTP metodu | Token |
+| **Kimlik bilgileri** | Token talep eden kimlik bilgisi veya istemci anahtarı | Token |
+| **Ortam kimlikleri** | Olayı üreten ortam | Token, Uygulama |
+| **Bileşenler** | Logu yazan Apinizer bileşeni — Manager, Gateway, Cache, Integration, Portal | Uygulama |
+| **İstemci CIDR blokları** | İstemci IP adresi; IPv4 veya IPv6 CIDR bloklarıyla eşleştirilir | Denetim, Oturum, Token |
+
+Adlar büyük/küçük harf duyarsız, kimlikler tam eşleşme ile karşılaştırılır.
+
+:::warning
+
+Yönetim Konsolu isteği ve erişim reddi denetim olayları hiçbir projeye ait değildir. **Proje kimlikleri** alanını bir proje kimliğiyle doldurursanız bu olaylar eşleşmeyi bırakır ve o hedeften kaybolur. Onları korumak için listeye `admin` değerini de ekleyiniz; bu değer projesi olmayan olayları seçer.
+
+:::
+
+### Örnekler
+
+| Amaç | Nasıl yapılandırılır |
+|---|---|
+| Yalnızca başarısız ve reddedilen yönetimsel işlemler gönderilsin | Denetim kuralı → **Sonuçlar**: `FAILURE`, `DENIED` |
+| Yüksek hacimli Yönetim Konsolu istek akışı bir hedefin dışında tutulsun | Denetim kuralı → **Hariç tutulan olay tipleri**: `MANAGER_REQUEST` |
+| Yalnızca tek bir projenin olayları gönderilsin | Denetim kuralı → **Kapsam — dahil et** → **Proje kimlikleri**: proje kimliği (platform seviyesindeki olaylar için `admin` de eklenir) |
+| Yalnızca uyarı ve hatalar gönderilsin | Uygulama kuralı → **En düşük seviye**: `WARN` |
+| Paylaşılan bir syslog hedefi token dalgasından korunsun | Token kuralı → **Saniyedeki en fazla olay**: `200` |
+| Yalnızca token redleri gönderilsin | Token kuralı → **Dahil edilen olay tipleri**: `TOKEN_REJECTED` |
+
+:::info
+
+Kurallar yalnızca yetkisi **ACTIVE** olan hatlarda uygulanır. Bir hat **LEGACY** durumdayken eski listedeki her alıcı her olayı almaya devam eder.
+
+:::
+
+## Gizlilik Profili
+
+Hassas veri iki katmanda ele alınır.
+
+**Birinci katman kapatılamaz.** Token değerleri, parolalar ve parola özetleri, `Authorization`, `Cookie` ve `Set-Cookie` başlıkları, API anahtarı başlıkları, sorgu dizeleri, sertifika ve anahtar materyali ile gizlilik tuzunun kendisi bir v2 yükünün parçası hiçbir zaman olmaz. Bunlar izin verilen alan listesinde yer almaz ve ikinci bir denetim, adı kimlik bilgisine benzeyen kalan alanları da kaldırır.
+
+**İkinci katman hedef başına yapılandırdığınız gizlilik profilidir.** İsteğe bağlıdır ve yalnızca **Apinizer JSON v2** yolunda, zarf üretildikten sonra ve boyut politikası çalışmadan önce uygulanır. Her kural bir zarf alanını adıyla, düzenli ifadeyle ya da hazır PII tipiyle (kimlik numarası, IBAN, e-posta adresi, telefon numarası, kart numarası) hedefler ve tek bir işlem uygular: maskeleme, hash'leme, silme, şifreleme veya tespit.
+
+Hedef penceresinde tek tıkla uygulanan önerilen profil, kimlik alanlarını (`user`, `email` ve kimlik bilgisi adı) tuzlu hash'e çevirir ve IP adresini okunabilir bırakır. Serbest metin alanları için hazır PII tespiti bu ekrandaki tablodan henüz düzenlenemez.
+
+| Genel kural | Neden |
+|---|---|
+| Kimlikleri silmek yerine hash'leyiniz | Tuzlu hash aynı kullanıcıyı olaylar arasında tutarlı tutar; korelasyon ve kullanıcı bazlı alarm çalışmaya devam eder. |
+| IP adresini okunabilir bırakınız | SIEM tespitlerinin çoğu (imkânsız seyahat, kaba kuvvet, olağan dışı kaynak) IP üzerine kuruludur. |
+| Her şeyi maskelemeyiniz | Aşırı maskeleme SIEM'in ihtiyaç duyduğu sinyalleri siler; aşırı maskelenmiş bir akış denetimden geçer ama hiçbir şey tespit etmez. |
+| Hash kullanmadan önce tuz tanımlayınız | Tuzsuz hash kuralı kabul edilmez. |
+| Tuzu bilinçli döndürünüz | Rotasyon sonrası aynı kullanıcı farklı bir değere hash'lenir; rotasyon sınırının iki yakası arasında takma ad korelasyonu kırılır. Bunu SIEM ekibinizle planlayınız. |
+
+:::warning
+
+Bir olay için maskeleme başarısız olursa, o olay maskesiz gönderilmek yerine **hiç gönderilmez**. Kopyanın kaybı, hassas verinin sızmasına tercih edilir. Bu olaylar ayrı olarak sayılır ve görünür kalır.
+
+:::
+
+Zarfın yapısal alanları — `logType`, `schemaVersion`, `timestamp`, `event` altındaki her şey ve `apinizer` altındaki her şey — korumalıdır. Bunları hedefleyen bir gizlilik kuralı yok sayılır; maskelenmeleri alt taraftaki tüm ayrıştırıcıları bozardı.
+
+Gizlilik profilleri, bugünkü çıktıyı birebir üreten **Legacy Raw** hedeflerine uygulanmaz. Maskeleme gerekiyorsa hedefi **Apinizer JSON v2** profiline geçiriniz.
+
+## Boyut Politikası
+
+Boyut politikası da yalnızca v2 profilinde çalışır ve zarf dahil tüm yükün UTF-8 boyutunu sınırlar.
+
+| Ayar | Davranış |
+|---|---|
+| Kapalı (varsayılan) | Sınır yok — yükseltme öncesiyle aynı davranış. |
+| **Veriyi kırp** | `data` içindeki büyük alanlar — `reference`, `message`, `stackTrace` — yük sığana kadar büyükten küçüğe kısaltılır, her biri kırpma notuyla işaretlenir ve `apinizer.truncated` değeri `true` olur. Zarf alanlarına dokunulmaz. Kırpma yeterli olmazsa olay düşürülür. |
+| **Olayı düşür** | Olay gönderilmez ve boyut aşımı olarak sayılır. |
+| **Veriyi hash ile değiştir** | `data` yerine SHA-256 özeti ve bayt sayısı yazılır; olay korelasyon için kullanılabilir kalır ama yük taşımaz. |
+
+Yapılandırılabilen en düşük değer **1024 bayttır**. Syslog hedefleri için **8192 bayt ve Veriyi kırp** iyi bir başlangıçtır; RFC 5424 alıcılarının çoğu mesaj başına 2–8 KB kabul eder ve daha uzununu sessizce keser. Kafka, Webhook ve Elasticsearch hedefleri genellikle sınıra ihtiyaç duymaz.
+
+Bir olayı büyüten iki alan, uygulama hata yığınları ile denetim referans nesneleridir. Her ikisi de isteğe bağlıdır ya da sınırlanabilir: referans nesnesi denetim hattında varsayılan olarak kapalıdır, hata yığını anahtarı ise ihtiyaç duymayan bir hedef için kapatılabilir.
+
+## Taşıma ve Geçiş Rehberi
+
+### Sürüm yükseltmesinde ne oldu
+
+Yükseltme sırasında, Genel Ayarlar altında uygulama, token, denetim ve giriş logları için yapılandırılmış her alıcı bu sayfada bir hedefe dönüştü:
+
+- Alıcı başına bir hedef; bağlantı yapılandırması ve kimliği değişmeden korundu.
+- Yük profili **Legacy Raw**, gizlilik profili ve boyut politikası tanımsız — çıktı, yükseltme öncesinde SIEM'inize ulaşanla birebir aynı.
+- O alıcının hizmet ettiği hat için bir kural; **Dahil edilen olay tipleri** listesi yükseltme anında var olan tüm olay tiplerini içerir (uygulama hattı istisnadır, seviye ile filtrelendiği için listesi boş bırakılır). Böylece SIEM'iniz önceden aldığının aynısını almaya devam eder, fazlasını almaz.
+- Token ve uygulama logları için yerel saklama anahtarları olduğu gibi taşındı.
+- Tüm hatlar **LEGACY** yetkisinde bırakıldı; siz aksine karar verene kadar hiçbir şey değişmedi.
+
+Korunacak bir alıcı listesinin bulunmadığı taze kurulumlarda dört hat da **ACTIVE** başlar.
+
+:::info
+
+Taşınan kural açık bir olay tipi listesi taşıdığı için, sonraki Apinizer sürümlerinde eklenen olay tipleri siz listeye ekleyene kadar o kural üzerinden **yönlendirilmez**. Bu bilinçli bir tercihtir: taşınan bir akış, yöneticinin kararı olmadan büyümez. **Dahil edilen olay tipleri** alanını boş bırakarak kendiniz yazdığınız bir kural ise sonradan eklenenler dahil tüm tipleri yönlendirir.
+
+:::
+
+### Bir hattın geçişi
+
+1. O hattın hedefini açınız ve kuralını gözden geçiriniz — olay tipleri, sonuçlar, kapsam ve saniyedeki olay sınırı.
+2. İsterseniz **Apinizer JSON v2** profiline geçiriniz ve yükü **Şema ve Örnekler** sekmesinde SIEM ekibinizle doğrulayınız.
+3. Bir test olayı gönderiniz ve ulaştığını teyit ediniz.
+4. **Hatlar** sekmesinde hattın yetkisini **ACTIVE** yapınız.
+5. Bir sonraki hatta geçmeden önce birkaç dakika sayaçları ve SIEM tarafını izleyiniz.
+
+Önerilen sıra **Denetim → Oturum → Token → Uygulama** şeklindedir: en düşük hacim önce, en yüksek ve en dalgalı olan en sonda.
+
+### Geri alma
+
+Bir hattı **LEGACY** durumuna geri almak anında etkilidir. Eski alıcı listeleri bu sayfadaki her kayıtta güncel tutulduğu için her iki yönde de kayıp yaşanmaz.
+
+Aynı mekanizma kademeli sürüm yükseltmesini de güvenli kılar. Önceki sürümü çalıştıran bir düğüm bu sayfayı bilmez ve güncel tutulan eski listeleri okur; aynı olayları yönlendirir, yalnızca yükseltilene kadar kural, gizlilik profili ve boyut politikası uygulamaz.
+
+:::warning
+
+Alıcı listeleri ve iki yerel saklama anahtarı artık bu sayfaya aittir. Genel Ayarlar ekranı, Yönetim API'leri veya APIops üzerinden bu alanlar için gönderilen değerler yok sayılır; bir yapılandırma içe aktarımındaki değerler de öyle. Bu ayarları buradan yapılandırınız. Bu ayarların dışa ve içe aktarım desteği sonraki bir sürüm için planlanmıştır.
+
+:::
+
+## Yerel Depolama ve Saklama
+
+**Hatlar** sekmesinin ilk sütunu, sayfadaki diğer her şeyden farklı bir soruyu yanıtlar: kopya nereye gönderiliyor değil, *kayıt Apinizer veritabanında tutuluyor mu*.
+
+| Hat | Yerel saklama | Bugünkü saklama süresi |
+|---|---|---|
+| **Denetim** | Her zaman saklanır — kapatılamaz | Otomatik temizleme yok. Siz kaldırana kadar kayıtlar birikir; denetim kayıtları için otomatik saklama süresi planlanmıştır. |
+| **Oturum** | Her zaman saklanır — kapatılamaz | Otomatik temizleme yok. Giriş kayıtları için otomatik saklama süresi planlanmıştır. |
+| **Token** | Anahtarla açılıp kapatılır | [Log Saklama](/tr/admin/system-settings/sistem-ayarlari-ve-limitler#log-saklama-log-retention) bölümünden yapılandırılır; varsayılan olarak kapalıdır. |
+| **Uygulama** | Anahtarla açılıp kapatılır | Bileşen başına [Log Saklama](/tr/admin/system-settings/sistem-ayarlari-ve-limitler#log-saklama-log-retention) bölümünden ve [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasından yapılandırılır; varsayılan olarak kapalıdır. |
+
+:::warning
+
+Token veya uygulama hattı için yerel saklamayı kapatmak, o kayıtların Apinizer veritabanında hiç tutulmaması ve [Token İstekleri](/tr/admin/audit-compliance/token-istekleri) ile [Uygulama Logları](/tr/admin/audit-compliance/application-logs) sayfalarında görünmemesi demektir. Bunu yalnızca en az bir hedefin kayıtları aldığı doğrulandıktan sonra yapınız.
+
+:::
+
+## Şema v2 {#sema-v2}
+
+### Zarf
+
+Her **Apinizer JSON v2** olayı aynı yapıya ve aynı alan sırasına sahiptir. Zarf alanları değeri `null` olsa bile yazılır; böylece ayrıştırıcınız bu alanların varlığına güvenebilir. `data` içindeki alanlar ise değer taşımadıklarında hiç yazılmaz. Zaman damgaları UTC ISO-8601 biçiminde ve milisaniye hassasiyetindedir.
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68493da280f5de2a3c29c975",
+  "timestamp": "2026-09-02T14:31:05.123Z",
+  "event": {
+    "category": "AUDIT",
+    "action": "ENTITY.UPDATED",
+    "outcome": "SUCCESS",
+    "severity": 3
+  },
+  "actor": {
+    "user": "admin",
+    "ip": "10.0.0.7",
+    "userAgent": "Mozilla/5.0",
+    "sessionId": null
+  },
+  "target": {
+    "type": "ApiProxy",
+    "id": "68493bb680f5de2a3c29c609",
+    "name": "Swagger Petstore Documentation",
+    "projectId": "68493b6e80f5de2a3c29c5ee"
+  },
+  "correlationId": "dccababd-16e3-415e-b801-9f6a52b6a28c",
+  "source": {
+    "component": "MANAGER",
+    "host": "manager-0",
+    "environmentId": null
+  },
+  "apinizer": {
+    "version": "2026.09.2",
+    "configRevision": 17,
+    "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+    "synthetic": false,
+    "truncated": false
+  },
+  "data": {
+    "id": "68493da280f5de2a3c29c975",
+    "state": "UPDATED",
+    "origin": "MANAGER"
+  }
+}
+```
+
+| Zarf alanı | Anlamı |
+|---|---|
+| `logType`, `event.category` | Hat — `AUDIT`, `SESSION`, `TOKEN` veya `APPLICATION`. |
+| `schemaVersion` | Bu zarf için `2`. Yalnızca **kırıcı** bir değişiklikte artar; alan eklemek kırıcı değildir. |
+| `eventId` | Kaydın Apinizer veritabanındaki kimliği, yoksa üretilmiş bir kimlik. |
+| `event.action` | Olay tipi ve varsa alt tipiyle birlikte — örneğin `ENTITY.UPDATED` veya `LOG.ERROR`. |
+| `event.outcome` | `SUCCESS`, `FAILURE` veya `DENIED`. |
+| `event.severity` | Hat ve olay tipinden türetilen 0–10 arası değer. Aşağıdaki tabloya bakınız. |
+| `actor` | Olaya kimin sebep olduğu, bilindiği kadarıyla. |
+| `target` | Olayın neyle ilgili olduğu. |
+| `source.component` | Olayı üreten Apinizer bileşeni — `MANAGER`, `WORKER`, `CACHE`, `INTEGRATION` veya `PORTAL`. |
+| `apinizer.configRevision` | Olayı üreten yapılandırma sürümü — ayarlardaki bir değişiklikle akıştaki bir değişikliği ilişkilendirmek için kullanışlıdır. |
+| `apinizer.synthetic` | Yalnızca **Test olayı gönder** butonuyla üretilen olaylarda `true`. |
+| `apinizer.truncated` | Boyut politikası `data` alanını kısalttığında ya da değiştirdiğinde `true`. |
+| `data` | Aşağıda hat başına listelenen alanlar; başka hiçbir şey. |
+
+:::warning
+
+Sonraki sürümlerde `schemaVersion` artmadan zarfa ve `data` içine yeni alanlar eklenebilir. Ayrıştırıcınız tanımadığı alanları yok saymalı ve beklemediği bir alanda hata vermemelidir.
+
+:::
+
+### Önem derecesi
+
+| Hat | Değer |
+|---|---|
+| **Denetim** | Yönetim Konsolu isteği başarılı 1 · varlık değişikliği 3 · varlık silme 4 · Yönetim Konsolu isteği başarısız 5 · erişim reddi 6 |
+| **Oturum** | Çıkış ve başarılı token yenileme 1 · başarılı giriş 2 · başarısız giriş ve başarısız token yenileme 5 · hesap kilitlendi 7 |
+| **Token** | Üretildi ve yenilendi 2 · reddedildi 5 |
+| **Uygulama** | Trace ve debug 0 · info 1 · warn 4 · error 7 |
+
+### Hat başına alanlar
+
+`data` nesnesi, platformda tanımlı sabit bir alan kümesi taşır. Genişletilemez; yalnızca daraltılabilir — gizlilik profiliyle ya da kuraldaki iki içerik anahtarıyla.
+
+**Denetim**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `clientIp`, `userAgent` |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | `className`, `objectId`, `objectName`, `projectId` |
+| `event.action` | `eventType`; varlık değişikliklerinde `state` ile noktalı olarak birleştirilir |
+| `data.id`, `data.state`, `data.origin` | `id`, `state`, `source` |
+| `data.reference` | `referenceObjectJson`, nesne olarak ayrıştırılır — **yalnızca** *Referans nesnesini yüke ekle* açıkken gönderilir. Bu nesnenin önceki durum kopyası hiçbir zaman gönderilmez. |
+
+**Oturum**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `remoteAddress`, `userAgent` |
+| `target.type`, `target.name`, `target.projectId` | sabit `User`, `principal`, `targetProjectId` |
+| `event.action` | `eventType` |
+| `data` | `reasonCode`, `errorType`, `message` (512 karakterle sınırlı), `loginSource`, `portalId`, `accountId`, `email`, `displayName` |
+
+**Token**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip` | `usernameOrKey`, `httpRequestRemoteAddress` |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | sabit `ApiProxy`, `apiProxyId`, `apiProxyName`, `projectId` |
+| `correlationId`, `source.environmentId` | `apinizerCorrelationId`, `environmentId` |
+| `data` | `id`, `applicationId`, `applicationName`, `httpRequestHttpMethod`, `httpRequestContentType`, `xForwardedFor`, `errorType`, `parentErrorType`, `authTokenType`, `audience`, `scope`, `tokenNeverExpires`, `issuedAt`, `expiresAt`, `expiresIn`, `refreshTokenIssuedAt`, `refreshTokenExpiresAt`, `refreshTokenExpiresIn`, `refreshCount`, `maxRefreshCount` |
+
+Legacy Raw profilinin hâlâ taşıdığı token yanıt başlıkları, token yanıt gövdesi ve istemci tanımlayıcısı (`clientInfo`) v2 yükünün parçası **değildir**. Bir token hedefini v2'ye taşımanın başlıca nedeni budur.
+
+**Uygulama**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `target.type`, `target.id`, `target.name` | sabit `ApiProxy`, `apiProxyId`, `apiProxyName`; log bir API proxy'ye aitse |
+| `source.component`, `source.host`, `source.environmentId` | `enumApplicationLog`, `hostName`, ortam adı |
+| `event.action` | `LOG.` ve ardından seviye |
+| `data` | `level`, `message`, `totalDuration`, `date` ve *Hata yığınını yüke ekle* açıkken `stackTrace` (varsayılan olarak açıktır) |
+
+Uygulama loglarında `actor` bulunmaz.
+
+## Test Olayı
+
+Kaydedilmiş bir hedefteki **Test olayı gönder** işlemi, seçtiğiniz hat için tek bir sentetik olay üretir ve onu o hedefin tüm gönderim yolundan geçirir.
+
+- Kurallar **atlanır** — buton "bu hedef çalışıyor mu" sorusunu yanıtlar, "bu olay filtremden geçer mi" sorusunu değil.
+- Yük profili, gizlilik profili ve boyut politikası **uygulanır**; böylece test, hedefin gerçekte ne ürettiğini gösterir.
+- v2 hedefinde olay `apinizer.synthetic: true` ve `SYNTHETIC_TEST` eylemiyle gelir.
+- Legacy Raw hedefinde, sınıf adı `SYNTHETIC_TEST` olan bir denetim kaydı olarak ulaşır. Bu kayıt Apinizer veritabanına hiçbir zaman yazılmaz; yalnızca SIEM tarafında görünür.
+- Sonuç **Kuyruğa alındı**, **Gönderildi** veya **Başarısız** olur. Syslog hedefleri **Kuyruğa alındı** bildirir: olay konnektörün kuyruğuna kabul edilmiştir, ancak syslog teslim onayı vermediği için daha güçlü bir iddiada bulunulamaz.
+
+Yöneticinin bağlantı denetimlerinin alarm üretmemesi için SIEM korelasyon kurallarınızda `SYNTHETIC_TEST` olaylarını hariç tutmayı değerlendiriniz.
+
+## Gözlenebilirlik
+
+Yönetim Konsolu'nda Prometheus metrik dışa aktarımı etkinken, Prometheus uç noktası (`/management/prometheus`) aşağıdaki SIEM sayaçlarını yayınlar:
+
+| Metrik | Etiketler | Neyi sayar |
+|---|---|---|
+| `siem_events_total` | `destination`, `stream`, `result` | Her gönderim denemesini. `result` değerleri: `accepted`, `filtered`, `throttled`, `dropped_oversize`, `dropped_secret`, `privacy_failed`, `send_failed`. |
+| `siem_events_filtered_total` | `destination`, `stream`, `reason` | Filtrelenen olayları, onları eleyen kural adımına göre. |
+| `siem_dispatch_duration_seconds` | `stream` | Gönderimin üretici akış üzerinde ne kadar sürdüğünü. |
+| `siem_config_revision` | — | Yürürlükteki yapılandırmanın sürümünü. Kaydedilen bir değişikliğin düğüme ulaşıp ulaşmadığını doğrulamak için kullanılır. |
+
+Ağ geçidi bir Prometheus uç noktası sunmaz; aynı sayaçlar, [Environment Diagnostics](/tr/admin/server-management/environment-diagnostics) sayfasından okuyabileceğiniz teşhis çıktısında `siem` bloğu altında yayınlanır:
+
+```json
+{
+  "siem": {
+    "configRevision": 17,
+    "events": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|accepted": 41822,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|filtered": 6103,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|throttled": 55
+    },
+    "filteredReasons": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|threshold": 6103
+    },
+    "dispatchDuration": {
+      "count": 47980,
+      "totalNanos": 1583340000,
+      "averageNanos": 32999
+    }
+  }
+}
+```
+
+Düğümler arasında farklılaşan bir `configRevision`, o düğümün son kaydı henüz almadığı anlamına gelir. Artan `send_failed` veya `throttled` sayacı ise bir hedefin yetişemediğinin en erken işaretidir.
+
+## Bilinen Sınırlar
+
+- **Teslim en iyi çaba ilkesine göredir.** Kalıcı kuyruk ve yeniden gönderim yoktur. SIEM'in kaçırdığı kayıt Apinizer veritabanında durur, ancak SIEM'e sonradan ulaşmaz.
+- **CEF, LEEF, hedefler için karşılıklı TLS (mTLS), RFC 5424 yapılandırılmış veri ve sayfa içi sağlık kartları** henüz kullanılabilir değildir; sonraki bir sürüm için planlanmıştır.
+- **Veritabanı konnektörleri Legacy Raw ile sınırlıdır**; dolayısıyla bugünkü alan listesiyle, gizlilik profili ve boyut politikası olmadan çalışır.
+- **Gizlilik profilleri ve boyut politikaları yalnızca Apinizer JSON v2 için geçerlidir.** Legacy Raw hedefi bugünkü çıktısını değiştirmeden üretir.
+- **Önbellek ve entegrasyon modüllerinin uygulama logları** hâlâ eski alıcı listesi üzerinden yönlendirilir; kurallar, gizlilik profilleri ve boyut politikaları bunlara uygulanmaz. Yönetim Konsolu ve ağ geçidi uygulama logları bu sayfayı izler.
+- **Birden fazla hattın paylaştığı bir bağlantı yapılandırması tek bir kuyruğu paylaşır.** Uygulama logu dalgası, aynı syslog bağlantısındaki denetim olaylarını sıkıştırabilir. Yüksek hacimli hatta kendi bağlantı yapılandırmasını veriniz ya da en düşük seviye ve saniyedeki olay sınırıyla sınırlayınız.
+- **Bu ayarların dışa ve içe aktarımı** henüz desteklenmez. Bu sayfa yapılandırmayı elinde tuttuğu sürece, bir yapılandırma içe aktarımıyla gelen alıcı listeleri yok sayılır.
+- **API Güvenliği, API Erişimi ve Portal hatları** rezervedir ve yapılandırılamaz. API trafiğinin kendisi SIEM hatlarına dahil değildir; trafik logları ağ geçidi ortamının log konnektörleri üzerinden iletilmeye devam eder.

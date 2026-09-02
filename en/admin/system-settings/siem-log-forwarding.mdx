@@ -1,0 +1,459 @@
+---
+title: "SIEM & Log Forwarding"
+description: "You can forward Apinizer audit, session, token and application events to your SIEM, decide per destination which events are sent and in which payload format, apply a privacy profile and a size limit, and switch each stream from the legacy recipient lists to the rules defined on this page."
+---
+
+:::info
+
+Reach this screen by following **Administration → System Settings → SIEM & Log Forwarding**. Only users with the **Administrator (Admin)** role can open it. Click **Save and Deploy** to save; changes are pushed to the running Gateway environments immediately.
+
+:::
+
+## Overview
+
+Apinizer's configuration database is the **system of record** for audit, session, token and application events. Whatever you forward to a SIEM is a **copy**, produced for correlation, alerting and long-term archiving on your side.
+
+The delivery contract is **best effort**:
+
+- Events are handed to the connector on the path that produced them; the connector buffers and sends them.
+- When a connector's queue is full, events are dropped rather than blocking the request that produced them.
+- Over UDP and plain TCP syslog, "delivered" cannot be observed. For that reason the test button reports **Queued**, not **Sent**, for syslog destinations.
+- Nothing is retried from a durable outbox. If the SIEM was unreachable, the record is still in the Apinizer database — it is not in your SIEM.
+
+:::warning
+
+Do not design a compliance control that depends on the SIEM copy alone. Query the Apinizer database (Audit Records, Login Records, Token Requests, Application Logs) when you need the authoritative answer, and use the SIEM copy for correlation and alerting.
+
+:::
+
+## Concepts
+
+### Streams
+
+A **stream** is one family of events. Each stream has its own producer, its own collection in the Apinizer database, its own event types and its own way of deriving an outcome.
+
+| Stream | What it records | Apinizer database collection | Event types | Outcome |
+|---|---|---|---|---|
+| **Audit** | Administrative changes, Management Console requests and rejected requests | `audit_event` | `ENTITY`, `MANAGER_REQUEST`, `ACCESS_DENIED` | `SUCCESS`, `FAILURE`, `DENIED` |
+| **Session** | Management Console and API Portal sign-in, sign-out, token refresh and lockout | `persistent_audit_event` | `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `LOGOUT`, `TOKEN_REFRESH_SUCCESS`, `TOKEN_REFRESH_FAILURE`, `ACCOUNT_LOCKED` | derived from the event type; `ACCOUNT_LOCKED` is `DENIED` |
+| **Token** | Token issuance, refresh and rejection on the Gateway | `log_tokentraffic` | `TOKEN_ISSUED`, `TOKEN_REFRESHED`, `TOKEN_REJECTED` | `SUCCESS` when there is no error, `FAILURE` when there is; authentication errors are `DENIED` |
+| **Application** | Component logs from the Management Console, Gateway, Cache and Integration modules | `apinizer_log` | `LOG.TRACE` … `LOG.ERROR` | `WARN` and `ERROR` are `FAILURE`, everything else `SUCCESS` |
+
+Three further streams appear on the screen with a **Planned** badge and cannot be configured yet: **API Security**, **API Access** and **Portal**. API traffic is not part of the SIEM streams — traffic logs continue to be forwarded by the log connectors of the Gateway environment.
+
+### Destinations
+
+A **destination** is one connector plus everything that is applied before an event reaches it:
+
+| Part | Meaning |
+|---|---|
+| **Connector** | The connection configuration that carries the payload — Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog or a database connector. |
+| **Payload profile** | The format of the payload. See below. |
+| **Stream rules** | Per stream: whether the stream is sent to this destination at all, and which of its events are selected. |
+| **Privacy profile** | Optional masking, hashing, deletion or encryption applied to the payload before it leaves Apinizer. |
+| **Size policy** | Optional maximum event size and what happens when an event exceeds it. |
+
+A destination that has no rule for a stream never receives that stream. The same connection configuration can be used by several destinations.
+
+### Payload profiles
+
+| Profile | What it produces | Available for |
+|---|---|---|
+| **Legacy Raw** | Today's output for your connector type, unchanged — a database connector still writes SQL columns, a Graylog connector still writes a GELF message, an Elasticsearch connector still writes its own document, and the string-based connectors still receive the same JSON they receive today. The field list is **frozen**: fields added to Apinizer in later versions do not appear in this output. | Every connector type |
+| **Apinizer JSON v2** | The canonical envelope described under [Schema v2](#schema-v2) — a stable field order, a typed field allowlist, a severity value, and a `data` object that carries only the fields explicitly permitted for that stream. | Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog |
+| **CEF 0**, **LEEF 2.0** | Reserved. Selecting one is rejected until the format work lands in a later release. | Syslog (planned) |
+
+:::info
+
+Database connectors write into fixed table columns and therefore cannot carry the v2 envelope; they stay on **Legacy Raw**. Privacy profiles and size policies are applied only on the v2 path, so a destination that needs masking must be switched to **Apinizer JSON v2**.
+
+:::
+
+Legacy Raw is kept byte-for-byte compatible so an existing SIEM parser keeps working after the upgrade. It also keeps whatever it emits today, including fields such as the token log's `clientInfo`. The v2 profile is where the field list is curated: token values, passwords, and `Authorization`, `Cookie` and API-key headers are never part of it, and any remaining field whose name looks like a credential is dropped a second time before the payload is sent.
+
+### Authority
+
+Every stream is served by exactly one of two sources, and you switch between them per stream:
+
+| Authority | Where the destinations come from | Are rules applied? |
+|---|---|---|
+| **Legacy** | The recipient lists that were previously configured under General Settings | No — every event goes to every recipient, exactly as before the upgrade |
+| **Active** | The destinations on this page | Yes — rules, payload profile, privacy profile and size policy all apply |
+
+Switching a stream is immediate in both directions, so you can move one stream at a time and roll it back without losing events.
+
+## The page
+
+The page has three tabs.
+
+### Destinations
+
+The destination list shows the name, the connector type and connection configuration, the payload profile, a badge for every stream routed to it, and whether it is enabled. **Add Destination** opens the destination dialog, where you configure:
+
+- **Name**, **Description** and the **Enabled** switch.
+- **Connector** — **Select Connector** opens the same connector editor used elsewhere in Apinizer; **Edit Connector** reopens it for an existing destination.
+- **Payload Profile** — the list is filtered by connector type, and profiles that are not available yet carry a *planned* label.
+- **Size Policy** — *Limit event size*, the maximum event size in bytes, and the action taken when the limit is exceeded.
+- **Privacy Profile** — *Apply privacy profile* plus **Apply recommended SIEM profile**, which fills in the identity rules for you.
+- **Stream Rules** — one section per stream, each starting with *Send this stream to this destination*.
+
+Use **Send test event** on a saved destination to verify connectivity before you switch a stream over.
+
+### Streams
+
+One row per stream, with four columns:
+
+| Column | What it does |
+|---|---|
+| **Stream** | The stream's name. Reserved streams carry a *Planned* badge and cannot be configured. |
+| **Apinizer Database / Local Retention** | Whether the stream is stored locally, plus a **Retention settings** link to the retention configuration for that log family. Audit and Session are marked *Always stored* and cannot be turned off. Token and Application have a *Store in the Apinizer database* switch. The Audit row also carries the *Audit manager requests* switch, which remains a General Settings value and controls whether Management Console requests are recorded at all. |
+| **Destinations** | A summary of the rule for each destination configured for that stream. When no destination is configured the cell says so, and streams still on Legacy show *Rules take effect once the authority is ACTIVE*. |
+| **Authority** | The Legacy ⇄ Active switch, with a confirmation dialog and the recommended cutover order. |
+
+### Schema & Samples
+
+Pick a stream and a profile and the tab renders the payload the running platform produces for that combination, together with the field allowlist. Use it to build your parser, and read the note next to it: **new fields may be added without raising the schema version, so your parser must ignore unknown fields**.
+
+## Rules
+
+Rules are evaluated at the source, on the path that produced the event, before anything is handed to a connector. There is no scripting and no regular expression matching — the evaluation is a fixed sequence of checks, so it stays cheap even on the token path.
+
+### Evaluation order
+
+| Step | Check | Result when it matches |
+|---|---|---|
+| 1 | The rule is switched off | Not sent |
+| 2 | The event type is in **Excluded event types** | Not sent — exclusion always wins over inclusion |
+| 3 | **Included event types** is not empty and does not contain the event type | Not sent |
+| 4 | Any dimension of **Scope — exclude** matches | Not sent |
+| 5 | **Scope — include** is not empty and no dimension matches | Not sent |
+| 6 | The threshold rejects the event — **Minimum level** for Application, **Outcomes** for every other stream | Not sent |
+| 7 | **Maximum events per second** has been exhausted for this second | Throttled |
+| 8 | — | Sent |
+
+An empty list always means *everything*: no included event types means every type, no outcomes means every outcome, no scope means every event. Within **Scope — include** the dimensions are combined with OR — the event has to match at least one filled dimension — while an event matching any dimension of **Scope — exclude** is dropped.
+
+### Scope dimensions
+
+| Dimension | Matched against | Streams where it is meaningful |
+|---|---|---|
+| **Project ids** | The project the affected object belongs to | Audit, Session, Token |
+| **API proxy ids**, **API proxy names** | The API proxy the event belongs to | Token, Application |
+| **HTTP methods** | The HTTP method of the token request | Token |
+| **Credentials** | The credential or client key that requested the token | Token |
+| **Environment ids** | The environment that produced the event | Token, Application |
+| **Components** | The Apinizer component that wrote the log — Manager, Gateway, Cache, Integration, Portal | Application |
+| **Client CIDR blocks** | The client IP address, matched against IPv4 or IPv6 CIDR blocks | Audit, Session, Token |
+
+Names are matched case-insensitively; identifiers must match exactly.
+
+:::warning
+
+Management Console request and access-denied audit events belong to no project. If you fill **Project ids** with a project identifier, those events stop matching and disappear from that destination. To keep them, add the literal value `admin` to the list — it selects the events that have no project.
+
+:::
+
+### Examples
+
+| Goal | How to configure it |
+|---|---|
+| Send only failed and rejected administrative operations | Audit rule → **Outcomes**: `FAILURE`, `DENIED` |
+| Keep the high-volume Management Console request stream out of a destination | Audit rule → **Excluded event types**: `MANAGER_REQUEST` |
+| Forward only one project's events | Audit rule → **Scope — include** → **Project ids**: the project identifier (add `admin` as well to keep platform-level events) |
+| Forward warnings and errors only | Application rule → **Minimum level**: `WARN` |
+| Protect a shared syslog target from a token burst | Token rule → **Maximum events per second**: `200` |
+| Send token rejections only | Token rule → **Included event types**: `TOKEN_REJECTED` |
+
+:::info
+
+Rules apply only to streams whose authority is **Active**. While a stream is on **Legacy**, every recipient of the legacy list still receives every event.
+
+:::
+
+## Privacy profile
+
+Sensitive data is handled in two layers.
+
+**The first layer cannot be turned off.** Token values, passwords and password hashes, `Authorization`, `Cookie` and `Set-Cookie` headers, API-key headers, query strings, certificate and key material, and the privacy salt itself are never part of a v2 payload. They are not in the allowlist, and a second check removes any remaining field whose name resembles a credential.
+
+**The second layer is the privacy profile you configure per destination.** It is optional and it applies only on the **Apinizer JSON v2** path, after the envelope has been produced and before the size policy runs. Each rule targets an envelope field by name, by regular expression, or by built-in PII type (national identity number, IBAN, e-mail address, phone number, card number) and applies one operation: mask, hash, delete, encrypt or detect.
+
+The recommended profile, applied with a single click in the destination dialog, hashes the identity fields — `user`, `email` and the credential name — leaves the IP address readable, and runs built-in PII detection over the free-text fields.
+
+| Rule of thumb | Why |
+|---|---|
+| Hash identities instead of deleting them | A salted hash keeps the same user consistent across events, so correlation and user-based alerting still work. |
+| Leave the IP address readable | Most SIEM detections — impossible travel, brute force, unusual source — are built on it. |
+| Do not mask everything | Excessive masking removes the very signals your SIEM needs; an over-masked feed passes an audit and detects nothing. |
+| Set a salt before you use hashing | A hash rule without a salt is rejected. |
+| Rotate the salt deliberately | After a rotation the same user hashes to a different value, so pseudonym correlation across the rotation boundary is broken. Plan it with your SIEM team. |
+
+:::warning
+
+If masking fails for an event, that event is **not sent at all** rather than sent unmasked. Losing a copy is preferred over leaking sensitive data. These events are counted separately so you can see them.
+
+:::
+
+The envelope's structural fields — `logType`, `schemaVersion`, `timestamp`, everything under `event`, and everything under `apinizer` — are protected. A privacy rule that targets them is ignored, because masking them would break every parser downstream.
+
+Privacy profiles are not applied to **Legacy Raw** destinations, which reproduce today's output exactly. Switch the destination to **Apinizer JSON v2** if you need masking.
+
+## Size policy
+
+The size policy is also a v2-only feature and bounds the UTF-8 size of the whole payload, envelope included.
+
+| Setting | Behaviour |
+|---|---|
+| Off (default) | No limit — the same behaviour as before the upgrade. |
+| **Truncate data** | The bulk fields inside `data` — `reference`, `message`, `stackTrace` — are shortened largest-first until the payload fits, each one marked with a truncation note, and `apinizer.truncated` is set to `true`. The envelope fields are never touched. If truncation is not enough, the event is dropped. |
+| **Drop the event** | The event is not sent and is counted as an oversize drop. |
+| **Replace data with a hash** | `data` is replaced by its SHA-256 digest and byte count, so the event is still correlatable but carries no payload. |
+
+The minimum you can configure is **1024 bytes**. For syslog destinations, **8192 bytes with Truncate data** is a good starting point — most RFC 5424 receivers accept between 2 and 8 KB per message and silently cut anything longer. Kafka, Webhook and Elasticsearch destinations normally need no limit.
+
+Application stack traces and audit reference objects are the two fields that make an event large. Both are opt-in or bounded: the reference object is off by default on the Audit stream, and the stack trace switch on the Application stream can be turned off for a destination that does not need it.
+
+## Migration and cutover
+
+### What the upgrade did
+
+When you upgraded, every recipient that was configured under General Settings for application, token, audit and login logs became a destination on this page:
+
+- One destination per recipient, keeping its connector configuration and its identity unchanged.
+- The payload profile set to **Legacy Raw**, no privacy profile and no size policy — the output is identical to what your SIEM received before the upgrade.
+- A rule for the stream that recipient served, whose **Included event types** lists every event type that existed at the time of the upgrade (the Application stream is the exception — it is filtered by level, so its list is left empty). Your SIEM therefore keeps receiving exactly what it received before, and nothing more.
+- The local storage switches for token and application logs copied across.
+- Every stream left on **Legacy** authority, so nothing changed until you decide otherwise.
+
+On a fresh installation, where there were no recipient lists to preserve, all four streams start on **Active**.
+
+:::info
+
+Because a migrated rule carries an explicit list of event types, event types introduced in later Apinizer versions are **not** forwarded through that rule until you add them. This is deliberate: a migrated feed never grows without an administrator's decision. A rule you write yourself, leaving **Included event types** empty, forwards every type including the ones added later.
+
+:::
+
+### Cutting a stream over
+
+1. Open the destination for that stream and review its rule — event types, outcomes, scope and the events-per-second limit.
+2. Optionally switch it to **Apinizer JSON v2** and confirm the payload on the **Schema & Samples** tab with your SIEM team.
+3. Send a test event and confirm it arrives.
+4. On the **Streams** tab, switch the stream's authority to **Active**.
+5. Watch the counters and your SIEM for a few minutes before moving to the next stream.
+
+The recommended order is **Audit → Session → Token → Application**: lowest volume first, highest and burstiest last.
+
+### Rolling back
+
+Switching a stream back to **Legacy** takes effect immediately. The legacy recipient lists are kept in step with this page on every save, so they are always current and nothing is lost in either direction.
+
+The same mechanism makes a rolling upgrade safe. A node running the previous version does not know about this page and reads the legacy lists, which are up to date — it forwards the same events, it simply does not apply rules, privacy profiles or size policies until it is upgraded.
+
+:::warning
+
+The recipient lists and the two local storage switches are now owned by this page. Values sent for them through the General Settings screen, the Management APIs or APIops are ignored, and so are the values in a configuration import. Configure them here. Export and import support for these settings is planned for a later release.
+
+:::
+
+## Local storage and retention
+
+The first column of the **Streams** tab answers a different question from everything else on the page: not *where is the copy sent*, but *is the record kept in the Apinizer database at all*.
+
+| Stream | Local storage | Retention today |
+|---|---|---|
+| **Audit** | Always stored — cannot be turned off | No automatic cleanup. Records accumulate until you remove them; automatic retention for audit records is planned. |
+| **Session** | Always stored — cannot be turned off | No automatic cleanup. Automatic retention for login records is planned. |
+| **Token** | Switchable | Configurable under [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention); off by default. |
+| **Application** | Switchable | Configurable per component under [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention) and through the [Application Log Cleanup Tasks](/en/admin/audit-compliance/application-log-cleanup-tasks) page; off by default. |
+
+:::warning
+
+Turning off local storage for the token or application stream means the Apinizer database no longer holds those records, and the Token Requests and Application Logs pages stop showing them. Do it only when at least one destination is confirmed to be receiving them.
+
+:::
+
+## Schema v2 {#schema-v2}
+
+### Envelope
+
+Every **Apinizer JSON v2** event has the same shape, in the same field order. Envelope fields are written even when they are `null`, so your parser can rely on them being present; fields inside `data` are omitted when they have no value. Timestamps are UTC ISO-8601 with milliseconds.
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68493da280f5de2a3c29c975",
+  "timestamp": "2026-09-02T14:31:05.123Z",
+  "event": {
+    "category": "AUDIT",
+    "action": "ENTITY.UPDATED",
+    "outcome": "SUCCESS",
+    "severity": 3
+  },
+  "actor": {
+    "user": "admin",
+    "ip": "10.0.0.7",
+    "userAgent": "Mozilla/5.0",
+    "sessionId": null
+  },
+  "target": {
+    "type": "ApiProxy",
+    "id": "68493bb680f5de2a3c29c609",
+    "name": "Swagger Petstore Documentation",
+    "projectId": "68493b6e80f5de2a3c29c5ee"
+  },
+  "correlationId": "dccababd-16e3-415e-b801-9f6a52b6a28c",
+  "source": {
+    "component": "MANAGER",
+    "host": "manager-0",
+    "environmentId": null
+  },
+  "apinizer": {
+    "version": "2026.09.2",
+    "configRevision": 17,
+    "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+    "synthetic": false,
+    "truncated": false
+  },
+  "data": {
+    "id": "68493da280f5de2a3c29c975",
+    "state": "UPDATED",
+    "origin": "MANAGER"
+  }
+}
+```
+
+| Envelope field | Meaning |
+|---|---|
+| `logType`, `event.category` | The stream — `AUDIT`, `SESSION`, `TOKEN` or `APPLICATION`. |
+| `schemaVersion` | `2` for this envelope. It is raised only on a **breaking** change; adding a field is not breaking. |
+| `eventId` | The identifier of the record in the Apinizer database, or a generated identifier when there is none. |
+| `event.action` | The event type, dotted with its sub-type where one exists — for example `ENTITY.UPDATED` or `LOG.ERROR`. |
+| `event.outcome` | `SUCCESS`, `FAILURE` or `DENIED`. |
+| `event.severity` | A 0–10 value derived from the stream and event type. See the table below. |
+| `actor` | Who caused the event, as far as it is known. |
+| `target` | What the event was about. |
+| `source.component` | The Apinizer component that produced the event — `MANAGER`, `WORKER`, `CACHE`, `INTEGRATION` or `PORTAL`. |
+| `apinizer.configRevision` | The revision of this page's configuration that produced the event — useful when correlating a change in the feed with a change in the settings. |
+| `apinizer.synthetic` | `true` only for an event produced by the **Send test event** button. |
+| `apinizer.truncated` | `true` when the size policy shortened or replaced `data`. |
+| `data` | The per-stream fields listed below, and nothing else. |
+
+:::warning
+
+Fields may be added to the envelope and to `data` in later versions without raising `schemaVersion`. Your parser must ignore fields it does not recognise, and must not fail on a field it did not expect.
+
+:::
+
+### Severity
+
+| Stream | Value |
+|---|---|
+| **Audit** | Management Console request success 1 · entity change 3 · entity deletion 4 · Management Console request failure 5 · access denied 6 |
+| **Session** | sign-out and successful token refresh 1 · successful sign-in 2 · failed sign-in and failed token refresh 5 · account locked 7 |
+| **Token** | issued and refreshed 2 · rejected 5 |
+| **Application** | trace and debug 0 · info 1 · warn 4 · error 7 |
+
+### Fields per stream
+
+The `data` object carries a fixed set of fields defined in the platform. It cannot be extended, and it can only be narrowed — with a privacy profile, or with the two content switches on the rule.
+
+**Audit**
+
+| Envelope field | Comes from the legacy field |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `clientIp`, `userAgent` |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | `className`, `objectId`, `objectName`, `projectId` |
+| `event.action` | `eventType`, dotted with `state` for entity changes |
+| `data.id`, `data.state`, `data.origin` | `id`, `state`, `source` |
+| `data.reference` | `referenceObjectJson`, parsed into an object — sent **only** when *Include the reference object in the payload* is on. The previous-state copy of that object is never sent. |
+
+**Session**
+
+| Envelope field | Comes from the legacy field |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `remoteAddress`, `userAgent` |
+| `target.type`, `target.name`, `target.projectId` | fixed `User`, `principal`, `targetProjectId` |
+| `event.action` | `eventType` |
+| `data` | `reasonCode`, `errorType`, `message` (capped at 512 characters), `loginSource`, `portalId`, `accountId`, `email`, `displayName` |
+
+**Token**
+
+| Envelope field | Comes from the legacy field |
+|---|---|
+| `actor.user`, `actor.ip` | `usernameOrKey`, `httpRequestRemoteAddress` |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | fixed `ApiProxy`, `apiProxyId`, `apiProxyName`, `projectId` |
+| `correlationId`, `source.environmentId` | `apinizerCorrelationId`, `environmentId` |
+| `data` | `id`, `applicationId`, `applicationName`, `httpRequestHttpMethod`, `httpRequestContentType`, `xForwardedFor`, `errorType`, `parentErrorType`, `authTokenType`, `audience`, `scope`, `tokenNeverExpires`, `issuedAt`, `expiresAt`, `expiresIn`, `refreshTokenIssuedAt`, `refreshTokenExpiresAt`, `refreshTokenExpiresIn`, `refreshCount`, `maxRefreshCount` |
+
+The token response headers, the token response body and the client identifier (`clientInfo`) that Legacy Raw still carries are **not** part of the v2 payload. This is the main reason to move a token destination to v2.
+
+**Application**
+
+| Envelope field | Comes from the legacy field |
+|---|---|
+| `target.type`, `target.id`, `target.name` | fixed `ApiProxy`, `apiProxyId`, `apiProxyName`, when the log belongs to one |
+| `source.component`, `source.host`, `source.environmentId` | `enumApplicationLog`, `hostName`, the environment name |
+| `event.action` | `LOG.` followed by the level |
+| `data` | `level`, `message`, `totalDuration`, `date`, and `stackTrace` when *Include the stack trace in the payload* is on (it is on by default) |
+
+There is no `actor` for application logs.
+
+## Test event
+
+**Send test event** on a saved destination produces one synthetic event for the stream you choose and sends it through that destination's full outbound path.
+
+- Rules are **skipped** — the button answers "does this destination work", not "would this event pass my filter".
+- The payload profile, privacy profile and size policy **are** applied, so the test shows exactly what the destination emits.
+- On a v2 destination, the event carries `apinizer.synthetic: true` and the action `SYNTHETIC_TEST`.
+- On a Legacy Raw destination it arrives as an audit record whose class name is `SYNTHETIC_TEST`. It is never written to the Apinizer database — you will see it in your SIEM only.
+- The result is **Queued**, **Sent** or **Failed**. Syslog destinations report **Queued**: the event was accepted by the connector's queue, but syslog gives no delivery acknowledgement, so nothing stronger can be claimed.
+
+Consider excluding `SYNTHETIC_TEST` in your SIEM's correlation rules so administrator connectivity checks do not raise alerts.
+
+## Observability
+
+When Prometheus metrics export is enabled on the Management Console, its Prometheus endpoint (`/management/prometheus`) publishes the following SIEM counters:
+
+| Metric | Labels | What it counts |
+|---|---|---|
+| `siem_events_total` | `destination`, `stream`, `result` | Every dispatch attempt. `result` is `accepted`, `filtered`, `throttled`, `dropped_oversize`, `dropped_secret`, `privacy_failed` or `send_failed`. |
+| `siem_events_filtered_total` | `destination`, `stream`, `reason` | Filtered events broken down by the rule step that rejected them. |
+| `siem_dispatch_duration_seconds` | `stream` | How long dispatching takes on the producing path. |
+| `siem_config_revision` | — | The revision of the configuration currently in effect. Use it to confirm that a saved change reached the node. |
+
+The Gateway does not expose a Prometheus endpoint; the same counters are published in its diagnostics output, which you can read from the [Environment Diagnostics](/en/admin/server-management/environment-diagnostics) page, under a `siem` block:
+
+```json
+{
+  "siem": {
+    "configRevision": 17,
+    "events": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|accepted": 41822,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|filtered": 6103,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|throttled": 55
+    },
+    "filteredReasons": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|threshold": 6103
+    },
+    "dispatchDuration": {
+      "count": 47980,
+      "totalNanos": 1583340000,
+      "averageNanos": 32999
+    }
+  }
+}
+```
+
+A `configRevision` that differs between nodes means a node has not received the latest save yet. A rising `send_failed` or `throttled` count is the earliest sign that a destination cannot keep up.
+
+## Known limitations
+
+- **Delivery is best effort.** There is no durable outbox and no replay. What the SIEM missed is still in the Apinizer database, but it will not arrive at the SIEM later.
+- **CEF, LEEF, mutual TLS for destinations, RFC 5424 structured data and the on-page health cards** are not available yet; they are planned for a later release.
+- **Database connectors are limited to Legacy Raw**, and therefore to today's field list, with no privacy profile and no size policy.
+- **Privacy profiles and size policies apply only to Apinizer JSON v2.** A Legacy Raw destination emits its current output unchanged.
+- **Application logs from the Cache and Integration modules** are still forwarded through the legacy recipient list, so rules, privacy profiles and size policies do not apply to them. Application logs from the Management Console and the Gateway follow this page.
+- **A connection configuration shared by several streams shares one queue.** An application-log burst can crowd out audit events on the same syslog connection. Give a high-volume stream its own connection configuration, or bound it with a minimum level and an events-per-second limit.
+- **Export and import of these settings** is not supported yet. Recipient lists arriving in a configuration import are ignored while this page holds the configuration.
+- **API Security, API Access and Portal streams** are reserved and cannot be configured. API traffic itself is not part of the SIEM streams; traffic logs continue to be forwarded by the log connectors of the Gateway environment.

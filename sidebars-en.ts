@@ -724,6 +724,7 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/overview",
         "admin/system-settings/system-settings-and-limits",
         "admin/system-settings/global-configuration",
+        "admin/system-settings/siem-log-forwarding",
         {
           "type": "category",
           "label": "Predefined Values",
