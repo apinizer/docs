@@ -1,0 +1,106 @@
+---
+title: "API Trafik Metriklerini Grafana İle Görselleştirme"
+description: "Apinizer Gateway API trafik metriklerini Prometheus veri kaynağı üzerinden Grafana ile görselleştirme. Elasticsearch loglarından farklı olarak bu dashboard'lar Prometheus'ta tutulan Gateway metriklerini kullanır."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+
+Apinizer Gateway, API trafiği, işlem süreleri ve hata oranlarına ilişkin metrikleri Prometheus'a sunar. Bu metrikler Grafana'da paneller halinde izlenir.
+
+Grafana, Elasticsearch'te tutulan API trafik loglarını okumaz. Veri kaynağı, Gateway'in Prometheus endpoint'inden toplanan zaman serisi metrikleridir. Tekil istek kaydı, durum kodu veya istek gövdesi gibi log alanlarına ihtiyaç duyuluyorsa [Kibana](/tr/tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-api-trafik-log-gorsellestirme) kullanılmalıdır.
+
+:::warning
+
+Bu sayfadaki grafiklerin veri kaynağı Elasticsearch API trafik logları değildir. Grafana, Apinizer Gateway metriklerini Prometheus üzerinden kullanır. Metrik endpoint'inin varsayılan portu `9091`'dir; port özelleştirildiyse Prometheus ve Grafana yapılandırmasında özelleştirilen port kullanılmalıdır.
+
+:::
+
+## Kurulum
+
+Grafana kurulumu, Prometheus scraping yapılandırması ve Grafana'da Prometheus veri kaynağının tanımlanması aşağıdaki dokümanlarda yer alır. Örnek grafiklere geçmeden önce bu adımların tamamlanmış olması gerekir.
+
+<CardGroup cols={2}>
+  <Card title="Prometheus Scraping" icon="download" href="/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping">
+    Gateway metriklerinin Prometheus tarafından toplanması
+  </Card>
+  <Card title="Grafana ve Prometheus Veri Kaynağı" icon="plug" href="/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/grafana-prometheus-data-source">
+    Grafana kurulumu ve Prometheus'un data source olarak eklenmesi
+  </Card>
+  <Card title="Gateway Metrikleri" icon="chart-line" href="/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis">
+    Kullanılabilir API trafik metrikleri ve etiketler
+  </Card>
+  <Card title="Prometheus / Grafana Entegrasyonu" icon="layer-group" href="/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/prometheus-grafana-entegrasyonu">
+    Gateway ve Cache metrik entegrasyonunun genel bakışı
+  </Card>
+</CardGroup>
+
+Prometheus veri kaynağı eklendikten sonra Grafana'da **Dashboards → New → Add visualization** ile panel oluşturulur. Sorgular PromQL ile yazılır.
+
+## Örnek Grafikler
+
+Aşağıdaki paneller, Apinizer Genel Bakış *(Overview)* ekranındaki özet metriklere benzer bir görünüm sağlar. Sorgular Prometheus'taki `apinizer_api_traffic_*` metrik ailesini kullanır.
+
+### İstek hacmi: toplam, başarılı ve hatalı istekler
+
+Bu panel, API istek hızını (req/s) toplam, başarılı ve hatalı istekler olarak ayırır. Trafikteki artışlar, hata yükselişleri ve başarı oranındaki değişimler aynı grafikte izlenir.
+
+| Seri | Görselleştirme | PromQL |
+|------|----------------|--------|
+| Toplam istekler | Timeseries | `sum(rate(apinizer_api_traffic_total_count_total[5m]))` |
+| Başarılı istekler | Timeseries | `sum(rate(apinizer_api_traffic_success_count_total[5m]))` |
+| Hatalı istekler | Timeseries | `sum(rate(apinizer_api_traffic_error_count_total[5m]))` |
+
+- Y ekseni birimi: `req/s`
+- Toplam istekler mavi, başarılı istekler yeşil, hatalı istekler kırmızı
+- Legend açık tutulmalıdır; Mean, Max ve Last kolonları anlık hız ile pencere ortalamasını karşılaştırır
+
+<img
+  src="/images/operations/dashboard1.png"
+  alt="İstek hacmi: toplam, başarılı ve hatalı istekler"
+  width="1000"
+/>
+
+Kibana'daki tarih histogramı ve sonuç durumu (`rt`) kırılımının metrik karşılığıdır. Kaynak log belgesi değil, Prometheus sayacıdır.
+
+### En yüksek trafik hacmine sahip API'ler
+
+Seçilen zaman aralığında hangi API Proxy'lerin daha fazla çağrıldığını gösterir. Kullanım yoğunluğu ve kapasite dağılımı bu panel üzerinden okunur.
+
+| Alan | Görselleştirme | PromQL |
+|------|----------------|--------|
+| API adına göre istek artışı | Bar gauge veya Bar chart | `topk(5, sum by (api_name) (increase(apinizer_api_traffic_total_count_tagged_total[100m])))` |
+
+- Görselleştirme yatay veya dikey bar gauge olabilir
+- Sıralama yüksekten düşüğe alınır
+- Legend'da `api_name` etiketi gösterilir; bu etiket Elasticsearch'teki `apn` (API Proxy ismi) alanının metrik karşılığıdır
+
+<img
+  src="/images/operations/dashboard2.png"
+  alt="En yüksek trafik hacmine sahip API'ler"
+  width="1000"
+/>
+
+### API işlem süreleri
+
+İsteğin Gateway içindeki süresini üç aşamaya ayırır: request pipeline, routing ve response pipeline. Değerler milisaniye cinsindendir. Gecikmenin politika katmanından, backend yönlendirmeden veya yanıt işleminden kaynaklanıp kaynaklanmadığı bu kırılımla görülür.
+
+| Seri | Görselleştirme | PromQL |
+|------|----------------|--------|
+| Request pipeline | Timeseries | `sum(rate(apinizer_api_traffic_request_pipeline_time_seconds_sum[5m])) / sum(rate(apinizer_api_traffic_request_pipeline_time_seconds_count[5m])) * 1000` |
+| Routing | Timeseries | `sum(rate(apinizer_api_traffic_routing_time_seconds_sum[5m])) / sum(rate(apinizer_api_traffic_routing_time_seconds_count[5m])) * 1000` |
+| Response pipeline | Timeseries | `sum(rate(apinizer_api_traffic_response_pipeline_time_seconds_sum[5m])) / sum(rate(apinizer_api_traffic_response_pipeline_time_seconds_count[5m])) * 1000` |
+
+- Y ekseni birimi: `ms`
+- Routing süresinin diğer serilerden belirgin yüksek kalması, gecikmenin büyük ölçüde backend çağrısından geldiğini gösterir
+
+<img
+  src="/images/operations/dashboard3.png"
+  alt="API işlem süreleri detayı"
+  width="1000"
+/>
+
+## Dashboard'a ekleme
+
+Oluşturulan paneller **Dashboards → New dashboard → Add** ile tek bir dashboard'da toplanır. Zaman aralığı olarak son 1 saat veya son 24 saat, yenileme aralığı olarak 30 saniye önerilir.
+
+İstek/yanıt boyutu, pod CPU kullanımı ve diğer panel örnekleri [Grafana Üzerinde Örnek Dashboardlar](/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard) sayfasındadır.

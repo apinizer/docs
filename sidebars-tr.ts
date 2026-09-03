@@ -1020,6 +1020,7 @@ const sidebars: SidebarsConfig = {
             "operations/yaygin-sorunlar-cozumleri/high-latency-slow-response-times",
             "operations/yaygin-sorunlar-cozumleri/authentication-failures",
             "operations/yaygin-sorunlar-cozumleri/database-connection-issues",
+            "operations/yaygin-sorunlar-cozumleri/Oracle-tns-timezone-error",
             "operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors",
             "operations/yaygin-sorunlar-cozumleri/policy-execution-failures",
             "operations/yaygin-sorunlar-cozumleri/routing-issues",
@@ -1307,7 +1308,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-api-trafik-log-gorsellestirme",
-            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme"
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme",
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/grafana-api-trafik-metrik-gorsellestirme"
           ]
         },
         {
