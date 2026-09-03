@@ -108,6 +108,30 @@ Bu sürümden sonra oluşturulan bir Consumer — bu ekrandan, portaldan, APIops
 
 Envanterin **Yalnız Consumer** kararı vereceği bir Consumer — LDAP, veritabanı, bir API üzerinden doğrulanan ya da bir kimlik sağlayıcı claim'iyle eşleşen bir kayıt — oluşturulduğu haliyle bırakılır; bu tür bir kayıt için hiçbir şey türetilmez, çünkü bu bir hata değil, o türden bir kayıt için normal sonuçtur. Taşınması gereken bir Consumer için üç adımdan biri başarısız olursa, Consumer bu özellik hiç var olmamış gibi çalışmaya devam eder ve Manager'ın bir sonraki açılışında otomatik olarak çalışan kurulum geneli dönüşüm onu tamamlar. Dizin ya da veritabanı senkronizasyonuyla yazılan kayıtlar bu adıma hiç girmez — bunlar yapıları gereği dış bir kimlik kaynağı taşır, dolayısıyla onlar için de zaten hiçbir şey türetilmez.
 
+## Yükseltmede Otomatik Taşıma {#yukseltmede-otomatik-tasima}
+
+:::info Operatör müdahalesi gerekmez
+Bu bölümde anlatılan taşıma, Manager yeni sürüme yükseltildiğinde **kendiliğinden** çalışır. Yukarıdaki Dry-Run/Uygula ve Secret Taşıma ekranlarını/uçlarını elle çalıştırmanıza gerek yoktur — kurulum genelindeki dönüşüm, Manager'ın HTTP dinleyicisi açılmadan önce, sırayla ve bir kez koşar.
+:::
+
+Manager yeni sürümle ilk açıldığında, aşağıdaki adımlar HTTP dinleyicisi açılmadan önce otomatik olarak koşar:
+
+1. **Kimlik** — kurulumdaki tüm eski kayıtlar için envanter kararı verilir (bkz. [Karar Değerleri](#karar-degerleri)), **Geçir** kararı alan her kayıt için bir API istemcisi ikizi oluşturulur, eski parola secret olarak taşınır ve istemci aktifleştirilir — yukarıda anlatılan Dry-Run/Uygula ve Secret Taşıma adımlarının kurulum geneli, otomatik hâli.
+2. **Erişim işareti** — erişim otoritesinin (API Proxy ACL / Group ACL satırları) taşınan kayıtlar için de geçerliliğini koruduğu kayıt defterine not edilir; bu adım başka bir şey yazmaz.
+3. **Limitler** — API Proxy ACL / Group ACL satırlarındaki ve Rate Limit Kontrol Listesi kayıtlarındaki legacy limitler, typed **Limit Planı + atama**ya taşınır. Ayrıntı için bkz. [Limit Planları → Yükseltmede Taşınan Legacy Limitler](/tr/ai-gateway/limit-planlari#yukseltmede-tasinan-legacy-limitler).
+4. **Portal** — her portal uygulamasının erişim izinleri onaylı aboneliklerinden yeniden türetilir ve abonelik planı atamaları geriye dönük doldurulur.
+5. **Consumer key damgası** — `consumerKey` alanı boş kalmış her kimlik bilgisine benzersiz bir anahtar üretilir.
+6. **Doğrulama ve günlük reconcile job** — tüm adımların sonucu tek bir koşu kaydında toplanır; bundan sonra **her gün 03:45'te** çalışan bir arka plan görevi (`LimitMigrationReconcileJob`), kayıt defterinde başarısız ya da eksik kalan kayıt varsa aynı adımları yeniden dener. Bu görev admin **job kataloğunda** kayıtlıdır — her açılışta eksikse yeniden kurulur, taşıma adımı sırasında zamanlayıcının kendisine erişilemese bile. Taşıma adımı sırasında ilgili servise hiç erişilemezse kayıt defterine bir **FAILED** koşu satırı yazılır; reconcile job bir sonraki gece aynı adımı yeniden dener. Taşıma tamamen yakınsadığında bu görev günde tek bir hafif kontrolden ibaret kalır.
+7. **Legacy parola temizliği** — **Etkin** durumda olup secret'ı başarıyla taşınmış her kimlik bilgisinin saklı `password` alanı, açılışta hemen değil, kimlik adımı tamamlandıktan **7 gün sonra** (varsayılan; `-Dapinizer.migration.legacyPasswordUnsetGraceDays=N` JVM özelliğiyle değiştirilebilir) yukarıdaki günlük reconcile job tarafından silinir; kullanıcı adı ve ortam detaylarındaki parolalar kalır. Bu bekleme süresinin nedeni, pencerede yeniden başlayan eski sürüm bir gateway pod'unun taşınmış kimlik bilgilerini doğrulayacak parolayı hâlâ bulabilmesidir — **tüm gateway'lerin bu süre içinde yükseltilmesi gerekir** (bkz. [Apinizer Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme)). Bu süre boyunca kayıt defteri bu adım için "deferred" notuyla 1 residual gösterir — bu normaldir. Secret taşıması başarısız olmuş ya da hâlâ Taslak'ta kalan kayıtların parolası dokunulmadan kalır — bu kayıtlar için eski yol yanıt vermeye devam eder.
+
+Her adım **kayıt başına hata-toleranslıdır** (bozuk tek bir kayıt adımı durdurmaz), **idempotenttir** (ikinci bir koşu sıfır yeni satır üretir) ve gateway'e senkron bir push yapmaz: taşıma sonucu ilgili worker'lara bir sonraki soğuk açılışta ya da dakikalık arka plan senkronizasyonuyla ulaşır.
+
+Her koşu, hangi adımın ne zaman, kaç kayıt üzerinde, hangi sonuçla çalıştığını iki kayıt defteri koleksiyonuna yazar: `api_client_migration_run` (adım etiketi, durum, sayaçlar içeren çalıştırma özeti) ve — yakınsamayan her kayıt için — `api_client_migration_row` (kayıt tipi/kimliği, sonuç, neden içeren kayıt bazlı satır). Bir sorun yaşandığında bu iki koleksiyon incelenerek hangi kaydın neden taşınamadığı görülebilir.
+
+:::warning Sayaçlar sıfırdan başlar, geri dönüş yok
+Legacy kota/daraltma sayaçları taşınmaz — typed atamaların sayaçları sıfırdan başlar. Taşıma için bir geri alma (rollback) mekanizması yoktur; yükseltmeden önce alınmış bir MongoDB yedeği tek geri dönüş yoludur (bkz. [Apinizer Sürüm Yükseltme](/tr/upgrade/apinizer-surum-yukseltme)).
+:::
+
 ## Yetkiler
 
 - **Görüntüleme**: Envanteri görüntülemek için kimlik yönetimi görüntüleme yetkisi yeterlidir.
