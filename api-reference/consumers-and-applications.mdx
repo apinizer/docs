@@ -1,0 +1,201 @@
+---
+title: "Consumers & Applications Management API"
+description: "Read a project's consumers and applications through the Management API, addressed by their consumer key or application key, and reach their API clients, access entitlements and limit assignments as sub-resources; suspend and resume an application without a separate write surface."
+---
+
+## Overview
+
+This page covers two owner-centric read surfaces of the Management API: **Consumers** (the platform's credential-based identities) and **Applications** (API Portal applications). Both expose bounded listing, one-record reads, and three sub-resources of a single owner — its API clients, its access entitlements, and its limit assignments — in the portable form the rest of the Management API uses. Applications additionally expose the two lifecycle actions the platform already implements as primitives: **suspend** and **resume**.
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and bounded pagination. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. The admin (platform) project has no consumers or applications of its own, so a platform-scoped call is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
+
+References on this surface are **portable** — no Mongo id ever crosses the boundary. A consumer is addressed by its `consumerKey`, an application by its `applicationKey`; organizations, API clients, entitlement targets and limit-assignment references are all echoed back in the stable, name-based form the rest of the Management API uses.
+
+:::info
+
+Creating, updating and deleting a consumer, and changing its password or certificate material, is **not** on this surface. Those operations stay on the existing [Credentials API](/api-reference/credentials), which addresses the same record by its `username`. A consumer's enabled flag is part of that surface's update body — there is no separate toggle here. This page is read-only for consumers.
+
+:::
+
+:::info
+
+An application has no create, update or delete endpoint here either, and no promote action. Archive, delete and promote are steps of the portal's maker-checker deletion/promotion approval flows, not standalone operations, so they have no place on an automation surface. **Suspend** and **resume** are the only write operations this page exposes for an application.
+
+:::
+
+## Endpoints
+
+### Consumers
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/consumers` | The project's consumers, by username by default; filterable by organization code, enabled flag and a username/full-name search |
+| `GET` | `/consumers/{consumerKey}` | One consumer, addressed by its consumer key; no secret material is ever included |
+| `GET` | `/consumers/{consumerKey}/api-clients` | Summary rows of the API clients owned by the consumer |
+| `GET` | `/consumers/{consumerKey}/entitlements` | Every access entitlement whose subject is the consumer |
+| `GET` | `/consumers/{consumerKey}/limit-assignments` | Every limit assignment whose subject is the consumer |
+
+`GET /consumers?organizationCode&enabledOnly&search&page&size&sort` sorts by `username,asc` by default; `sort` may also name `fullName` or `enabled`. `search` is a case-insensitive contains-match against username and full name.
+
+### Applications
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/applications` | The project's applications, by name by default; filterable by organization code, status and a name search |
+| `GET` | `/applications/{applicationKey}` | One application, addressed by its application key |
+| `GET` | `/applications/{applicationKey}/api-clients` | Summary rows of the API clients owned by the application |
+| `GET` | `/applications/{applicationKey}/entitlements` | Every access entitlement whose subject is the application |
+| `GET` | `/applications/{applicationKey}/limit-assignments` | Every limit assignment whose subject is the application |
+| `POST` | `/applications/{applicationKey}/actions/suspend` | Disable and withdraw the application's enabled credentials and re-push its API clients as suspended |
+| `POST` | `/applications/{applicationKey}/actions/resume` | Re-enable exactly the credentials the suspension disabled and re-push the application's API clients |
+
+`GET /applications?organizationCode&status&search&page&size&sort` sorts by `name,asc` by default; `sort` may also name `appStatus`. `status` is one of `ACTIVE`, `SUSPENDED`, `PENDING_DELETION`, `ARCHIVED`. `search` is a case-insensitive contains-match against the application name.
+
+### Suspend and resume
+
+Both actions are **idempotent**: suspending an already-suspended application, or resuming an already-active one, repeats safely and does not require an `Idempotency-Key` header — unlike the run-creating calls documented elsewhere on the Management API, there is no second run to deduplicate against, only a state to converge on.
+
+- **Suspend** disables and un-deploys every credential of the application that is currently enabled, and records exactly those credentials so resume can restore precisely what suspend paused. Every record — subscriptions, credentials, analytics — is kept; no traffic passes until the application is resumed.
+- **Resume** re-enables and re-deploys only the credentials that the matching suspend disabled, so a credential that was independently revoked in the meantime stays revoked.
+
+Neither action takes a request body.
+
+## Response
+
+### Consumer — `200`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `consumerKey` | string | Opaque public key — the identifier this surface addresses the consumer by |
+| `username` | string | The consumer's username — the identifier the [Credentials API](/api-reference/credentials) addresses the same record by |
+| `fullName` | string | Display name |
+| `email` | string | |
+| `description` | string | |
+| `enabled` | boolean | |
+| `organizationCode` | string | The consumer's organization, by code — absent when the consumer belongs to none |
+| `expireDate` | timestamp | |
+
+No secret, certificate or token-setting field ever appears here — those stay on the [Credentials API](/api-reference/credentials).
+
+### Application — `200`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `applicationKey` | string | Opaque public key — the identifier this surface addresses the application by |
+| `name` | string | |
+| `referenceId` | string | The API Portal's own portable identity of the same record |
+| `applicationKind` | enum | `PORTAL` (an ordinary consumer application) or `INTERNAL` (an administrator-created, first-party application, invisible on every portal-facing surface) |
+| `appStatus` | enum | `ACTIVE` \| `SUSPENDED` \| `PENDING_DELETION` \| `ARCHIVED` |
+| `description` | string | |
+| `organizationCode` | string | The application's organization, by code — absent when the application belongs to none |
+| `created` | timestamp | |
+| `lifecycleRevision` | integer | Monotonic counter, bumped on every operational state change (suspend, resume, deletion submit/cancel/reject, archive) — lets a caller tell whether anything happened since it last read the application |
+
+### API client summary (sub-resource) — `200`, array
+
+Returned by `GET .../api-clients` for either owner. Identity and state only — never secret material. See the [API Clients API](/api-reference/api-clients) for the full client shape and its lifecycle.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `apiClientKey` | string | Opaque public key |
+| `clientId` | string | The client's OAuth2 client id |
+| `name` | string | |
+| `operationalState` | enum | `DRAFT` \| `ACTIVE` \| `SUSPENDED` \| `REVOKED` — whether the operator currently allows this client to be used at all |
+| `readiness` | enum | `READY` \| `PENDING_SECRET` \| `UNRESOLVED_DEPENDENCY` — whether the client actually has what it needs to authenticate |
+| `validFrom` / `expiresAt` | timestamp | Validity window |
+| `version` | integer | |
+
+### Access entitlement (sub-resource) — `200`, array
+
+Returned by `GET .../entitlements` for either owner. Every entitlement whose subject is that consumer or application.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `entitlementKey` | string | Opaque public key |
+| `subjectType` | enum | `CONSUMER` or `APPLICATION` — matches the owner this row was read under |
+| `subjectKey` | string | The owner's own public key (`username` for a consumer, `name` for an application) |
+| `targetType` | enum | What the grant is for: `API_PROXY`, `API_PROXY_GROUP`, `API_PRODUCT`, or `API_PROXY_ENV` |
+| `targetRef` | string | The target's stable, portable reference |
+| `environmentRef` | string | Present only when `targetType` is `API_PROXY_ENV` |
+| `status` | enum | `DRAFT` \| `ACTIVE` \| `ENDED` |
+| `validFrom` / `validUntil` | timestamp | |
+| `source` | enum | `LEGACY_CAP` \| `MANUAL` \| `IMPORT` \| `PORTAL` \| `MIGRATION` — where the row came from |
+| `version` | integer | |
+| `assignedAt` / `assignedBy` | timestamp / string | |
+| `endedAt` / `endedBy` / `endedReason` | timestamp / string / string | Present only once the entitlement has ended |
+
+### Limit assignment (sub-resource) — `200`, array
+
+Returned by `GET .../limit-assignments` for either owner: every limit assignment whose subject is that consumer or application, in the same portable shape the [Limit Assignments Management API](/api-reference/limit-assignments) and the [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) use — see those pages for the full field reference (target shape, rule content, custom message settings) and for [Limit Plans](/en/ai-gateway/limit-plans) for the underlying concepts. The row's `subject.type` is `CONSUMER` or `APPLICATION` and `subject.key` echoes the owner's own public key; `bindingKey` is the assignment's own opaque public key.
+
+### List envelope — `200`
+
+`GET /consumers` and `GET /applications` both return the shared paged envelope:
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 42,
+  "totalPages": 3,
+  "sort": ["username,asc"]
+}
+```
+
+`size` defaults to 20 and is capped at 200 (see [Common Contract → Pagination](/api-reference/apiops-common-contract)).
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The admin (platform) project was addressed (`params.reason = platformScopeNotSupported`), an `organizationCode` filter did not resolve, or a malformed `sort` value was sent |
+| `resourceNotFound` | An unknown `consumerKey` / `applicationKey`, or an unknown `organizationCode` |
+| `unsupportedSortField` | `sort` named a field this surface does not sort on |
+| `permissionDenied` | Authenticated, but the caller lacks the **Identity** permission at **View** (reads) or **Manage** (suspend/resume) |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require the **Identity** permission at **View**; the two application actions (`POST .../actions/suspend`, `POST .../actions/resume`) require it at **Manage**.
+- No license module is required for anything on this page.
+- The admin (platform) project has no consumers or applications and is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`) — both surfaces are always project-scoped.
+- A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+
+## Example
+
+List a project's enabled consumers in one organization, read one consumer's entitlements, then suspend and resume an application:
+
+```bash
+# 1. List enabled consumers in an organization, sorted by full name
+curl "https://apinizer.example.com/apiops/projects/finance/consumers?organizationCode=acme-partners&enabledOnly=true&sort=fullName,asc" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 2. One consumer's access entitlements
+curl "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/entitlements" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. List applications pending deletion review
+curl "https://apinizer.example.com/apiops/projects/finance/applications?status=PENDING_DELETION" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. Suspend an application — idempotent, no Idempotency-Key needed
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/actions/suspend" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 5. Resume it once the review is done
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/actions/resume" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Related Documentation
+
+- [Credentials API](/api-reference/credentials) - Create, update, delete and manage the secret material of a consumer, addressed by `username`
+- [API Clients API](/api-reference/api-clients) - The full API client shape and lifecycle behind the `api-clients` sub-resource on this page
+- [Limit Assignments Management API](/api-reference/limit-assignments) - The full field reference behind the `limit-assignments` sub-resource on this page
+- [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) - Attach one limit assignment to a large, filtered population of consumers or applications in a single run
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, pagination, and status-code rules every endpoint on this page follows

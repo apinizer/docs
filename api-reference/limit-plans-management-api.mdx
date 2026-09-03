@@ -1,0 +1,313 @@
+---
+title: "Limit Plans Management API"
+description: "Manage the Request Rate and AI Token Budget limit plan catalog through the Management API: create a plan, open and edit its draft revisions, publish, retire, and delete a never-published draft — all addressed by portable, name-based references, at either project scope or the installation-wide platform scope."
+---
+
+## Overview
+
+A limit plan is a reusable catalog entry a limit assignment can point at instead of carrying its own numbers: draft it, publish a revision, and every assignment that references the plan resolves to that published rule. This page documents the Management API surface for that catalog, the portable counterpart of the manager's own [Limit Plans REST endpoints](/api-reference/limit-plans). For the concepts behind it — plan lifecycle, the revision ladder, and what each family carries — see [Limit Plans](/en/ai-gateway/limit-plans).
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, bounded pagination, and `Idempotency-Key` on plan creation. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`.
+
+References are **portable** — no Mongo id ever crosses the boundary. A plan is always addressed by its `planKey`, minted by the server and returned in the response; revisions are addressed by their plan's `planKey` plus a plain revision number.
+
+### Platform scope (`projectName=admin`) {#platform-scope}
+
+`projectName` names the plan's owning scope. The special **admin** project — reachable only by a system administrator — addresses the installation-wide **platform** catalog instead of one project's own: the plans every project can bind to but only the platform can edit.
+
+Reads and writes by `planKey` (`GET`/`PUT`/`DELETE .../{planKey}`, every revision endpoint, publish, retire) are scoped **strictly** to the calling project — a project-scoped call can never resolve a platform-only `planKey` this way, even though `GET /limit-plans?includePlatform=true` surfaces it in a **list**. Reaching a platform plan by key requires calling through the `admin` project.
+
+`GET /limit-plans?includePlatform=true` adds the platform's plans to a project's own listing; they come back with `platformScoped: true`, read-only from that project.
+
+## Endpoints
+
+### Plans
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/limit-plans` | List the scope's plans, sortable by name, family, or lifecycle |
+| `POST` | `/limit-plans` | Create a plan with its first DRAFT revision (`201` + `Location`) |
+| `GET` | `/limit-plans/{planKey}` | One plan's descriptive metadata and lifecycle |
+| `PUT` | `/limit-plans/{planKey}` | Update a plan's name, description, or labels (not its rule body) |
+| `DELETE` | `/limit-plans/{planKey}` | Delete a plan that has never been published (`204`) |
+
+### Revisions
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/limit-plans/{planKey}/revisions` | Every revision of the plan, oldest first |
+| `GET` | `/limit-plans/{planKey}/revisions/{revision}` | One revision, rule spec included |
+| `GET` | `/limit-plans/{planKey}/draft` | The open DRAFT revision (`404` when there is none) |
+| `GET` | `/limit-plans/{planKey}/published` | The currently published revision (`404` when never published) |
+| `POST` | `/limit-plans/{planKey}/draft-revisions` | Open a new draft revision (`201` + `Location`) |
+| `PUT` | `/limit-plans/{planKey}/draft-revisions/{revision}` | Replace an open draft revision's rule spec |
+| `POST` | `/limit-plans/{planKey}/revisions/{revision}/actions/publish` | Publish a draft revision |
+| `POST` | `/limit-plans/{planKey}/actions/retire` | Retire the plan |
+
+### List plans
+
+`GET /limit-plans?family&includePlatform&page&size&sort` sorts by `name,asc` by default, tie-broken by `planKey`; `sort` may also name `family` or `lifecycle`. A `sort` naming any other field is `400 unsupportedSortField` (`params.supported` lists the three). `family` narrows the listing to one family; `includePlatform=true` is described under [Platform scope](#platform-scope) above.
+
+### Publish
+
+Publishing makes the named DRAFT revision the plan's published rule; assignments referencing the plan are recompiled and re-pushed.
+
+### Retire
+
+Retiring closes the plan to new assignments; assignments that already reference it keep applying its published rule until they end. It does not remove or undeploy anything already running — see [Limit Plans](/en/ai-gateway/limit-plans) for the concept.
+
+### Delete a draft plan
+
+`DELETE /limit-plans/{planKey}` only ever removes a plan that has **never** been published — its lifecycle is still DRAFT, its `currentPublishedRevision` is `0`, and no revision under it has left DRAFT status — **and** that no limit assignment references. A plan that fails either condition is refused with `409 lifecycleConflict`; publish is one-way, so correcting a published plan means opening a new draft revision under it (see [Limit Plans](/en/ai-gateway/limit-plans)) rather than deleting it.
+
+## Idempotency
+
+`POST /limit-plans` requires an `Idempotency-Key` header (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)); a missing or blank header is `400 idempotencyKeyRequired`. The key is claimed per scope and per operation, together with a canonical hash of the request body:
+
+| Situation | Result |
+|---|---|
+| New key | The plan is created |
+| Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the plan key the first call created; read it with `GET .../{planKey}` instead |
+| Same key, same body, first call still in flight | `409 idempotencyInProgress` |
+| Same key, a different body | `409 idempotencyKeyReused` |
+
+A claim whose underlying call failed is released, so the same key may be retried once the cause is fixed. A create at platform scope (through the `admin` project) claims its key under that same scope, separately from any project's own claims.
+
+Every other write on this page — opening or replacing a draft revision, publishing, retiring, deleting — is naturally idempotent through the plan's own optimistic version or revision status, and takes no `Idempotency-Key`.
+
+## Request Body
+
+### Create a plan — `POST /limit-plans`
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `family` | enum | Yes | `REQUEST_RATE` or `AI_TOKEN_BUDGET` — immutable after creation |
+| `name` | string | Yes | Editable later with `PUT` |
+| `nameTr` | string | No | Turkish display name |
+| `description` | string | No | |
+| `labels` | string[] | No | Free-form tags |
+| `initialRuleSpec` | object | **Yes in practice** | The first draft revision's rule body — see [Rule Spec](#rule-spec) below |
+
+`initialRuleSpec` is nullable on the wire, but the plan is always born with a first DRAFT revision, so a create that omits it is refused the same way an empty draft revision would be — `400 malformedRequest` (`params.reason = limit.plan.ruleSpecRequired`).
+
+The name is unique per scope and family, not globally: creating a plan whose `family` + `name` combination already exists in the target scope is `409 lifecycleConflict` (`params.reason = limit.plan.nameAlreadyExists`). The `planKey` is minted from the name and checked for a collision before the plan is saved, so its own conflict (`params.reason = limit.plan.keyAlreadyExists`) is only reachable under an actual race between two concurrent creates for the same name.
+
+### Update a plan's metadata — `PUT /limit-plans/{planKey}` {#update-a-plans-metadata}
+
+Only the plan's descriptive half is editable this way — its `family`, `planKey`, and owning scope are immutable, and its rule body lives in revisions, not here.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `name` | string | Yes | |
+| `nameTr` | string | No | |
+| `description` | string | No | |
+| `labels` | string[] | No | Replaces the stored list |
+| `version` | integer | **Yes in practice** | The version last read from the plan |
+
+`version` is nullable on the wire but required in practice: a plan's version starts at `1` on creation and only increases, while an omitted `version` defaults to `0` on the wire — so omitting it is always refused as `409 lifecycleConflict` (`params.reason = limit.plan.staleVersion`). Sending an explicit `version` that no longer matches the stored plan is `409 versionConflict` instead (see [Common Contract → Optimistic concurrency](/api-reference/apiops-common-contract#optimistic-concurrency)). Always send the `version` your last read of the plan returned.
+
+### Rule Spec
+
+`POST /limit-plans/{planKey}/draft-revisions` and `PUT /limit-plans/{planKey}/draft-revisions/{revision}` share one body:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `ruleSpec` | object | Yes | The revision's rule body — exactly one of the two arms below, matching the plan's `family` |
+| `changeReason` | string | No | Recorded on the revision; also accepted (optional) by the publish call |
+
+A `ruleSpec` that is missing, that carries both arms, or that carries the arm for the wrong family, is `400 malformedRequest` — missing is `params.reason = limit.plan.ruleSpecRequired`, the wrong/extra arm is `params.reason = limit.plan.ruleSpecFamilyMismatch`.
+
+#### Request Rate arm — `ruleSpec.requestRate`
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `windows` | array | Yes, non-empty | One ceiling per time window — see below |
+| `overflowAction` | enum | No | `BLOCK` (default when absent) refuses the request once a window is exhausted; `COUNT_ONLY` lets it through and keeps counting |
+
+Each entry of `windows`:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `permittedMessageCount` | integer | Yes, `>= 1` | The ceiling for this window |
+| `interval` | enum | Yes | `ONE_SECOND` \| `ONE_MINUTE` \| `ONE_HOUR` \| `ONE_DAY` \| `ONE_MONTH` |
+| `periodLength` | integer | No, `>= 1` | How many of `interval` make up one window (e.g. `interval=ONE_HOUR`, `periodLength=6` is a 6-hour window) |
+| `windowType` | enum | No | `FIXED` or `SLIDING` |
+| `countingMode` | enum | No | `ALL_REQUESTS` counts a request even when it is the one that gets blocked; `ACCEPTED_ONLY` counts only requests that reached the backend |
+
+No default is filled in on unset optional fields here — they are read back exactly as sent, absent members included.
+
+#### AI Token Budget arm — `ruleSpec.aiBudget`
+
+The same budget shape the [Update Budget](/api-reference/ai-budgets/update-budget#budget-object-fields) endpoint documents in full — `enabled`, `tokensPerHour`/`tokensPerMinute`/`tokensPerDay`/`tokensPerMonth`, `monthlyBudgetUsd`/`usdPerHour`/`usdPerDay`, `softCapPercents`, `hardCapPercent`, `overflowAction` (`BLOCK` \| `FAILOVER` \| `ALERT_ONLY` \| `CHEAPER_MODEL`), `cheaperModelId`, and the per-model/per-provider override lists `modelBudgets`/`providerBudgets`. See that page's field tables — the shape carried inline in a plan revision is identical to the one that endpoint accepts.
+
+## Response
+
+### Plan — `200`/`201`
+
+The shape returned by every plan endpoint that answers with a body (`GET`/`POST`/`PUT .../{planKey}`, `retire`); `DELETE` answers `204` with no body.
+
+```json
+{
+  "planKey": "standard-100rps",
+  "family": "REQUEST_RATE",
+  "name": "Standard 100 rps",
+  "nameTr": "Standart 100 rps",
+  "description": "Default tier for partner API clients",
+  "labels": ["partner", "tier-1"],
+  "lifecycle": "PUBLISHED",
+  "currentPublishedRevision": 2,
+  "platformScoped": false,
+  "retiredAt": null,
+  "retiredBy": null,
+  "version": 3
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `planKey` | string | Opaque public key, minted at creation |
+| `family` | enum | `REQUEST_RATE` or `AI_TOKEN_BUDGET` |
+| `name` / `nameTr` / `description` / `labels` | string / string / string / string[] | Descriptive metadata |
+| `lifecycle` | enum | `DRAFT` \| `PUBLISHED` \| `RETIRED` |
+| `currentPublishedRevision` | integer | `0` until the first publish |
+| `platformScoped` | boolean | `true` when this plan lives in the platform catalog rather than a project's own |
+| `retiredAt` / `retiredBy` | timestamp / string | Set once `retire` has been called |
+| `version` | integer | The optimistic-concurrency token for `PUT`'s `version` field |
+
+### Revision — `200`/`201`
+
+The shape returned by every revision endpoint (`GET .../revisions/{revision}`, `.../draft`, `.../published`, `POST`/`PUT .../draft-revisions`, `publish`), and each row of `GET .../revisions`:
+
+```json
+{
+  "planKey": "standard-100rps",
+  "revision": 2,
+  "status": "PUBLISHED",
+  "ruleSpec": {
+    "requestRate": {
+      "windows": [
+        { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
+      ],
+      "overflowAction": "BLOCK"
+    }
+  },
+  "semanticChecksum": "9f2a7c1e4b3d",
+  "changeReason": "Raised the per-second ceiling for the new partner tier",
+  "publishedAt": "2026-09-01T09:30:00Z",
+  "publishedBy": "jane.doe"
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `planKey` | string | The owning plan |
+| `revision` | integer | An opaque public sequence number, starting at `1` |
+| `status` | enum | `DRAFT` \| `PUBLISHED` \| `SUPERSEDED` |
+| `ruleSpec` | object | See [Rule Spec](#rule-spec) above |
+| `semanticChecksum` | string | Pins the exact body a `PUBLISHED`/`SUPERSEDED` revision carries — a published revision is never rewritten |
+| `changeReason` | string | Set by the caller when opening/editing the draft, or by `publish` |
+| `publishedAt` / `publishedBy` | timestamp / string | Set once this revision has been published |
+
+`GET /limit-plans/{planKey}/revisions` returns a plain array of this shape — **not** the paged envelope the plan list uses. A plan's revision history is bounded by how many times it has been redrafted, small enough that this endpoint does not page it.
+
+### List envelope — `200`
+
+`GET /limit-plans` returns the shared paged envelope (see [Common Contract → Pagination](/api-reference/apiops-common-contract#pagination)):
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 12,
+  "totalPages": 1,
+  "sort": ["name,asc"]
+}
+```
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The body could not be understood or was left empty (`params.reason = bodyRequired`), the plan is missing its `family` (`params.reason = limit.plan.familyRequired`) or `name` (`params.reason = limit.plan.nameRequired`), or a rule spec is missing (`params.reason = limit.plan.ruleSpecRequired`) or carries the wrong/extra arm for the plan's family (`params.reason = limit.plan.ruleSpecFamilyMismatch`) |
+| `resourceNotFound` | An unknown `planKey` (`params.reason = limit.plan.notFound`) — including a project-scoped call naming a platform-only `planKey`, see [Platform scope](#platform-scope) — or an unknown revision number: `GET .../revisions/{revision}`, `.../draft`, and `.../published` answer with no `params.reason` (`params.revision` carries the number, or `"draft"`/`"published"`), while a bad revision number on `PUT .../draft-revisions/{revision}` or the publish call carries `params.reason = limit.plan.revisionNotFound` |
+| `versionConflict` | `PUT .../{planKey}`'s `version` field no longer matches the stored plan |
+| `lifecycleConflict` | `params.reason` names the service cause: `limit.plan.staleVersion` (see the `version` note under [Update a plan's metadata](#update-a-plans-metadata) above), `limit.plan.draftAlreadyExists` (the plan already has an open draft), `limit.plan.publishConflict` (the named revision is no longer publishable), `limit.plan.revisionNotDraft` (editing a revision that already left DRAFT), `limit.plan.notPublished` (retiring a plan that was never published), `limit.plan.notDraft` (deleting a plan that has been published), `limit.plan.retired` (drafting or publishing under a retired plan), `limit.plan.inUseByBinding` (deleting a plan a live assignment references), `limit.plan.nameAlreadyExists` / `limit.plan.keyAlreadyExists` (duplicate within the scope), or `limit.plan.keyImmutable` / `limit.plan.familyImmutable` / `limit.plan.projectImmutable` (an immutable field was sent on update) |
+| `idempotencyKeyRequired` | `POST /limit-plans` was missing its `Idempotency-Key` header |
+| `idempotencyKeyReused` | The same key was sent with a different request body |
+| `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the plan it created |
+| `idempotencyInProgress` | The same key and body's first call is still running |
+| `permissionDenied` | Authenticated, but the caller lacks Identity/AI Budgets **Manage** (writes) or **View** (reads) |
+| `licenseModuleNotEnabled` | An `AI_TOKEN_BUDGET` plan was created or written without the AI Gateway license module — reads are not gated by the license, only writes |
+| `unsupportedSortField` | `sort` on `GET /limit-plans` named a field other than `name`, `family`, or `lifecycle` |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`/`PUT`/`DELETE`) require it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
+- Every **write** on an `AI_TOKEN_BUDGET` plan — create, metadata update, draft revision, publish, retire, delete — additionally requires the **AI Gateway** license module, checked **after** authentication so an anonymous caller cannot use it to enumerate paid modules; reading an `AI_TOKEN_BUDGET` plan is not license-gated. `REQUEST_RATE` needs no license module at all.
+- Writing a platform-scope plan (any endpoint through the `admin` project) is restricted to a system administrator, the same rule the rest of the manager's admin-scoped endpoints follow.
+- A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+
+## Example
+
+Create a plan with its first draft, publish it, then open a second draft with a raised ceiling:
+
+```bash
+# 1. Create — requires Idempotency-Key; born with its first DRAFT revision
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-plans" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6f1a9c3e-2d4b-4a7c-9e1f-8b3a1d5e7c40" \
+  -d '{
+    "family": "REQUEST_RATE",
+    "name": "Standard 100 rps",
+    "description": "Default tier for partner API clients",
+    "labels": ["partner", "tier-1"],
+    "initialRuleSpec": {
+      "requestRate": {
+        "windows": [
+          { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
+        ],
+        "overflowAction": "BLOCK"
+      }
+    }
+  }'
+# 201 Created, Location: /apiops/projects/finance/limit-plans/standard-100rps
+
+# 2. Publish the first (and only) draft revision
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-plans/standard-100rps/revisions/1/actions/publish" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "changeReason": "Initial publish" }'
+
+# 3. Open a new draft revision with a raised ceiling
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-plans/standard-100rps/draft-revisions" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ruleSpec": {
+      "requestRate": {
+        "windows": [
+          { "permittedMessageCount": 150, "interval": "ONE_SECOND" }
+        ],
+        "overflowAction": "BLOCK"
+      }
+    },
+    "changeReason": "Raised the per-second ceiling for the new partner tier"
+  }'
+# 201 Created, Location: /apiops/projects/finance/limit-plans/standard-100rps/revisions/2
+```
+
+## Related Documentation
+
+- [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) - The manager's own REST surface behind Limit Plans, including plan CRUD and the same revision ladder
+- [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) - Attach a published plan to a large, filtered population of subjects in one run
+- [Limit Plans](/en/ai-gateway/limit-plans) - The manager UI screens and concepts this surface backs
+- [Update Budget](/api-reference/ai-budgets/update-budget) - Full field reference for the AI Token Budget shape reused inline by this page's `aiBudget` arm
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, pagination, and status-code rules every endpoint on this page follows
+- [Error Handling](/api-reference/getting-started/error-handling) - The envelope used by the manager's older endpoints

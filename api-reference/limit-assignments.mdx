@@ -1,0 +1,232 @@
+---
+title: "Limit Assignments Management API"
+description: "Manage a single Request Rate or AI Token Budget limit assignment through the Management API: you can list, read, create, update, activate, end, and validate one subject's assignment at a time, addressing every subject, plan, proxy, group, and environment by its portable, name-based reference instead of an internal id."
+---
+
+## Overview
+
+This is the single-assignment counterpart of the [Bulk Limit Assignment API](/api-reference/limit-assignment-runs): instead of attaching one assignment to a large, filtered population in a run, it creates, reads, updates, activates, ends, and validates **one** assignment at a time. It documents the Management API surface for the manager's own [Limit Assignments REST endpoints](/api-reference/limit-plans) (`/api/limit-bindings`) — the same lifecycle (`DRAFT` → `ACTIVE` → `ENDED`, no delete — ending is the removal), addressed portably instead of by internal id.
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and bounded pagination. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. Assignments are project-owned (their subjects are consumers, clients, applications, organizations, proxies, or rules of a project), so the admin (platform) project has no subjects of its own and a platform-scoped call is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
+
+References on this surface are **portable** — no Mongo id ever crosses the boundary. A subject is addressed by the public key its type is already known by (a consumer's `username`, an API client's `clientId`, an application's `name`, an organization's `code`, an API proxy's `name`); a `PROJECT` or `PLATFORM` subject carries no key at all, and an `AUDIENCE_RULE` subject is identified by the assignment itself. Plans, proxies, groups, and environments are addressed by name the same way. An unknown reference is `404 resourceNotFound` naming the field.
+
+**Not exposed here**: the operator override pin/release (a Manager-screen recovery control that marks a row so a portal-subscription sync will not re-point it) and the covering-API-proxy / referencing-plan lookups (screen conveniences) — a pipeline reads the assignments it needs through the list filters instead.
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/limit-assignments` | List the project's assignments, newest first by default |
+| `GET` | `/limit-assignments/{bindingKey}` | One assignment by its key |
+| `POST` | `/limit-assignments` | Create an assignment (`201` + `Location`) |
+| `PUT` | `/limit-assignments/{bindingKey}` | Replace an assignment's editable content |
+| `POST` | `/limit-assignments/{bindingKey}/actions/activate` | Move a `DRAFT` assignment to `ACTIVE` |
+| `POST` | `/limit-assignments/{bindingKey}/actions/end` | Move an `ACTIVE` assignment to `ENDED` |
+| `POST` | `/limit-assignments/actions/validate` | Run every save-time rule without writing anything |
+
+### List assignments
+
+`GET /limit-assignments?family&status&subjectType&subjectKey&page&size&sort` sorts by `assignedAt,desc` by default; `sort` may also name `status` or `family`. `size` is capped at 200 (see [Common Contract → Pagination](/api-reference/apiops-common-contract#pagination)). `subjectKey` narrows to one subject and requires `subjectType` alongside it — a `subjectKey` without a `subjectType` is `400 malformedRequest` (`params.field = subjectType`, `params.reason = subjectKeyRequiresSubjectType`). An absent `status` returns every status, drafts and ended rows included. When present, `subjectKey` carries the subject's public key in the same per-type convention as [Subject](#subject) below — a consumer's `username`, an API client's `clientId`, an application's `name`, an organization's `code`, an API proxy's `name` — with one exception: for `subjectType=AUDIENCE_RULE` the subject is the assignment itself, so `subjectKey` is that assignment's own `bindingKey` and filters directly on it. For `PLATFORM`/`PROJECT`, `subjectKey` is ignored, since neither subject type carries a key of its own.
+
+### Update, activate, end
+
+**Update** (`PUT`) replaces the editable content of a `DRAFT` or `ACTIVE` assignment — `mode`, plan keys or custom rule, `audienceRule`, the enforcement posture, and the validity window. The subject, family, and target are the row's active-scope identity and cannot be changed this way; changing them means ending the assignment and creating a new one. The body's `version` is optional but, when present, must match the stored one, or the call is refused with `409 versionConflict`.
+
+**Activate** turns a `DRAFT` assignment live and pushes it to the running environments; it is refused with `409 lifecycleConflict` (`params.reason = limit.binding.notDraft`) on a row that is not `DRAFT`. **End** withdraws an `ACTIVE` assignment and records why; it is refused with `409 lifecycleConflict` (`params.reason = limit.binding.notActive`) on a row that is not `ACTIVE`, or `limit.binding.alreadyEnded` on one that already is. Both actions take an optional `version` in the body, fencing the same conditional write the required status already fences: when the row's status still matches but its `version` has moved on, the refusal is `409 lifecycleConflict` (`params.reason = limit.binding.versionConflict`) — not the top-level `versionConflict` key `PUT` uses.
+
+Both are naturally idempotent through the row's own optimistic `version` and take no `Idempotency-Key`.
+
+## Idempotency
+
+`POST /limit-assignments` requires an `Idempotency-Key` header (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)); a missing or blank header is `400 idempotencyKeyRequired`. The key is claimed per project and per operation, together with a canonical hash of the request body:
+
+| Situation | Result |
+|---|---|
+| New key | The assignment is created |
+| Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the assignment key the first call created; read it with `GET .../{bindingKey}` instead |
+| Same key, same body, first call still in flight | `409 idempotencyInProgress` |
+| Same key, a different body | `409 idempotencyKeyReused` |
+
+A claim whose underlying call failed is released, so the same key may be retried once the cause is fixed. `PUT`, the two lifecycle actions, and `actions/validate` take no `Idempotency-Key` — the update is fenced by `version` instead, and the two actions are fenced by both `version` and the row's current status (see [Update, activate, end](#update-activate-end) above).
+
+## Request Body
+
+`POST` and `PUT /limit-assignments/{bindingKey}` share one body:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `subject` | object | The assignment's owner — see [Subject](#subject) below. Immutable after create |
+| `content` | object | The assignment itself: family, actor scope, target, plan keys or custom rule, posture, validity — see [Content](#content) below |
+| `audienceRule` | object | Required when `subject.type` is `AUDIENCE_RULE`, forbidden otherwise — see [Audience rule](#audience-rule) below |
+| `status` | enum | **Create only.** `DRAFT` (default) or `ACTIVE`; `ENDED` is refused with `409 lifecycleConflict` (`params.reason = limit.binding.statusNotCreatable`) |
+| `version` | integer | **Update only**, as the optimistic-concurrency token — see [Update, activate, end](#update-activate-end) above |
+
+### Subject
+
+The portable owner reference:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | enum | `PLATFORM` \| `PROJECT` \| `ORGANIZATION` \| `CONSUMER` \| `APPLICATION` \| `API_CLIENT` \| `API_PROXY` \| `AUDIENCE_RULE` — required |
+| `key` | string | The subject's public key in the type's own convention: a consumer's `username`, an API client's `clientId`, an application's `name`, an organization's `code`, an API proxy's `name`. Absent for `PLATFORM`/`PROJECT` (the scope is the project in the path, or the installation) and for `AUDIENCE_RULE` (its key is minted by the server and echoed back as the assignment's own `bindingKey` on read) |
+
+A `key` that resolves to no subject is `404 resourceNotFound` (`params.subjectType`, `params.subject`). Which `actorScope` values a subject type may carry, and which of `ORGANIZATION`/`CONSUMER`/`APPLICATION`/`API_CLIENT` may hold two live assignments that differ only by `actorScope`, is the same matrix the manager surface documents — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
+
+### Content
+
+The same shape the [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) carries as its run content — see [Content](/api-reference/limit-assignment-runs#content) and [Target](/api-reference/limit-assignment-runs#target) there for the full field-by-field reference (`family`, `actorScope`, `target`, `planKeys`, `customRuleSpec`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, the three `customMessage*` fields, `validFrom`/`validUntil`).
+
+One difference: on this surface `mode` may additionally be `INHERIT` (explicitly opt this subject into the nearest enabled ancestor default) or `OFF` (this subject contributes no local bucket of its own — ancestor ceilings still apply), on top of `PLAN` and `CUSTOM`. See [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) for what each mode requires and forbids.
+
+A plan key that resolves to no plan is `404 resourceNotFound` (`params.plan`); a retired or unpublished plan is `409 lifecycleConflict` (`params.reason = limit.binding.planRetired` / `limit.binding.planNotPublished`). `AI_TOKEN_BUDGET` content is refused with `403 licenseModuleNotEnabled` when the project's license does not include the AI Gateway module — checked **after** authentication.
+
+### Audience rule
+
+Required when `subject.type` is `AUDIENCE_RULE`, forbidden for every other subject type (`400 malformedRequest`, `params.reason = limit.binding.audienceRuleShape`). Unlike `target`, this is content — it **can** be changed by `PUT`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `identitySource` | enum | `AUTH_RESOLVED` (default) or `VARIABLE` |
+| `variableId` | string | The global `Variable`'s id — required when `identitySource` is `VARIABLE` |
+| `operator` | enum | A comparison operator (`EQ`, `CONTAINS`, `STARTS_WITH`, `IN`, …) — required |
+| `value` | string | Required |
+| `outOfTargetAction` | enum | `BLOCK` (default) or `GENERAL_QUOTA` |
+| `generalQuotaMode` | enum | `TOTAL` (default) or `PER_IDENTITY` — read only when `outOfTargetAction` is `GENERAL_QUOTA` |
+| `generalQuotaWindows` | array | At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA` |
+
+`content.family` must be `REQUEST_RATE` for an `AUDIENCE_RULE` subject — there is no rule-based assignment for the AI Token Budget family; `AI_TOKEN_BUDGET` on an `AUDIENCE_RULE` subject is `400 malformedRequest` (`params.reason = limit.binding.audienceRuleFamily`).
+
+## Response
+
+### Assignment — `200` / `201`
+
+The shape every read and write endpoint on this page returns:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `bindingKey` | string | Opaque public id — also the subject key echoed for an `AUDIENCE_RULE` subject |
+| `subject` | object | The portable [Subject](#subject) reference |
+| `family` | enum | `REQUEST_RATE` or `AI_TOKEN_BUDGET` |
+| `actorScope` | enum | `ANY` \| `AUTHENTICATED` \| `ANONYMOUS` |
+| `target` | object | The [Target](/api-reference/limit-assignment-runs#target) this assignment narrows to |
+| `mode` | enum | `PLAN` \| `CUSTOM` \| `INHERIT` \| `OFF` |
+| `planKeys` | string[] | Published plan keys, when `mode` is `PLAN` |
+| `customRuleSpec` | object | The inline rule body, when `mode` is `CUSTOM` |
+| `audienceRule` | object | The [Audience rule](#audience-rule), when `subject.type` is `AUDIENCE_RULE` |
+| `cacheErrorHandlingType` / `cacheConnectionTimeoutInSeconds` / `showRateLimitStatisticsInResponseHeader` | enum / integer / boolean | Enforcement posture — Request Rate only |
+| `customMessageTemplate` / `customMessageContentType` / `customMessageHttpStatusCode` | string / string / integer | The custom limit-exceeded message, when set — Request Rate only |
+| `source` | enum | How this row came to exist: `MANUAL` \| `CREATION_DEFAULT` \| `BULK` \| `MIGRATION` \| `IMPORT` \| `PORTAL_SUBSCRIPTION` |
+| `status` | enum | `DRAFT` \| `ACTIVE` \| `ENDED` |
+| `validFrom` / `validUntil` | timestamp | Optional validity window |
+| `assignedAt` / `assignedBy` | timestamp / string | When the row was created, and by whom |
+| `endedAt` / `endedBy` / `endedReason` | timestamp / string / string | Present once `status` is `ENDED` |
+| `operatorOverride` | boolean | Whether an operator has pinned this row against a portal-subscription resync |
+| `version` | integer | The optimistic-concurrency token for `PUT` and the two lifecycle actions |
+| `bulkRunId` | string | Present when `source` is `BULK` — the run that wrote this row |
+| `replacedBindingKey` | string | Present when this row replaced an earlier one under a bulk run's **Replace** conflict policy |
+
+### List envelope — `200`
+
+`GET /limit-assignments` returns the shared paged envelope — see [Common Contract → Pagination](/api-reference/apiops-common-contract#pagination):
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 42,
+  "totalPages": 3,
+  "sort": ["assignedAt,desc"]
+}
+```
+
+### Validate — `200`
+
+`POST /limit-assignments/actions/validate` returns `200` with an empty body when the assignment would be accepted, and `400 malformedRequest` with the reason otherwise — nothing is written either way.
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The body could not be understood, a reference field was left blank (`params.field` names it), `subjectKey` was sent without `subjectType` on the list, an `httpMethods` list was sent on a target type that does not support one (`params.reason = limit.binding.methodAxisNotAllowed`), `audienceRule` was missing/present on the wrong subject type or its family was not `REQUEST_RATE`, or any other save-time shape rule failed — `params.reason` names the service's own key |
+| `resourceNotFound` | An unknown assignment key, or a subject/content reference (`plan`, `apiProxy`, `apiProxyGroup`, `environment`, or `subjectType` + `subject`) that resolves to nothing |
+| `versionConflict` | `PUT`'s body `version` did not match the stored one — `params.entity`, `params.expected`, `params.current` |
+| `lifecycleConflict` | `params.reason` names the service's own cause: `limit.binding.scopeAlreadyBound` (this subject/family/target/actorScope already has a live assignment), `limit.binding.conflict` (an unrelated unique-index collision), `limit.binding.notDraft` (activate on a row that is not `DRAFT`), `limit.binding.notActive` (end on a row that is not `ACTIVE`), `limit.binding.alreadyEnded`, `limit.binding.endedIsFinal` (update on an `ENDED` row), `limit.binding.planRetired`, `limit.binding.planNotPublished`, `limit.binding.keyAlreadyExists`, `limit.binding.keyImmutable`, `limit.binding.scopeImmutable` (update tried to move subject/family/target), `limit.binding.counterIdentityImmutable`, `limit.binding.versionConflict` (activate/end sent a `version` the row has moved past, while its status still matched), or `limit.binding.statusNotCreatable` (`status: ENDED` on create) |
+| `idempotencyKeyRequired` | `POST /limit-assignments` was missing its `Idempotency-Key` header |
+| `idempotencyKeyReused` | The same key was sent with a different request body |
+| `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the assignment it created |
+| `idempotencyInProgress` | The same key and body's first call is still running |
+| `permissionDenied` | Authenticated, but the caller lacks Identity/AI Budgets **Manage** (writes) or **View** (reads) |
+| `licenseModuleNotEnabled` | `AI_TOKEN_BUDGET` content was used without the AI Gateway license module |
+| `unsupportedSortField` | `sort` named a field other than `assignedAt`, `status`, or `family` |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`/`PUT`) require it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
+- `AI_TOKEN_BUDGET` content additionally requires the **AI Gateway** license module on every write that touches it (create, update, activate, end, validate); `REQUEST_RATE` needs no license module.
+- The admin (platform) project has no subjects and is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`) — assignments are always project-scoped on this surface.
+- A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+
+## Example
+
+Create a draft assignment, validate a change before saving it, activate the draft, then end it:
+
+```bash
+# 1. Create — DRAFT by default; requires Idempotency-Key
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignments" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 7c2a9e10-4b3d-4f8a-9e21-6a0d3f5b7c88" \
+  -d '{
+    "subject": { "type": "API_CLIENT", "key": "acme-mobile-app" },
+    "content": {
+      "family": "REQUEST_RATE",
+      "actorScope": "AUTHENTICATED",
+      "mode": "PLAN",
+      "planKeys": ["standard-100rps"],
+      "target": { "type": "ALL" }
+    }
+  }'
+# 201 Created, Location: /apiops/projects/finance/limit-assignments/lpb_9f2a1c
+
+# 2. Validate a content change without writing anything
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignments/actions/validate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "subject": { "type": "API_CLIENT", "key": "acme-mobile-app" },
+    "content": {
+      "family": "REQUEST_RATE",
+      "actorScope": "AUTHENTICATED",
+      "mode": "PLAN",
+      "planKeys": ["standard-500rps"],
+      "target": { "type": "ALL" }
+    }
+  }'
+
+# 3. Activate the draft
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignments/lpb_9f2a1c/actions/activate" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "version": 0 }'
+
+# 4. End it later
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignments/lpb_9f2a1c/actions/end" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "version": 1, "reason": "Client decommissioned" }'
+```
+
+## Related Documentation
+
+- [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) - The population-scale counterpart of this same engine, sharing its Content and Target shapes
+- [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) - The manager's own REST surface behind Limit Plans, including its single-assignment endpoints (`/api/limit-bindings`) this page mirrors portably
+- [Limit Plans](/en/ai-gateway/limit-plans) - The manager UI screen and concepts this surface backs
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, pagination, and status-code rules every endpoint on this page follows
+- [Error Handling](/api-reference/getting-started/error-handling) - The envelope used by the manager's older endpoints

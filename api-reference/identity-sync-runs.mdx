@@ -1,0 +1,219 @@
+---
+title: "Identity Sync Runs Management API"
+description: "Queue, monitor, and read the identity synchronization runs of an LDAP, database, API, or OIDC identity source through the Management API, and approve a run's staged reconciliation when it is waiting for your review."
+---
+
+## Overview
+
+Every identity source keeps its own history of synchronization runs — the passes that pull users (and, on LDAP and OIDC, groups/organizations) from the source into Apinizer credentials. This page documents the Management API surface for that history, addressed under the source each run belongs to: `/identity-sources/{sourceType}/{sourceName}/sync-runs`. `sourceType` is one of `ldap`, `database`, `api`, `oidc`; the name is resolved within the project and within that type only, so a source named the same in two different types is two different resources.
+
+This is the portable counterpart of the Manager's own per-type synchronization endpoints. For the screen and concepts this surface backs — the Sync Profile, run scopes, the run history table, and the deactivation-threshold approval workflow — see [Credential Synchronization](/en/admin/identity-management/identity-providers/credential-sync).
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, bounded pagination, and `Idempotency-Key` on the run-creating call. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`.
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/identity-sources/{sourceType}/{sourceName}/sync-runs` | Queue a synchronization run for the source (`202` + `Location`) |
+| `GET` | `/identity-sources/{sourceType}/{sourceName}/sync-runs` | List the source's runs, newest first |
+| `GET` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}` | One run's progress and outcome |
+| `GET` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}/issues` | The per-subject issues the run recorded |
+| `POST` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}/actions/approve-reconcile` | Approve a run's staged reconciliation and queue the applying run (`202` + `Location`) |
+
+Both list endpoints accept only `page` and `size` — neither exposes a `sort` parameter. Runs are always listed newest-queued-first; issues are always listed in the order they were recorded within the run.
+
+### Source types and run scopes
+
+`sourceType` identifies which of the four identity source kinds the address resolves against:
+
+| `sourceType` | Identity source |
+|---|---|
+| `ldap` | LDAP / Active Directory |
+| `database` | Database identity provider |
+| `api` | API identity provider |
+| `oidc` | OIDC provider |
+
+A path segment other than one of these four, or a `sourceName` that resolves to no source of that type in the project, is `404 resourceNotFound`.
+
+The optional `mode` on the queue request selects the run's scope. Which scopes a source type accepts depends on whether it can fetch users and groups as separate passes:
+
+| `sourceType` | Accepted `mode` values |
+|---|---|
+| `ldap`, `oidc` | `FULL` (default), `USERS_ONLY`, `GROUPS_ONLY` |
+| `database`, `api` | `FULL` only |
+
+`RECONCILE_APPLY` cannot be requested on the queue endpoint under any source type — that scope is produced only by **approve-reconcile**, never chosen directly. A `mode` the source type does not accept, or a value that is not one of the four scopes, is `400 malformedRequest` (`params.reason = runModeNotSupported`); the request is never silently downgraded to `FULL`.
+
+### Queue a run
+
+`POST .../sync-runs` claims the source and writes a `QUEUED` run row before triggering the synchronization job, so a trigger that fails still leaves a visible `FAILED` row instead of nothing at all. Three guards run before the job is triggered:
+
+- The source's synchronization must be enabled, else `409 lifecycleConflict` (`params.reason = syncDisabled`).
+- An OIDC source whose vendor has no Keycloak Admin REST API is refused with `409 lifecycleConflict` (`params.reason = syncRequiresKeycloakVendor`) rather than landing a `FAILED` run.
+- Only one run may be active for a source at a time; queuing a second run while one is queued or running is `409 lifecycleConflict` (`params.reason = syncAlreadyRunning`).
+
+### Approve a run's pending reconcile
+
+When a run's reconciliation step would deactivate or delete more records than the source's deactivation threshold allows, the run finishes in the `AWAITING_RECONCILE_APPROVAL` state without touching a single record, and stages an approval. `POST .../sync-runs/{runId}/actions/approve-reconcile` re-verifies that approval against the same candidate list, filter, and deactivation mode it was staged with, then queues a new `RECONCILE_APPLY` run that applies exactly what was approved — it fetches nothing from the source again. See [Deactivation Threshold and Reconcile Approval](/en/admin/identity-management/identity-providers/credential-sync#deactivation-threshold-and-reconcile-approval) for the full workflow.
+
+Approval is refused with:
+
+- `409 lifecycleConflict` (`params.reason = reconcileApprovalConflict`) — the run is no longer awaiting approval, or a newer run on the same source has replaced the pending approval.
+- `400 malformedRequest` (`params.reason = reconcileApprovalNotFound`) — the source has no pending approval.
+- `400 malformedRequest` (`params.reason = reconcileApprovalExpired`) — the pending approval lapsed (approvals are valid for 24 hours).
+
+## Idempotency
+
+`POST .../sync-runs` requires an `Idempotency-Key` header (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)); a missing or blank header is `400 idempotencyKeyRequired`. Reads and **approve-reconcile** need no key — approval is already single-use by construction. The queue key is claimed per project and per source's queue operation, together with a canonical hash of the request body:
+
+| Situation | Result |
+|---|---|
+| New key | The run is queued |
+| Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the run id the first call created; read it with `GET .../{runId}` instead |
+| Same key, same body, first call still in flight | `409 idempotencyInProgress` |
+| Same key, a different body | `409 idempotencyKeyReused` |
+
+A claim whose underlying call failed is released, so the same key may be retried once the cause is fixed.
+
+## Request Body
+
+`POST .../sync-runs` takes one optional field:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `mode` | string | The run's scope — see [Source types and run scopes](#source-types-and-run-scopes) above. Absent means the source's full run. |
+
+**Approve-reconcile** takes no body — everything it needs is already staged in the pending approval.
+
+## Response
+
+### Accepted — `202`
+
+The receipt returned by `POST .../sync-runs` and `.../actions/approve-reconcile`, with `Location` pointing at the queued run:
+
+```json
+{
+  "runId": "68b1f2a4c9e1a2b3c4d5e6f7",
+  "sourceName": "corp-ad",
+  "sourceType": "LDAP",
+  "status": "QUEUED",
+  "runMode": "FULL",
+  "queuedAt": "2026-09-03T10:15:00Z"
+}
+```
+
+### Run — `200`
+
+The shape returned by `GET .../{runId}` and each row of `GET .../sync-runs`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `runId` | string | The run's id |
+| `sourceName` | string | The source's name, as it was at the time of the run (a snapshot — later renaming or deleting the source does not change it) |
+| `sourceType` | string | `LDAP` \| `DATABASE` \| `API` \| `OIDC` |
+| `status` | enum | `QUEUED` \| `RUNNING` \| `SUCCESS` \| `WARNING` \| `FAILED` \| `AWAITING_RECONCILE_APPROVAL` \| `INTERRUPTED` |
+| `runMode` | enum | The run's scope: `FULL` \| `USERS_ONLY` \| `GROUPS_ONLY` \| `RECONCILE_APPLY`. Runs recorded before this field existed read as `FULL`. |
+| `approvalPending` | boolean | `true` exactly when `status` is `AWAITING_RECONCILE_APPROVAL` |
+| `trigger` | string | `MANUAL` for a run queued through this API or the Manager screen, `SCHEDULED` for one the source's own cron started |
+| `triggeredBy` | string | The user who queued the run; absent on a scheduled run |
+| `startedAt` | timestamp | When the run was queued — the row's birth time |
+| `runningAt` | timestamp | When a node picked the run up; absent while still `QUEUED` |
+| `heartbeatAt` | timestamp | The executing node's last liveness signal |
+| `finishedAt` | timestamp | When the run reached its result |
+| `durationMs` | integer | Actual execution time once finished; time spent queued is not counted |
+| `phase` | enum | `FETCH` \| `RECONCILE`; absent while `QUEUED` |
+| `processedCount` | integer | Subjects processed so far |
+| `issueCount` | integer | Total issue rows this run recorded (see [Issue](#issue--200-paged) below) — the true total, even past the persisted cap |
+| `issuesTruncated` | boolean | `true` once the persisted-issue cap was hit; `issueCount` still shows the true total |
+| `upserted` / `deactivated` / `skipped` / `filtered` / `errors` | integer | Per-outcome counters. `filtered` counts subjects the source's scope filter excluded, kept apart from `skipped` (a conflict a caller has to resolve) |
+| `message` | string | Legacy raw-English fallback reason, kept for runs recorded before translatable reasons existed |
+| `messages` | array | Up to 10 translatable reasons for this run's outcome, each `{ "key": string, "params": object }` |
+
+`WARNING` means the run finished without error but its reconciliation step was deliberately skipped as a safety measure (the source returned no subjects, or its subject list could only be read in part) — nothing was deactivated or deleted.
+
+### Issue — `200`, paged
+
+One row of `GET .../{runId}/issues`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | Sequence within the run, starting at 1 |
+| `severity` | enum | `ERROR` (the subject was left out of synchronization) \| `WARNING` (the subject was processed but the row still deserves attention) |
+| `message` | object | The translatable reason: `{ "key": string, "params": object }` |
+| `subject` | string | The username or external identity the row is about; absent when the reason cannot be tied to one subject |
+| `occurredAt` | timestamp | When this row was recorded |
+
+At most 1,000 issue rows are kept per run; `issuesTruncated` on the run itself tells you when the true count went further.
+
+### List envelope — `200`
+
+`GET .../sync-runs` and `GET .../{runId}/issues` both return the shared paged envelope:
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 42,
+  "totalPages": 3,
+  "sort": ["startedAt,desc"]
+}
+```
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The requested `mode` is not one of the four scopes, or is not one the source type accepts (`params.reason = runModeNotSupported`); the source has no pending reconcile approval (`params.reason = reconcileApprovalNotFound`); or the pending approval has expired (`params.reason = reconcileApprovalExpired`) |
+| `resourceNotFound` | The `sourceType` path segment is not `ldap`, `database`, `api`, or `oidc`; the `sourceName` resolves to no source of that type in the project; or an unknown run id, or a run id that belongs to a different source, was addressed |
+| `lifecycleConflict` | `params.reason` names the cause: `syncDisabled` (the source's synchronization is not enabled), `syncRequiresKeycloakVendor` (an OIDC source without a Keycloak Admin REST API), `syncAlreadyRunning` (a second run was queued while one was already active), `reconcileApprovalConflict` (the run is not awaiting approval, or a newer run replaced the pending approval), or `unknownSourceType` (defensive — the run's own recorded source type could not be resolved to a synchronization job) |
+| `idempotencyKeyRequired` | `POST .../sync-runs` was called without its `Idempotency-Key` header |
+| `idempotencyKeyReused` | The same key was sent with a different request body |
+| `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the run it created |
+| `idempotencyInProgress` | The same key and body's first call is still running |
+| `permissionDenied` | Authenticated, but the caller lacks the **Identity** permission at the level this operation requires |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require the **Identity** permission at **View**; queuing a run and approving a reconcile (`POST`) require it at **Manage**.
+- The admin (platform) project addresses admin-owned identity sources. A caller whose account is not a system administrator gets `404 resourceNotFound` when addressing the admin project — the same answer a caller outside its project scope gets, never `403`.
+- A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+
+## Example
+
+Queue a full run on an LDAP source with an idempotency key, poll it, then read its issues:
+
+```bash
+# 1. Queue — requires Idempotency-Key
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/identity-sources/ldap/corp-ad/sync-runs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 9d0c8f4a-2f1e-4c7b-9c2f-8b3a1d5e7c40" \
+  -d '{ "mode": "USERS_ONLY" }'
+# 202 Accepted, Location: /apiops/projects/finance/identity-sources/ldap/corp-ad/sync-runs/68b1f2a4c9e1a2b3c4d5e6f7
+
+# 2. Poll the run
+curl "https://apinizer.example.com/apiops/projects/finance/identity-sources/ldap/corp-ad/sync-runs/68b1f2a4c9e1a2b3c4d5e6f7" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. Once finished, read what was skipped or erred
+curl "https://apinizer.example.com/apiops/projects/finance/identity-sources/ldap/corp-ad/sync-runs/68b1f2a4c9e1a2b3c4d5e6f7/issues?page=0&size=50" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. If a run comes back AWAITING_RECONCILE_APPROVAL, approve it
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/identity-sources/ldap/corp-ad/sync-runs/68b1f2a4c9e1a2b3c4d5e6f7/actions/approve-reconcile" \
+  -H "Authorization: Bearer $TOKEN"
+# 202 Accepted, Location points at the new RECONCILE_APPLY run
+```
+
+## Related Documentation
+
+- [Credential Synchronization](/en/admin/identity-management/identity-providers/credential-sync) - The manager UI screen and concepts this surface backs: Sync Profile, run scopes, run history, and the deactivation-threshold approval workflow
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, pagination, and status-code rules every endpoint on this page follows
+- [Error Handling](/api-reference/getting-started/error-handling) - The envelope used by the manager's older endpoints
