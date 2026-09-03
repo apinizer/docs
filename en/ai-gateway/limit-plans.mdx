@@ -6,9 +6,9 @@ description: "You can create reusable AI Token Budget or Request Rate limit plan
 import {Card, CardGroup} from '@site/src/components/Card';
 
 :::info Licensing and Permissions
-Every screen and endpoint here shares the same **AI Budgets** permission group as [Token Quotas and Rate Limiting](/en/ai-gateway/token-quotas) (see [Access Control and Roles](/en/ai-gateway/access-control-rbac)) — **View** to read, **Manage** to write, for both plan families.
+Every screen and endpoint here — plans, assignments, default limit policies, and [Bulk Assignment](#bulk-assignment) — is governed by the **Identity** permission group (see [Access Control and Roles](/en/ai-gateway/access-control-rbac)): **View** to read, **Manage** to write. The **AI Budgets** permission group is also accepted in place of Identity, so an installation still organized around the older AI Budgets model keeps working unchanged.
 
-The **AI Gateway** license module gates only the **AI Token Budget** family: without it, AI Token Budget plans are hidden from the catalog and the matching calls are rejected with `403 Forbidden`. **Request Rate** plans need no license module and are available on every installation.
+The **AI Gateway** license module gates only the **AI Token Budget** family: without it, AI Token Budget plans are hidden from the catalog and the matching calls are rejected with `403 Forbidden`. **Request Rate** plans need no license module and are available on every installation — including Bulk Assignment runs of that family.
 :::
 
 ## Concepts
@@ -163,6 +163,86 @@ Below the mode/plan fields, every assignment — again regardless of family — 
 :::note Target is enforced for both families; Cache Posture and Custom Error Message stay Request Rate-only
 The Target, Cache Posture, and Custom Error Message fields appear on every assignment regardless of family. **Target** narrows enforcement for both families — see [Enforcement](#enforcement-status-shadow-mode) below for how an AI Token Budget assignment's target maps onto its counter. **Cache Posture** and **Custom Error Message** are acted on for **Request Rate** only; an AI Token Budget assignment is enforced through the [Token Rate Limit policy](/en/ai-gateway/token-quotas), which has its own cache-behavior settings and applies the plan's own overflow action when a ceiling is exceeded.
 :::
+
+## Bulk Assignment {#bulk-assignment}
+
+Assigning a plan to a subject at a time does not scale once a project has thousands of them. **Bulk Assignment** attaches one limit — a plan or a custom value — to a large, filtered population of subjects (consumers, API clients, applications, or organizations) in a single run, instead of opening the [Limits tab](#assigning-a-limit-to-a-subject-the-limits-tab) once per subject.
+
+Reached from the **Bulk Assignment** button on the **AI Gateway → Limit Plans** catalog. On an installation with no AI Gateway license module, **Limit Plans** is also listed under **Identity Management**, so Request Rate bulk assignment stays reachable without the AI Gateway menu group. The screen has two tabs: **Assign** builds and starts a run, **Runs** tracks its progress and history.
+
+### Assign: Selecting the Population
+
+The left panel is a lazily loaded organization tree — each node shows its name and its subject count, and an **include sub-organizations** toggle folds a whole subtree into the selection. Above the subject table, filters narrow the population further: **subject type** (Consumer, API Client, Application, or Organization), free-text search, **enabled only**, and — once at least one organization is picked — **existing assignment** (**Any**, **None**, or **Exists**).
+
+The right panel is a server-paged table of matching subjects (name, organization, and any current assignment: plan, mode, and target). Two selection modes are offered:
+
+- **Row selection** — check individual rows, up to **5,000** subjects.
+- **Select all matching the filter** — selects the entire filtered population without transferring an id list to the browser; rows you explicitly uncheck afterward are excluded. This is the only practical way to select a population in the thousands.
+
+### Assign: Content and Conflict Policy
+
+The **Content** dialog defines what every selected subject receives — the same fields as a single [assignment](#assigning-a-limit-to-a-subject-the-limits-tab):
+
+- **Family** — Request Rate or AI Token Budget (AI Token Budget requires the AI Gateway license module).
+- **Mode** — Plan (pick a published plan) or Custom (enter windows/budget directly).
+- **Target** — the same [Target](#target-what-the-ceiling-narrows-to) narrowing a single assignment carries (API proxy, group, environment, or method).
+- **Cache posture and custom message**, **validity window** (`validFrom`/`validUntil`) — the same [fields](#cache-posture-and-custom-error-message) a single assignment carries.
+
+A **conflict policy** decides what happens to a subject that already carries an active assignment on the same scope:
+
+| Conflict Policy | Meaning | Default |
+|---|---|---|
+| **Keep existing** | A subject with an active assignment is skipped; only subjects without one receive the new assignment. | Yes |
+| **Replace** | The subject's existing assignment is ended and a new one is opened in its place. | — |
+
+:::warning Replace starts the counter over
+**Replace** ends the existing assignment and opens a brand-new one — it does not carry over the subject's in-window consumption. The new assignment's counter starts at zero, exactly like any other freshly created assignment.
+:::
+
+### Preview and Start
+
+**Preview** classifies the selected population without writing anything: the expected subject count, how many assignments would be created, skipped, or replaced, how many are blocked by a missing license module, and a small sample of rows. Above **5,000** subjects the count is **estimated** — the run itself reports the real numbers as it processes.
+
+**Start** queues the run (`202`) and switches to the **Runs** tab.
+
+## Runs Tab
+
+Each row is one run: when it started, its **kind** (Assign, Rollback, or Retry), its status, phase, progress, the counters (created / replaced / skipped / failed / license-skipped), the deployment state, who triggered it, and how long it took.
+
+| Status | Meaning |
+|---|---|
+| **Queued** | Accepted, not yet picked up. |
+| **Running** | Actively processing chunks. |
+| **Success** | Every subject in the population was processed with no failures. |
+| **Partial** | Finished, but at least one subject failed. |
+| **Failed** | The run could not complete. |
+| **Cancelled** | Stopped by an operator's **Cancel**. |
+| **Interrupted** | The node running it died mid-run — see [Node Failure](#node-failure) below. |
+| **License revoked** | The AI Gateway license module was disabled while an AI Token Budget run was in flight. |
+
+**Deployment state** — **In sync**, **Degraded**, or **Pending** — reports whether the run's gateway-side rollout reached every environment.
+
+A live run's row refreshes every 5 seconds. Only **one active run per project** is allowed at a time — starting a second while one is queued or running is refused (`409`).
+
+### Actions
+
+- **Cancel** — asks a queued or running run to stop at its next chunk boundary; everything already written stays written.
+- **Rollback** — only on a finished Assign or Retry run: queues a **new** run that ends every assignment the source run created, and re-opens what it **Replaced** as brand-new rows (their counters restart, same as any Replace). Asks for confirmation first.
+- **Retry failed** — queues a **new** run over only the subjects the source run failed on, always with **Keep existing** as its conflict policy.
+
+Expanding a row shows its **issues** — the FAILED and SKIPPED subjects, with the reason for each. Only FAILED and SKIPPED rows are kept, at most **1,000 per run**; beyond that the list is marked **truncated**.
+
+### Node Failure {#node-failure}
+
+A run's owning node reports a heartbeat while it works. If a node dies mid-run, its heartbeat goes stale; after **10 minutes**, a sweeper (checking every **5 minutes**) marks the run **Interrupted** rather than leaving it stuck as Running forever. The operator resumes with **Retry failed** to cover whatever the interrupted run had not yet reached.
+
+### Deployment Lag and Compensation
+
+The engine processes a run in chunks of **200** subjects, pushing one batch deployment to the affected gateways at the end of each chunk. For **Replace** and **Rollback**, removing the superseded binding is carried by a separate, once-a-minute deployment sweep — for a short window both the old and the new binding may be live on the gateway at once, and the **stricter** of the two is what actually enforces.
+
+If writing the new binding fails partway through a **Replace** or **Rollback** step, the engine restores the old binding rather than leaving the subject with no ceiling at all. If even that restoration fails, the run's issue for that subject is marked **unprotected**, and the recommended recovery is **Retry failed**.
+
+Every binding a bulk run creates or replaces carries the run's id as its source, so it is always traceable back to the run that wrote it.
 
 ## Rule Assignments: Limiting by Identity Condition {#rule-assignments-limiting-by-identity-condition}
 
@@ -379,5 +459,8 @@ On upgrade, Subscription Plans that already carry quota or rate-limit numbers ar
   </Card>
   <Card title="API Product" icon="package" href="/en/api-portal/api-product#limit-profiles">
     Reference a platform Limit Profile from a Subscription Plan
+  </Card>
+  <Card title="Bulk Limit Assignment API" icon="layers" href="/api-reference/limit-assignment-runs">
+    Preview, start, and monitor a bulk assignment run through the Management API
   </Card>
 </CardGroup>

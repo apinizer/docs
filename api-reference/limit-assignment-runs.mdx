@@ -1,0 +1,306 @@
+---
+title: "Bulk Limit Assignment API"
+description: "Preview, start, monitor, cancel, roll back, and retry a bulk limit assignment run through the Management API: attach one Request Rate or AI Token Budget assignment to a large, filtered population of consumers, API clients, applications, or organizations in a single run, addressed entirely by portable, name-based references."
+---
+
+## Overview
+
+Bulk Assignment attaches one assignment — a published plan or a custom value — to a large, filtered population of subjects in a single run, instead of one call per subject. This page documents the Management API surface for that engine, the portable counterpart of the manager's own [Bulk Assignment REST endpoints](/api-reference/limit-plans#bulk-assignment). For the screen and concepts this backs — selection modes, conflict policy, run lifecycle, node-failure recovery — see [Limit Plans → Bulk Assignment](/en/ai-gateway/limit-plans#bulk-assignment).
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, bounded pagination, and `Idempotency-Key` on every run-creating call. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. The admin (platform) project has no subjects of its own, so a platform-scoped call is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
+
+References on this surface are **portable** — no Mongo id ever crosses the boundary. Subjects, organizations, plans, proxies, groups, and environments are all addressed by the name or code the object is already known by; an unknown reference is `404 resourceNotFound` naming the field.
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/limit-assignment-previews` | Classify the selected population without writing anything |
+| `POST` | `/limit-assignment-runs` | Queue a run over the selected population (`202` + `Location`) |
+| `GET` | `/limit-assignment-runs` | List the project's runs, newest first by default |
+| `GET` | `/limit-assignment-runs/{runId}` | One run's progress and outcome |
+| `GET` | `/limit-assignment-runs/{runId}/issues` | The FAILED/SKIPPED subjects the run recorded |
+| `POST` | `/limit-assignment-runs/{runId}/actions/cancel` | Ask a queued or running run to stop at its next chunk boundary (`200`) |
+| `POST` | `/limit-assignment-runs/{runId}/actions/rollback` | Queue a **new** run that undoes what the given run did (`202`) |
+| `POST` | `/limit-assignment-runs/{runId}/actions/retry-failed` | Queue a **new** run over only the subjects the given run failed on (`202`) |
+
+### List runs
+
+`GET /limit-assignment-runs?page&size&sort` sorts by `startedAt,desc` by default; `sort` may also name `status` or `kind`. `size` is capped at 200. A `sort` naming any other field is `400 unsupportedSortField` (`params.supported` lists the three).
+
+### Cancel, rollback, retry-failed
+
+**Cancel** stops a queued or running run at its next 200-subject chunk boundary; whatever it already wrote stays written. It returns `200` with the run itself — it does not start a new run.
+
+**Rollback** is only valid on a finished `Assign` or `Retry` run: it queues a brand-new run that ends every assignment the source run created and re-opens what it **Replaced** as new rows — those counters restart, the same as any Replace. Refused with `409 lifecycleConflict` (`params.reason = limit.bulk.runNotRollbackable`) on a run with nothing to roll back.
+
+**Retry failed** queues a brand-new run over only the subjects the source run's issues recorded as `FAILED`, always with **Keep existing** as its conflict policy. Refused with `409 lifecycleConflict` (`params.reason = limit.bulk.runNotRetryable`) when the source run recorded no retryable subject.
+
+Both actions require their own `Idempotency-Key` and return `202` with a `Location` pointing at the new run — never the source run.
+
+## Idempotency
+
+`POST /limit-assignment-runs`, `.../actions/rollback`, and `.../actions/retry-failed` each require an `Idempotency-Key` header (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)); a missing or blank header is `400 idempotencyKeyRequired`. The key is claimed per project and per operation, together with a canonical hash of the request body:
+
+| Situation | Result |
+|---|---|
+| New key | The run is queued |
+| Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the run id the first call created; read it with `GET .../{runId}` instead |
+| Same key, same body, first call still in flight | `409 idempotencyInProgress` |
+| Same key, a different body | `409 idempotencyKeyReused` |
+
+A claim whose underlying call failed is released, so the same key may be retried once the cause is fixed.
+
+## Request Body
+
+`POST /limit-assignment-previews` and `POST /limit-assignment-runs` share one body:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `selector` | object | The population — see [Selector](#selector) below |
+| `content` | object | The assignment every matched subject receives — see [Content](#content) below |
+| `conflictPolicy` | enum | `KEEP_EXISTING` (default) or `REPLACE` |
+| `previewFingerprint` | string | **Runs only.** From the preview response; a selector that no longer hashes to it is `409 lifecycleConflict` (`params.reason = limit.bulk.fingerprintMismatch`) |
+| `expectedCount` | integer | **Runs only.** From the preview response; recorded on the run as `expectedCount` |
+
+### Selector
+
+The WHO: which subjects are in scope.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `subjectType` | enum | `CONSUMER` \| `API_CLIENT` \| `APPLICATION` \| `ORGANIZATION` — required |
+| `organizationCodes` | string[] | Organization codes to scope the population to |
+| `includeSubOrganizations` | boolean | With `organizationCodes`, also include each organization's descendant subtree |
+| `search` | string | Case-insensitive name/username contains-search |
+| `enabledOnly` | boolean | Only enabled subjects |
+| `existingAssignment` | enum | `ANY` (default) \| `NONE` (only subjects with no active assignment on this scope) \| `EXISTS` |
+| `subjectKeys` | string[] | An explicit population by public key (Consumer username, API Client `clientId`, Application name, Organization code) — at most **5,000** |
+| `excludeSubjectKeys` | string[] | Subjects to leave out of the filter-wide population — at most **5,000** |
+
+A `subjectKeys`/`excludeSubjectKeys` list beyond 5,000 entries is `400 malformedRequest` (`params.reason = limit.bulk.includeListTooLarge`). A key that resolves to no subject is `404 resourceNotFound` (`params.subjectType`, `params.subject` — the first missing key — and `params.missingCount`).
+
+### Content
+
+The WHAT: the assignment every matched subject receives — the same content a single `POST /api/limit-bindings` assignment carries on the [manager's own REST surface](/api-reference/limit-plans), addressed by portable references instead of ids.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `family` | enum | `REQUEST_RATE` or `AI_TOKEN_BUDGET` — required |
+| `actorScope` | enum | `ANY` \| `AUTHENTICATED` \| `ANONYMOUS` — must be one the subject type allows |
+| `target` | object | What the ceiling narrows to — see [Target](#target) below |
+| `mode` | enum | `PLAN` (default when `planKeys` is set) or `CUSTOM` (with `customRuleSpec`) |
+| `planKeys` | string[] | Published plan keys — at most 200 |
+| `customRuleSpec` | object | The plan's own rule body (windows / budget), inline — required when `mode` is `CUSTOM` |
+| `cacheErrorHandlingType` | enum | `FAIL` (default) or `CONTINUE` — Request Rate only |
+| `cacheConnectionTimeoutInSeconds` | integer | Request Rate only |
+| `showRateLimitStatisticsInResponseHeader` | boolean | Request Rate only |
+| `customMessageTemplate` / `customMessageContentType` / `customMessageHttpStatusCode` | string / string / integer | Replaces the standard message on a limit-exceeded block — Request Rate only |
+| `validFrom` / `validUntil` | timestamp | Optional validity window |
+
+A plan key that resolves to no plan is `404 resourceNotFound` (`params.plan`). `AI_TOKEN_BUDGET` is refused with `403 licenseModuleNotEnabled` when the project's license does not include the AI Gateway module — checked **after** authentication, so an anonymous caller cannot use this to enumerate paid modules.
+
+### Target
+
+`target.type` narrows what the assignment counts: `ALL` (default, no narrowing), `API_PROXY`, `API_PROXY_ENV`, `API_PROXY_GROUP`, `API_PROXY_GROUP_ENV`, `API_ENDPOINT`, `AI_MODEL`, or `AI_PROVIDER`.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `type` | enum | See above |
+| `apiProxyName` | string | Required for `API_PROXY` / `API_PROXY_ENV` |
+| `apiProxyGroupName` | string | Required for `API_PROXY_GROUP` / `API_PROXY_GROUP_ENV` |
+| `environmentName` | string | Required for `API_PROXY_ENV` / `API_PROXY_GROUP_ENV` |
+| `targetKey` | string | For `API_ENDPOINT` / `AI_MODEL` / `AI_PROVIDER` — the target's key as shown wherever a Target is displayed; these three have no project-scoped human name on this surface, so the key is taken verbatim |
+| `httpMethods` | string[] | `API_PROXY` / `API_PROXY_ENV` only — empty or absent means every method |
+
+An `apiProxyName`, `apiProxyGroupName`, or `environmentName` that resolves to nothing is `404 resourceNotFound` (`params.apiProxy` / `params.apiProxyGroup` / `params.environment`). `httpMethods` on a target type that does not carry the method axis is `400 malformedRequest` (`params.reason = limit.binding.methodAxisNotAllowed`).
+
+## Response
+
+### Preview — `200`
+
+```json
+{
+  "status": "SUCCESS",
+  "selectorFingerprint": "a1b2c3d4",
+  "expectedCount": 4000,
+  "willCreate": 3820,
+  "willSkip": 150,
+  "willReplace": 30,
+  "licenseBlocked": 0,
+  "estimated": false,
+  "sample": [
+    { "subjectName": "acme-mobile-app", "outcome": "CREATED" },
+    { "subjectName": "acme-web-app", "outcome": "SKIPPED_EXISTING", "existingBindingKey": "lpb_9f2a" }
+  ]
+}
+```
+
+`estimated: true` above a population of 5,000 — the counts are an estimate; the run itself reports the real numbers.
+
+### Accepted — `202`
+
+The receipt returned by `POST /limit-assignment-runs`, `.../actions/rollback`, and `.../actions/retry-failed`, with `Location` pointing at the new run:
+
+```json
+{
+  "status": "SUCCESS",
+  "runId": "bar_7f3e1a9c",
+  "kind": "ASSIGN",
+  "runStatus": "QUEUED",
+  "queuedAt": "2026-09-03T10:15:00Z",
+  "expectedCount": 4000
+}
+```
+
+### Run — `200`
+
+The shape returned by `GET .../{runId}` and each row of `GET /limit-assignment-runs`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `runId` | string | Opaque public id |
+| `runStatus` | enum | `QUEUED` \| `RUNNING` \| `SUCCESS` \| `PARTIAL` \| `FAILED` \| `CANCELLED` \| `INTERRUPTED` \| `LICENSE_REVOKED` |
+| `kind` | enum | `ASSIGN` \| `ROLLBACK` \| `RETRY` |
+| `phase` | enum | `PREPARE` \| `APPLY` \| `DEPLOY` \| `FINALIZE` |
+| `startedAt` / `runningAt` / `heartbeatAt` / `finishedAt` | timestamp | Lifecycle timestamps |
+| `durationMs` | integer | Elapsed time, once finished |
+| `trigger` | enum | `MANUAL` (manager UI) or `APIOPS` (this surface) |
+| `triggeredBy` | string | The caller who started it |
+| `selector` | object | The request's selector, echoed back in the same portable vocabulary |
+| `includedSubjectCount` / `excludedSubjectCount` | integer | Size of the explicit include/exclude lists (not the full matched population) |
+| `selectorFingerprint` | string | The fingerprint this run's selector hashed to |
+| `content` | object | The request's content, echoed back the same way |
+| `conflictPolicy` | enum | `KEEP_EXISTING` or `REPLACE` |
+| `expectedCount` / `actualCount` / `processedCount` | integer | Planned vs. actual population size, and how much has been processed so far |
+| `createdCount` / `replacedCount` / `skippedCount` / `failedCount` / `licenseSkippedCount` | integer | Per-outcome counters |
+| `issueCount` | integer | How many issues were recorded |
+| `issuesTruncated` | boolean | `true` once the 1,000-issue cap was hit |
+| `cancelRequested` | boolean | Whether **Cancel** was asked for |
+| `rollbackOfRunId` / `retryOfRunId` | string | Present on a `ROLLBACK` / `RETRY` run, naming its source run |
+| `idempotencyKey` | string | The key that started this run |
+| `deploymentState` | enum | `IN_SYNC` \| `DEGRADED` \| `PENDING` |
+| `messageKey` / `messageParams` | string / object | An i18n key + parameters describing the run's outcome, when there is one to show |
+
+### Issue — `200`, paged
+
+One row of `GET .../{runId}/issues`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `seq` | integer | Sequence within the run |
+| `subjectType` | enum | The selector's subject type |
+| `subjectName` | string | The subject's public name — never an id |
+| `outcome` | enum | `CREATED` \| `REPLACED` \| `SKIPPED_EXISTING` \| `SKIPPED_LICENSE` \| `FAILED` \| `ENDED` \| `RESTORED` |
+| `bindingKey` | string | The assignment this issue is about, when there is one |
+| `messageKey` / `messageParams` | string / object | An i18n key + parameters explaining the outcome |
+| `occurredAt` | timestamp | When this row was recorded |
+
+Only `FAILED` and `SKIPPED_*` rows are kept, at most 1,000 per run.
+
+### List envelope — `200`
+
+`GET /limit-assignment-runs` and `GET .../{runId}/issues` both return the shared paged envelope:
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 137,
+  "totalPages": 7,
+  "sort": ["startedAt,desc"]
+}
+```
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The body could not be understood, a reference field was left blank, an `httpMethods` list was sent on a target type that does not support one, or an include/exclude list exceeded 5,000 entries (`params.reason = limit.bulk.includeListTooLarge`) |
+| `resourceNotFound` | An unknown run id, or a selector/content reference (`plan`, `organization`, `apiProxy`, `apiProxyGroup`, `environment`, or `subject` + `subjectType` + `missingCount`) that resolves to nothing |
+| `lifecycleConflict` | `params.reason` names the engine cause: `limit.bulk.runAlreadyActive` (a second run started while one is queued or running), `limit.bulk.fingerprintMismatch` (the selector no longer matches the preview), `limit.bulk.runNotCancellable`, `limit.bulk.runNotRollbackable`, or `limit.bulk.runNotRetryable` |
+| `idempotencyKeyRequired` | A run-creating call was missing its `Idempotency-Key` header |
+| `idempotencyKeyReused` | The same key was sent with a different request body |
+| `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the run it created |
+| `idempotencyInProgress` | The same key and body's first call is still running |
+| `permissionDenied` | Authenticated, but the caller lacks Identity/AI Budgets **Manage** (writes) or **View** (reads) |
+| `licenseModuleNotEnabled` | An `AI_TOKEN_BUDGET` selector/content was used without the AI Gateway license module |
+| `unsupportedSortField` | `sort` named a field other than `startedAt`, `status`, or `kind` |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`) require it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
+- `AI_TOKEN_BUDGET` content additionally requires the **AI Gateway** license module; `REQUEST_RATE` needs no license module.
+- The admin (platform) project has no subjects and is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`) — Bulk Assignment is always project-scoped.
+- A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+
+## Example
+
+Preview the population, start a run with an idempotency key, poll it, then read its issues:
+
+```bash
+# 1. Preview — zero-write
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignment-previews" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "selector": {
+      "subjectType": "API_CLIENT",
+      "organizationCodes": ["acme-partners"],
+      "includeSubOrganizations": true,
+      "existingAssignment": "NONE"
+    },
+    "content": {
+      "family": "REQUEST_RATE",
+      "mode": "PLAN",
+      "planKeys": ["standard-100rps"],
+      "target": { "type": "ALL" }
+    },
+    "conflictPolicy": "KEEP_EXISTING"
+  }'
+
+# 2. Start — requires Idempotency-Key; body repeats the preview plus its fingerprint
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-assignment-runs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 9d0c8f4a-2f1e-4c7b-9c2f-8b3a1d5e7c40" \
+  -d '{
+    "selector": {
+      "subjectType": "API_CLIENT",
+      "organizationCodes": ["acme-partners"],
+      "includeSubOrganizations": true,
+      "existingAssignment": "NONE"
+    },
+    "content": {
+      "family": "REQUEST_RATE",
+      "mode": "PLAN",
+      "planKeys": ["standard-100rps"],
+      "target": { "type": "ALL" }
+    },
+    "conflictPolicy": "KEEP_EXISTING",
+    "previewFingerprint": "a1b2c3d4",
+    "expectedCount": 4000
+  }'
+# 202 Accepted, Location: /apiops/projects/finance/limit-assignment-runs/bar_7f3e1a9c
+
+# 3. Poll the run
+curl "https://apinizer.example.com/apiops/projects/finance/limit-assignment-runs/bar_7f3e1a9c" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. Once finished, read what failed or was skipped
+curl "https://apinizer.example.com/apiops/projects/finance/limit-assignment-runs/bar_7f3e1a9c/issues?page=0&size=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Related Documentation
+
+- [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) - The manager's own REST surface behind Limit Plans, including its Bulk Assignment endpoints
+- [Limit Plans → Bulk Assignment](/en/ai-gateway/limit-plans#bulk-assignment) - The manager UI screen and concepts this surface backs
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, pagination, and status-code rules every endpoint on this page follows
+- [Error Handling](/api-reference/getting-started/error-handling) - The envelope used by the manager's older endpoints
