@@ -756,6 +756,7 @@ const sidebars: SidebarsConfig = {
         "admin/audit-compliance/acl-denetim-kayitlari",
         "admin/audit-compliance/token-istekleri",
         "admin/audit-compliance/giris-kayitlari",
+        "admin/audit-compliance/guvenlik-olaylari",
         "admin/audit-compliance/audit-records",
         "admin/audit-compliance/application-logs",
         "admin/audit-compliance/uygulama-logu-temizleme-gorevleri"
