@@ -128,7 +128,14 @@ GET /apiops/projects/{projectName}/connections/{connectionName}/
       "syslogAppName": "Apinizer",
       "syslogFacility": "AUDIT",
       "syslogSeverity": "INFORMATIONAL",
-      "syslogSslEnabled": false
+      "syslogSslEnabled": true,
+      "keyStoreId": "68493bb680f5de2a3c29c701",
+      "keyStoreName": "apinizer-gateway-client",
+      "trustStoreId": "68493bb680f5de2a3c29c702",
+      "trustStoreName": "corp-ca-truststore",
+      "syslogTlsHostnameVerification": true,
+      "syslogStructuredDataEnabled": true,
+      "syslogEnterpriseId": "99999"
     }
   ],
   "resultCount": 1
@@ -215,6 +222,33 @@ POST /apiops/projects/{projectName}/connections/{connectionName}/
 }
 ```
 
+##### Full JSON Body Example - Mutual TLS with Structured Data
+
+```json
+{
+  "type": "syslog",
+  "name": "my-syslog-mtls",
+  "description": "Syslog TCP connection with mutual TLS and RFC 5424 structured data",
+  "deployToWorker": true,
+  "enabled": true,
+  "syslogProtocolType": "TCP",
+  "syslogMessageHostname": "apinizer.example.com",
+  "syslogServerHostname": "syslog.example.com",
+  "syslogPort": 6514,
+  "syslogTimeout": 5000,
+  "syslogMessageFormat": "RFC_5425",
+  "syslogAppName": "Apinizer",
+  "syslogFacility": "AUDIT",
+  "syslogSeverity": "INFORMATIONAL",
+  "syslogSslEnabled": true,
+  "keyStoreName": "apinizer-gateway-client",
+  "trustStoreName": "corp-ca-truststore",
+  "syslogTlsHostnameVerification": true,
+  "syslogStructuredDataEnabled": true,
+  "syslogEnterpriseId": "99999"
+}
+```
+
 ##### Full JSON Body Example - RFC 5425 Format
 
 ```json
@@ -263,6 +297,15 @@ POST /apiops/projects/{projectName}/connections/{connectionName}/
 | syslogFacility | string | No | AUDIT | Syslog facility. See Facility |
 | syslogSeverity | string | No | INFORMATIONAL | Syslog severity level. See Severity |
 | syslogSslEnabled | boolean | No | false | Enable SSL/TLS encryption (TCP only) |
+| keyStoreName | string | No | - | Name of the key store holding the client certificate presented for mutual TLS. Resolved to an identifier at write time; an unknown name is rejected. Empty means no client certificate is presented (server-only TLS). |
+| trustStoreName | string | No | - | Name of the key store used to verify the syslog server's certificate chain. When set it becomes the only trust anchor for this connection; empty means the JVM default trust store is used. |
+| syslogTlsHostnameVerification | boolean | No | false | Require the name in the server certificate (SAN or CN) to match `syslogServerHostname`. When false, only the certificate chain is verified. |
+| syslogStructuredDataEnabled | boolean | No | false | Write the RFC 5424 STRUCTURED-DATA field. Effective only with `RFC_5424` or `RFC_5425` over TCP. |
+| syslogEnterpriseId | string | No | - | IANA Private Enterprise Number used as the identifier of the Apinizer element inside structured data. Must match `^[0-9]{1,10}$`. Empty means only the `origin` and `timeQuality` elements are written. |
+
+**Key store references:** create and update requests carry `keyStoreName` and `trustStoreName`; read requests return the resolved `keyStoreId` and `trustStoreId` alongside them. A name that does not exist in the project (or in the administration project) is rejected with `400 Bad Request` and the message `KeyStore (name: <name>) not found!`, so a missing key store can never downgrade a mutual-TLS connection to server-only TLS unnoticed.
+
+**Enterprise number validation:** a value that is not 1 to 10 digits — including a whitespace-only value — is rejected with `400 Bad Request` and the message `syslogEnterpriseId must be an IANA Private Enterprise Number (1 to 10 digits)!`. `null` and an empty string are accepted and mean "not set".
 
 ### EnumSyslogProtocolType (syslogProtocolType)
 
@@ -319,6 +362,9 @@ POST /apiops/projects/{projectName}/connections/{connectionName}/
 - `syslogPort` defaults to 514 (standard Syslog port).
 - `syslogProtocolType` defaults to TCP.
 - `syslogSslEnabled` is only applicable for TCP connections.
+- `keyStoreName`, `trustStoreName` and `syslogTlsHostnameVerification` take effect only when `syslogSslEnabled` is `true`. They are stored as sent even when SSL is off, so turning SSL back on restores them.
+- None of the TLS fields is required. A connection with `syslogSslEnabled: true` and no key store or trust store is a valid server-only TLS connection, and a connection with `syslogSslEnabled: false` keeps sending over plain TCP or UDP.
+- `syslogStructuredDataEnabled` is ignored on UDP and with the `RFC_3164` message format, because neither carries a structured-data field.
 - `syslogTimeout` is only used for TCP connections.
 - `syslogMessageHostname` can be used by some cloud Syslog services to transmit secret keys.
 - `syslogAppName` defaults to "Apinizer".
@@ -418,7 +464,7 @@ PUT /apiops/projects/{projectName}/connections/{connectionName}/
 }
 ```
 
-**Note:** Request body structure is the same as Create Connection. All fields should be provided for update.
+**Note:** Request body structure is the same as Create Connection. All fields should be provided for update — an update replaces the stored connection in full. Omitting `keyStoreName` on a connection that has one therefore removes the client certificate and leaves a server-only TLS connection; the same applies to `trustStoreName`, `syslogTlsHostnameVerification`, `syslogStructuredDataEnabled` and `syslogEnterpriseId`. Read the connection first and send back the fields you want to keep.
 
 ### Response
 
@@ -494,6 +540,13 @@ DELETE /apiops/projects/{projectName}/connections/{connectionName}/
   - `syslogSslEnabled: true` enables SSL/TLS encryption (TCP only)
   - Use RFC_5425 format for TLS Syslog (port 6514)
   - UDP does not support SSL/TLS
+  - `keyStoreName` adds a client certificate for mutual TLS; `trustStoreName` replaces the JVM default trust store for this connection
+  - When a referenced key store cannot be read at run time, the connection stops sending instead of falling back to an unencrypted or unauthenticated session
+
+- **Structured Data**:
+  - `syslogStructuredDataEnabled: true` writes the RFC 5424 STRUCTURED-DATA field on `RFC_5424` and `RFC_5425` frames
+  - Without `syslogEnterpriseId`, only the `origin` and `timeQuality` elements are written
+  - A Private Enterprise Number can be requested from [IANA](https://www.iana.org/assignments/enterprise-numbers/assignment/apply/)
 
 - **Facility**:
   - Facility codes identify the source of the message

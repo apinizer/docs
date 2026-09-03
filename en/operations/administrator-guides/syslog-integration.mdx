@@ -7,6 +7,7 @@ import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import {Card, CardGroup} from '@site/src/components/Card';
 import {Accordion} from '@site/src/components/Accordion';
+import {Steps, Step} from '@site/src/components/Steps';
 
 ## Logging Categories
 
@@ -50,12 +51,14 @@ Traffic logs are not part of that page — they continue to be forwarded by the 
 
 ## Payload Formats
 
-Every destination sends one of two formats, selected per destination:
+Every destination sends one of the following formats, selected per destination:
 
 | Profile | What your parser receives |
 |---|---|
 | **Legacy Raw** | Today's output, unchanged and frozen. Every field documented on this page and on [Transferring System Logs to Syslog](/en/operations/administrator-guides/system-logs-syslog-transfer) is produced exactly as before, so an existing parser keeps working. Fields added to Apinizer in later versions do **not** appear in this output. |
 | **Apinizer JSON v2** | A canonical envelope shared by all four streams — a stable field order, a severity value, an explicit outcome, and a curated `data` object from which token values, passwords and authentication headers are excluded by construction. |
+| **CEF 0** | A single-line ArcSight Common Event Format record, produced from the same envelope after the privacy profile and the size limit have been applied. Selectable on Syslog destinations only; see [CEF and LEEF](/en/admin/system-settings/siem-log-forwarding#cef-and-leef). |
+| **LEEF 2.0** | A single-line, tab-separated IBM QRadar Log Event Extended Format record, produced the same way. Selectable on Syslog destinations only. |
 
 ```json
 {
@@ -78,6 +81,132 @@ Every destination sends one of two formats, selected per destination:
 New fields may be added to the v2 envelope without raising `schemaVersion` — your parser must ignore fields it does not recognise. The full field reference for each stream, together with the filtering rules, the privacy profile and the event size policy, is on the [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding) page.
 
 :::
+
+## Mutual TLS (mTLS) Setup
+
+A syslog server that requires client authentication accepts a connection only from a client that presents a certificate it trusts. Apinizer presents that certificate from a key store you register, and verifies the server with a trust store you register. Neither is mandatory: a Syslog connection with SSL turned on and both fields empty keeps working as server-only TLS, and an installation that does not use TLS at all keeps sending over plain TCP or UDP.
+
+<Steps>
+  <Step title="Produce a client certificate with your certificate authority">
+    Create a key pair and a signing request for Apinizer, have your corporate authority sign it, and package the result as a PKCS#12 file. The example below produces `apinizer-gateway.p12`.
+
+    ```bash
+    # 1. Private key and certificate signing request for the Apinizer client
+    openssl req -new -newkey rsa:2048 -nodes \
+      -keyout apinizer-gateway.key \
+      -out apinizer-gateway.csr \
+      -subj "/CN=apinizer-gateway/O=Example Corp"
+
+    # 2. Sign the request with the corporate certificate authority
+    openssl x509 -req -days 825 \
+      -in apinizer-gateway.csr \
+      -CA corp-ca.crt -CAkey corp-ca.key -CAcreateserial \
+      -out apinizer-gateway.crt
+
+    # 3. Package the key and the certificate into a PKCS#12 key store
+    openssl pkcs12 -export \
+      -inkey apinizer-gateway.key \
+      -in apinizer-gateway.crt \
+      -certfile corp-ca.crt \
+      -name apinizer-gateway \
+      -out apinizer-gateway.p12
+    ```
+
+    The common name you choose here is the name the syslog server will match against its permitted-peer list, so agree on it with the team that runs the server.
+  </Step>
+
+  <Step title="Register the key store in Apinizer">
+    On the **Key Stores** page under **Secret**, add a new record, upload `apinizer-gateway.p12` and enter the password you used when exporting it. This record is what the **Keystore** field on the Syslog connection offers. See [Keystore Management](/en/admin/secrets-management/keystore-management).
+  </Step>
+
+  <Step title="Register the trust store">
+    Package the certificate of the authority that issued the **server** certificate into its own store and register it the same way. It is used only for verification, so it holds no private key.
+
+    ```bash
+    openssl pkcs12 -export -nokeys \
+      -in corp-ca.crt \
+      -name corp-ca \
+      -out syslog-truststore.p12
+    ```
+
+    A trust store selected on the connection becomes the only trust anchor for that connection: the public authorities that ship with the JVM are not added to it. Leave the field empty if the server certificate is issued by a public authority.
+  </Step>
+
+  <Step title="Configure the Syslog connection">
+    Open the connection from the **Connection → Syslog Connection** section of the left menu, set the protocol to TCP and turn on **Enable SSL**, then select the **Keystore** and the **Truststore** you registered. Leave **Hostname Verification** on so the name in the server certificate is matched against the **Syslog Server Hostname** you entered; turn it off only when the certificate deliberately carries a different name. The port is usually 6514 with the RFC 5425 message format. Field-by-field descriptions are on the [Syslog connection](/en/integrations/connection-management/syslog) page.
+  </Step>
+
+  <Step title="Read the Test Connection result">
+    **[Test Connection]** reports the session that was actually negotiated:
+
+    ```text
+    ok: tls: TLSv1.3 / TLS_AES_256_GCM_SHA384 / peer=CN=syslog.example.com / clientCert=CN=apinizer-gateway (expires 2036-08-31)
+    ```
+
+    Read it as a checklist: `peer` is the certificate the server presented, and `clientCert` is the one Apinizer presented — `clientCert=none` means no key store is in effect and the server is only seeing an anonymous client. Two failures have their own wording:
+
+    - `TLS configuration error: ...` — the selected key store or trust store could not be read. Nothing is sent and the connection is never retried without TLS.
+    - a failure mentioning `certificate_required` — the server asked for a client certificate and did not receive one it accepts.
+
+    A successful test against a TLS server takes about a second longer than a plain one, because a server that rejects the client certificate only announces it after the handshake and Apinizer waits for that answer.
+  </Step>
+
+  <Step title="Require client authentication on the syslog server">
+    The server side has to ask for the certificate and accept the name you issued. In rsyslog this is the `gtls` stream driver with an authentication mode of `x509/name` and a permitted-peer list:
+
+    ```text
+    module(load="imtcp"
+           StreamDriver.Name="gtls"
+           StreamDriver.Mode="1"
+           StreamDriver.AuthMode="x509/name"
+           PermittedPeer=["apinizer-gateway"])
+
+    global(DefaultNetstreamDriver="gtls"
+           DefaultNetstreamDriverCAFile="/etc/rsyslog.d/certs/corp-ca.crt"
+           DefaultNetstreamDriverCertFile="/etc/rsyslog.d/certs/syslog-server.crt"
+           DefaultNetstreamDriverKeyFile="/etc/rsyslog.d/certs/syslog-server.key")
+
+    input(type="imtcp" port="6514")
+    ```
+
+    On syslog-ng the equivalent is a `network()` source with `transport("tls")` whose `tls()` block sets `peer-verify(required-trusted)` together with the authority, certificate and key files.
+  </Step>
+</Steps>
+
+:::note
+
+When the certificate inside a key store record is renewed, save the Syslog connection again (or redeploy the environment). The open connections are rebuilt with the new material at that point; renewing the store on its own does not disturb a running connection.
+
+If a selected key store becomes unreadable while the system is running — it was deleted, or its password changed — delivery on that connection stops rather than silently continuing without the certificate. The events are handed to the failover connector when one is configured and dropped otherwise, an error is logged every 30 seconds, and the destination's health card turns **Failing**.
+
+:::
+
+## RFC 5424 Structured Data
+
+RFC 5424 reserves a field between the frame header and the message for machine-readable metadata. Apinizer can fill it so that a SIEM can route and correlate on the frame itself, without parsing the message body first. It is turned on per connection with **Write RFC 5424 Structured Data**, and it is written only over TCP with the **RFC 5424** or **RFC 5425** message format — UDP and RFC 3164 have no such field and ignore the setting.
+
+A frame with structured data looks like this:
+
+```text
+<110>1 2026-09-03T10:23:25.922Z gw-1 Apinizer - - [origin software="Apinizer" swVersion="2026.09.2"][timeQuality tzKnown="1"][apinizer@99999 stream="AUDIT" eventType="ENTITY" outcome="SUCCESS" eventId="68493da280f5de2a3c29c975" correlationId="dccababd-16e3-415e-b801-9f6a52b6a28c" severity="3"] {"logType":"AUDIT","schemaVersion":2,"eventId":"68493da280f5de2a3c29c975"}
+```
+
+| Element | When it is written | What it carries |
+|---|---|---|
+| `origin` | Whenever structured data is on | `software="Apinizer"`, plus `swVersion` where the version is known on that path |
+| `timeQuality` | Whenever structured data is on | `tzKnown="1"` |
+| `apinizer@<number>` | Only when an **Enterprise Number (PEN)** is set on the connection **and** the frame carries an event from the SIEM & Log Forwarding page | `stream`, `eventType`, `outcome`, `eventId`, `correlationId`, `severity` |
+
+The `99999` above is an example. Substitute your own Private Enterprise Number, which you can request free of charge from [IANA](https://www.iana.org/assignments/enterprise-numbers/assignment/apply/); the field accepts 1 to 10 digits. Until you have one, leave it empty and the frames carry only `origin` and `timeQuality` — a number that is not yours must not be used, because it is what tells the receiver whose definition of these fields applies.
+
+:::info
+
+Structured data carries metadata only. The event itself stays in the message part of the frame, and the message hostname, the acting user and the payload fields are never copied into it.
+
+The setting belongs to the connection, not to a destination: while it is on, every RFC 5424 or RFC 5425 frame that connection sends carries `origin` and `timeQuality`, including traffic logs and application logs that share the same connection. The `apinizer@` element is the exception — it is written only for events dispatched from the SIEM & Log Forwarding page, so a destination on the **Legacy Raw** profile never produces it. The frame sent by **[Test Connection]** carries no structured data either; use the **Schema & Samples** tab to see the exact element that your configuration produces.
+
+:::
+
 
 ## Frequently Asked Questions
 

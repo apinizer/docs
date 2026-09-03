@@ -6,6 +6,7 @@ description: "Apinizer loglarını syslog protokolü üzerinden harici SIEM sist
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import {Card, CardGroup} from '@site/src/components/Card';
+import {Steps, Step} from '@site/src/components/Steps';
 import {Accordion} from '@site/src/components/Accordion';
 
 ## Loglama Kategorileri
@@ -29,7 +30,7 @@ Sistem Logları kendi içinde beş alt kategoriye ayrılır. Bunlardan dördü S
 
 Denetim (Audit), Giriş (Login), Token ve Uygulama loglarının alıcıları artık **[SIEM ve Log Yönlendirme](/tr/admin/system-settings/siem-log-yonlendirme)** sayfasından yönetilir. Hedefler, olay tipi ve kapsam filtreleri, gizlilik profili ile boyut politikası oradan hat bazında tanımlanır.
 
-Bu sayfada gösterilen çıktı biçimi `LEGACY_RAW` yük profiline karşılık gelir: bugünkü alan listesi dondurulmuştur ve değişmez, mevcut ayrıştırıcılarınız çalışmaya devam eder. Kanonik zarf, ortak aktör/hedef blokları ve alan bazlı gizlilik uygulaması isteniyorsa hedef `APINIZER_JSON_V2` profiline geçirilir; örnek zarf yeni sayfadadır.
+Bu sayfada gösterilen çıktı biçimi **Legacy Raw** yük profiline karşılık gelir; seçilebilen dört profil için aşağıdaki [Yük Biçimleri](#yuk-bicimleri) bölümüne bakınız.
 
 :::
 
@@ -49,6 +50,180 @@ Bu sayfada gösterilen çıktı biçimi `LEGACY_RAW` yük profiline karşılık 
         </ul>
     </TabItem>
 </Tabs>
+
+## Yük Biçimleri {#yuk-bicimleri}
+
+Her hedef, olayı hedef bazında seçilen tek bir biçimde gönderir:
+
+| Profil | Ayrıştırıcınıza ulaşan içerik |
+|---|---|
+| **Legacy Raw** | Bugünkü çıktı; dondurulmuştur ve değişmez. Bu sayfada ve [Sistem Loglarının Syslog'a Aktarılması](/tr/operations/yonetici-kilavuzlari/system-loglar-syslog-aktarma) sayfasında belgelenen her alan aynen üretilir, mevcut ayrıştırıcılarınız çalışmaya devam eder. Sonraki sürümlerde eklenen alanlar bu çıktıda **yer almaz**. |
+| **Apinizer JSON v2** | Dört hattın da paylaştığı kanonik zarf: sabit alan sırası, önem derecesi, açık bir sonuç değeri ve token değerleri, parolalar ile kimlik doğrulama başlıklarının yapısı gereği dışarıda bırakıldığı seçilmiş bir `data` nesnesi. |
+| **CEF 0** | ArcSight Common Event Format söz diziminde tek satır; aynı zarftan, gizlilik profili ve boyut politikası uygulandıktan sonra üretilir. Yalnızca Syslog hedeflerinde seçilebilir; bkz. [CEF ve LEEF](/tr/admin/system-settings/siem-log-yonlendirme#cef-leef). |
+| **LEEF 2.0** | IBM QRadar Log Event Extended Format söz diziminde, sekme ayraçlı tek satır; aynı yolla üretilir. Yalnızca Syslog hedeflerinde seçilebilir. |
+
+Bu sayfada gösterilen alan listesi **Legacy Raw** profiline karşılık gelir. Zarfın alan referansı, filtreleme kuralları, gizlilik profili ve boyut politikası [SIEM ve Log Yönlendirme](/tr/admin/system-settings/siem-log-yonlendirme) sayfasındadır.
+
+## Karşılıklı TLS (mTLS) Kurulumu {#mtls-kurulumu}
+
+Syslog bağlantısı TLS ile kapsüllenirken Apinizer'ın sunucuya bir istemci sertifikası sunması ve sunucunun zincirini kurum sertifika otoritesine göre doğrulaması sağlanabilir. Bu, RFC 5425 çalışan kurumsal SIEM ürünlerinin (QRadar, Splunk, ArcSight ve benzeri) sıklıkla beklediği kurulumdur.
+
+:::info
+
+Karşılıklı TLS zorunlu değildir. TLS kullanmayan kurumlar düz TCP veya UDP ile çalışmaya devam eder; istemci sertifikası, güven deposu, sunucu adı doğrulaması ve yapılandırılmış veri alanlarının hepsi isteğe bağlıdır ve boş bırakılabilir.
+
+:::
+
+<Steps>
+  <Step title="Kurum sertifika otoritesiyle istemci sertifikası üretin">
+    Apinizer'ın syslog sunucusuna sunacağı istemci sertifikasını kurumunuzun sertifika otoritesiyle imzalayınız. Sertifikayı ve özel anahtarını **tek parolalı** bir PKCS12 paketine koyunuz: Apinizer, kayıttaki tek parolayı hem depo hem de anahtar parolası olarak kullanır.
+
+    ```bash
+    # 1) İstemci özel anahtarı ve sertifika imzalama isteği (CSR)
+    openssl req -new -newkey rsa:2048 -nodes \
+      -keyout apinizer-gw.key \
+      -out apinizer-gw.csr \
+      -subj "/CN=apinizer-gw/O=Kurum"
+
+    # 2) İsteği kurum sertifika otoritesiyle imzalama
+    openssl x509 -req -in apinizer-gw.csr \
+      -CA kurum-ca.crt -CAkey kurum-ca.key -CAcreateserial \
+      -days 825 -sha256 \
+      -out apinizer-gw.crt
+
+    # 3) Sertifika ve anahtarı tek parolalı PKCS12 paketine koyma
+    openssl pkcs12 -export \
+      -inkey apinizer-gw.key -in apinizer-gw.crt \
+      -name apinizer-gw \
+      -out apinizer-gw.p12 -passout pass:DEPO_PAROLASI
+
+    # 4) Kurum kök sertifikasını güven deposu olarak paketleme
+    keytool -importcert -noprompt -alias kurum-ca \
+      -file kurum-ca.crt \
+      -keystore kurum-truststore.p12 -storetype PKCS12 \
+      -storepass DEPO_PAROLASI
+    ```
+
+    Sunucu adı doğrulamasını kullanacaksanız sunucu sertifikasının alternatif ad (SAN) alanı, bağlantıda gireceğiniz ana bilgisayar adını içermelidir. Hedefi IP adresiyle giriyorsanız o IP'nin de alternatif ad alanında bulunması gerekir.
+  </Step>
+
+  <Step title="İstemci sertifikasını Key Store olarak kaydedin">
+    **Yönetim → Gizlilik Yönetimi → Key Stores** ekranından yeni bir kayıt oluşturarak `apinizer-gw.p12` dosyasını ve parolasını yükleyiniz. Adım adım anlatım için [Keystore Yönetimi](/tr/admin/secrets-management/keystore-yonetimi) sayfasına bakınız.
+  </Step>
+
+  <Step title="Kurum kök sertifikasını güven deposu olarak kaydedin">
+    Aynı ekranda ikinci bir kayıt oluşturarak `kurum-truststore.p12` dosyasını yükleyiniz. Güven deposu PKCS12 veya JKS biçiminde olabilir ve yalnızca syslog sunucusunun zincirini doğrulayacak kök sertifikayı taşıması yeterlidir.
+
+    :::info
+
+    Bir güven deposu seçildiğinde **yalnızca o depo** geçerli olur; Java çalışma ortamının varsayılan kök sertifikaları bu depoya eklenmez. Sunucu sertifikanız genel bir sertifika otoritesinden alınmışsa güven deposu alanını boş bırakınız.
+
+    :::
+  </Step>
+
+  <Step title="Syslog bağlantısını yapılandırın">
+    **Connection → Syslog Bağlantısı** ekranında hedef bağlantıyı açınız:
+
+    - **Syslog Protocol Type** alanını TCP yapınız ve portu SIEM'in TLS dinleyicisine göre giriniz (yaygın değer 6514).
+    - **Syslog SSL Enabled** anahtarını açınız.
+    - **Keystore** alanında ikinci adımda oluşturduğunuz kaydı seçiniz. Sunucu istemci sertifikası istemiyorsa bu alan boş bırakılabilir.
+    - **Truststore** alanında üçüncü adımdaki kaydı seçiniz.
+    - **Sunucu Adı (Hostname) Doğrulaması** anahtarını kontrol ediniz. Bu anahtar yalnızca ekrandan yeni oluşturulan kayıtlarda açık gelir; sürüm yükseltmesinden gelen ya da APIops üzerinden oluşturulmuş kayıtlarda alan hiç ayarlanmamışsa kapalıdır. Sunucu sertifikasındaki ad hedef adresle eşleşiyorsa açınız.
+
+    Alan açıklamalarının tamamı [Syslog bağlantısı](/tr/integrations/baglanti-yonetimi/syslog) sayfasındadır.
+  </Step>
+
+  <Step title="Test Connection çıktısını okuyun">
+    **[Test Connection]** butonuna tıklayınız. TLS ile kurulan bağlantılarda sonuç kutusu, el sıkışmanın hangi koşullarda tamamlandığını gösteren bir tanılama satırı içerir:
+
+    ```
+    ok: tls: TLSv1.3 / TLS_AES_256_GCM_SHA384 / peer=CN=siem.kurum.local / clientCert=CN=apinizer-gw (expires 2036-08-31)
+    ```
+
+    - `peer` sunucunun sunduğu sertifikadır; `clientCert` Apinizer'ın sunduğu istemci sertifikasıdır. İstemci sertifikası seçilmemişse bu bölüm `clientCert=none` olur — sunucu istemci kimlik doğrulaması bekliyorsa bağlantı bu noktada başarısız olmalıdır.
+    - Seçilen depolardan biri çözülemezse test açık bir hata mesajı döndürür; bağlantı sessizce düz TLS'e ya da düz TCP'ye düşmez. Aynı davranış üretimde de geçerlidir: o hedefe hiçbir olay gönderilmez ve yaklaşık 30 saniyede bir açıklayıcı bir hata kaydı düşer.
+    - Test çerçevesi yapılandırılmış veri taşımaz; sunucu tarafında bu alanı doğrulamak için gerçek bir olay gönderiniz.
+
+    Sertifikanın içeriği yenilendiğinde çalışan gönderici havuzu eski materyalle bağlantısını sürdürür. Yenilemeden sonra Syslog bağlantısını yeniden kaydediniz ya da ortamı yeniden dağıtınız.
+  </Step>
+
+  <Step title="Syslog sunucusunda istemci kimlik doğrulamasını açın">
+    İstemci sertifikası yalnızca sunucu istediğinde sunulur. Syslog sunucusunda istemci kimlik doğrulaması açık değilse Apinizer'daki **Keystore** seçimi hiçbir işe yaramaz: sertifika hiç gönderilmez ve bağlantı yalnız sunucu TLS'i olarak kurulur. Bu adım atlanırsa karşılıklı TLS kurulmuş olmaz.
+
+    <Tabs>
+      <TabItem value="rsyslog" label="rsyslog">
+        ```
+        global(
+          DefaultNetstreamDriver="gtls"
+          DefaultNetstreamDriverCAFile="/etc/rsyslog.d/tls/kurum-ca.crt"
+          DefaultNetstreamDriverCertFile="/etc/rsyslog.d/tls/syslog-server.crt"
+          DefaultNetstreamDriverKeyFile="/etc/rsyslog.d/tls/syslog-server.key"
+        )
+
+        module(load="imtcp"
+          StreamDriver.Name="gtls"
+          StreamDriver.Mode="1"
+          StreamDriver.AuthMode="x509/name"
+          PermittedPeer=["apinizer-gw"]
+        )
+
+        input(type="imtcp" port="6514" SupportOctetCountedFraming="on" maxFrameSize="2000000")
+        ```
+
+        `StreamDriver.AuthMode="x509/name"` istemci sertifikasının adını `PermittedPeer` listesiyle karşılaştırır; listedeki değer istemci sertifikasının adıyla (yukarıdaki örnekte `apinizer-gw`) eşleşmelidir.
+      </TabItem>
+
+      <TabItem value="syslog-ng" label="syslog-ng">
+        ```
+        source s_apinizer {
+          network(
+            ip("0.0.0.0")
+            port(6514)
+            transport("tls")
+            flags(syslog-protocol)
+            tls(
+              ca-file("/etc/syslog-ng/tls/kurum-ca.crt")
+              cert-file("/etc/syslog-ng/tls/syslog-server.crt")
+              key-file("/etc/syslog-ng/tls/syslog-server.key")
+              peer-verify(required-trusted)
+            )
+          );
+        };
+        ```
+
+        `peer-verify(required-trusted)` istemci sertifikasını zorunlu kılar ve zinciri `ca-file` ile doğrular.
+      </TabItem>
+    </Tabs>
+  </Step>
+</Steps>
+
+## RFC 5424 Yapılandırılmış Veri (STRUCTURED-DATA) {#rfc-5424-yapilandirilmis-veri}
+
+Syslog bağlantısında **RFC 5424 Yapılandırılmış Veri (SD) Yaz** anahtarı açıldığında, çerçevenin bugüne kadar boş bırakılan yapılandırılmış veri alanı doldurulur. SIEM ayrıştırıcınız olay üstverisini mesaj gövdesine düzenli ifade yazmadan, doğrudan bu alandan okuyabilir.
+
+Örnek bir çerçeve:
+
+```
+<110>1 2026-09-03T10:23:25.922Z gw-1 Apinizer - - [origin software="Apinizer" swVersion="2026.09.2"][timeQuality tzKnown="1"][apinizer@99999 stream="AUDIT" eventType="ENTITY" outcome="SUCCESS" eventId="68493da280f5de2a3c29c975" correlationId="dccababd-16e3-415e-b801-9f6a52b6a28c" severity="3"] {json}
+```
+
+Alanların anlamı:
+
+| Eleman | Ne zaman yazılır | İçerik |
+|---|---|---|
+| `origin` | Yapılandırılmış veri açıkken her zaman | Ürün adı ve sürümü. IANA'da kayıtlı bir elemandır, kurum numarası gerektirmez. |
+| `timeQuality` | Yapılandırılmış veri açıkken her zaman | Zaman damgasının saat dilimi bilgisi taşıdığını bildirir. |
+| `apinizer@<numara>` | Yalnızca bağlantıda **Kurum Numarası (PEN)** doluyken | Olay üstverisi: hat, olay tipi, sonuç, olay kimliği, korelasyon kimliği ve önem derecesi. |
+
+Kapsam ve sınırlar:
+
+- Örnekteki `99999` yalnızca bir örnektir. Gerçek değer, Syslog bağlantısındaki **Kurum Numarası (PEN)** alanına girdiğiniz IANA numarasıdır; alan boşken `apinizer@` elemanı hiç yazılmaz ve çerçeve yalnızca `origin` ile `timeQuality` taşır.
+- Mesaj formatı **RFC 3164** seçildiğinde yapılandırılmış veri kavramı yoktur; anahtar açık olsa bile bir şey yazılmaz. Aynı biçimde UDP yolunda da yazılmaz.
+- **Legacy Raw** yük profilinden geçen kayıtlarda olay üstverisi bulunmadığı için `apinizer@` elemanı üretilmez; bu yolda yalnızca `origin` ve `timeQuality` yazılır.
+- Çerçevenin mesaj kimliği (`MSGID`) alanı bu sürümde her zaman boş (`-`) kalır; olay kimliği yapılandırılmış veri içinde taşınır.
+- Yapılandırılmış veri yalnızca üstveri taşır. Olay gövdesi, aktör bilgisi ve bağlantıdaki mesaj ana bilgisayar adı bu alana hiçbir zaman yazılmaz; gövde mesajın kendisinde kalır.
+- Anahtar kapalıyken çerçeveler sürüm yükseltmesi öncesiyle bayt düzeyinde aynıdır; mevcut ayrıştırıcılarınız etkilenmez.
+
 
 ## Sıkça Sorulan Sorular
 
