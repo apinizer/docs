@@ -1,6 +1,6 @@
 ---
 title: "Limit Plans"
-description: "You can create reusable AI Token Budget or Request Rate limit plans — project-scoped or, as a system administrator, platform-wide — and manage them through draft, publish, and revision steps; assign these plans — or custom values — directly to an API client, a credential, or a portal Subscription Plan, activate or end the assignment, and use this as an additional ceiling on top of your existing quota/budget configuration."
+description: "You can create reusable AI Token Budget or Request Rate limit plans — project-scoped or, as a system administrator, platform-wide — and manage them through draft, publish, and revision steps; assign these plans — or custom values — directly to an API client, a credential, or a portal Subscription Plan, activate or end the assignment, and enforce it as a real ceiling on your traffic, merged with any organization/project/proxy-level budget so only the stricter of the two ever applies."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -160,8 +160,8 @@ Below the mode/plan fields, every assignment — again regardless of family — 
 
 **Custom error message** — a message template, its content type, and an HTTP status code, using the same variable syntax as the platform's [Error Messages](/en/admin/system-settings/error-messages) screen. When set, it replaces the standard message on a limit-exceeded block *for this assignment only*; leave it blank to use the standard message.
 
-:::note Fields are shown for both families, enforced for one
-The Target, Cache Posture, and Custom Error Message fields appear on every assignment regardless of family. Today they are only acted on for **Request Rate** — see [Enforcement](#enforcement-status-shadow-mode) below; on an AI Token Budget assignment they are accepted and stored but not yet enforced.
+:::note Target is enforced for both families; Cache Posture and Custom Error Message stay Request Rate-only
+The Target, Cache Posture, and Custom Error Message fields appear on every assignment regardless of family. **Target** narrows enforcement for both families — see [Enforcement](#enforcement-status-shadow-mode) below for how an AI Token Budget assignment's target maps onto its counter. **Cache Posture** and **Custom Error Message** are acted on for **Request Rate** only; an AI Token Budget assignment is enforced through the [Token Rate Limit policy](/en/ai-gateway/token-quotas), which has its own cache-behavior settings and applies the plan's own overflow action when a ceiling is exceeded.
 :::
 
 ## Rule Assignments: Limiting by Identity Condition {#rule-assignments-limiting-by-identity-condition}
@@ -205,10 +205,10 @@ A Rate Limit Control List record is retired by this, not left running alongside 
 
 **Request Rate**: an existing [Rate Limit Control List](/en/admin/identity-management/rate-limit-control-list) or an [API Proxy ACL](/en/admin/identity-management/api-proxy-acl)/[API Proxy Group ACL](/en/admin/identity-management/api-proxy-group-acl) quota/throttling setting is **no longer applied by the gateway** — on upgrade, every such legacy limit was converted into a typed Limit Plan and assignment, so the ceiling itself carries over; only the mechanism enforcing it changed. See [Legacy Limits Migrated at Upgrade](#legacy-limits-migrated-at-upgrade) below for exactly what moved and how.
 
-**AI Token Budget**: an existing [AI token budget](/en/ai-gateway/token-quotas) defined elsewhere — at the organization, project, or proxy level — if any, is still the **only** one that blocks, and remains **additional** to a typed assignment, never a replacement; see [Enforcement](#enforcement-status-shadow-mode) for why. A typed AI Token Budget assignment is measured for parity against it but does not yet add a ceiling of its own.
+**AI Token Budget**: an existing [AI token budget](/en/ai-gateway/token-quotas) defined elsewhere — at the organization, project, or proxy level — keeps applying alongside a typed assignment, not as a second, independent deduction: when both cover the same counter and window, the gateway reserves the request's cost **once**, against whichever ceiling is **stricter**; see [Enforcement](#enforcement-status-shadow-mode) for the full merge rule.
 
-:::info This is an additional ceiling, not a replacement — for AI Token Budget
-Defining a typed AI Token Budget assignment never changes or disables an existing AI token budget — it keeps working exactly as it does today, whether or not a typed assignment also exists. Request Rate is different since the retirement of the legacy path: see [Legacy Limits Migrated at Upgrade](#legacy-limits-migrated-at-upgrade) below.
+:::info Same counter, stricter ceiling, reserved once — for AI Token Budget
+A typed AI Token Budget assignment does not stack on top of an existing organization/project/proxy-level AI budget as a second ceiling. When both cover the same subject, window, and dimension (overall consumption, or the same model/provider), only one reservation happens, using whichever of the two is stricter — so adding a typed assignment can only tighten what already applies, never loosen or duplicate it.
 :::
 
 ## Enforcement {#enforcement-status-shadow-mode}
@@ -228,19 +228,29 @@ Counters are reserved through the same counter service call the legacy quota/thr
 
 **Observability**: a Prometheus counter `apinizer_limit_typed_decisions_total{family, outcome}` (outcome: `granted` / `blocked` / `count_only` / `cache_error_continue` / `cache_error_fail` / `out_of_target_block`) tracks every enforcement decision.
 
-There is no parity comparison for Request Rate: the legacy path it would have compared against is retired, so there is nothing left to compare against. The `apinizer_limit_shadow_comparisons_total{family="REQUEST_RATE", ...}` series is no longer produced; the JVM system property `apinizer.limit.shadow.enabled` now affects only the AI Token Budget comparison — see [AI Token Budget: Still Shadow](#ai-token-budget-still-shadow) below.
+There is no parity comparison for Request Rate: the legacy path it would have compared against is retired, so there is nothing left to compare against. The `apinizer_limit_shadow_comparisons_total{family="REQUEST_RATE", ...}` series is no longer produced — nor is there a comparison for AI Token Budget any more: shadow mode ended for that family too, and the `apinizer.limit.shadow.enabled` switch that once gated it no longer exists; see [AI Token Budget: Enforced](#ai-token-budget-still-shadow) below.
 
 :::warning Upgrading from a version where Request Rate was shadow-only
 An **Active** Request Rate assignment created while this mechanism was still shadow-only starts blocking traffic for real the moment you upgrade to this version — review your active assignments beforehand if you are not ready for them to start enforcing. Their counters start at zero: no consumption carries over from the comparison period, since a shadow comparison never reserved anything.
 :::
 
 :::warning Legacy limits migrated at upgrade
-On the same upgrade, every legacy Rate Limit Control List rule and every API Proxy ACL/API Proxy Group ACL throttling/quota setting is converted into a typed Limit Plan and assignment — the gateway no longer reads either legacy source at all. Afterward, expect to see `Migrated REQUEST_RATE #<checksum>` plans in your catalog and assignments with source **Migration** on your subjects; like every typed assignment, their counters start at zero. See [Legacy Limits Migrated at Upgrade](#legacy-limits-migrated-at-upgrade) below for the full conversion matrix.
+On the same upgrade, every legacy Rate Limit Control List rule and every API Proxy ACL/API Proxy Group ACL throttling/quota setting is converted into a typed Limit Plan and assignment — the gateway no longer reads either legacy source at all. Afterward, expect to see `Migrated REQUEST_RATE #<checksum>` plans in your catalog and assignments with source **Migration** on your subjects; like every migrated Request Rate assignment, their counters start at zero — a migrated AI Token Budget assignment is the one exception, see [AI Budgets](#ai-budgets) below. See [Legacy Limits Migrated at Upgrade](#legacy-limits-migrated-at-upgrade) below for the full conversion matrix.
 :::
 
-### AI Token Budget: Still Shadow
+### AI Token Budget: Enforced {#ai-token-budget-still-shadow}
 
-A typed **AI Token Budget** assignment still runs in shadow only: on every request, the gateway calculates what it would enforce and compares that against the existing (legacy) AI budget mechanism, but blocking is still done by the legacy mechanism — a typed AI Token Budget assignment never rejects a request on its own yet. The same `apinizer_limit_shadow_comparisons_total` counter and `apinizer.limit.shadow.enabled` switch described above apply to it.
+A typed **AI Token Budget** assignment now enforces for real, at every subject level the family supports — Consumer, API Client, Application, Organization, API Proxy, Project, and Platform — whether it was created by hand or, like a Request Rate one, sourced from a portal subscription (see [Referenced by a Portal Subscription Plan](#referenced-by-a-portal-subscription-plan) below).
+
+When an entity-level AI budget — an organization, API proxy, project, or platform default budget defined on the [Token Quotas](/en/ai-gateway/token-quotas) screen — and a typed assignment cover the same subject, window, and dimension, the gateway reserves the request's token/USD cost **once**, against whichever ceiling is **stricter**; see [Working Together With Your Existing Limits](#working-together-with-your-existing-limits) above.
+
+The [Target](#target-what-the-ceiling-narrows-to) narrowing is honored for this family too: **Everything**, **One API Proxy**, and **One API Proxy + Environment** budget the subject's whole counter; **One AI Model** and **One AI Provider** budget only that model's or that provider's own dimension of the counter, leaving every other model/provider under the subject's wider ceiling.
+
+An assignment's **actor scope** narrows coverage the same way: an **Anonymous**-only assignment applies only to callers with no resolved identity and is reserved against the proxy's separate anonymous counter — the same legacy bucket an Anonymous Default budget uses — never folding onto authenticated traffic's shared proxy counter; an **Authenticated**-only assignment applies only to a resolved identity, and the default, **Any**, covers both. A Request Rate assignment honors the same actor-scope narrowing.
+
+There is no [rule assignment](#rule-assignments-limiting-by-identity-condition) for this family: an AI Token Budget ceiling always has one fixed subject, never an identity condition, so creating one with `subjectType: AUDIENCE_RULE` is refused with `400` (errorKey `limit.binding.audienceRuleFamily`) — the **Rule assignments** view toggle above the catalog table is Request Rate only.
+
+The shadow-comparison mechanism this section used to describe — the `apinizer_limit_shadow_comparisons_total` counter and the `apinizer.limit.shadow.enabled` switch that gated it — no longer exists for either family.
 
 ### The "Rate Limit" Badge on Develop
 
@@ -303,6 +313,19 @@ A Rate Limit Control List's `credentialIdList` was, in legacy behavior, that rul
 
 A Rate Limit Control List's `targetAudienceRuleList` and `targetIdentityValueList` (equality entries not already covered by `credentialIdList`) become their own rule assignments the same way: the identity source (auth-resolved or variable), the out-of-target action (Block, or a general quota), and the general quota itself (Total/Per identity, with its own window) all carry onto the rule. When the out-of-target action is a general quota but its quota fields were left empty, the rule's own limit is carried over as the general quota instead — the same fallback the legacy runtime applied. A rule left with nobody to migrate — no consumers, no identities, no condition — produces no assignment at all.
 
+### AI Budgets
+
+A consumer-level AI token budget is migrated the same way, from a different source and into a different plan family:
+
+- **Source**: the environment-level **Enable AI Token Budget** setting (and its budget values) on an [API Proxy ACL](/en/admin/identity-management/api-proxy-acl)/[API Proxy Group ACL](/en/admin/identity-management/api-proxy-group-acl) row.
+- **Plan**: rows sharing the exact same budget body are folded the same way Request Rate rows are — one **AI Token Budget** plan per distinct body, named `Migrated AI_TOKEN_BUDGET #<checksum>` (first 8 hex characters), tagged `migrated` and `checksum:<sha>`, **Published**.
+- **Assignment**: subject is the Consumer itself — the same twin the Request Rate migration above targets — or, when that Consumer's migrated API client belongs to a portal application, the **API client** instead; target [One API Proxy + Environment](#target-what-the-ceiling-narrows-to), matching the row's own proxy and environment; source **Migration**; `validUntil` the row's own expiry, if it had one.
+- **No counter reset**: unlike every other migrated assignment, this one is counted under the same counter the legacy budget already used, so in-window consumption carries over rather than restarting at zero. A Consumer later migrated to an API client keeps sharing that same counter with its legacy record.
+
+The row's **AI Budget Source** field keeps exactly one job after this migration: it only decides whether the **organization**-level AI budget chain applies to that Consumer on that proxy. The Consumer's own migrated assignment always applies regardless of that setting; to stop it, end the assignment (or disable its budget) on the [Limits tab](#assigning-a-limit-to-a-subject-the-limits-tab) or the [Token Quotas](/en/ai-gateway/token-quotas) screen.
+
+Not every enabled row is carried — see the AI-specific outcomes in [Not Migrated (Reported Only)](#not-migrated-reported-only) below. A row whose **AI Budget Source** was **Organization** is the notable case: its own budget was never enforced even before this migration (only the organization chain applied to it), so nothing is lost by leaving it out — assign one directly on the Limits screen if you want that Consumer to also carry its own ceiling. A row whose Consumer no longer exists is skipped and recorded as `CREDENTIAL_MISSING`, the same as a portal-derived or expired row is skipped and counted without being listed individually.
+
 ### Not Migrated (Reported Only)
 
 The following legacy items have no typed counterpart, are intentionally skipped, or are carried over with a caveat; each is recorded in the migration's audit ledger:
@@ -322,7 +345,9 @@ The following legacy items have no typed counterpart, are intentionally skipped,
 | A rule audience whose out-of-target action is **General quota** but whose quota fields were left empty | The rule's own limit is carried over as the general quota instead — the same fallback the legacy runtime applied, recorded as `GENERAL_QUOTA_FALLBACK` |
 | A Rate Limit Control List with no consumers, no target identities, and no condition to migrate | Nothing is migrated, recorded as `EMPTY_AUDIENCE_SKIPPED` |
 | A **portal-derived** (subscription/product) row | Skipped — carried instead by the Subscription Plan assignment backfill; see [Upgrading Existing Subscription Plans](#upgrading-existing-subscription-plans) |
-| An **AI token budget** referenced on a legacy ACL row | Not migrated in this step — it stays on the legacy ACL binding until a later wave |
+| A row's **AI Budget Source** set to **Organization** | Not carried — see [AI Budgets](#ai-budgets) above; recorded as `AI_LEAF_EXCLUDED_BY_SOURCE`, information only, not a residual failure |
+| **Enable AI Token Budget** on but the budget itself disabled or naming no ceiling | Skipped, recorded as `AI_BUDGET_INCOMPLETE_SKIPPED` |
+| A row with **Enable AI Token Budget** on but no API proxy named on it | Skipped, recorded as `AI_BUDGET_TARGET_MISSING` |
 
 Re-running the migration is idempotent: a subject/target pair that already has an active assignment from a previous run is left as-is, not written again.
 
@@ -332,7 +357,7 @@ A published, platform-scope plan can also be referenced from a portal API Produc
 
 A Subscription Plan may reference at most one Request Rate plan and one AI Token Budget plan, each **Off** or a specific published plan. The referenced plan's overflow posture must agree with the Subscription Plan's own on-exceed setting — **Block** needs a plan that blocks, **Continue & charge** needs a plan that only counts (Count Only for Request Rate, Alert Only for AI Token Budget) — a mismatch is refused when the Subscription Plan is saved.
 
-When a subscription of that plan is **approved**, one **Active** assignment is created automatically for the subscribing application, per referenced family — the same kind of assignment [described above](#assigning-a-limit-to-a-subject-the-limits-tab), sourced from the subscription rather than entered by hand, application-wide rather than tied to one API. Its [enforcement status](#enforcement-status-shadow-mode) follows its family exactly like a manually entered assignment does: a subscription-sourced Request Rate assignment enforces for real, a subscription-sourced AI Token Budget assignment is still shadow-only.
+When a subscription of that plan is **approved**, one **Active** assignment is created automatically for the subscribing application, per referenced family — the same kind of assignment [described above](#assigning-a-limit-to-a-subject-the-limits-tab), sourced from the subscription rather than entered by hand, application-wide rather than tied to one API. Its [enforcement status](#enforcement-status-shadow-mode) follows its family exactly like a manually entered assignment does: both a subscription-sourced Request Rate assignment and a subscription-sourced AI Token Budget assignment enforce for real.
 
 An application can have only one such assignment per family. If a second, different subscription of the same application also references a plan for that family, the existing assignment is **kept**, and the operator approving the second subscription is asked to keep it or switch to the new plan. When a subscription that owns the assignment ends, it is handed over to another still-approved subscription of the same application that references the same family, if one exists, so coverage and accumulated usage are not lost; otherwise the assignment ends with it.
 
