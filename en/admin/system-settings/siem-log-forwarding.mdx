@@ -39,13 +39,33 @@ A **stream** is one family of events. Each stream has its own producer, its own 
 | **Token** | Token issuance, refresh and rejection on the Gateway | `log_tokentraffic` | `TOKEN_ISSUED`, `TOKEN_REFRESHED`, `TOKEN_REJECTED` | `SUCCESS` when there is no error, `FAILURE` when there is; authentication errors are `DENIED` |
 | **Application** | Component logs from the Management Console, Gateway, Cache and Integration modules | `apinizer_log` | `LOG.TRACE` … `LOG.ERROR` | `WARN` and `ERROR` are `FAILURE`, everything else `SUCCESS` |
 | **API Security** | Gateway requests blocked by a policy or failed with an error, across HTTP, gRPC and WebSocket traffic | `log_apisecurityevent` | `AUTHENTICATION`, `AUTHORIZATION`, `QUOTA`, `THROTTLING`, `VALIDATION`, `IP_SECURITY`, `THREAT`, `ROUTING`, `GATEWAY`, `OTHER` | `DENIED` when the request was blocked, `FAILURE` when it errored |
+| **API Access** | **Every** request that passes through the Gateway — successful ones included — as bodiless metadata, across HTTP, gRPC and WebSocket traffic | `log_apiaccess` | the same ten categories as API Security | `SUCCESS` when the request completed, `DENIED` when it was blocked, `FAILURE` when it errored |
 | **Portal** | The API Portal's own domain events — an application registered or removed, a subscription requested/approved/rejected/cancelled, an organization membership or join request managed, a support ticket opened, a personal API access token created or revoked | `audit_event` (the same collection as Audit — see [Portal Events](/en/admin/audit-compliance/audit-records#portal-events)) | `PORTAL_APP_CREATED`, `PORTAL_APP_DELETED`, `PORTAL_SUBSCRIPTION_REQUESTED`, `PORTAL_SUBSCRIPTION_APPROVED`, `PORTAL_SUBSCRIPTION_REJECTED`, `PORTAL_SUBSCRIPTION_CANCELLED`, `PORTAL_ORG_MEMBER_INVITED`, `PORTAL_ORG_MEMBER_ADDED`, `PORTAL_ORG_MEMBER_ROLE_CHANGED`, `PORTAL_ORG_MEMBER_REMOVED`, `PORTAL_ORG_JOIN_REQUESTED`, `PORTAL_ORG_JOIN_APPROVED`, `PORTAL_ORG_JOIN_REJECTED`, `PORTAL_TICKET_CREATED`, `PORTAL_API_TOKEN_CREATED`, `PORTAL_API_TOKEN_REVOKED` | `SUCCESS`, `FAILURE`, `DENIED` |
 
 :::info
 Portal sign-ins and sign-outs are **not** part of the Portal stream — they are Session events, physically recorded in a separate collection, `portal_login_logs`, rather than `persistent_audit_event`. A `PORTAL_LOGIN_SUCCESS`, `PORTAL_LOGIN_FAILURE`, `PORTAL_LOGOUT`, `PORTAL_ACCOUNT_LOCKED`, `PORTAL_ACCOUNT_UNLOCKED`, `PORTAL_PASSWORD_CHANGED`, `PORTAL_PASSWORD_CHANGE_REQUIRED`, `PORTAL_PASSWORD_RESET_REQUESTED`, `PORTAL_PASSWORD_POLICY_VIOLATION` or `PORTAL_ACCOUNT_DISABLED` event type on the **Session** row above carries `source.component: PORTAL` and `data.portalId`, so a rule can select or exclude portal sign-ins without touching Management Console ones — see [API Portal Login Logs](/en/api-portal/login-logs#event-types-and-reason-codes) for the full catalog (ten types in all). `PORTAL_ACCOUNT_DISABLED` is written only by the [inactive-account job](/en/api-portal/api-portal-settings#security) so far; `PORTAL_ACCOUNT_UNLOCKED` only by an administrator's explicit **Unlock** on [Accounts/Developers](/en/api-portal/accounts-developers#actions) — a lock that simply expires on its own writes no event of its own, the sign-in row that follows says what happened.
 :::
 
-One further stream, **API Access**, appears on the screen with a **Planned** badge and cannot be configured yet. API traffic is not part of the SIEM streams — traffic logs continue to be forwarded by the log connectors of the Gateway environment.
+:::warning The API Access stream is the high-volume one
+
+API Access produces **one event per request**, so it grows at the rate of your traffic rather than at the rate of your incidents. Two switches govern it, and both are **off by default**:
+
+- **Local storage** — whether the events are written to the `log_apiaccess` collection at all, on the **Streams** tab. Turning it on asks for confirmation, because from that moment every request costs a database write.
+- **Authority** — whether the stream is dispatched from the destinations on this page.
+
+Before you turn either on, set a short retention for the collection — **3 to 7 days** is the recommendation — from the **API Access Events** row on [Application Log Cleanup Tasks](/en/admin/audit-compliance/application-log-cleanup-tasks), and consider [sampling](#sampling) the rule that forwards it.
+
+:::
+
+:::info Blocked and failed requests reach two streams
+
+A request that a policy blocks or that ends in an error produces **both** an API Security event and an API Access event — the two streams overlap on purpose, so that a destination can subscribe to security incidents without the traffic, or to the traffic without duplicating incidents.
+
+If you forward both streams to the same destination, set **Outcomes** to `SUCCESS` on the API Access rule. The API Security rule then carries the blocked and failed requests and the API Access rule carries only the successful ones, and nothing is counted twice.
+
+:::
+
+Full traffic logs — the ones with request and response payloads — are still a separate mechanism and are not part of the SIEM streams; they continue to be forwarded by the log connectors of the Gateway environment. An API Access event is metadata only and never carries a body, a header or a query string.
 
 ### Destinations
 
@@ -116,8 +136,8 @@ One row per stream, with four columns:
 
 | Column | What it does |
 |---|---|
-| **Stream** | The stream's name. Reserved streams carry a *Planned* badge and cannot be configured. |
-| **Apinizer Database / Local Retention** | Whether the stream is stored locally, plus a **Retention settings** link to the retention configuration for that log family. Audit and Session are marked *Always stored* and cannot be turned off. Token and Application have a *Store in the Apinizer database* switch. The Audit row also carries the *Audit manager requests* switch, which remains a General Settings value and controls whether Management Console requests are recorded at all. |
+| **Stream** | The stream's name. A stream that exists in the platform but is not configurable yet would carry a *Planned* badge; as of this release every stream is configurable. |
+| **Apinizer Database / Local Retention** | Whether the stream is stored locally, plus a **Retention settings** link to the retention configuration for that log family. Audit, Session, API Security and Portal are marked *Always stored* and cannot be turned off. Token and Application have a *Store in the Apinizer database* switch that is **on** by default. API Access has the same switch but it is **off** by default and asks for confirmation before it is turned on — see the warning above. The Audit row also carries the *Audit manager requests* switch, which remains a General Settings value and controls whether Management Console requests are recorded at all. |
 | **Destinations** | A summary of the rule for each destination configured for that stream. When no destination is configured the cell says so, and streams still on Legacy show *Rules take effect once the authority is ACTIVE*. |
 | **Authority** | The Legacy ⇄ Active switch, with a confirmation dialog and the recommended cutover order. The switch is saved on its own, immediately, and it carries over only what has already been saved: destination edits you have not saved yet stay on screen but are **not** part of the cutover, and the dialog says so. Save them first if the switch should cover them. |
 
@@ -141,10 +161,28 @@ Rules are evaluated at the source, on the path that produced the event, before a
 | 4 | Any dimension of **Scope — exclude** matches | Not sent |
 | 5 | **Scope — include** is not empty and no dimension matches | Not sent |
 | 6 | The threshold rejects the event — **Minimum level** for Application, **Outcomes** for every other stream | Not sent |
-| 7 | **Maximum events per second** has been exhausted for this second | Throttled |
-| 8 | — | Sent |
+| 7 | **Sample percent** is set (API Access only) and this event is not in the sampled share | Not sent — sampled out |
+| 8 | **Maximum events per second** has been exhausted for this second | Throttled |
+| 9 | — | Sent |
 
 An empty list always means *everything*: no included event types means every type, no outcomes means every outcome, no scope means every event. Within **Scope — include** the dimensions are combined with OR — the event has to match at least one filled dimension — while an event matching any dimension of **Scope — exclude** is dropped.
+
+### Sampling
+
+The **Sample percent** field appears on the **API Access** rule only, and it is the knob that makes a per-request stream affordable for a SIEM that is priced or sized by event count. Leave it empty to forward every event that matched the rule; set it to `10` to forward roughly a tenth of them.
+
+Two things about it are worth being precise on:
+
+- **It thins forwarding, never storage.** Sampling decides what leaves for the destination. It does not affect what is written to the `log_apiaccess` collection — that is governed solely by the local storage switch, so the Security Events screen keeps showing every event regardless of the sample percent.
+- **The decision is deterministic, not random.** It is derived from the event's own identifier, so the same event always gets the same verdict, and a request either reaches every destination that sampled it in or none of them. Re-evaluating the same event never flips the result.
+
+Sampling is the wrong tool for reducing a specific kind of noise — use **Outcomes**, **Scope — include** or **Scope — exclude** for that, and keep sampling for the case where you want a representative slice of everything.
+
+:::warning
+
+Sampling is not compatible with using API Access as an audit trail. A sampled destination holds a statistical picture of your traffic, not a complete one; do not point a compliance report at it.
+
+:::
 
 ### Scope dimensions
 
@@ -182,6 +220,8 @@ Management Console sign-ins have no **Portal ids** to match, and portal sign-ins
 | Forward only one project's events | Audit rule → **Scope — include** → **Project ids**: the project identifier (add `admin` as well to keep platform-level events) |
 | Forward warnings and errors only | Application rule → **Minimum level**: `WARN` |
 | Protect a shared syslog target from a token burst | Token rule → **Maximum events per second**: `200` |
+| Forward successful API traffic without duplicating the security incidents | API Access rule → **Outcomes**: `SUCCESS` (leave the API Security rule to carry the blocked and failed requests) |
+| Keep a per-request stream affordable on a metered SIEM | API Access rule → **Sample percent**: `10` — roughly a tenth of the matching events is forwarded, the collection still stores all of them |
 | Send token rejections only | Token rule → **Included event types**: `TOKEN_REJECTED` |
 | Forward only one portal's sign-ins/sign-outs | Session rule → **Scope — include** → **Portal ids**: the portal identifier |
 | Forward a portal's application/subscription/ticket activity but not its sign-ins | Portal rule with no scope restriction; leave the Session rule for that destination off (or scoped to a different portal) |
@@ -668,7 +708,9 @@ A `configRevision` that differs between nodes means a node has not received the 
 - **Application logs from the Cache and Integration modules** are still forwarded through the legacy recipient list, so rules, privacy profiles and size policies do not apply to them. Application logs from the Management Console and the Gateway follow this page.
 - **A connection configuration shared by several streams shares one queue.** An application-log burst can crowd out audit events on the same syslog connection. Give a high-volume stream its own connection configuration, or bound it with a minimum level and an events-per-second limit.
 - **A whole-project configuration import still ignores the recipient lists and local storage switches** — this page owns them, so use the [SIEM Settings](/en/admin/secrets-management/export-import#siem-settings) type in the Export/Import wizard instead; see [Export and import](#export-and-import) above.
-- **The API Access stream** is reserved and cannot be configured. API traffic itself is not part of the SIEM streams; traffic logs continue to be forwarded by the log connectors of the Gateway environment.
-- **API Security destinations must use Schema v2, CEF or LEEF** — Legacy Raw is not available for this stream.
+- **A blocked or failed request is counted by two streams.** It produces an API Security event and an API Access event. Set **Outcomes** to `SUCCESS` on the API Access rule when both streams go to the same destination — see [Streams](#streams).
+- **Sampling an API Access rule thins only what is forwarded**, never what is stored. The `log_apiaccess` collection still receives every event while local storage is on, so bound it with a short retention rather than with the sample percent.
+- **API Access local storage is off by default and stays off after an upgrade.** Until it is turned on, the API Access tab of the Security Events screen is empty even when the stream is being forwarded to a SIEM destination.
+- **API Security and API Access destinations must use Schema v2, CEF or LEEF** — Legacy Raw is not available for these streams, because a new destination defaults to Legacy Raw and the events would otherwise be dropped silently.
 - **A newly introduced Portal domain event type is not added to an already-migrated destination's included event types automatically** — the same rule that already applies to Audit, Session, Token and Application (see [What the upgrade did](#what-the-upgrade-did)); a rule left with an empty **Included event types** list is unaffected and always picks up new types.
 - **The client IP and User-Agent on a portal-originated Session or Portal event depend on the API Portal backend sitting behind a reverse proxy or ingress that is configured to pass the real client address through** (`server.forward-headers-strategy` on the Portal backend, matching whatever your proxy sends). Without that, these fields fall back to the Portal backend's own host address rather than the end user's.
