@@ -447,6 +447,58 @@ Fields used for Security Settings configuration are shown in the table below.
 | **Inactive Account Threshold (days)** | Security tab → Inactive Account Threshold. Approved accounts that have not signed in for this many days are disabled automatically by a daily background job — the same effect as an administrator setting the account's status to Disabled, and just as reversible: approve it again from **Portal → Accounts/Developers** and the account works immediately. `0` (default) turns the check off. An account that holds a valid (non-expired) API access token is exempt, so a token-only integration is never disabled just because nobody signs in with a browser. No account is ever deleted and no notification is sent. | Not visible in the Portal interface; a disabled account can no longer sign in until an administrator re-approves it. |
 | **Management API Key Users** | Security tab → Management API Key Users. Lists the Manager users whose Management API key may act on behalf of this portal. The Portal backend sends the portal identity in the `X-Portal-Id` header with every Management API call; the Manager verifies that the key's user is in this list (system administrators always pass). Leave the list empty to accept every user holding a portal role (Portal Manager, Portal Business, Portal Developer). A user outside the list, a user without a portal role, or an unknown portal id is rejected with **403**. Once at least one portal has this list filled, a Management API call to a portal endpoint that **omits** the `X-Portal-Id` header is rejected with **403** as well (system administrators excepted): a blank header would otherwise select the unscoped path — for example validating a token against every portal — which must never be laxer than the strictest header the caller could have sent. The Portal backend always sends the header, so this only affects direct Management API callers. The server-side property `apinizer.portal.managementApi.portalBinding` (`strict`, default / `legacy`) temporarily restores the previous, unverified behavior during migration; every legacy pass is logged once per user and portal and counted in the `apinizer_portal_management_api_legacy_binding_total` metric. The field is part of the Portal Settings export; on another installation the listed logins must exist there as well, otherwise that portal receives 403 until the list is updated. | Not visible in the Portal interface; it decides whether the Portal backend's Management API calls for this portal are accepted at all. |
 
+## Password Policy & Account Lockout {#password-policy--account-lockout}
+
+The **Security** tab also configures the rules a portal account's own password must follow, and what happens after repeated failed sign-ins. These settings are **scoped per portal** — two portals on the same installation can run different rules — and apply to every portal account: registration, self-service password change, a "forgot password" reset, and a password an administrator sets from **Portal → Accounts/Developers**.
+
+Every default below reproduces the rule the portal's registration form already enforced before this section existed — 8 to 50 characters with at least one uppercase and one lowercase letter — so an installation that upgrades to this version behaves exactly as before until an administrator changes something.
+
+| Field | Default | Meaning |
+|------|----------|----------|
+| Minimum Password Length | 8 | The shortest password a portal account may set. |
+| Maximum Password Length | 50 | The longest password a portal account may set. |
+| Minimum Number of Character Types | 2 | How many of the four character types below (uppercase letter, lowercase letter, digit, special character) a password must contain, independently of which ones are individually required below. |
+| Uppercase letter is required | On | A password must always contain an uppercase letter. |
+| Lowercase letter is required | On | A password must always contain a lowercase letter. |
+| Digit is required | Off | When on, a password must always contain a digit, regardless of the minimum above. |
+| Special character is required | Off | When on, a password must always contain a special character, regardless of the minimum above. |
+| Password Validity Period (days) | 0 (never expires) | A password older than this many days must be changed at the account's next sign-in. 0 disables expiry. |
+| Expiry Warning Period (days) | 7 | How many days before expiry the account is warned at sign-in. Only applies when a validity period is set. |
+| Password History Size | 0 (disabled) | An account cannot reuse this many of its most recent passwords, counting the one currently in use. 0 disables the check. |
+| Force Password Change After Administrator Reset | Off | When on, an account whose password was set by an administrator — at creation or on a later reset — must choose a new one at its next sign-in. |
+| Max Failed Login Attempts | 5 | How many *wrong* passwords in a row lock the account — the attempt that **exceeds** this number locks it, not the one that reaches it. |
+| Lock Duration (minutes) | 0 (until an administrator unlocks it) | How long a lock lasts before it opens on its own. `0` means the lock never expires by itself; only an [administrator's **Unlock**](/en/api-portal/accounts-developers#actions) — or re-approving the account — reopens it. For a public, self-registering portal a short duration (for example 15 minutes) is recommended so a mistaken lockout does not become a support ticket; the unlimited default favors slowing down an attacker over convenience. |
+
+This is the same rule engine the Management Console's own [password policy](/en/admin/system-settings/global-configuration#password-policy) uses, configured with independent values — a portal account is an external, self-service identity, not an administrator's, so the two should not be assumed to share defaults.
+
+### Account lockout
+
+A **lock** is separate from the account's Enabled/Disabled status ([Accounts/Developers](/en/api-portal/accounts-developers)): a locked account is still Enabled, it simply cannot sign in until the lock clears. This keeps "an administrator closed this account" and "someone guessed the password too many times" visibly different, and the second is always reversible without waiting on an administrator when a lock duration is configured.
+
+- Every wrong password increases the account's failed-attempt count; a correct password resets it to zero.
+- The attempt that pushes the count **past** *Max Failed Login Attempts* locks the account immediately — the account is refused before the next password is even compared, so a locked account cannot be used to keep guessing.
+- The lock opens automatically once *Lock Duration* has passed, or immediately when an administrator clicks **Unlock** on [Accounts/Developers](/en/api-portal/accounts-developers#actions), or when a Disabled account is re-approved.
+- Both the lock and the unlock are recorded as their own rows in [Login Logs](/en/api-portal/login-logs#event-types-and-reason-codes) and, once the **Session** stream is switched to Active, are forwarded through [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding) like any other session event.
+
+:::info
+A portal published without login restricted to the local network can be probed for a **different** portal's account through this same sign-in form — the credentials are simply checked against the account they actually belong to. A wrong guess in that case still counts against the target account's *own* portal threshold and lock, exactly as if it had been tried there directly, so the same portal-level lockout protection applies. Keep *Lock Duration* at a sensible, non-zero value on a public portal if this matters to your threat model — the default (until an administrator unlocks it) is deliberately the stricter choice.
+:::
+
+### Forced password change
+
+A sign-in still succeeds when a password has expired (*Password Validity Period*) or an administrator required a change (*Force Password Change After Administrator Reset*) — refusing it outright would leave the account holder with a correct password and no way to open the account-settings screen that lets them replace it. Instead:
+
+- The session is issued normally, but every action other than reading the account's own profile/settings and changing the password is refused until the password is changed.
+- The portal redirects the signed-in user straight to the password-change screen and shows a banner explaining why.
+- Once the password is changed, the restriction is lifted by signing the account out and back in — the portal does this automatically — rather than by silently upgrading the existing session.
+- This restriction applies only to a browser sign-in. A personal API access token or an MCP connection is **not** affected: an unattended integration must keep working even while a human's portal password has expired.
+
+:::note
+**Upgrade notes.** Update the Manager before the API Portal — a manager running this version and an older API Portal keep working together (the older Portal simply does not use the new fields), but a Portal already updated to expect the new sign-in fields fails to sign accounts in against an older Manager. On upgrade, every existing portal account's password age is stamped as of the upgrade itself, so *Password Validity Period* only starts counting from there, never from an unknown date in the past — the same discipline the Management Console's own [password policy](/en/admin/system-settings/global-configuration#password-policy) upgrade follows. A second, one-time migration also repairs a small number of portal account passwords that a since-fixed defect could leave stored incorrectly (in the clear, or encrypted more than once) — no password value is ever written to a log, and the repair is silently skipped for an account that was never affected.
+
+Accounts that this version's stricter, `>5`-attempt lockout would previously have flipped to **Disabled** are not retroactively distinguished from accounts an administrator disabled on purpose — both simply show as Disabled today. Re-approving such an account from **Portal → Accounts/Developers** resets its failed-attempt count the same way an **Unlock** does.
+:::
+
 ## Features
 
 Features to be used on the API Developer Portal side are managed through this screen.

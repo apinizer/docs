@@ -388,24 +388,38 @@ Every row carries an **Event** — which session event this is — and, for a fa
 | **Login Failed** | A sign-in attempt was rejected — see the **Reason** column for why. | FAILURE |
 | **Logout** | A developer signed out. | SUCCESS |
 | **Account Disabled** | The account was disabled — today, only by the [inactive-account job](/en/api-portal/api-portal-settings#security) (**Reason**: `Account inactive for too long`). | SUCCESS |
-| Account Locked, Password Changed, Password Change Required, Password Reset Requested, Password Policy Violation | Reserved event types for the portal password policy and account lockout feature. Not produced by this version. | — |
+| **Account Locked** | The account was locked after too many failed sign-in attempts — see [Password Policy & Account Lockout](/en/api-portal/api-portal-settings#password-policy--account-lockout). | FAILURE |
+| **Account Unlocked** | An administrator cleared a lockout from [Accounts/Developers](/en/api-portal/accounts-developers#actions) — row **Unlock**. Never written when a lock simply expires on its own, or when re-approving a Disabled account happens to clear the same state; only the explicit Unlock action produces this row. | SUCCESS |
+| **Password Changed** | The account's password was changed — self-service, by an administrator, via a reset link, or because a forced/expired password had to be replaced. See the **Reason** column for which. | SUCCESS |
+| **Password Change Required** | Written alongside a successful **Login Succeeded** row whenever the sign-in that just occurred must be followed by a password change before anything else can be done. | SUCCESS |
+| **Password Reset Requested** | A "forgot password" reset e-mail was requested for the account. | SUCCESS |
+| **Password Policy Violation** | A password submitted at registration, self-service change, reset, or an administrator's save did not meet the portal's password policy and was rejected. The password value itself is never recorded — only which rule it broke. | FAILURE |
 
 ### Reason codes
 
-Only shown for **Login Failed** and the automatic **Account Disabled** event.
+Shown for **Login Failed**, **Account Locked**, **Account Unlocked**, **Password Changed**, **Password Change Required**, **Password Policy Violation**, and the automatic **Account Disabled** event; empty for a plain **Login Succeeded**, **Logout**, or **Password Reset Requested** row.
 
-| Reason code | Meaning |
-|---|---|
-| **Wrong email or password** | The e-mail exists but the password did not match. |
-| **Account disabled** | The account's status is Disabled (locked out after repeated failures, or disabled by an administrator). |
-| **Account not approved** | The account exists but has not been approved yet, for a reason other than the two below. |
-| **Email confirmation needed** | The account was registered but its e-mail address has not been confirmed. |
-| **Waiting for approval** | Registration requires administrator approval and it has not happened yet. |
-| **Account rejected** | An administrator rejected the registration. |
-| **No account with this email** | No account exists with the e-mail address that was submitted. |
-| **Account belongs to another portal** | The e-mail and password are valid, but for an account registered on a *different* portal — portal accounts are isolated per portal. |
-| **Account inactive for too long** | Written on the automatic **Account Disabled** event by the [inactive-account job](/en/api-portal/api-portal-settings#security), never on a login attempt. |
-| Account locked, Changed by the account holder, Changed by an administrator, Changed via a password reset link, Changed after a forced expiry, Password expired, Reset by an administrator | Reserved reason codes for the portal password policy and account lockout feature. Not produced by this version. |
+| Event | Reason code | Meaning |
+|---|---|---|
+| Login Failed | **Wrong email or password** | The e-mail exists but the password did not match. |
+| Login Failed | **Account disabled** | The account's status is Disabled — by an administrator, or by the [inactive-account job](/en/api-portal/api-portal-settings#security). No longer written for a lockout: a locked account rejects the attempt with **Account locked** below instead. |
+| Login Failed | **Account not approved** | The account exists but has not been approved yet, for a reason other than the two below. |
+| Login Failed | **Email confirmation needed** | The account was registered but its e-mail address has not been confirmed. |
+| Login Failed | **Waiting for approval** | Registration requires administrator approval and it has not happened yet. |
+| Login Failed | **Account rejected** | An administrator rejected the registration. |
+| Login Failed | **No account with this email** | No account exists with the e-mail address that was submitted. |
+| Login Failed | **Account belongs to another portal** | The e-mail and password are valid, but for an account registered on a *different* portal — portal accounts are isolated per portal. |
+| Login Failed | **Account locked** | The attempt was refused because the account is already locked — the password is never even compared. A burst of these, right after a burst of **Wrong email or password**, is someone still guessing after the lock took hold. |
+| Account Disabled | **Account inactive for too long** | Written by the [inactive-account job](/en/api-portal/api-portal-settings#security), never on a login attempt. |
+| Account Locked | **Failed-attempt threshold** | The configured *Max Failed Login Attempts* was exceeded. |
+| Account Unlocked | **Administrator** | The only reason code this event produces — it is always an explicit administrator action. |
+| Password Changed | **Changed by the account holder** | Self-service change from the account's own profile/settings screen. |
+| Password Changed | **Changed by an administrator** | An administrator set the password from [Accounts/Developers](/en/api-portal/accounts-developers). |
+| Password Changed | **Changed via a password reset link** | Completed through a "forgot password" e-mail link. |
+| Password Changed | **Changed after a forced expiry** | The account signed in with an expired or administrator-forced password and changed it as required, before doing anything else. |
+| Password Change Required | **Password expired** | *Password Validity Period* has been exceeded. |
+| Password Change Required | **Reset by an administrator** | *Force Password Change After Administrator Reset* applied the last time an administrator set this account's password. |
+| Password Policy Violation | *(the violated rule's name)* | One of the policy's own field names — minimum/maximum length, a required character class, the minimum number of character classes, or password history reuse. The submitted password is never written anywhere. |
 
 ## API Portal Login Error Messages
 
@@ -465,9 +479,8 @@ Users cannot log into the portal without email verification. This is an importan
 
   <Accordion title="3. Account Disabled (DISABLED)" icon="ban">
     **When It Appears:**
-    - Account is automatically locked when user enters wrong password 5 times
-    - Or manually disabled by admin
-    - When security violation is detected
+    - Manually disabled by an administrator
+    - Automatically disabled by the [inactive-account job](/en/api-portal/api-portal-settings#security) after too many days without a sign-in
     
     **Error Message:**
     ```
@@ -478,12 +491,35 @@ Users cannot log into the portal without email verification. This is an importan
     "Your account has been disabled. Please contact the administrator."
     
     **Solution:**
-    - Portal administrator can reactivate the account from Portal Management → Developer Accounts section
+    - Portal administrator can re-approve the account from Portal → Accounts/Developers
     - User can request account activation by contacting the administrator
+    
+    :::info
+
+Too many wrong passwords in a row no longer disables the account — it **locks** it instead (see the next entry), which is independent of this Disabled status and does not need an administrator's re-approval unless *Lock Duration* is set to unlimited.
+
+:::
+  </Accordion>
+
+  <Accordion title="3b. Account Locked (LOCKED)" icon="lock">
+    **When It Appears:**
+    - The account went over the portal's *Max Failed Login Attempts* (5 by default) in a row
+    
+    **Error Message:**
+    ```
+    Authentication failed -> LOCKED
+    ```
+    
+    **Message Shown to User:**
+    "Your account has been locked due to too many failed sign-in attempts."
+    
+    **Solution:**
+    - Wait for *Lock Duration* to pass, if the portal has a non-zero one configured
+    - Otherwise ask a portal administrator to click **Unlock** on [Accounts/Developers](/en/api-portal/accounts-developers#actions)
     
     :::warning
 
-**5 Wrong Passwords = Automatic Lockout:** User accounts are automatically set to DISABLED status when users enter wrong password 5 times. This is a security measure against brute force attacks.
+**Automatic lockout is a security measure against brute force attacks**, not a punishment for the account holder — a correct password submitted while the account is locked is still refused, without being compared, so it is never counted as a fresh failed attempt. Full configuration: [Password Policy & Account Lockout](/en/api-portal/api-portal-settings#password-policy--account-lockout).
 
 :::
   </Accordion>
@@ -542,30 +578,20 @@ Rejected accounts remain in the system but cannot log into the portal. Administr
     ```
     
     **Message Shown to User:**
-    "Email or password is incorrect. Remaining attempts: X" (X = 5, 4, 3, 2, 1)
+    "Email or password is incorrect."
     
     **⚠️ Important Security Mechanism:**
     
-    - **1st Wrong Attempt:** `... failed authentication due to 1 failed login attempts`
-      - Remaining attempts: 4
-    - **2nd Wrong Attempt:** `... failed authentication due to 2 failed login attempts`
-      - Remaining attempts: 3
-    - **3rd Wrong Attempt:** `... failed authentication due to 3 failed login attempts`
-      - Remaining attempts: 2
-    - **4th Wrong Attempt:** `... failed authentication due to 4 failed login attempts`
-      - Remaining attempts: 1
-    - **5th Wrong Attempt:** `... failed authentication due to 5 failed login attempts`
-      - Account automatically goes to DISABLED status
-    - **6th Attempt:** Cannot log in anymore, account is locked
+    Each wrong password increases the account's failed-attempt count by one; a correct password resets it to zero. The attempt that pushes the count **past** the portal's *Max Failed Login Attempts* (5 by default, configurable per portal) locks the account immediately — the attempt that only reaches the limit does not lock it. Once locked, every further attempt is refused as **Account Locked** above without comparing the password at all, so it is not counted as another failed attempt.
     
     **Solution:**
     - User should enter the correct password
     - If forgot password, can use "Forgot Password" feature
-    - If account is locked, should contact administrator
+    - If the account is locked, wait for *Lock Duration* to pass or ask an administrator to **Unlock** it
     
     :::warning
 
-**Automatic Account Lockout:** Account is automatically locked after 5 wrong password attempts. This is a critical security measure.
+**Automatic Account Lockout:** the exact threshold and lock duration are configured per portal — see [Password Policy & Account Lockout](/en/api-portal/api-portal-settings#password-policy--account-lockout).
 
 :::
   </Accordion>
@@ -622,10 +648,11 @@ The following table summarizes all error conditions and solutions:
 |-------|----------|-------------|----------------------|-------|
 | **WAITING_FOR_APPROVEMENT** | Waiting for admin approval | `Authentication failed -> WAITING_FOR_APPROVEMENT` | "Your account is waiting for administrator approval" | Admin should approve account |
 | **CONFIRMATION_NEEDED** | Email not verified | `Authentication failed -> CONFIRMATION_NEEDED` | "Please verify your email address" | Click email verification link |
-| **DISABLED** | 5 wrong attempts or manual | `Authentication failed -> DISABLED` | "Your account is disabled" | Admin should activate account |
+| **DISABLED** | Manual, or inactivity job | `Authentication failed -> DISABLED` | "Your account is disabled" | Admin should activate account |
+| **LOCKED** | Too many wrong passwords in a row | `Authentication failed -> LOCKED` | "Your account has been locked" | Wait for *Lock Duration*, or admin **Unlock** |
 | **REJECTED** | Application rejected | `Authentication failed -> REJECTED` | "Your account application has been rejected" | New application can be made |
 | **NOT_APPROVED** | Not approved | `Authentication failed -> NOT_APPROVED` | "Your account has not yet been approved" | Admin should approve account |
-| **Wrong Password** | Password wrong | `Account user@... failed authentication due to N failed login attempts` | "Email or password is incorrect. Remaining: X" | Enter correct password |
+| **Wrong Password** | Password wrong | `Account user@... failed authentication due to N failed login attempts` | "Email or password is incorrect." | Enter correct password |
 | **Account Not Found** | Email not found | `Authentication failed -> Account not found` | "No user found with this email" | Register or check email |
 | **Successful** | Email+password correct | (empty) | Redirect to home page | - |
 
@@ -699,12 +726,13 @@ Failed logins are marked with a red FAILURE badge.
     **Common Error Types:**
     - `WAITING_FOR_APPROVEMENT` → Waiting for admin approval
     - `CONFIRMATION_NEEDED` → Email not verified
-    - `DISABLED` → Account locked
+    - `DISABLED` → Account disabled (admin, or the inactive-account job)
+    - `LOCKED` → Account locked by the failed-attempt threshold
     - `Wrong Password` → Wrong password
     
     :::warning
 
-Immediate intervention may be required for accounts in DISABLED status.
+Immediate intervention may be required for accounts in DISABLED or LOCKED status.
 
 :::
   </Step>
@@ -853,14 +881,14 @@ Follow these recommendations to use the Login Logs page effectively:
 
 :::warning
 
-**5 Wrong Passwords = Automatic Lockout**
+**Repeated Wrong Passwords = Automatic Lockout**
 
-User accounts are automatically set to DISABLED status when users enter wrong password 5 times. This is a critical security measure against brute force attacks.
+An account is automatically **locked** — not disabled — after too many wrong passwords in a row. The threshold (5 by default) and how long the lock lasts before opening on its own are configured per portal; see [Password Policy & Account Lockout](/en/api-portal/api-portal-settings#password-policy--account-lockout). This is a critical security measure against brute force attacks.
 
 **Administrator Action:**
-- Regularly check locked accounts
+- Regularly check locked accounts on [Accounts/Developers](/en/api-portal/accounts-developers)
 - Inform users about account lockout
-- Activate account if necessary
+- **Unlock** the account if necessary — no need to re-approve it, a lock does not touch Enabled/Disabled status
 
 :::
 
@@ -919,6 +947,6 @@ The API Portal Login Logs page is a powerful tool for monitoring portal security
     Analyze access from different IP addresses and location-based activities
   </Card>
   <Card title="Automatic Protection" icon="lock">
-    Ensure security with automatic account lockout after 5 wrong passwords
+    Ensure security with automatic, per-portal-configurable account lockout after repeated wrong passwords
   </Card>
 </CardGroup>
