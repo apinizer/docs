@@ -189,7 +189,8 @@ const sidebars: SidebarsConfig = {
             "export-import/list-supported-types",
             "export-import/list-objects",
             "export-import/export-objects",
-            "export-import/import-objects"
+            "export-import/import-objects",
+            "transfer-v2"
           ]
         },
         {

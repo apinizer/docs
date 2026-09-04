@@ -1,0 +1,276 @@
+---
+title: "Transfer API v2"
+description: "Move objects between Apinizer installations from a CI/CD pipeline with a versioned, preview-then-apply contract: a zero-write preview or preflight answers a digest, and the run that follows is refused if anything about the selection or the target drifted since."
+---
+
+## Overview
+
+Transfer API v2 is a CI/CD-oriented Management API surface built on top of the same export/import engine the [Export/Import Wizard](/en/admin/secrets-management/export-import) and the [legacy Export/Import API](/api-reference/export-import) already use. It adds one thing neither of those has: a **preview → digest-bound run** contract.
+
+- `POST .../transfer-export-previews` resolves a named selection — and, with `withDependencies`, everything it would carry — and answers an `exportDigest`. Nothing is written.
+- `POST .../transfer-export-runs` repeats the same request with that digest attached. If the selection now resolves differently (an object was renamed, added, or removed since the preview), the run is refused with `409` rather than silently packaging something the caller never inspected. Otherwise it streams the package.
+- `POST .../transfer-import-preflights` analyzes an uploaded package against this project — objects, dependency resolution, replace targets, environments, manifest blockers — and answers a `preflightDigest`. Nothing is written.
+- `POST .../transfer-import-runs` repeats the package with that digest and an `Idempotency-Key`. If the target project changed since the preflight, the run is refused with `409` rather than applying a mapping the caller never inspected.
+
+The engine itself — what a package contains, how a dependency is resolved, how a name collision is refused — is exactly the wizard's and the legacy API's. This surface does not change any of that; it adds the contract a pipeline needs around it: a caller-side guarantee that what gets applied is what was inspected, and (on import) exactly-once application under a caller-chosen key.
+
+This page follows the [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and `Idempotency-Key` semantics. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. Every address on this page is under `/apiops/projects/{projectName}`.
+
+:::note
+
+Transfer API v2 does not replace the [legacy Export/Import API](/api-reference/export-import) (`/export-import/{type}/export|import`) — both are live at the same time, and the legacy endpoints keep serving every object type the engine knows. Use v2 when a pipeline needs to know, before it commits to a run, that nothing has moved since the caller last looked.
+
+:::
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/transfer-export-previews` | Preview an export: resolve the selection and its dependencies, return the `exportDigest`. Writes nothing (`200`) |
+| `POST` | `/transfer-export-runs` | Re-resolve the selection, verify the digest, stream the package (`200`, body = the ZIP) |
+| `POST` | `/transfer-import-preflights` | Analyze an uploaded package against this project, return the `preflightDigest`. Writes nothing (`200`) |
+| `POST` | `/transfer-import-runs` | Re-analyze the package, verify the digest, apply the import (`200`) — requires `Idempotency-Key` |
+
+### Export: preview → run
+
+Both calls take the same JSON body — object type, the object `names`, an optional `kind` for multi-kind types (`CERTIFICATE`, `API_CREATOR`, `IDENTITY_SERVICE` — see [Export/Import: How Objects Are Addressed](/api-reference/export-import#how-objects-are-addressed)), and `withDependencies`. The preview resolves the names, walks the dependency graph when `withDependencies` is set, and returns everything the run will need — including `exportDigest`.
+
+The run repeats the exact same body plus `expectedExportDigest` (the digest the preview returned). The server re-resolves the selection from scratch and recomputes the digest; a mismatch means the selection now resolves to a different set of objects or ids than it did at preview time, and the run is refused:
+
+- `409 dependencyConflict` (`params.reason = transfer.exportDigestMismatch`) — nothing is streamed.
+
+There is no server-side stash between preview and run: the run is a second, independent resolution that happens to be checked against the first. A caller that waits a long time between preview and run, or that runs them against a project under active change, should expect an occasional digest mismatch and simply preview again.
+
+`POST .../transfer-export-runs` is **synchronous** — the response body **is** the package, exactly as the legacy export endpoint produces it (same ZIP writer, same integrity manifest, same audit row). Encryption is optional: pass `encrypt=true` on the query string together with `X-Apinizer-Package-Passphrase`; asking for `encrypt=true` without a passphrase is refused:
+
+- `400 malformedRequest` (`params.reason = packagePassphraseRequired`)
+
+### Import: preflight → run
+
+The preflight takes the package as a multipart file (`exportFile`) plus a `type` query parameter, and analyzes it against the current project exactly as the wizard's Mapping step would: which objects it carries, how each dependency resolves here (a same-named candidate, several candidates, or none), which existing objects in this project a Replace would target, the environments on each side, and any manifest-level blockers. It answers a `preflightDigest`.
+
+The run takes the same package plus a JSON `options` part that names the `preflightDigest` it was analyzed against. The server re-runs the same analysis and compares digests **before** claiming the idempotency key, so a stale digest never burns a caller's key:
+
+- `409 dependencyConflict` (`params.reason = transfer.preflightDrift`) — nothing is imported; run the preflight again.
+
+Only once the digest checks out is the import applied, under the options given (`conflictPolicy`, `environmentMapping`, and the certificate-environment merge options — see [Request Bodies](#request-bodies) below). The response carries the objects the package named, plus the engine's advisories; an empty advisory list is a complete transfer.
+
+## Idempotency
+
+Only `POST .../transfer-import-runs` requires `Idempotency-Key` (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)) — it is the one call in this surface that writes. The three preview/preflight calls and the export run need no key: a preview and a preflight are read-effect-free and reissuable, and the export run is a re-resolution guarded by `expectedExportDigest`, not a state-mutating step that could be duplicated.
+
+| Situation | Result |
+|---|---|
+| New key | The import is applied |
+| Same key, same package + options, first call still running | `409 idempotencyInProgress` |
+| Same key, same package + options, first call already finished | `409 idempotencyReplayExpired` |
+| Same key, a different package or a different `options` body | `409 idempotencyKeyReused` |
+| Header missing | `400 idempotencyKeyRequired` |
+
+A claim whose underlying import failed (an engine error, not a digest mismatch — the drift check happens before the key is claimed) is released, so the same key can be retried once the cause is fixed.
+
+## Request Bodies
+
+### `formatVersion`
+
+Every body on this page carries `formatVersion: 1`. It may be omitted (it defaults to `1`); sending any other value is refused:
+
+- `400 malformedRequest` (`params.reason = transfer.formatVersionUnsupported`)
+
+### Preview / run an export
+
+```json
+{
+  "formatVersion": 1,
+  "type": "LLM_PROVIDER",
+  "names": ["openai-prod", "anthropic-prod"],
+  "kind": null,
+  "withDependencies": true
+}
+```
+
+The run repeats this body with one field added:
+
+```json
+{
+  "formatVersion": 1,
+  "type": "LLM_PROVIDER",
+  "names": ["openai-prod", "anthropic-prod"],
+  "withDependencies": true,
+  "expectedExportDigest": "3f9a1c...e02b"
+}
+```
+
+### Preflight an import
+
+Multipart: `exportFile` (the package) + `type` query parameter. No JSON body.
+
+### Run an import
+
+Multipart: `exportFile` (the same package the preflight analyzed) + an `options` part:
+
+```json
+{
+  "formatVersion": 1,
+  "type": "LLM_PROVIDER",
+  "preflightDigest": "9be2f0...7a1d",
+  "conflictPolicy": "NEW",
+  "environmentMapping": {},
+  "certEnvironmentMergeMethod": "MATCH_BY_NAME",
+  "certEnvironmentUncoveredAction": "FILL_FROM_PACKAGE",
+  "acknowledgeChecksumMismatch": false
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `preflightDigest` | string | Yes | The digest the preflight returned; the run refuses a drifted target |
+| `conflictPolicy` | enum | No (default `NEW`) | `NEW` — import as new objects; `REPLACE` — replace same-named existing objects |
+| `environmentMapping` | object | No | Source environment name → target environment name, for object types whose data is environment-scoped |
+| `certEnvironmentMergeMethod` | enum | No | `MATCH_BY_NAME` (default) or `OVERWRITE_ALL` — how a `REPLACE` merges an incoming Certificate/KeyStore/CryptoKeyInfo/JWK's per-environment data onto the target's own environment list |
+| `certEnvironmentUncoveredAction` | enum | Only meaningful with `MATCH_BY_NAME` | `FILL_FROM_PACKAGE` or `REMOVE_FROM_TARGET` — what happens to a target environment the package's data does not cover |
+| `acknowledgeChecksumMismatch` | boolean | No (default `false`) | Accept a package whose file *contents* no longer match its own integrity manifest and import it anyway. Does not cover a missing or an undeclared file — those are always refused, with no acknowledgment possible |
+
+See [Export/Import Wizard → Package Integrity](/en/admin/secrets-management/export-import#package-integrity) for what a checksum mismatch means and when it can be acknowledged, and [→ Mapping & Dependencies](/en/admin/secrets-management/export-import#mapping--dependencies) for what `certEnvironmentMergeMethod`/`certEnvironmentUncoveredAction` do to a certificate family object on `REPLACE`.
+
+## Response
+
+### Export preview — `200`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `formatVersion` | integer | Always `1` |
+| `type` | string | The object type |
+| `withDependencies` | boolean | Echoed from the request |
+| `objects` | array | `{ name, kind, type }` — the objects the request named |
+| `dependencies` | array | `{ type, name, secret }` — populated only when the request set `withDependencies: true`; otherwise empty. Everything the package would additionally carry |
+| `secretHandling` | enum | `DECRYPTED_FOR_EXPORT` \| `CIPHERTEXT_VERBATIM` \| `NONE` — how this type's secrets travel in a plain (unencrypted) package. See [Export/Import Wizard → Packages That Carry Secret Material](/en/admin/secrets-management/export-import#packages-that-carry-secret-material) |
+| `advisories` | array | `{ level, key, params }`, same shape as on the import preflight — currently always empty on an export preview |
+| `exportDigest` | string | Pass back as `expectedExportDigest` on the run |
+
+A dependency is identified by `type` + `name` only; the engine's internal `depType:id` key never leaves the server (no stored identifier appears on the wire).
+
+### Export run — `200`
+
+The response body is the package itself (`Content-Type: application/octet-stream`, `Content-Disposition: attachment; filename="<name>.zip"` — the single object's name when exactly one was requested, otherwise `<type>-export.zip`). If `encrypt=true` was passed, the ZIP is encrypted end to end, including the object names inside it, and needs the same passphrase to open — see [Export/Import Wizard → Package Encryption](/en/admin/secrets-management/export-import#package-encryption).
+
+### Import preflight — `200`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `formatVersion` | integer | Always `1` |
+| `type` | string | The type requested |
+| `detectedType` | string | The type the engine actually detected inside the package — compare against `type` if the caller is not sure what it uploaded |
+| `objects` | array | `{ name, kind, type }` — the package's own objects |
+| `dependencies` | array | `{ type, name, secret, resolvedByName, candidateNames }` — every dependency the package carries or needs. `resolvedByName` is `true` when an object of the same name already exists in this project; `candidateNames` lists what the engine would offer as alternatives |
+| `replaceTargets` | array of string | Names of existing objects in this project that `conflictPolicy: "REPLACE"` would target |
+| `packageEnvironments` | array of string | Environment names present in the package |
+| `installationEnvironments` | array of string | Environment names that exist on this installation, for building `environmentMapping` |
+| `blockers` | array | `{ code, entryFileName, detail }` — manifest or reference problems that would refuse the run outright (a torn or hand-edited package, for example) |
+| `advisories` | array | `{ level, key, params }` — see [Errors](#errors) below |
+| `preflightDigest` | string | Pass back as `options.preflightDigest` on the run |
+
+### Import run — `200`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `formatVersion` | integer | Always `1` |
+| `type` | string | The type imported |
+| `conflictPolicy` | string | `NEW` or `REPLACE`, as applied |
+| `imported` | array | `{ name, kind, type }` — the objects the package named |
+| `advisories` | array | `{ level, key, params }` — the engine's own advisories, e.g. `deployRequired` (`params.names`) or `transfer.checksumMismatchAcknowledged` (`params.entryCount`, `params.acknowledgedBy`) when `acknowledgeChecksumMismatch` was used |
+| `unresolvedReferences` | array of string | The advisories rendered as plain lines, kept for scripts written against the legacy import response's field of the same name |
+
+An empty `advisories` array is a complete transfer with nothing to review.
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, and on `params.reason` where one is given.
+
+| Error key | `params.reason` | When |
+|---|---|---|
+| `malformedRequest` | `bodyRequired` / `namesRequired` | The JSON body, or its `names`, was missing |
+| `malformedRequest` | `unknownType` | `type` does not name a type this installation supports |
+| `malformedRequest` | `transfer.formatVersionUnsupported` | `formatVersion` was set to something other than `1` |
+| `malformedRequest` | `packagePassphraseRequired` | `encrypt=true` was requested with no passphrase header |
+| `malformedRequest` | `exportFileRequired` / `exportFileMustBeZip` | The uploaded `exportFile` part was missing, empty, or not a `.zip` |
+| `malformedRequest` | `optionsRequired` | The import run's `options` part was missing |
+| `malformedRequest` | `platformScopeNotSupported` | `projectName` addressed the admin (platform) project — transfer is always project-scoped |
+| `resourceNotFound` | — | The project is unknown, or the token has no visibility into it; also an object name in the export selection could not be resolved in this project |
+| `dependencyConflict` | `transfer.exportDigestMismatch` | The export run's live selection no longer matches `expectedExportDigest` |
+| `dependencyConflict` | `transfer.preflightDrift` | The import run's re-analysis no longer matches `options.preflightDigest` |
+| `idempotencyKeyRequired` | — | `transfer-import-runs` was called without `Idempotency-Key` |
+| `idempotencyKeyReused` | — | The same key was sent with a different package or `options` body |
+| `idempotencyReplayExpired` | — | The same key and body already completed |
+| `idempotencyInProgress` | — | The same key and body's first call is still running |
+| `permissionDenied` | — | Authenticated, but the token lacks `EXPORT_IMPORT` where this call needs it |
+
+`transfer-import-runs`'s apply step shares its engine with [Import Objects](/api-reference/export-import/import-objects), so it can also refuse for any of the same causes documented there — a name collision, an unresolved certificate-environment mapping, a malformed limit plan, and the rest. Where that page shows a `resultMessage` sentence for a cause, this endpoint answers `400 malformedRequest` with `params.reason` set to that cause's stable key instead (for example `importNameCollision`, `manifestChecksumMismatch`, `credentialUsernameTaken`) — same cause, contract-shaped response.
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+:::note
+
+A package that cannot be decrypted (wrong passphrase, or not a package this installation can read) still fails with `400`, but on `transfer-import-preflights`/`transfer-import-runs` that particular failure carries its own `errorKey` (`packagePassphraseInvalid` or `packageDecryptFailed`) rather than the envelope above — the same behavior the legacy import endpoint has. Branch on `errorKey` either way; do not assume the outer envelope shape for this one case.
+
+:::
+
+## Permissions & Licensing
+
+- Every call requires **`EXPORT_IMPORT`** either on the type's own asset category, or on **`PROJECT_MANAGEMENT`** — the same either/or the legacy Export/Import API uses. With `withDependencies: true`, this is additionally checked against the asset category of every dependency the package would carry.
+- A settings-family type (`SETTINGS_GROUP`, `SIEM Settings`, and the like) additionally requires the caller to be a system administrator — the same rule the wizard applies.
+- A caller with no visibility into the addressed project — an unknown project name, or a project the token cannot see — always gets `404 resourceNotFound`, never `403`, so an unauthorized caller learns nothing about what exists. See [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+- Object references throughout this surface are by **name only** — no internal id is ever accepted or returned.
+
+## Not in this version
+
+`change-candidates` and `config-change-activation-previews|runs` are not part of Transfer API v2 — the existing deploy endpoints already cover activating a change. If a pipeline's workflow needs those, keep using the deploy surface directly; nothing here replaces it.
+
+## Example
+
+Export with dependencies, encrypted, then import it into another project — preview/preflight first, run second:
+
+```bash
+# 1. Preview the export — writes nothing, returns the exportDigest
+curl -X POST "https://apinizer.example.com/apiops/projects/staging/transfer-export-previews" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "type": "LLM_PROVIDER", "names": ["openai-prod"], "withDependencies": true }'
+# 200 OK, exportDigest: "3f9a1c...e02b"
+
+# 2. Run the export with that digest — synchronous, body = the package
+curl -X POST "https://apinizer.example.com/apiops/projects/staging/transfer-export-runs?encrypt=true" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -d '{ "type": "LLM_PROVIDER", "names": ["openai-prod"], "withDependencies": true, "expectedExportDigest": "3f9a1c...e02b" }' \
+  --output openai-prod.zip
+# 200 OK
+
+# 3. Preflight the import against the target project — writes nothing
+curl -X POST "https://apinizer.example.com/apiops/projects/production/transfer-import-preflights?type=LLM_PROVIDER" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -F "exportFile=@openai-prod.zip;type=application/zip"
+# 200 OK, preflightDigest: "9be2f0...7a1d"
+
+# 4. Run the import with that digest — requires Idempotency-Key
+curl -X POST "https://apinizer.example.com/apiops/projects/production/transfer-import-runs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Apinizer-Package-Passphrase: $(printf '%s' 'my-passphrase' | base64)" \
+  -H "Idempotency-Key: 9d0c8f4a-2f1e-4c7b-9c2f-8b3a1d5e7c40" \
+  -F "exportFile=@openai-prod.zip;type=application/zip" \
+  -F 'options={"type":"LLM_PROVIDER","preflightDigest":"9be2f0...7a1d","conflictPolicy":"NEW"};type=application/json'
+# 200 OK, imported: [{ "name": "openai-prod", "type": "LLM_PROVIDER" }], advisories: []
+```
+
+## Legacy endpoints
+
+`POST /apiops/projects/{projectName}/export-import/{type}/export/` and `.../import/` — the [legacy Export/Import API](/api-reference/export-import) — are untouched by this page and continue to serve every object type the engine supports. They remain the simpler choice for a one-shot, no-drift-checking transfer; reach for this page when a pipeline specifically needs the preview-then-apply guarantee.
+
+## Related Documentation
+
+- [Export/Import Wizard](/en/admin/secrets-management/export-import) - The manager UI this surface shares its engine with: supported types, dependency mapping, package encryption and integrity, and the certificate-environment merge behavior referenced above
+- [Export / Import API](/api-reference/export-import) - The legacy, non-versioned endpoints this surface complements rather than replaces
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, and status-code rules this page follows
+- [Authentication](/api-reference/getting-started/authentication) - Creating a personal API access token
