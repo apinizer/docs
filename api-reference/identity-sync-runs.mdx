@@ -20,6 +20,7 @@ Every address on this page is under `/apiops/projects/{projectName}` and follows
 | `GET` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}` | One run's progress and outcome |
 | `GET` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}/issues` | The per-subject issues the run recorded |
 | `POST` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}/actions/approve-reconcile` | Approve a run's staged reconciliation and queue the applying run (`202` + `Location`) |
+| `POST` | `/identity-sources/{sourceType}/{sourceName}/sync-runs/{runId}/actions/cancel` | Cancel a `QUEUED` or `RUNNING` run (`200` + the run) |
 
 Both list endpoints accept only `page` and `size` — neither exposes a `sort` parameter. Runs are always listed newest-queued-first; issues are always listed in the order they were recorded within the run.
 
@@ -62,6 +63,26 @@ Approval is refused with:
 - `409 lifecycleConflict` (`params.reason = reconcileApprovalConflict`) — the run is no longer awaiting approval, or a newer run on the same source has replaced the pending approval.
 - `400 malformedRequest` (`params.reason = reconcileApprovalNotFound`) — the source has no pending approval.
 - `400 malformedRequest` (`params.reason = reconcileApprovalExpired`) — the pending approval lapsed (approvals are valid for 24 hours).
+
+### Cancel a queued or running run
+
+`POST .../sync-runs/{runId}/actions/cancel` asks a `QUEUED` or `RUNNING` run to stop at the next page boundary: fetching from the source is cut off, whatever pages were already written stay as they are, and the reconciliation step (deactivating or deleting records) is skipped entirely — a partial fetch must never be allowed to deactivate anyone. The run's own status becomes `CANCELLED`; the source's last-synchronization status becomes `WARNING`.
+
+The call returns `200` immediately, before the run has necessarily stopped — it only records that a stop was requested. The run body comes back with `cancelRequested` set to `true`:
+
+```json
+{
+  "runId": "68b1f2a4c9e1a2b3c4d5e6f7",
+  "sourceName": "corp-ad",
+  "sourceType": "LDAP",
+  "status": "RUNNING",
+  "runMode": "FULL",
+  "cancelRequested": true,
+  "startedAt": "2026-09-03T10:15:00Z"
+}
+```
+
+A run that is not `QUEUED` or `RUNNING` — one that has already reached a final state, in either direction — cannot be cancelled: `409 lifecycleConflict` (`params.reason = runNotActive`).
 
 ## Idempotency
 
@@ -112,7 +133,7 @@ The shape returned by `GET .../{runId}` and each row of `GET .../sync-runs`:
 | `runId` | string | The run's id |
 | `sourceName` | string | The source's name, as it was at the time of the run (a snapshot — later renaming or deleting the source does not change it) |
 | `sourceType` | string | `LDAP` \| `DATABASE` \| `API` \| `OIDC` |
-| `status` | enum | `QUEUED` \| `RUNNING` \| `SUCCESS` \| `WARNING` \| `FAILED` \| `AWAITING_RECONCILE_APPROVAL` \| `INTERRUPTED` |
+| `status` | enum | `QUEUED` \| `RUNNING` \| `SUCCESS` \| `WARNING` \| `FAILED` \| `AWAITING_RECONCILE_APPROVAL` \| `INTERRUPTED` \| `CANCELLED` |
 | `runMode` | enum | The run's scope: `FULL` \| `USERS_ONLY` \| `GROUPS_ONLY` \| `RECONCILE_APPLY`. Runs recorded before this field existed read as `FULL`. |
 | `approvalPending` | boolean | `true` exactly when `status` is `AWAITING_RECONCILE_APPROVAL` |
 | `trigger` | string | `MANUAL` for a run queued through this API or the Manager screen, `SCHEDULED` for one the source's own cron started |
@@ -127,10 +148,15 @@ The shape returned by `GET .../{runId}` and each row of `GET .../sync-runs`:
 | `issueCount` | integer | Total issue rows this run recorded (see [Issue](#issue--200-paged) below) — the true total, even past the persisted cap |
 | `issuesTruncated` | boolean | `true` once the persisted-issue cap was hit; `issueCount` still shows the true total |
 | `upserted` / `deactivated` / `skipped` / `filtered` / `errors` | integer | Per-outcome counters. `filtered` counts subjects the source's scope filter excluded, kept apart from `skipped` (a conflict a caller has to resolve) |
+| `unchanged` | integer | Subjects whose synchronized fields matched the source exactly on this run — the record was not rewritten and not redeployed to gateways, only its "last synchronized" stamp was refreshed. A healthy repeat run normally shows `upserted: 0` and a large `unchanged`; the first run after an upgrade rewrites every record once before this settles in |
+| `failureReason` | enum | Set once the run has a failure to report: `UNREACHABLE` \| `TIMEOUT` \| `AUTH_REJECTED` \| `PERMISSION_MISSING` \| `HTTP_ERROR` \| `CONFIG` \| `INTERRUPTED` \| `CANCELLED` \| `UNKNOWN`. Absent on a clean `SUCCESS` |
+| `failureHttpStatus` | integer | The HTTP status code the source returned, when `failureReason` is `HTTP_ERROR`, `AUTH_REJECTED`, or `PERMISSION_MISSING`; absent otherwise |
+| `failureScope` | enum | Which read the failure happened on, when known: `USERS` \| `GROUPS` \| `ROLES`; absent when the failure was not tied to one read |
+| `cancelRequested` | boolean | `true` once a [cancel](#cancel-a-queued-or-running-run) action has been accepted for this run |
 | `message` | string | Legacy raw-English fallback reason, kept for runs recorded before translatable reasons existed |
 | `messages` | array | Up to 10 translatable reasons for this run's outcome, each `{ "key": string, "params": object }` |
 
-`WARNING` means the run finished without error but its reconciliation step was deliberately skipped as a safety measure (the source returned no subjects, or its subject list could only be read in part) — nothing was deactivated or deleted.
+`WARNING` means the run finished without error but its reconciliation step was deliberately skipped as a safety measure (the source returned no subjects, or its subject list could only be read in part) — nothing was deactivated or deleted. `CANCELLED` means a [cancel](#cancel-a-queued-or-running-run) action was accepted and the run stopped before completing its fetch — whatever it had already written stays, and reconciliation never ran.
 
 ### Issue — `200`, paged
 
@@ -170,7 +196,7 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 |---|---|
 | `malformedRequest` | The requested `mode` is not one of the four scopes, or is not one the source type accepts (`params.reason = runModeNotSupported`); the source has no pending reconcile approval (`params.reason = reconcileApprovalNotFound`); or the pending approval has expired (`params.reason = reconcileApprovalExpired`) |
 | `resourceNotFound` | The `sourceType` path segment is not `ldap`, `database`, `api`, or `oidc`; the `sourceName` resolves to no source of that type in the project; or an unknown run id, or a run id that belongs to a different source, was addressed |
-| `lifecycleConflict` | `params.reason` names the cause: `syncDisabled` (the source's synchronization is not enabled), `syncRequiresKeycloakVendor` (an OIDC source without a Keycloak Admin REST API), `syncAlreadyRunning` (a second run was queued while one was already active), `reconcileApprovalConflict` (the run is not awaiting approval, or a newer run replaced the pending approval), or `unknownSourceType` (defensive — the run's own recorded source type could not be resolved to a synchronization job) |
+| `lifecycleConflict` | `params.reason` names the cause: `syncDisabled` (the source's synchronization is not enabled), `syncRequiresKeycloakVendor` (an OIDC source without a Keycloak Admin REST API), `syncAlreadyRunning` (a second run was queued while one was already active), `reconcileApprovalConflict` (the run is not awaiting approval, or a newer run replaced the pending approval), `runNotActive` (a [cancel](#cancel-a-queued-or-running-run) was requested on a run that is not `QUEUED` or `RUNNING`), or `unknownSourceType` (defensive — the run's own recorded source type could not be resolved to a synchronization job) |
 | `idempotencyKeyRequired` | `POST .../sync-runs` was called without its `Idempotency-Key` header |
 | `idempotencyKeyReused` | The same key was sent with a different request body |
 | `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the run it created |
