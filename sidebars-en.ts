@@ -684,7 +684,8 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
-        "admin/identity-management/acl-report"
+        "admin/identity-management/acl-report",
+        "admin/identity-management/legal-holds-and-purge"
       ]
     },
     {

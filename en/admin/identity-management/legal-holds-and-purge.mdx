@@ -1,0 +1,135 @@
+---
+title: "Legal Holds and Data Lifecycle Purge"
+description: "You can place a legal hold on a consumer, API client, application, or organization to block any deletion or purge, and run erasure, correction, retention, or crypto-shred purges through a four-eyes preview-approve-execute workflow."
+---
+
+import {Steps, Step} from '@site/src/components/Steps';
+
+:::info
+
+Legal Hold and Data Lifecycle Purge let you honor a data-subject erasure request (for example under GDPR Article 17 or KVKK) or a scheduled retention policy without touching a database directly, while keeping every irreversible action behind a **preview → approve → execute** workflow performed by two different people. This page is a functional description, not legal advice — whether and how it satisfies a specific regulation is a decision for your own legal counsel.
+
+:::
+
+## Legal Hold
+
+A legal hold is placed on one subject — a **Consumer**, **API Client**, **Application**, or **Organization** — and blocks every destructive path for that subject for as long as it is active:
+
+- The subject's own delete screens and APIs are refused.
+- Every [purge mode](#purge-modes) is refused for that subject, at preview time, so an in-progress investigation is never accidentally erased.
+
+Placing a hold requires a reason; an optional reference (a case or ticket number, for example) can be attached alongside it. Releasing a hold requires a release reason. Releasing a hold does **not** delete or restore anything by itself — it only removes the block, returning the subject to its normal lifecycle. A hold's full history (who placed it, when, why, who released it, when, why) is kept even after release, so a released hold is still visible as evidence that the subject was once protected.
+
+| Hold status | Meaning |
+|---|---|
+| **Active** | The subject cannot be deleted through any screen, API, or purge |
+| **Released** | The block is lifted; the subject follows its normal lifecycle again |
+
+## Purge and the Four-Eyes Workflow
+
+A purge processes one subject through one of four [modes](#purge-modes). Because a purge can permanently destroy personal data, it always goes through four stages, and the person who approves a run can never be the same person who previewed it (a single administrator is the only exception — see below):
+
+<Steps>
+<Step title="Preview">
+A preview writes nothing. It evaluates the subject, produces a **manifest** — the exact list of what will be touched, collection by collection — and a **digest** (a fingerprint of that manifest). If the subject is not eligible (an active legal hold, a mode that does not apply to this subject's state, a retention period not yet reached, and so on), the preview itself is refused and nothing is created.
+</Step>
+<Step title="Approve">
+A different user reviews the previewed manifest and approves it by resubmitting its digest. The digest must match exactly — if the underlying data changed between preview and approval, the digest no longer matches and the approval is refused, forcing a fresh preview.
+</Step>
+<Step title="Execute">
+Approving queues the run; it executes asynchronously against exactly what was approved. Progress (processed / anonymized / deleted / revoked / ended / failed counts) can be followed on the run.
+</Step>
+<Step title="Point of no return">
+The moment the run performs its first real mutation, it passes a point of no return. Before that moment the run can still be cancelled; after it, cancellation is refused — the run must be allowed to finish.
+</Step>
+</Steps>
+
+:::note Single-administrator exception
+The rule that approval must come from someone other than the previewer is waived for a system administrator: a sole administrator installation is not blocked from approving its own preview.
+:::
+
+### Run Status
+
+| Status | Meaning |
+|---|---|
+| **Previewed** | The manifest and digest exist; nothing has been written |
+| **Approved** | A different user (or an administrator) approved the matching digest; not yet queued to run |
+| **Queued** | Execution has been requested and is waiting to start |
+| **Running** | Execution is in progress |
+| **Success** | Every manifest item completed without error |
+| **Partial** | Execution finished, but one or more items failed or were skipped — see the run's issue list |
+| **Failed** | Execution could not complete |
+| **Cancelled** | Cancelled before the point of no return; nothing was mutated |
+| **Interrupted** | Execution stopped unexpectedly (for example a node restart) before finishing |
+
+## Purge Modes
+
+| Mode | What it does | What it does not do |
+|---|---|---|
+| **Data Subject Erasure** | Permanently erases the subject's personal data — see [scope by subject type](#data-subject-erasure-scope-by-subject-type) below | Does not remove audit/history rows themselves (only their personal fields), and does not rewrite already-written traffic logs |
+| **Correction Purge** | Removes a subject that was created in error, but only while it is still in a pre-operational state (for example, never activated or used) — a stricter, narrower version of ordinary deletion | Refused once the subject has moved past a pre-operational state, even if it is otherwise eligible |
+| **Retention Purge** | Removes a subject that has already reached a terminal state (for example a revoked API client, or a tombstoned consumer) once it has sat in that terminal state for at least the configured retention period (30 days by default) | Refused for a subject that is not yet terminal, or that reached its terminal state too recently |
+| **Crypto Shred** | Destroys only secrets and tokens belonging to the subject, cryptographically preventing their future use | Does not touch personal data — the subject's profile fields are left exactly as they are |
+
+### Data Subject Erasure — Scope by Subject Type {#data-subject-erasure-scope-by-subject-type}
+
+Data Subject Erasure is the mode that responds to an actual erasure request. Its effect depends on the subject type:
+
+| Subject type | What is anonymized or removed |
+|---|---|
+| **Consumer** | Personal fields (username, name, contact details) are replaced with an anonymized value derived from the record's id; stored secrets are deleted; the consumer's status is set to a terminal, tombstoned state |
+| **API Client** | Every credential belonging to the client is revoked; all secret versions are cryptographically shredded; all issued tokens are deleted |
+| **Application** | The owning consumer(s), their subscriptions, and their support request threads are handled as above; access permissions and limit assignments tied to the application are ended |
+| **Organization** | Every member, application, and portal account under the organization is processed as above; portal accounts are disabled and anonymized; pending membership and join requests are removed; portal login records are redacted |
+
+Across all subject types:
+
+- **Access permissions and limit assignments** tied to the subject are ended, not merely disabled.
+- **The identity-sync link is removed.** If the subject was originally created by [Credential Synchronization](/en/admin/identity-management/identity-providers/credential-sync) and the same user or group still exists in the source, the **next** synchronization run will recreate it as a brand-new subject — erasure does not exclude a source's user from being synchronized again.
+- **Audit trail rows are kept, with personal fields redacted.** Audit event, history, and lifecycle event rows for the subject are not deleted — only their personal-data fields are redacted — so the fact that an action happened remains provable without retaining who it was about.
+- **Evidence used to justify a Correction Purge is untouched.**
+- **Legal hold and purge run records themselves are never purged.**
+
+:::warning API traffic logs are not rewritten
+Elasticsearch API traffic logs referencing the subject are **not** retroactively rewritten or redacted by an erasure run — doing so for a high-volume log store is not practical. Instead, they age out through your own [API traffic retention](/en/admin/system-settings/system-settings-and-limits#log-retention) configuration. The purge manifest reflects this with a dedicated retain-until-TTL line rather than a deletion line. If API traffic retention has not been configured, the manifest states this explicitly rather than implying the logs will disappear.
+:::
+
+## Legal Hold and Purge Together
+
+A subject under an active legal hold cannot be purged in any mode, and cannot be deleted through the ordinary delete screens either — a preview against a held subject is refused outright, before any manifest is produced. Releasing the hold does not retroactively delete anything; it simply allows a new preview to be attempted afterward.
+
+## Permissions
+
+Legal Hold and Data Lifecycle Purge are governed by a dedicated permission category, separate from consumer/application/organization management itself:
+
+| Action | Covers |
+|---|---|
+| **View** | Reading legal holds and purge runs |
+| **Manage** | Placing or releasing a legal hold; previewing, approving, or cancelling a purge run |
+| **Execute** | Starting the approved run |
+
+This permission is project-scoped. When this capability was introduced, it was granted automatically only to the **Project Owner** role — it is **not** granted to API Developer, API Tester, or the other predefined roles, because being able to manage identities is a different responsibility than being able to permanently destroy their data. A project owner who wants to delegate this can grant the permission to another role explicitly. A system administrator always has access.
+
+## Retention of Purge Run History
+
+Finished purge runs (any status other than **Queued** or **Running**) are subject to their own retention setting, **Lifecycle Purge Run History**, alongside the other entries on the [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention) screen. It is disabled by default, so no run record is removed until an administrator turns it on and sets a retention period. An in-progress run is never eligible for cleanup regardless of this setting.
+
+## Troubleshooting
+
+| Situation | Cause |
+|---|---|
+| Preview is refused for a subject under legal hold | The subject has an active legal hold — release it first, if appropriate |
+| Preview is refused because the mode does not apply | The chosen mode does not match the subject's current state (for example Correction Purge on a subject that already left its pre-operational state) |
+| Preview is refused, retention not reached | Retention Purge was requested before the subject had spent the configured number of days in its terminal state |
+| Preview is refused, subject not eligible for correction | Correction Purge was requested on a subject that is past the pre-operational state Correction Purge requires |
+| Approval is refused, digest mismatch | The manifest changed since the preview was produced — run a new preview and approve that one instead |
+| Approval is refused, same actor | The user approving is the same user who ran the preview — have a different user approve, or use a system administrator account |
+| A second preview or run is refused, active run exists | The subject already has a run in progress — wait for it to finish, or check its status first |
+| Cancel is refused | The run has already passed its point of no return (its first real mutation was made), or has already finished |
+
+## Related Pages
+
+- [Credential Synchronization](/en/admin/identity-management/identity-providers/credential-sync) - The identity-sync link that a Data Subject Erasure removes
+- [Security Events](/en/admin/audit-compliance/security-events) - Related audit and compliance logging
+- [Authorization Matrix](/en/admin/user-access-management/authorization-matrix) - The permission model this page's category fits into
+- [System Settings and Limits](/en/admin/system-settings/system-settings-and-limits#log-retention) - Where the Lifecycle Purge Run History retention setting lives

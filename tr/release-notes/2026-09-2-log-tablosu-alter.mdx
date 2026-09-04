@@ -1,0 +1,117 @@
+---
+title: "2026.09.2 — Log Tablosu ALTER Scriptleri"
+description: "2026.09.2 sürümüne yükseltilen SQL/JDBC trafik-log ve token-log kurulumları için ALTER TABLE scriptleri."
+slug: /release-notes/2026-09-2-log-tablosu-alter
+unlisted: true
+---
+
+Bu sayfa listelenmemiştir (unlisted) — sidebar'da ve arama sonuçlarında görünmez, yalnızca 2026.09.2 sürüm notlarındaki doğrudan bağlantı üzerinden erişilmek üzere tasarlanmıştır.
+
+## Kimler ihtiyaç duyar
+
+Bu script yalnızca logları **SQL/JDBC connector** üzerinden ilişkisel bir veritabanına (Oracle, MySQL, PostgreSQL veya SQL Server) yazan Apinizer kurulumlarını ilgilendirir — API proxy trafiği için, token üretimi için ya da ikisi için birden.
+
+**Elasticsearch veya MongoDB connector'ı kullanıyorsanız bu sayfayı tamamen atlayın** — o hedefler yeni veriyi elle bir adım gerektirmeden taşır. Elasticsearch tarafında indeks şablonu yükseltme sırasında güncellenir ve indeks otomatik olarak rollover edilir.
+
+## Ne değişti
+
+Apinizer 2026.09.2, bir trafik ya da token kaydının yalnızca çözülmüş kullanıcı adına değil, isteği doğrulayan API Client'ın kendisine de atfedilebilmesini sağlayan kolonlar ekler.
+
+**`log_ApiProxyTraffic` dört yeni kolon alır:**
+
+- `api_client_key` — isteği doğrulayan API Client'ın anahtarı.
+- `client_owner_type` — API Client'ın ait olduğu özne türü: `CONSUMER` (doğrudan tanımlanmış bir Credential) veya `APPLICATION` (bir Portal Application).
+- `client_owner_id` — o sahip Consumer'ın (Credential) veya Portal Application'ın kimliği.
+- `client_organization_id` — doğrulanan kimliğin organizasyon kimliği.
+
+Bir API Client üzerinden doğrulanan bir istekte dört kolon da doldurulur. API Client modelinden önce gelen bir Credential ile geleneksel yoldan doğrulanan bir istekte ise `client_owner_type` her zaman `CONSUMER` olur ve `client_owner_id` Credential'ın kimliğini taşır, ancak kaydedilecek bir API Client anahtarı olmadığı için `api_client_key` boş kalır. Hiçbir kimliğin çözülemediği bir istekte dört kolon da `NULL` kalır.
+
+**`log_TokenTraffic` iki yeni kolon alır:** `api_client_key` ve `client_organization_id`, yukarıdakiyle aynı anlamda; böylece bir token üretim kaydı, token'ın verildiği client ve organizasyona atfedilebilir. Organizasyonu olmayan eski bir credential üzerinden verilen token'da her iki kolon da `NULL` kalır.
+
+Altı kolon da nullable ve seyrektir (sparse). Gateway yazım yolu fail-soft'tur: bir kolon yoksa yalnızca o alan atlanır, log yazımı başarısız olmaz; dolayısıyla script'i geç çalıştırmak atıf verisini kaybettirir ama trafik ya da token loglamasını etkilemez.
+
+## Ne zaman çalıştırılmalı
+
+Bu script'i yapılandırılmış her SQL/JDBC log veritabanına karşı **bir kez** çalıştırın; 2026.09.2 yükseltmesinden önce ya da yükseltme sırasında olabilir, bakım penceresi gerektirmez. Kolonlar nullable olduğu için yükseltme öncesi log satırlarını yazmaya devam eden eski gateway worker'ları etkilenmez. Bu script 2026.09.0 ve 2026.09.1 scriptlerinden bağımsızdır; onlardan hangisini çalıştırmış olursanız olun bunu bir kez çalıştırmanız gerekir. DDL için bir değişiklik yönetimi süreciniz varsa önce production dışı bir ortamda deneyin.
+
+Kurulumunuz token trafiğini yalnızca Elasticsearch veya MongoDB'ye, API proxy trafiğini ise SQL/JDBC connector'ı üzerinden yazıyorsa (ya da tam tersi), yalnızca gerçekten kullandığınız tablonun `ALTER` ifadesini çalıştırın.
+
+## Oracle
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD (
+    api_client_key VARCHAR2(255),
+    client_owner_type VARCHAR2(16),
+    client_owner_id VARCHAR2(64),
+    client_organization_id VARCHAR2(64)
+);
+
+ALTER TABLE log_TokenTraffic ADD (
+    api_client_key VARCHAR2(255),
+    client_organization_id VARCHAR2(64)
+);
+```
+
+## PostgreSQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_owner_type VARCHAR(16),
+    ADD COLUMN client_owner_id VARCHAR(64),
+    ADD COLUMN client_organization_id VARCHAR(64);
+
+ALTER TABLE log_TokenTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_organization_id VARCHAR(64);
+```
+
+## MySQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_owner_type VARCHAR(16),
+    ADD COLUMN client_owner_id VARCHAR(64),
+    ADD COLUMN client_organization_id VARCHAR(64);
+
+ALTER TABLE log_TokenTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_organization_id VARCHAR(64);
+```
+
+## SQL Server
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD
+    api_client_key NVARCHAR(255),
+    client_owner_type NVARCHAR(16),
+    client_owner_id NVARCHAR(64),
+    client_organization_id NVARCHAR(64);
+
+ALTER TABLE log_TokenTraffic ADD
+    api_client_key NVARCHAR(255),
+    client_organization_id NVARCHAR(64);
+```
+
+## Doğrulama
+
+Script'i çalıştırdıktan sonra kimlik doğrulaması açık bir API Proxy üzerinden bir istek geçirin ve trafik kaydının yeni kolonları taşıdığını kontrol edin:
+
+```sql
+SELECT correlation_id, api_client_key, client_owner_type, client_owner_id, client_organization_id
+FROM log_ApiProxyTraffic
+WHERE api_client_key IS NOT NULL OR client_owner_id IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+Token üretimini de aynı veritabanına logluyorsanız bir token isteyin ve token kaydını kontrol edin:
+
+```sql
+SELECT correlation_id, api_client_key, client_organization_id
+FROM log_TokenTraffic
+WHERE api_client_key IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+Yeni kurulumlarda bir işlem gerekmez — [Apinizer Log Tabloları Oluşturma Komutları](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari) sayfasındaki `CREATE TABLE` ifadeleri kolonları zaten içerir.

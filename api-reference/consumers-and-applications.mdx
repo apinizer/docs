@@ -5,7 +5,7 @@ description: "Read a project's consumers and applications through the Management
 
 ## Overview
 
-This page covers two owner-centric read surfaces of the Management API: **Consumers** (the platform's credential-based identities) and **Applications** (API Portal applications). Both expose bounded listing, one-record reads, and three sub-resources of a single owner — its API clients, its access entitlements, and its limit assignments — in the portable form the rest of the Management API uses. Applications additionally expose the two lifecycle actions the platform already implements as primitives: **suspend** and **resume**.
+This page covers two owner-centric surfaces of the Management API: **Consumers** (the platform's credential-based identities) and **Applications** (API Portal applications). Both expose bounded listing, one-record reads, and three sub-resources of a single owner — its API clients, its access entitlements, and its limit assignments — in the portable form the rest of the Management API uses. Applications additionally expose the two lifecycle actions the platform already implements as primitives: **suspend** and **resume**. Both owners expose one more write operation: moving the owner to another organization of the same project — see [Transfer to another organization](#transfer-to-another-organization) below.
 
 Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and bounded pagination. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. The admin (platform) project has no consumers or applications of its own, so a platform-scoped call is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
 
@@ -13,13 +13,13 @@ References on this surface are **portable** — no Mongo id ever crosses the bou
 
 :::info
 
-Creating, updating and deleting a consumer, and changing its password or certificate material, is **not** on this surface. Those operations stay on the existing [Credentials API](/api-reference/credentials), which addresses the same record by its `username`. A consumer's enabled flag is part of that surface's update body — there is no separate toggle here. This page is read-only for consumers.
+Creating, updating and deleting a consumer, and changing its password or certificate material, is **not** on this surface. Those operations stay on the existing [Credentials API](/api-reference/credentials), which addresses the same record by its `username`. A consumer's enabled flag is part of that surface's update body — there is no separate toggle here. The one write operation this page exposes for a consumer is moving it to another organization — see [Transfer to another organization](#transfer-to-another-organization) below.
 
 :::
 
 :::info
 
-An application has no create, update or delete endpoint here either, and no promote action. Archive, delete and promote are steps of the portal's maker-checker deletion/promotion approval flows, not standalone operations, so they have no place on an automation surface. **Suspend** and **resume** are the only write operations this page exposes for an application.
+An application has no create, update or delete endpoint here either, and no promote action. Archive, delete and promote are steps of the portal's maker-checker deletion/promotion approval flows, not standalone operations, so they have no place on an automation surface. **Suspend**, **resume**, and moving the application to another organization (see [Transfer to another organization](#transfer-to-another-organization) below) are the only write operations this page exposes for an application.
 
 :::
 
@@ -34,6 +34,7 @@ An application has no create, update or delete endpoint here either, and no prom
 | `GET` | `/consumers/{consumerKey}/api-clients` | Summary rows of the API clients owned by the consumer |
 | `GET` | `/consumers/{consumerKey}/entitlements` | Every access entitlement whose subject is the consumer |
 | `GET` | `/consumers/{consumerKey}/limit-assignments` | Every limit assignment whose subject is the consumer |
+| `POST` | `/consumers/{consumerKey}/actions/transfer-organization` | Move the consumer to another organization of the same project |
 
 `GET /consumers?organizationCode&enabledOnly&search&page&size&sort` sorts by `username,asc` by default; `sort` may also name `fullName` or `enabled`. `search` is a case-insensitive contains-match against username and full name.
 
@@ -48,6 +49,7 @@ An application has no create, update or delete endpoint here either, and no prom
 | `GET` | `/applications/{applicationKey}/limit-assignments` | Every limit assignment whose subject is the application |
 | `POST` | `/applications/{applicationKey}/actions/suspend` | Disable and withdraw the application's enabled credentials and re-push its API clients as suspended |
 | `POST` | `/applications/{applicationKey}/actions/resume` | Re-enable exactly the credentials the suspension disabled and re-push the application's API clients |
+| `POST` | `/applications/{applicationKey}/actions/transfer-organization` | Move the application, the consumers it owns, and its subscriptions to another organization of the same project |
 
 `GET /applications?organizationCode&status&search&page&size&sort` sorts by `name,asc` by default; `sort` may also name `appStatus`. `status` is one of `ACTIVE`, `SUSPENDED`, `PENDING_DELETION`, `ARCHIVED`. `search` is a case-insensitive contains-match against the application name.
 
@@ -59,6 +61,33 @@ Both actions are **idempotent**: suspending an already-suspended application, or
 - **Resume** re-enables and re-deploys only the credentials that the matching suspend disabled, so a credential that was independently revoked in the meantime stays revoked.
 
 Neither action takes a request body.
+
+### Transfer to another organization {#transfer-to-another-organization}
+
+`POST .../consumers/{consumerKey}/actions/transfer-organization` and `POST .../applications/{applicationKey}/actions/transfer-organization` move the owner to a different organization of the **same project**, addressed by code:
+
+```json
+{ "organizationCode": "acme-partners" }
+```
+
+Both answer `200` with the owner's own view (the same shape `GET .../consumers/{consumerKey}` or `GET .../applications/{applicationKey}` returns), reflecting the new `organizationCode`. Everything the owner needs to keep working follows in the same operation:
+
+- **Consumer**: its own [API clients](/en/admin/identity-management/credentials#api-clients), its legacy API/API group access control list rows, and the tokens it holds are re-linked, and the consumer is redeployed.
+- **Application**: the consumers it owns (with their own API clients, legacy access control list rows and tokens), the application's own API clients, and its product subscriptions are re-linked, and its API clients are re-pushed.
+
+Unlike **suspend**/**resume**, this action is **not idempotent** — repeating a transfer to the organization the owner already belongs to is refused with `409 lifecycleConflict` (`reason: transfer.sameOrganization`), not treated as a no-op. It is refused the same way, and nothing is changed, when:
+
+- the consumer is managed by directory synchronization (`reason: transfer.syncManaged`), or the application is being deleted or is already archived (`reason: transfer.applicationTerminal`);
+- a delete of the owner, or of the organization it is leaving or joining, is currently in progress (`reason: deleteInProgress` for the owner, `reason: transfer.organizationDeleteInProgress` for either organization);
+- the target organization has been merged into another one (`reason: transfer.targetOrganizationTombstoned`).
+
+A blank or missing `organizationCode` is refused with `400 malformedRequest` before any of the checks above run; one that does not resolve within the project is `404 resourceNotFound`, the same as an unknown `consumerKey`/`applicationKey`.
+
+:::warning
+
+If the target organization is suspended, traffic for the owner (and, for an application, the consumers it owns) stops immediately after the transfer succeeds. Resume the target organization to let traffic flow again.
+
+:::
 
 ## Response
 
@@ -152,23 +181,24 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 
 | Error key | When |
 |---|---|
-| `malformedRequest` | The admin (platform) project was addressed (`params.reason = platformScopeNotSupported`), an `organizationCode` filter did not resolve, or a malformed `sort` value was sent |
-| `resourceNotFound` | An unknown `consumerKey` / `applicationKey`, or an unknown `organizationCode` |
+| `malformedRequest` | The admin (platform) project was addressed (`params.reason = platformScopeNotSupported`), a malformed `sort` value was sent, or a transfer's `organizationCode` was blank or missing |
+| `resourceNotFound` | An unknown `consumerKey` / `applicationKey`, an unknown `organizationCode` (as a list filter or as a transfer target) |
 | `unsupportedSortField` | `sort` named a field this surface does not sort on |
-| `permissionDenied` | Authenticated, but the caller lacks the **Identity** permission at **View** (reads) or **Manage** (suspend/resume) |
+| `lifecycleConflict` | A transfer was refused: `params.reason` is one of `transfer.syncManaged`, `transfer.applicationTerminal`, `transfer.sameOrganization`, `transfer.targetOrganizationTombstoned`, `transfer.organizationDeleteInProgress`, or `deleteInProgress` (a delete of the owner itself is in progress) — see [Transfer to another organization](#transfer-to-another-organization) above |
+| `permissionDenied` | Authenticated, but the caller lacks the **Identity** permission at **View** (reads) or **Manage** (suspend/resume/transfer) |
 
 See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
 
 ## Permissions & Licensing
 
-- Reads (`GET`) require the **Identity** permission at **View**; the two application actions (`POST .../actions/suspend`, `POST .../actions/resume`) require it at **Manage**.
+- Reads (`GET`) require the **Identity** permission at **View**; every `POST` action on this page — the two application lifecycle actions and the transfer action on either owner — requires it at **Manage**.
 - No license module is required for anything on this page.
 - The admin (platform) project has no consumers or applications and is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`) — both surfaces are always project-scoped.
 - A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
 
 ## Example
 
-List a project's enabled consumers in one organization, read one consumer's entitlements, then suspend and resume an application:
+List a project's enabled consumers in one organization, read one consumer's entitlements, suspend and resume an application, then move a consumer to another organization:
 
 ```bash
 # 1. List enabled consumers in an organization, sorted by full name
@@ -190,6 +220,12 @@ curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications/
 # 5. Resume it once the review is done
 curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/actions/resume" \
   -H "Authorization: Bearer $TOKEN"
+
+# 6. Move a consumer to another organization of the same project
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/actions/transfer-organization" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "organizationCode": "acme-partners" }'
 ```
 
 ## Related Documentation

@@ -681,7 +681,8 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
-        "admin/identity-management/acl-raporu"
+        "admin/identity-management/acl-raporu",
+        "admin/identity-management/yasal-saklama-ve-temizleme"
       ]
     },
     {

@@ -1,0 +1,294 @@
+---
+title: "Legal Holds and Lifecycle Purge Runs Management API"
+description: "Place or release a legal hold on a consumer, API client, application, or organization, and preview, approve, queue, monitor, and cancel a data lifecycle purge run through the Management API."
+---
+
+## Overview
+
+This page documents the Management API surface for two related capabilities: **legal holds**, which block deletion and purge for a single subject, and **lifecycle purge runs**, which permanently erase, correct, retire, or crypto-shred a subject's data through a four-eyes preview-approve-execute workflow. A subject is always addressed portably — by its type plus a business key — never by an internal database id:
+
+```json
+{ "subjectType": "CONSUMER", "consumerKey": "jane.doe" }
+{ "subjectType": "API_CLIENT", "apiClientKey": "mobile-app-prod" }
+{ "subjectType": "APPLICATION", "applicationKey": "loyalty-app" }
+{ "subjectType": "ORGANIZATION", "organizationCode": "acme-corp" }
+```
+
+`subjectType` is one of `CONSUMER`, `API_CLIENT`, `APPLICATION`, `ORGANIZATION`; exactly one of the matching key fields (`consumerKey`, `apiClientKey`, `applicationKey`, `organizationCode`) must be present alongside it.
+
+This is the portable counterpart of the Manager's own Legal Hold and Data Lifecycle Purge screens. For the concepts, the four purge modes, the erasure scope by subject type, and the permission model this surface backs, see [Legal Holds and Data Lifecycle Purge](/en/admin/identity-management/legal-holds-and-purge).
+
+Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, bounded pagination, and `Idempotency-Key` on the run-queuing call. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`.
+
+## Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/legal-holds` | List legal holds in the project |
+| `POST` | `/legal-holds` | Place a legal hold on a subject (`201`) |
+| `POST` | `/legal-holds/{holdId}/actions/release` | Release an active legal hold (`200`) |
+| `POST` | `/lifecycle-purge-previews` | Preview a purge for a subject — writes nothing (`200`, status `PREVIEWED`) |
+| `GET` | `/lifecycle-purge-runs` | List purge runs, newest first |
+| `POST` | `/lifecycle-purge-runs` | Queue an already-approved run for execution (`202` + `Location`) |
+| `GET` | `/lifecycle-purge-runs/{runId}` | One run's progress and outcome |
+| `GET` | `/lifecycle-purge-runs/{runId}/issues` | The per-item issues the run recorded |
+| `POST` | `/lifecycle-purge-runs/{runId}/actions/approve` | Approve a previewed run's manifest by its digest (`200`, status `APPROVED`) |
+| `POST` | `/lifecycle-purge-runs/{runId}/actions/cancel` | Cancel a run before its point of no return (`200`, status `CANCELLED`) |
+
+### Legal holds
+
+`POST .../legal-holds` places a hold and requires a `reason`; an optional `reference` (a case or ticket number, for example) can be attached. Placing a second hold on a subject that already has an active one is refused:
+
+- `409 lifecycleConflict` (`params.reason = alreadyHeld`) — the subject already has an active legal hold.
+
+`POST .../legal-holds/{holdId}/actions/release` requires a `reason` for the release and is refused if the hold is not currently active:
+
+- `409 lifecycleConflict` (`params.reason = notActive`) — the hold has already been released.
+
+A subject under an active legal hold cannot be deleted through any other surface, and every purge preview against it is refused before any manifest is produced — see [Legal Hold and Purge Together](/en/admin/identity-management/legal-holds-and-purge#legal-hold-and-purge-together).
+
+### Purge modes and the four-eyes workflow
+
+`mode` on the preview request selects what the run does:
+
+| `mode` | Effect |
+|---|---|
+| `DATA_SUBJECT_ERASURE` | Permanently erases the subject's personal data |
+| `CORRECTION_PURGE` | Removes a subject still in a pre-operational state |
+| `RETENTION_PURGE` | Removes a subject that has been terminal for at least `retentionDays` (default 30) |
+| `CRYPTO_SHRED` | Destroys only the subject's secrets and tokens |
+
+A preview writes nothing: it evaluates eligibility and returns a `manifest` (what will be touched, collection by collection) with a `manifestDigest` fingerprinting it. A second, different user then approves the exact digest; approving queues nothing by itself — a separate call to `POST .../lifecycle-purge-runs` starts execution. Once execution makes its first real mutation, the run has passed its **point of no return** and can no longer be cancelled. The full workflow, its status machine, and the single-administrator exception to the different-approver rule are described in [Purge and the Four-Eyes Workflow](/en/admin/identity-management/legal-holds-and-purge#purge-and-the-four-eyes-workflow).
+
+Preview is refused with:
+
+- `409 lifecycleConflict` (`params.reason = legalHold`) — the subject has an active legal hold.
+- `409 lifecycleConflict` (`params.reason = activeRunExists`) — the subject already has a run in progress.
+- `409 lifecycleConflict` (`params.reason = modeNotApplicable`) — the mode does not match the subject's current state.
+- `409 lifecycleConflict` (`params.reason = correctionNotEligible`) — `CORRECTION_PURGE` was requested on a subject past its pre-operational state.
+- `409 lifecycleConflict` (`params.reason = retentionNotReached`) — `RETENTION_PURGE` was requested before `retentionDays` had elapsed since the subject became terminal.
+- `400 malformedRequest` — the subject reference does not resolve to any subject of the given type.
+
+Approval is refused with:
+
+- `409 lifecycleConflict` (`params.reason = digestMismatch`) — the submitted digest does not match the run's current manifest (the underlying data changed since preview; run a new preview).
+- `409 lifecycleConflict` (`params.reason = sameActor`) — the approving user is the same user who ran the preview (waived for a system administrator).
+- `409 lifecycleConflict` (`params.reason = invalidState`) — the run is not in `PREVIEWED` state.
+
+Queuing execution is refused with:
+
+- `409 lifecycleConflict` (`params.reason = invalidState`) — the run is not in `APPROVED` state.
+
+Cancellation is refused with:
+
+- `409 lifecycleConflict` (`params.reason = cannotCancelAfterCommit`) — the run has already passed its point of no return.
+- `409 lifecycleConflict` (`params.reason = invalidState`) — the run has already reached a final state.
+
+## Idempotency
+
+`POST .../lifecycle-purge-runs` requires an `Idempotency-Key` header (see [Common Contract → Idempotency](/api-reference/apiops-common-contract#idempotency)); a missing or blank header is `400 idempotencyKeyRequired`. Legal hold placement, preview, approve, and cancel need no key — a preview is read-effect-free and reissuable, and approve/cancel are each single-use by construction against a specific run state.
+
+| Situation | Result |
+|---|---|
+| New key | The run is queued |
+| Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the run id; read it with `GET .../lifecycle-purge-runs/{runId}` instead |
+| Same key, same body, first call still in flight | `409 idempotencyInProgress` |
+| Same key, a different body | `409 idempotencyKeyReused` |
+
+A claim whose underlying call failed is released, so the same key may be retried once the cause is fixed.
+
+## Request Bodies
+
+### Place a legal hold
+
+```json
+{
+  "subjectType": "CONSUMER",
+  "consumerKey": "jane.doe",
+  "reason": "Ongoing regulatory investigation, case #4471",
+  "reference": "CASE-4471"
+}
+```
+
+### Release a legal hold
+
+```json
+{ "reason": "Investigation closed, no action required" }
+```
+
+### Preview a purge
+
+```json
+{
+  "mode": "DATA_SUBJECT_ERASURE",
+  "subjectType": "CONSUMER",
+  "consumerKey": "jane.doe"
+}
+```
+
+`retentionDays` is accepted (and only meaningful) with `mode: "RETENTION_PURGE"`; omitted, the project's configured default applies.
+
+### Approve a run
+
+```json
+{ "digest": "a94f2c9e7b1d4e0f8c3a2b1d9e7f6c5b4a3d2e1f0c9b8a7d6e5f4c3b2a1d0e9f" }
+```
+
+### Queue an approved run for execution
+
+```json
+{ "runId": "68b1f2a4c9e1a2b3c4d5e6f7" }
+```
+
+### Cancel a run
+
+No body.
+
+## Response
+
+### Legal Hold — `200`/`201`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | The hold's id |
+| `subjectType` | enum | `CONSUMER` \| `API_CLIENT` \| `APPLICATION` \| `ORGANIZATION` |
+| `subjectId` | string | The subject's internal id (present for reference; addressing on this page is always by the portable key) |
+| `projectId` | string | The owning project |
+| `reason` | string | Why the hold was placed |
+| `reference` | string | Optional external reference (case/ticket number); absent if not supplied |
+| `status` | enum | `ACTIVE` \| `RELEASED` |
+| `placedBy` / `placedAt` | string / timestamp | Who placed the hold and when |
+| `releasedBy` / `releasedAt` | string / timestamp | Who released the hold and when; absent while `ACTIVE` |
+| `releaseReason` | string | The reason given at release; absent while `ACTIVE` |
+
+### Purge Run — `200`/`202`
+
+The shape returned by preview, approve, `GET .../lifecycle-purge-runs/{runId}`, and each row of `GET .../lifecycle-purge-runs`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string | The run's id |
+| `projectId` | string | The owning project |
+| `mode` | enum | `DATA_SUBJECT_ERASURE` \| `CORRECTION_PURGE` \| `RETENTION_PURGE` \| `CRYPTO_SHRED` |
+| `subjectType` | enum | `CONSUMER` \| `API_CLIENT` \| `APPLICATION` \| `ORGANIZATION` |
+| `subjectId` | string | The subject's internal id |
+| `subjectLabel` | string | An anonymized display label for the subject — never the subject's personal name |
+| `status` | enum | `PREVIEWED` \| `APPROVED` \| `QUEUED` \| `RUNNING` \| `SUCCESS` \| `PARTIAL` \| `FAILED` \| `CANCELLED` \| `INTERRUPTED` |
+| `manifest` | array | `{ collection, action, criteriaSummary, expectedCount, note }` — one entry per collection the run will touch. `action` is one of `ANONYMIZE` \| `DELETE` \| `REVOKE` \| `END` \| `TOMBSTONE` \| `UNDEPLOY` \| `RETAIN_TTL` |
+| `manifestDigest` | string | Fingerprint of `manifest`, required unchanged on approval |
+| `retentionDays` | integer | The retention threshold applied (relevant to `RETENTION_PURGE`) |
+| `retentionDaysForTrafficLogs` | integer | The configured API traffic log retention reflected in the manifest's `RETAIN_TTL` line; `null` if not configured |
+| `previewedBy` / `previewedAt` | string / timestamp | Who ran the preview and when |
+| `approvedBy` / `approvedAt` | string / timestamp | Who approved and when; absent before approval |
+| `executedBy` | string | The user who queued execution |
+| `createdAt` / `queuedAt` / `runningAt` / `heartbeatAt` / `finishedAt` | timestamp | Lifecycle timestamps; each absent until the run reaches that stage |
+| `pointOfNoReturnAt` | timestamp | Set the moment the run's first real mutation is applied; once set, [cancel](#endpoints) is refused |
+| `cancelRequested` | boolean | `true` once a cancel action has been accepted for this run |
+| `durationMs` | integer | Actual execution time once finished |
+| `processedCount` / `anonymizedCount` / `deletedCount` / `revokedCount` / `endedCount` / `failedCount` | integer | Per-outcome counters |
+| `issueCount` | integer | Total issue rows this run recorded — the true total, even past the persisted cap |
+| `issuesTruncated` | boolean | `true` once the persisted-issue cap was hit |
+| `message` | object | `{ "key": string, "params": object }` — the translatable summary reason, one of `purge.run.cancelled`, `purge.run.interrupted`, `purge.run.failed` (`params.detail`), `purge.run.legalHold` |
+
+### Issue — `200`, paged
+
+One row of `GET .../lifecycle-purge-runs/{runId}/issues`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `outcome` | enum | `FAILED` \| `SKIPPED` |
+| `message` | object | `{ "key": string, "params": object }` — `purge.item.failed` (`params.detail`) or `purge.item.skipped` |
+
+### List envelope — `200`
+
+`GET .../legal-holds`, `GET .../lifecycle-purge-runs`, and `GET .../lifecycle-purge-runs/{runId}/issues` all return the shared paged envelope:
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [],
+  "page": 0,
+  "size": 20,
+  "totalElements": 12,
+  "totalPages": 1,
+  "sort": ["createdAt,desc"]
+}
+```
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | The subject reference does not resolve to a subject of the given type; the request body is missing a required field |
+| `resourceNotFound` | An unknown hold or run id was addressed, or one belonging to a different project |
+| `lifecycleConflict` | `params.reason` names the cause — see [Legal holds](#legal-holds) and [Purge modes and the four-eyes workflow](#purge-modes-and-the-four-eyes-workflow) above for the full list (`alreadyHeld`, `notActive`, `legalHold`, `activeRunExists`, `modeNotApplicable`, `correctionNotEligible`, `retentionNotReached`, `digestMismatch`, `sameActor`, `invalidState`, `cannotCancelAfterCommit`) |
+| `idempotencyKeyRequired` | `POST .../lifecycle-purge-runs` was called without its `Idempotency-Key` header |
+| `idempotencyKeyReused` | The same key was sent with a different request body |
+| `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the run it created |
+| `idempotencyInProgress` | The same key and body's first call is still running |
+| `permissionDenied` | Authenticated, but the caller lacks the **Data Lifecycle** permission at the level this operation requires |
+
+See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set and the status-code table.
+
+## Permissions & Licensing
+
+- Reads (`GET`) require **Data Lifecycle** at **View**; placing/releasing a hold and preview/approve/cancel require it at **Manage**; queuing execution requires it at **Execute**.
+- Among the predefined project roles, only **Project Owner** carries this permission automatically — see [Legal Holds and Data Lifecycle Purge → Permissions](/en/admin/identity-management/legal-holds-and-purge#permissions). A caller without it gets `403 permissionDenied`; a caller outside the project's scope entirely gets `404 resourceNotFound` instead, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
+- A system administrator always has access, and is the one exception to the different-approver rule on approval.
+
+## Example
+
+Place a hold, preview an erasure blocked by it, release the hold, then preview, approve, and queue the run:
+
+```bash
+# 1. Place a legal hold on a consumer
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/legal-holds" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "subjectType": "CONSUMER", "consumerKey": "jane.doe", "reason": "Regulatory investigation" }'
+# 201 Created
+
+# 2. A preview against the held subject is refused
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/lifecycle-purge-previews" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "mode": "DATA_SUBJECT_ERASURE", "subjectType": "CONSUMER", "consumerKey": "jane.doe" }'
+# 409 lifecycleConflict, params.reason = "legalHold"
+
+# 3. Release the hold once the investigation closes
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/legal-holds/{holdId}/actions/release" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "Investigation closed" }'
+# 200 OK
+
+# 4. Preview now succeeds — writes nothing, returns a manifest + digest
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/lifecycle-purge-previews" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "mode": "DATA_SUBJECT_ERASURE", "subjectType": "CONSUMER", "consumerKey": "jane.doe" }'
+# 200 OK, status: "PREVIEWED", manifestDigest: "a94f2c9e..."
+
+# 5. A different user approves the exact digest
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/lifecycle-purge-runs/68b1f2a4c9e1a2b3c4d5e6f7/actions/approve" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "digest": "a94f2c9e7b1d4e0f8c3a2b1d9e7f6c5b4a3d2e1f0c9b8a7d6e5f4c3b2a1d0e9f" }'
+# 200 OK, status: "APPROVED"
+
+# 6. Queue execution — requires Idempotency-Key
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/lifecycle-purge-runs" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 9d0c8f4a-2f1e-4c7b-9c2f-8b3a1d5e7c40" \
+  -d '{ "runId": "68b1f2a4c9e1a2b3c4d5e6f7" }'
+# 202 Accepted, Location: /apiops/projects/finance/lifecycle-purge-runs/68b1f2a4c9e1a2b3c4d5e6f7/
+```
+
+## Related Documentation
+
+- [Legal Holds and Data Lifecycle Purge](/en/admin/identity-management/legal-holds-and-purge) - The manager UI screens and concepts this surface backs: legal holds, the four purge modes, the four-eyes workflow, and erasure scope by subject type
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, idempotency, pagination, and status-code rules every endpoint on this page follows
+- [Authorization Matrix](/en/admin/user-access-management/authorization-matrix) - The **Data Lifecycle** permission category this page's endpoints are guarded by
