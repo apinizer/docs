@@ -30,6 +30,10 @@ The wizard groups the exportable/importable object types into four categories. T
 | Identity | Certificate / Key Store / Crypto Key / JWK | No |
 | Identity | IP Group | No |
 | Identity | Credential | Yes |
+| Identity | Limit Plan | No |
+| Identity | API Client | Yes |
+| Identity | Limit Assignment | Yes |
+| Identity | Access Entitlement | Yes |
 | AI | LLM Provider | Yes |
 | AI | Provider Definition | No |
 | AI | Model Definition | Yes |
@@ -59,8 +63,8 @@ The whole-project package is not part of the entity wizard's type catalog. That 
 
 The flow adapts automatically to whether the object type you pick carries dependencies:
 
-- **Types with dependencies** (API Proxy, Proxy Group, API Creator, Global Policy, Policy Group, Credential, LLM Provider, Model Definition, Vector DB, Knowledge Base) go through the wizard's full steps: you select the object(s), the dependency tree is resolved, you choose which dependencies to include on export; on import, every dependency is mapped to its counterpart in the target project. If none of the selected objects turn out to have a resolvable dependency, the Dependencies step shows an explicit empty-state message instead of a blank list.
-- **Types without dependencies** (Settings Group, Environment Variable, the certificate family, IP Group, Provider Definition, PII Preset, Prompt Guard Preset) skip the extra dependency/mapping step — the object is exported directly as soon as it is selected, and on import the wizard moves straight from the file upload to the options step.
+- **Types with dependencies** (API Proxy, Proxy Group, API Creator, Global Policy, Policy Group, Credential, LLM Provider, Model Definition, Vector DB, Knowledge Base, API Client, Limit Assignment, Access Entitlement) go through the wizard's full steps: you select the object(s), the dependency tree is resolved, you choose which dependencies to include on export; on import, every dependency is mapped to its counterpart in the target project. If none of the selected objects turn out to have a resolvable dependency, the Dependencies step shows an explicit empty-state message instead of a blank list.
+- **Types without dependencies** (Settings Group, Environment Variable, the certificate family, IP Group, Provider Definition, PII Preset, Prompt Guard Preset, Limit Plan) skip the extra dependency/mapping step — the object is exported directly as soon as it is selected, and on import the wizard moves straight from the file upload to the options step.
 
 <Tabs>
   <TabItem value="export" label="Export">
@@ -273,6 +277,51 @@ Dependency detection and mapping are the most critical part of the wizard — ho
     - MCP/A2A gateway proxies are exported as **API Proxies** (`type=MCP` / `type=A2A`) with no separate connection dependency to resolve: a Passthrough proxy's backend server(s) and a Tool Call / Agent Call policy's embedded server are packaged inline, as part of the proxy itself.
     - Model Definition and Vector DB also go through the dependency step: a custom model definition can reference a custom provider definition, and a Vector DB connection's settings can contain environment variable references — both are resolved and mapped the same way as any other dependency. When neither applies to the selection, the step shows the same empty-state message described above. PII Preset and Prompt Guard Preset carry no reference to another exportable object — each is a self-contained pattern definition — so both are exported directly, without a separate dependency step. A Provider Definition is likewise self-contained (it only carries its own default endpoint and auth settings) and is exported directly as well.
     - PII Preset and Prompt Guard Preset — including the ones scoped to your own project — can only be created or edited by a system administrator. From a regular project, the wizard's object list only shows presets already made available to your project; the platform's built-in preset catalog does not appear there.
+  </Accordion>
+</AccordionGroup>
+
+## Identity and Limit Management Types
+
+Limit Plan, API Client, Limit Assignment and Access Entitlement are four types added to the wizard's **Identity** category. They are matched between installations by a stable name or key rather than by an internal record id, so a rename on either side can't turn a match into a mismatch. All four also share one behavior that sets them apart from the rest: import never puts any of them into effect on its own.
+
+:::warning[Import never makes anything effective]
+
+- **Limit Plan** — arrives as a Draft plan with a Draft revision holding the packaged rule body. Publishing it on the target is a separate operator action; only then can an assignment use it.
+- **API Client** — arrives as a Draft client waiting on a secret. A client's secret is never part of the package — issue a new secret for it on the target, then activate it.
+- **Limit Assignment** — arrives as a Draft assignment. It affects no traffic until you activate it on the target.
+- **Access Entitlement** — arrives as a Draft entitlement. It grants no access until you activate it on the target.
+
+:::
+
+<AccordionGroup>
+  <Accordion title="Limit Plan">
+    - A limit plan travels as a single file together with the revisions that make up its rule body. It carries no dependency of its own — its rules are made of numeric thresholds and window values, referencing no other object.
+    - A plan created with **Import as New** always starts as **Draft**; the packaged rule body becomes the plan's first Draft revision. Making the plan effective (publishing) is not part of the import — it's a separate action on the plan's own screen.
+    - **Replace Existing** always updates the target plan's name, description and labels, and tries to add the packaged rule body as a new Draft revision on top of it. That addition is skipped in two cases — the target already has an open draft, or the target plan is **retired** — and in both, the metadata update still lands while only the rule body is skipped and reported in the import summary.
+    - Matching against the target is by the plan's stable **plan key**, never by its display name. Import as New is refused when that key is already held by another plan in the target — a rename in the Options step does not avoid this; use **Replace Existing** for it instead.
+  </Accordion>
+  <Accordion title="API Client">
+    - A typed OAuth client belonging to a consumer or an application can travel. A client has no management screen of its own — it's managed from its owner's (credential's or application's) detail screen.
+    - The client's secret material (client secret) **never enters the package**. An imported client always arrives as **Draft** and **waiting on a secret**; its first secret has to be issued on the target, and the client activated, separately.
+    - **Replace Existing** updates only the client's name and issuance settings; the target's secret(s), usage state, suspension/revocation history and counters are **left exactly as they are**. A Replace whose packaged owner does not match the target client's current owner is refused outright — a client can never be moved to another owner.
+    - The client identifier is unique across the whole installation, **across every project**. If the packaged identifier is already held by another client — even one living in a different project — the import is refused; no new identifier is silently minted.
+    - If the client's owner (a consumer credential or an application) cannot be found on the target, or the owner's name matches more than one application there, the file's import is refused rather than creating an ownerless or ambiguously-owned client. When the owner is a consumer, that consumer can be packaged as a credential dependency; when the owner is an application, it must already exist under the same name in the target — applications are not a type this wizard transfers.
+  </Accordion>
+  <Accordion title="Limit Assignment">
+    - A limit assignment defined for a subject (consumer, API client, application, organization, project, or a rule-based group) can travel.
+    - Import never puts a ceiling into effect: a new assignment always arrives as **Draft** and is never pushed to any Gateway.
+    - **Replace Existing** updates the target's content only **while it is still Draft**; a target that is already Active or Ended is **left untouched** and reported in the import summary.
+    - Dependencies: the plan(s) it names can be packaged with it; when its subject is a consumer the matching credential can be packaged too, and likewise its own API Client when the subject is one. When the target is a proxy or proxy group, that's a **reference only** — the target object itself is never packaged and must already exist under the same name on the target. The environment travels by name and is only validated on the target, never translated.
+    - The import is refused for that file if the subject, target, environment, or a named plan cannot be resolved on the target — a reference is never silently dropped.
+    - An assignment scoped to the whole installation (a PLATFORM subject, belonging to no project) never appears in the wizard's object list and cannot be imported through this wizard.
+  </Accordion>
+  <Accordion title="Access Entitlement">
+    - A record granting a consumer's or application's access to a proxy, proxy group, API product, or a proxy scoped to a single environment can travel.
+    - Import grants no access: a new entitlement always arrives as **Draft** and affects no Gateway behavior until activated.
+    - **Replace Existing** updates the target's target and validity window only **while it is still Draft**; an entitlement that is already active or ended is **not modified**.
+    - The import is refused for a file whose packaged subject differs from the target record's — an entitlement can never be moved to another subject.
+    - The dependency exists only when the subject is a consumer (the matching credential can be packaged with it); when the subject is an application, or the target is an API product, neither travels — both must already exist under the same name on the target. A proxy, proxy group or environment target is likewise reference-only and never packaged — it is matched by name.
+    - The import is refused for that file if the subject or the target (environment included) cannot be resolved on the target — there is no silent skip.
   </Accordion>
 </AccordionGroup>
 
