@@ -74,7 +74,7 @@ Every error returns the same envelope:
 | status | string | Always `FAILURE` on error |
 | errorKey | string | Stable, machine-readable reason. Branch on this. |
 | message | string | Translation key for the reason, always `error.` followed by the error key |
-| params | object | Values that belong to this specific failure, such as the project name or the list of supported sort fields. Present only when the failure has them. |
+| params | object | Values that belong to this specific failure, such as the project name or the list of supported sort fields. Present only when the failure has them. On a `malformedRequest`, `lifecycleConflict` or `dependencyConflict` from one of the domain surfaces below, `params.reason` narrows the cause — see [Domain reason keys](#domain-reason-keys). |
 | correlationId | string | The identifier for this request |
 
 Empty fields are omitted from the body.
@@ -142,6 +142,72 @@ Error bodies never contain a stack trace, an exception class name, or any text t
 | Error key | Meaning |
 |-----------|---------|
 | temporarilyUnavailable | A dependency the operation needs is momentarily unavailable. The call may be retried. |
+
+## Domain reason keys
+
+`malformedRequest`, `lifecycleConflict` and `dependencyConflict` are deliberately generic — many resources share them. Where a caller needs to tell causes apart, the response carries an additional `params.reason`, a stable key of its own that is never translated and never changes shape. Branch on `errorKey` first; narrow on `params.reason` only when it is present.
+
+A reason key that carries a dotted prefix (`transfer.`, `purge.`, `legalHold.`, `limit.bulk.`) names the subsystem that raised it; a small number of reasons, such as `platformScopeNotSupported`, are shared across surfaces and carry no prefix. The full narrative for each — which request shape triggers it, what to do about it — lives on the endpoint page linked below; this table is the index.
+
+### `transfer.*` — [Import/Export Transfer](/api-reference/transfer-v2)
+
+| Error key | Meaning |
+|-----------|---------|
+| transfer.exportDigestMismatch | The export selection resolves differently than it did when `expectedExportDigest` was captured. Returned as `409 dependencyConflict`. |
+| transfer.preflightDrift | The target project changed since the preflight this import's `options.preflightDigest` was taken from. Returned as `409 dependencyConflict`. |
+| transfer.formatVersionUnsupported | The package's `formatVersion` is not `1`. Returned as `400 malformedRequest`. |
+
+### `purge.*` — [Legal Holds and Lifecycle Purge Runs](/api-reference/lifecycle-purge-runs)
+
+| Error key | Meaning |
+|-----------|---------|
+| purge.legalHold | The subject has an active legal hold; preview, approve and execute all refuse while it stands. Returned as `409 lifecycleConflict`. |
+| purge.activeRunExists | Another non-terminal purge run already targets this subject. Returned as `409 lifecycleConflict`. |
+| purge.deleteInProgress | A delete of this subject is already in progress through another surface. Returned as `409 lifecycleConflict`. |
+| purge.subjectNotFound | The subject reference on a preview does not resolve, or its type/id was left blank. Returned as `400 malformedRequest`. |
+| purge.modeNotApplicable | Returned as `400 malformedRequest` when `mode` itself is not one of the four supported values, and as `409 lifecycleConflict` when the mode is valid but does not apply to the subject's current state (for example `CRYPTO_SHRED` on a subject with nothing to shred). |
+| purge.correctionNotEligible | `CORRECTION_PURGE` was requested on a subject that is not eligible for one; `params` also carries the blockers. Returned as `409 lifecycleConflict`. |
+| purge.retentionNotReached | `RETENTION_PURGE` was requested before the subject's retention age was reached. Returned as `409 lifecycleConflict`. |
+| purge.digestMismatch | The digest submitted to approve does not match the run's current manifest. Returned as `409 lifecycleConflict`. |
+| purge.sameActor | The approver is the same user who ran the preview (waived for a system administrator). Returned as `409 lifecycleConflict`. |
+| purge.invalidState | The run is not in the state this action requires (approve, execute, or cancel called out of order). Returned as `409 lifecycleConflict`. |
+| purge.cannotCancelAfterCommit | The run has already passed its point of no return. Returned as `409 lifecycleConflict`. |
+
+### `legalHold.*` — [Legal Holds and Lifecycle Purge Runs](/api-reference/lifecycle-purge-runs)
+
+| Error key | Meaning |
+|-----------|---------|
+| legalHold.subjectRequired | A hold was placed with no subject type/id. Returned as `400 malformedRequest`. |
+| legalHold.reasonRequired | A hold was placed, or released, with no `reason`. Returned as `400 malformedRequest`. |
+| legalHold.alreadyHeld | The subject already has an active legal hold. Returned as `409 lifecycleConflict`. |
+| legalHold.notActive | The hold being released is not currently active. Returned as `409 lifecycleConflict`. |
+
+### `limit.bulk.*` — [Limit Assignment Runs](/api-reference/limit-assignment-runs)
+
+| Error key | Meaning |
+|-----------|---------|
+| limit.bulk.selectorRequired | The request carries no subject selector. Returned as `400 malformedRequest`. |
+| limit.bulk.subjectTypeNotSupported | The selector's subject type is not one of consumer, API client, application or organization. Returned as `400 malformedRequest`. |
+| limit.bulk.contentRequired | The request carries no limit content (family, target and mode) to assign. Returned as `400 malformedRequest`. |
+| limit.bulk.conflictPolicyInvalid | `conflictPolicy` is not `KEEP_EXISTING` or `REPLACE`. Returned as `400 malformedRequest`. |
+| limit.bulk.includeListTooLarge | An include/exclude id list on the selector exceeds 5,000 entries. Returned as `400 malformedRequest`. |
+| limit.bulk.fingerprintMismatch | The selected population changed since the preview `previewFingerprint` was taken from. Returned as `409 lifecycleConflict`. |
+| limit.bulk.runAlreadyActive | Another bulk assignment run is already in progress in this project. Returned as `409 lifecycleConflict`. |
+| limit.bulk.runNotCancellable | The run is no longer running and cannot be cancelled. Returned as `409 lifecycleConflict`. |
+| limit.bulk.runNotRollbackable | The run has nothing to roll back (still live, already a rollback, or it assigned nothing). Returned as `409 lifecycleConflict`. |
+| limit.bulk.runNotRetryable | The run has no failed or license-skipped subject to retry, or is still live. Returned as `409 lifecycleConflict`. |
+
+### Unprefixed, shared across surfaces
+
+| Error key | Meaning |
+|-----------|---------|
+| platformScopeNotSupported | The admin (platform) project was addressed on a surface whose subjects are always project-owned — legal holds, lifecycle purge, and bulk limit assignment runs. Returned as `400 malformedRequest`. |
+
+:::note
+
+This index covers the reason keys the domain services above define as their own stable vocabulary. A `malformedRequest` can also carry a handful of endpoint-local, unprefixed reasons for shape errors that are specific to one request body (a missing `names` list, an unrecognized `type`) — those are documented on the endpoint page that returns them, not repeated here.
+
+:::
 
 ## Status codes
 
