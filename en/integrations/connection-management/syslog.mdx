@@ -347,6 +347,20 @@ These parameters are all optional and can be left empty. Framing, parallel conne
 
 :::
 
+### Message Splitting Parameter
+
+<CardGroup cols={2}>
+  <Card title="Max Message Size (Bytes)" icon="scissors">
+    **Description:** The largest a single syslog message from this connection may be before a record is sent as several syslog messages instead of one. The size that is measured is the complete syslog message — header, structured data and body together, not just the free-form part — which is the same quantity rsyslog measures with `` `global(maxMessageSize=...)` `` (the older `` `$MaxMessageSize` `` directive). The RFC 6587 framing around the message — the octet-count prefix in `OCTET_COUNTING` mode, or the trailing line break in `NON_TRANSPARENT` mode — is not counted.
+
+    **Default:** 0 — no splitting. Every record is still sent as exactly one message, byte-for-byte the same as before this setting existed.
+
+    **Unit:** bytes (UTF-8)
+
+    **Notes:** For UDP, keep this well under your network path's real datagram size; RFC 5426 recommends staying under 2048 bytes for compatibility with older relays and intermediate devices. See [Splitting Oversized Messages](#splitting-oversized-messages) below for what a split message looks like on the wire and how it relates to the size policy on the SIEM & Log Forwarding page.
+  </Card>
+</CardGroup>
+
 ### TLS and Structured Data Parameters
 
 These fields appear only where they are relevant: the first three when **Enable SSL** is on, the last two when the **Syslog Message Format** is RFC 5424 or RFC 5425. None of them is required — an organization that does not use TLS keeps sending over plain TCP or UDP exactly as before.
@@ -695,6 +709,44 @@ global(oversizemsg.report="on")
 Define a failover connector on the Syslog Connector. Failover is **disabled by default**; without it, records are dropped when the queue fills up or the rsyslog server becomes unreachable, and a batched warning is logged roughly every 30 seconds. With failover enabled, those records keep flowing through the backup connector instead.
 
 :::
+
+## Splitting Oversized Messages {#splitting-oversized-messages}
+
+:::info
+
+This is a different tool from the framing settings above. Framing keeps a large record intact as **one** syslog event. Splitting deliberately breaks a record into **several** syslog messages, for the cases framing cannot help with: a receiving server whose own message-size limit cannot be raised, or a UDP connection, where there is no framing to lengthen in the first place.
+
+:::
+
+**Maximum Message Size** bounds the size of a single syslog message this connection sends — see the parameter card above for exactly what is measured. It is optional and defaults to **0**, which means no splitting: the connection keeps sending exactly one message per record, byte-for-byte what it always has. Set it to a positive number of bytes and any record whose message would exceed that size is sent instead as several syslog messages, each transmitted on its own.
+
+### What a split message looks like
+
+Every part of a split message carries a slice of the original content; the only addition is a short prefix at the start of each part's message body:
+
+```
+[chunk 1/3 a1b2c3d4] first part of the original message...
+```
+
+The `` `[chunk i/N <id>]` `` prefix carries the part's position (`i`), the total number of parts (`N`), and an identifier shared by every part of that one original message and different from any other split message's identifier. It is written on **every** protocol (TCP and UDP) and **every** message format, so a receiver can recognize and reassemble a split message even on a destination using `RFC 3164` over plain TCP or UDP.
+
+When the connection has **RFC 5424** or **RFC 5425** selected and both **Write RFC 5424 Structured Data** and a valid **Enterprise Number (PEN)** are set — the same two conditions that already gate the `` `apinizer@<PEN>` `` element described under [TLS and Structured Data Parameters](#tls-and-structured-data-parameters) — a split message additionally carries an `` `apinizerChunk@<PEN>` `` structured-data element on each part, carrying the same index, total and identifier as the prefix. The prefix is what a receiver without structured-data support reassembles on; the element is a convenience for a parser that already reads structured data. The element carries three parameters: `` `id` `` (the identifier shared by every part of one message), `` `seq` `` (the 1-based index of this part) and `` `total` `` (how many parts the message was split into) — for example `` `[apinizerChunk@32473 id="3f2a19cc" seq="2" total="7"]` ``.
+
+The identifier does not travel in the RFC 5424 `MSGID` field. That field is capped at 32 characters by the protocol, which is not always enough to stay safely unique, so the identifier lives in the message prefix — and, where applicable, in the structured-data element — instead.
+
+:::warning
+
+**A split JSON record is not valid JSON one part at a time.** When what is being split is a JSON-shaped payload — a SIEM **Apinizer JSON v2** event, a **Legacy Raw** traffic log record, or any other JSON body — each individual syslog message, prefix included, is a fragment, not a document your JSON parser can read on its own. Reassemble the parts on the receiving side (see [Reassembling Split Messages](/en/operations/administrator-guides/syslog-integration#reassembling-split-messages)) before running JSON parsing rules on them; a parser applied directly to one part fails, or worse, silently misreads it.
+
+:::
+
+### Relationship to the SIEM Size Policy
+
+The [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding#size-policy) page has its own **Size Policy**, and the two settings solve different problems. The SIEM size policy runs first, at the destination level: it shortens, drops or replaces-with-a-hash the `data` object of an **Apinizer JSON v2**, **CEF 0** or **LEEF 2.0** payload so the event fits a target size — it is not available on **Legacy Raw**, and it never applies to traffic logs, which do not pass through the SIEM & Log Forwarding page at all. **Maximum Message Size** runs after that, on the Syslog connection itself, on whatever final message reaches it — a SIEM payload that already passed the size policy, an unmodified Legacy Raw event, or a traffic-log record forwarded by a Syslog Connector entirely outside the SIEM page. Where the SIEM size policy shrinks or drops content so it fits in one message, Maximum Message Size keeps all of the content and delivers it as more than one message instead.
+
+Over **TCP**, splitting does not enlarge what the Buffer Memory Ceiling admits into the send queue either: the parts of one split message are queued and admitted together, as a single record, so a message whose total size does not fit within that ceiling is still rejected as a whole. Max Message Size solves a receiver's or a wire protocol's message-size limit — it is not a way around the connection's own queue budget.
+
+Over **UDP** there is no send queue and no such all-or-nothing admission: each part is sent as its own datagram. If the connection fails partway through, the parts already sent are on the wire and the record is retried in full through the failover path, so a receiver can see duplicate parts. This is inherent to UDP, which is one more reason to prefer TCP for large records.
 
 ## Best Practices
 
@@ -1087,7 +1139,15 @@ For most installations, no: framing type, parallel connection count, offer timeo
   <Accordion title="How do I make sure large records are not split into multiple syslog events?">
     :::tip
 
-Select `RFC_5425` as the Syslog Message Format (or set Syslog Framing Type to `OCTET_COUNTING` explicitly), and make sure the receiving rsyslog server's `maxFrameSize` and `maxMessageSize` are raised to accommodate your largest record.
+Select `RFC_5425` as the Syslog Message Format (or set Syslog Framing Type to `OCTET_COUNTING` explicitly), and make sure the receiving rsyslog server's `maxFrameSize` and `maxMessageSize` are raised to accommodate your largest record. This is about accidental fragmentation caused by line breaks inside a record; it is unrelated to **Maximum Message Size**, which splits a record on purpose and only once it exceeds a size you choose — see the next question.
+
+:::
+  </Accordion>
+
+  <Accordion title="Can Apinizer split a message that is too large for my syslog receiver, instead of dropping it?">
+    :::tip
+
+Yes. Set **Maximum Message Size** (0 by default, meaning no splitting) to the largest single message your receiver or network path accepts. Any record whose message would exceed that size is sent as several syslog messages instead, each one marked with a `[chunk i/N id]` prefix your receiver can use to put it back together. See [Splitting Oversized Messages](#splitting-oversized-messages) above.
 
 :::
   </Accordion>

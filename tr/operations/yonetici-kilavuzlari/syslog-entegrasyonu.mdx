@@ -224,6 +224,50 @@ Kapsam ve sınırlar:
 - Yapılandırılmış veri yalnızca üstveri taşır. Olay gövdesi, aktör bilgisi ve bağlantıdaki mesaj ana bilgisayar adı bu alana hiçbir zaman yazılmaz; gövde mesajın kendisinde kalır.
 - Anahtar kapalıyken çerçeveler sürüm yükseltmesi öncesiyle bayt düzeyinde aynıdır; mevcut ayrıştırıcılarınız etkilenmez.
 
+## Bölünmüş Mesajları Birleştirme {#bolunmus-mesajlari-birlestirme}
+
+Bir Syslog connection'ında **Maksimum Mesaj Boyutu (Bayt)** ayarlandığında, bu boyutu aşan bir kayıt alıcıya tek mesaj yerine birden fazla syslog mesajı olarak ulaşır — ayarın kendisi ve her parçanın nasıl göründüğü için bkz. [Büyük Mesajları Bölme](/tr/integrations/baglanti-yonetimi/syslog#buyuk-mesajlari-bolme). Yeniden birleştirme alıcı tarafta yapılır; Apinizer'ın alıcının parçaları gerçekten birleştirip birleştirmediğini doğrulamasının bir yolu yoktur.
+
+Her parçanın mesaj gövdesi `[chunk i/N id] ` ile başlar — parçanın sırası, toplam parça sayısı ve o tek kaydın tüm parçalarında ortak olan bir kimlik. Gelen mesajları bu kimliğe göre gruplayın, sıraya göre dizin, öneki kaldırın ve kalan metni sırayla birleştirerek orijinal kaydı elde edin.
+
+:::warning
+
+Bunu herhangi bir JSON ayrıştırma kuralını çalıştırmadan **önce** yapın. Bir parça, önek dahil, orijinal metnin bir dilimidir — JSON ayrıştırıcınızın kendi başına okuyabileceği bir belge değildir.
+
+:::
+
+### rsyslog
+
+rsyslog'un yerleşik modülleri mesajları içeriğe göre korelasyonlamaz; bu nedenle yeniden birleştirme için küçük bir dış toplayıcı gerekir. Chunk öneki taşıyan mesajları `omprog` ile bu toplayıcıya yönlendirin; toplayıcı her kimliğin parçalarını bellekte — `id`'ye göre gruplayıp `i`'ye göre sıralayarak — `i`, `N`'ye ulaşana kadar tutsun, ardından öneksiz, birleştirilmiş sonucu üretip yeniden birleştirilmiş kayıtların ait olduğu yere (bir dosya, başka bir syslog hedefi, SIEM'inizin alım ucu) iletsin.
+
+```
+ruleset(name="apinizerChunks") {
+    action(type="omprog" binary="/opt/apinizer/reassemble-chunks.sh" template="RSYSLOG_TraditionalFileFormat")
+}
+
+if $msg contains '[chunk ' then {
+    call apinizerChunks
+} else {
+    action(type="omfile" file="/var/log/apinizer.log")
+}
+```
+
+Toplayıcı script, her satırı `^\[chunk (\d+)/(\d+) ([^\]]+)\] ` ile eşleştirerek sırayı, toplamı ve kimliği çıkarır, kimliğe göre tamponlar ve 1'den toplamına kadar her sıra geldiğinde kaydı akışa bırakır. Son parça hiç gelmezse gelen parçaları zaman aşımıyla akışa bırakıp loglayan bir mekanizma ekleyin; böylece kayıp bir parça bir kaydı belleğe süresiz hapsetmez.
+
+### Splunk
+
+Bir alan çıkarımı ve `stats` toplaması, aramada parçaları yeniden birleştirir:
+
+```spl
+index=syslog "[chunk "
+| rex field=_raw "^\[chunk (?<chunk_i>\d+)/(?<chunk_n>\d+) (?<chunk_id>\S+)\] (?<chunk_body>.*)"
+| eval chunk_i=tonumber(chunk_i)
+| sort chunk_id, chunk_i
+| stats list(chunk_body) as parts by chunk_id
+| eval original_message=mvjoin(parts, "")
+```
+
+`chunk_i`, sıralamadan önce sayıya çevrilir; aksi halde `"10"` metin olarak `"2"`'den önce sıralanır. `stats list()` grup başına en fazla 100 değer tutar — gerçekçi her chunk sayısı için yeterlidir, ama tek bir kaydın yüzlerce parçaya bölündüğü bir durumda bilinmesi gereken bir sınırdır. Üretim hattında aynı gruplamayı zamanlanmış bir aramada veya index-time'da lookup tabanlı bir oturumlama ile yapın; böylece sonrasında çalışan JSON çıkarım kuralları yalnızca tam olarak yeniden birleştirilmiş olayları görür.
 
 ## Sıkça Sorulan Sorular
 

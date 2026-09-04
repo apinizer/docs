@@ -207,6 +207,50 @@ The setting belongs to the connection, not to a destination: while it is on, eve
 
 :::
 
+## Reassembling Split Messages {#reassembling-split-messages}
+
+When a Syslog connection's **Max Message Size (Bytes)** is set, a record larger than that size arrives at the receiver as several syslog messages instead of one — see [Splitting Oversized Messages](/en/integrations/connection-management/syslog#splitting-oversized-messages) for the setting itself and what each part looks like. Reassembly happens on the receiving side; Apinizer has no way to confirm the receiver put the parts back together.
+
+Every part's message body starts with `[chunk i/N id] ` — the part's position, the total number of parts, and an identifier shared by every part of that one record. Group incoming messages by that identifier, order them by position, strip the prefix, and concatenate the remaining text in order to get the original record back.
+
+:::warning
+
+Do this **before** running any JSON parsing rule over the message. A part is a fragment of the original text, prefix included — not a document your JSON parser can read on its own.
+
+:::
+
+### rsyslog
+
+rsyslog's built-in modules do not correlate messages by content, so reassembly needs a small external collector. Route the messages that carry the chunk prefix to it with `omprog`, and have the collector hold each identifier's parts in memory — keyed by `id`, ordered by `i` — until `i` reaches `N`, then emit the concatenated, prefix-stripped result and forward it wherever the reassembled records belong (a file, another syslog target, your SIEM's ingestion endpoint).
+
+```
+ruleset(name="apinizerChunks") {
+    action(type="omprog" binary="/opt/apinizer/reassemble-chunks.sh" template="RSYSLOG_TraditionalFileFormat")
+}
+
+if $msg contains '[chunk ' then {
+    call apinizerChunks
+} else {
+    action(type="omfile" file="/var/log/apinizer.log")
+}
+```
+
+The collector script matches each line against `^\[chunk (\d+)/(\d+) ([^\]]+)\] ` to pull out the position, total and identifier, buffers by identifier, and flushes a record once every position from 1 to its total has arrived. Add a timeout that flushes and logs whatever parts did arrive if the last part never shows up, so a lost part does not hold a record in memory forever.
+
+### Splunk
+
+A field extraction plus a `stats` aggregation reassembles the parts in a search:
+
+```spl
+index=syslog "[chunk "
+| rex field=_raw "^\[chunk (?<chunk_i>\d+)/(?<chunk_n>\d+) (?<chunk_id>\S+)\] (?<chunk_body>.*)"
+| eval chunk_i=tonumber(chunk_i)
+| sort chunk_id, chunk_i
+| stats list(chunk_body) as parts by chunk_id
+| eval original_message=mvjoin(parts, "")
+```
+
+`chunk_i` is cast to a number before sorting, otherwise `"10"` would sort before `"2"` as text. `stats list()` keeps at most 100 values per group — enough for any realistic chunk count, but worth knowing if a single record is ever split into hundreds of parts. For a production pipeline, do the same grouping in a scheduled search or at index time with a lookup-based sessionization, so JSON-extraction rules that run downstream see only fully reassembled events.
 
 ## Frequently Asked Questions
 
