@@ -39,8 +39,13 @@ A **stream** is one family of events. Each stream has its own producer, its own 
 | **Token** | Token issuance, refresh and rejection on the Gateway | `log_tokentraffic` | `TOKEN_ISSUED`, `TOKEN_REFRESHED`, `TOKEN_REJECTED` | `SUCCESS` when there is no error, `FAILURE` when there is; authentication errors are `DENIED` |
 | **Application** | Component logs from the Management Console, Gateway, Cache and Integration modules | `apinizer_log` | `LOG.TRACE` … `LOG.ERROR` | `WARN` and `ERROR` are `FAILURE`, everything else `SUCCESS` |
 | **API Security** | Gateway requests blocked by a policy or failed with an error, across HTTP, gRPC and WebSocket traffic | `log_apisecurityevent` | `AUTHENTICATION`, `AUTHORIZATION`, `QUOTA`, `THROTTLING`, `VALIDATION`, `IP_SECURITY`, `THREAT`, `ROUTING`, `GATEWAY`, `OTHER` | `DENIED` when the request was blocked, `FAILURE` when it errored |
+| **Portal** | The API Portal's own domain events — an application registered or removed, a subscription requested/approved/rejected/cancelled, an organization membership or join request managed, a support ticket opened, a personal API access token created or revoked | `audit_event` (the same collection as Audit — see [Portal Events](/en/admin/audit-compliance/audit-records#portal-events)) | `PORTAL_APP_CREATED`, `PORTAL_APP_DELETED`, `PORTAL_SUBSCRIPTION_REQUESTED`, `PORTAL_SUBSCRIPTION_APPROVED`, `PORTAL_SUBSCRIPTION_REJECTED`, `PORTAL_SUBSCRIPTION_CANCELLED`, `PORTAL_ORG_MEMBER_INVITED`, `PORTAL_ORG_MEMBER_ADDED`, `PORTAL_ORG_MEMBER_ROLE_CHANGED`, `PORTAL_ORG_MEMBER_REMOVED`, `PORTAL_ORG_JOIN_REQUESTED`, `PORTAL_ORG_JOIN_APPROVED`, `PORTAL_ORG_JOIN_REJECTED`, `PORTAL_TICKET_CREATED`, `PORTAL_API_TOKEN_CREATED`, `PORTAL_API_TOKEN_REVOKED` | `SUCCESS`, `FAILURE`, `DENIED` |
 
-Two further streams appear on the screen with a **Planned** badge and cannot be configured yet: **API Access** and **Portal**. API traffic is not part of the SIEM streams — traffic logs continue to be forwarded by the log connectors of the Gateway environment.
+:::info
+Portal sign-ins and sign-outs are **not** part of the Portal stream — they are Session events, physically recorded in a separate collection, `portal_login_logs`, rather than `persistent_audit_event`. A `PORTAL_LOGIN_SUCCESS`, `PORTAL_LOGIN_FAILURE`, `PORTAL_LOGOUT`, `PORTAL_ACCOUNT_LOCKED`, `PORTAL_PASSWORD_CHANGED`, `PORTAL_PASSWORD_CHANGE_REQUIRED`, `PORTAL_PASSWORD_RESET_REQUESTED`, `PORTAL_PASSWORD_POLICY_VIOLATION` or `PORTAL_ACCOUNT_DISABLED` event type on the **Session** row above carries `source.component: PORTAL` and `data.portalId`, so a rule can select or exclude portal sign-ins without touching Management Console ones — see [API Portal Login Logs](/en/api-portal/login-logs#event-types-and-reason-codes) for the full catalog. `PORTAL_ACCOUNT_DISABLED` is written only by the [inactive-account job](/en/api-portal/api-portal-settings#security) so far.
+:::
+
+One further stream, **API Access**, appears on the screen with a **Planned** badge and cannot be configured yet. API traffic is not part of the SIEM streams — traffic logs continue to be forwarded by the log connectors of the Gateway environment.
 
 ### Destinations
 
@@ -83,6 +88,10 @@ Every stream is served by exactly one of two sources, and you switch between the
 | **Active** | The destinations on this page | Yes — rules, payload profile, privacy profile and size policy all apply |
 
 Switching a stream is immediate in both directions, so you can move one stream at a time and roll it back without losing events.
+
+:::info
+The **Portal** stream has no legacy recipient list to fall back to — its sixteen domain events simply reach no destination while it is on Legacy (which is also its default after an upgrade). Switch it to Active to start forwarding them at all. Portal sign-ins and sign-outs are unaffected by this switch: they follow the **Session** stream's authority instead, as explained under [Migration and cutover](#migration-and-cutover) below.
+:::
 
 ## The page
 
@@ -148,12 +157,19 @@ An empty list always means *everything*: no included event types means every typ
 | **Environment ids** | The environment that produced the event | Token, Application |
 | **Components** | The Apinizer component that wrote the log — Manager, Gateway, Cache, Integration, Portal | Application |
 | **Client CIDR blocks** | The client IP address, matched against IPv4 or IPv6 CIDR blocks | Audit, Session, Token |
+| **Portal ids** | The API Portal the event belongs to | Session (portal sign-in/sign-out events only), Portal |
 
 Names are matched case-insensitively; identifiers must match exactly.
 
 :::warning
 
 Management Console request and access-denied audit events belong to no project. If you fill **Project ids** with a project identifier, those events stop matching and disappear from that destination. To keep them, add the literal value `admin` to the list — it selects the events that have no project.
+
+:::
+
+:::warning
+
+Management Console sign-ins have no **Portal ids** to match, and portal sign-ins have no **Project ids** to match — a filled-in **Portal ids** scope on the Session stream selects only the portal side of it, exactly the way **Project ids** already selects only the Management Console side.
 
 :::
 
@@ -167,6 +183,8 @@ Management Console request and access-denied audit events belong to no project. 
 | Forward warnings and errors only | Application rule → **Minimum level**: `WARN` |
 | Protect a shared syslog target from a token burst | Token rule → **Maximum events per second**: `200` |
 | Send token rejections only | Token rule → **Included event types**: `TOKEN_REJECTED` |
+| Forward only one portal's sign-ins/sign-outs | Session rule → **Scope — include** → **Portal ids**: the portal identifier |
+| Forward a portal's application/subscription/ticket activity but not its sign-ins | Portal rule with no scope restriction; leave the Session rule for that destination off (or scoped to a different portal) |
 
 :::info
 
@@ -255,6 +273,17 @@ Switching a stream back to **Legacy** takes effect immediately. The legacy recip
 
 The same mechanism makes a rolling upgrade safe. A node running the previous version does not know about this page and reads the legacy lists, which are up to date — it forwards the same events, it simply does not apply rules, privacy profiles or size policies until it is upgraded.
 
+### Portal sign-in delivery
+
+Before this stream existed, each API Portal had its own, separate recipient list for login/logout events, configured on that portal's [Settings → Login Log tab](/en/api-portal/api-portal-settings#login-log). Upgrading to this version left that list exactly as it was **and** copied it here: for every connector on a portal's list, a destination now exists on this page with a Session rule scoped to that one portal (**Portal ids**) and limited to the nine event types a portal produces — nothing else that portal's connector used to receive changes.
+
+Which list is actually live is decided by the **Session** stream's authority, not the Portal stream's:
+
+- **Legacy** (the default after upgrade): each portal's own recipient list is used exactly as before — this page's copies of it exist but are inert.
+- **Active**: the per-portal recipient lists are no longer used at all, for **any** portal at once; every portal sign-in and sign-out is delivered by this page's destinations and rules instead, including the copies the upgrade created.
+
+There is no per-portal switch — cutting Session over to Active retires every portal's legacy list in the same step, which is why the [Login Log tab](/en/api-portal/api-portal-settings#login-log) on each portal shows an informational note once you do.
+
 :::warning
 
 The recipient lists and the two local storage switches are now owned by this page. Values sent for them through the General Settings screen, the Management APIs or APIops are ignored, and so are the values in a whole-project configuration import. Configure them here — this page's own configuration can be moved to another installation on its own, as the **SIEM Settings** type in the Export/Import wizard; see [Export and import](#export-and-import) below.
@@ -272,11 +301,16 @@ The first column of the **Streams** tab answers a different question from everyt
 | **Token** | Switchable | Configurable under [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention); off by default. |
 | **Application** | Switchable | Configurable per component under [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention) and through the [Application Log Cleanup Tasks](/en/admin/audit-compliance/application-log-cleanup-tasks) page; off by default. |
 | **API Security** | Always stored — cannot be turned off | Configurable under [Log Retention](/en/admin/system-settings/system-settings-and-limits#log-retention) and through the [Application Log Cleanup Tasks](/en/admin/audit-compliance/application-log-cleanup-tasks) page; off by default. |
+| **Portal** | Always stored — cannot be turned off | No automatic cleanup — same as Audit above; the sixteen domain events share the `audit_event` collection with Audit and are not covered by the Portal Login Logs retention switch described below. |
 
 :::warning
 
 Turning off local storage for the token or application stream means the Apinizer database no longer holds those records, and the Token Requests and Application Logs pages stop showing them. Do it only when at least one destination is confirmed to be receiving them.
 
+:::
+
+:::info
+The **Session** row above is only the full picture for Management Console sign-ins. Portal sign-ins and sign-outs live in a separate collection, `portal_login_logs`, which — unlike `persistent_audit_event` — does have a retention switch: **Portal Login Logs** under [Application Log Cleanup Tasks](/en/admin/audit-compliance/application-log-cleanup-tasks), off by default. Turning it on removes old portal sign-in/sign-out records only; administrator sign-ins in `persistent_audit_event` are unaffected either way.
 :::
 
 ## Export and import {#export-and-import}
@@ -345,7 +379,7 @@ Every **Apinizer JSON v2** event has the same shape, in the same field order. En
 
 | Envelope field | Meaning |
 |---|---|
-| `logType`, `event.category` | The stream — `AUDIT`, `SESSION`, `TOKEN` or `APPLICATION`. |
+| `logType`, `event.category` | The stream — `AUDIT`, `SESSION`, `TOKEN`, `APPLICATION`, `API_SECURITY` or `PORTAL`. |
 | `schemaVersion` | `2` for this envelope. It is raised only on a **breaking** change; adding a field is not breaking. |
 | `eventId` | The identifier of the record in the Apinizer database, or a generated identifier when there is none. |
 | `event.action` | The event type, dotted with its sub-type where one exists — for example `ENTITY.UPDATED` or `LOG.ERROR`. |
@@ -370,10 +404,11 @@ Fields may be added to the envelope and to `data` in later versions without rais
 | Stream | Value |
 |---|---|
 | **Audit** | Management Console request success 1 · entity change 3 · entity deletion 4 · Management Console request failure 5 · access denied 6 · secret revealed 6 · export 6 · API token created 4 · API token revoked 3 · PII unmask 6 — the last five are fixed by event type and do not vary with outcome; deploy 4 · undeploy 5 · promotion requested 4 · promotion approved 4 · promotion rejected 5 · promotion started 3 · promotion executed 4 · promotion cancelled 4 · ACL grant 4 · ACL revoke 5 — of these, only deploy and promotion executed rise on a failed outcome, to 5 and 6 respectively; the rest are fixed by event type |
-| **Session** | sign-out and successful token refresh 1 · successful sign-in 2 · password changed, password change required and password reset requested 3 · password policy violation 4 · failed sign-in and failed token refresh 5 · account locked 7 |
+| **Session** | sign-out and successful token refresh 1 · successful sign-in 2 · password changed, password change required and password reset requested 3 · password policy violation 4 · failed sign-in and failed token refresh 5 · account locked 7 — the nine `PORTAL_` twins carry the identical value each, plus `PORTAL_ACCOUNT_DISABLED` 5 |
 | **Token** | issued and refreshed 2 · rejected 5 |
 | **Application** | trace and debug 0 · info 1 · warn 4 · error 7 |
 | **API Security** | Authentication/Authorization/IP Security denied 7, failure 5 · Threat denied 8, failure 6 · Quota/Throttling denied 5, failure 4 · Validation 4 · Routing/Gateway denied 4, failure 5 · Other denied 6, failure 5 |
+| **Portal** | Anchored to the equivalent Audit value: token created 4, revoked 3 (as **API Token Created**/**Revoked**) · a membership, subscription or join approval, or an app deleted, 4 · an app created, a subscription/membership/join request, an invite, 3 · a subscription, membership, or join rejection/cancellation/removal, 5 · a support ticket created 1. A denied or failed outcome never ranks below the plain denied/failure floor (4/5) even where the row above it is lower. |
 
 ### Fields per stream
 
@@ -397,6 +432,8 @@ The `data` object carries a fixed set of fields defined in the platform. It cann
 | `target.type`, `target.name`, `target.projectId` | fixed `User`, `principal`, `targetProjectId` |
 | `event.action` | `eventType` |
 | `data` | `reasonCode`, `errorType`, `message` (capped at 512 characters), `loginSource`, `portalId`, `accountId`, `email`, `displayName` |
+
+On a portal-originated row (a `PORTAL_` event type), `target.type`/`target.name` are `PORTAL_ACCOUNT`/the account's e-mail rather than the fixed `User`/`principal` above, `actor.ip` and `actor.userAgent` need the API Portal backend's forward-headers setup described under [Known limitations](#known-limitations) to name the end user rather than the Portal backend host, `loginSource` is always `API_PORTAL`, and `data` carries only `reasonCode`, `message`, `loginSource`, `portalId` and — on an admin- or job-initiated row such as `PORTAL_ACCOUNT_DISABLED` — `targetAccountId` naming the affected account; `errorType`, `accountId`, `email` and `displayName` are not part of a portal row (the account is already named by `target`).
 
 **Token**
 
@@ -433,6 +470,10 @@ This stream has no legacy predecessor, so there is no Legacy Raw output to map f
 | `data` | `errorType`, `parentErrorType`, `resultType` (the raw `BLOCKED`/`ERROR` result, alongside the derived `event.outcome`), `statusCode`, `protocol`, `httpMethod`, `path`, `latencyMs` |
 
 There is no `actor.userAgent` for this stream. The request body, headers and query string are never part of the payload — the same bodyless guarantee described on the [Security Events](/en/admin/audit-compliance/security-events) page.
+
+**Portal**
+
+This stream shares its source record — and therefore its envelope shape — with Audit; see the Audit table above. The one difference is `source.component`, which is `PORTAL` rather than `MANAGER`, and the actor: it is the developer's own portal account whenever the API Portal backend could identify one, never the Management API service account it authenticates with — see [Portal Events](/en/admin/audit-compliance/audit-records#portal-events). Every row also carries `data.portalId`.
 
 ## CEF and LEEF
 
@@ -621,5 +662,7 @@ A `configRevision` that differs between nodes means a node has not received the 
 - **Application logs from the Cache and Integration modules** are still forwarded through the legacy recipient list, so rules, privacy profiles and size policies do not apply to them. Application logs from the Management Console and the Gateway follow this page.
 - **A connection configuration shared by several streams shares one queue.** An application-log burst can crowd out audit events on the same syslog connection. Give a high-volume stream its own connection configuration, or bound it with a minimum level and an events-per-second limit.
 - **A whole-project configuration import still ignores the recipient lists and local storage switches** — this page owns them, so use the [SIEM Settings](/en/admin/secrets-management/export-import#siem-settings) type in the Export/Import wizard instead; see [Export and import](#export-and-import) above.
-- **API Access and Portal streams** are reserved and cannot be configured. API traffic itself is not part of the SIEM streams; traffic logs continue to be forwarded by the log connectors of the Gateway environment.
+- **The API Access stream** is reserved and cannot be configured. API traffic itself is not part of the SIEM streams; traffic logs continue to be forwarded by the log connectors of the Gateway environment.
 - **API Security destinations must use Schema v2, CEF or LEEF** — Legacy Raw is not available for this stream.
+- **A newly introduced Portal domain event type is not added to an already-migrated destination's included event types automatically** — the same rule that already applies to Audit, Session, Token and Application (see [What the upgrade did](#what-the-upgrade-did)); a rule left with an empty **Included event types** list is unaffected and always picks up new types.
+- **The client IP and User-Agent on a portal-originated Session or Portal event depend on the API Portal backend sitting behind a reverse proxy or ingress that is configured to pass the real client address through** (`server.forward-headers-strategy` on the Portal backend, matching whatever your proxy sends). Without that, these fields fall back to the Portal backend's own host address rather than the end user's.
