@@ -659,7 +659,6 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "admin/identity-management/credentials",
-            "admin/identity-management/api-client-migration",
             "admin/identity-management/portal-applications",
             "admin/identity-management/organizations",
             "admin/identity-management/ip-groups",
