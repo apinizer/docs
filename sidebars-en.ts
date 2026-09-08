@@ -625,6 +625,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "admin/user-access-management/overview",
+        "admin/account-settings",
         "admin/user-access-management/roles",
         "admin/user-access-management/users",
         "admin/user-access-management/teams",

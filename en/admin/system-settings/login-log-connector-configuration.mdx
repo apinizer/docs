@@ -18,10 +18,7 @@ Apinizer tracks user sign-in/sign-out events in two layers:
 | **API Manager** | Administrators / system users | System Settings > SIEM & Log Forwarding (Session stream) |
 | **API Portal** | Portal end users (developers) | Portal Settings > Login Log tab |
 
-For both layers:
-
-- You can configure whether records are **written to MongoDB**.
-- You can define one or more **connector targets** to send logs to external systems.
+For both layers, records are **always written to the Apinizer database** and cannot be turned off; you can additionally define one or more **connector targets** to send the same events to external systems.
 
 ---
 
@@ -71,6 +68,9 @@ Connectors are defined per **environment**. A connection configuration must firs
 | Token refresh (project switch) | `TOKEN_REFRESH_SUCCESS` | The session token was renewed for a different project |
 | Token refresh denied | `TOKEN_REFRESH_FAILURE` | The user has no permission in the requested project (`reasonCode=NO_PROJECT_PERMISSION`) |
 | Account locked | `ACCOUNT_LOCKED` | The account was locked after too many failed attempts |
+| Password changed | `PASSWORD_CHANGED` | A user's password was set or changed — by the account holder or by an administrator |
+| Password change required | `PASSWORD_CHANGE_REQUIRED` | The user signed in with a password that must be changed before anything else can be done |
+| Password policy violation | `PASSWORD_POLICY_VIOLATION` | A password was rejected for not meeting the configured [password policy](/en/admin/system-settings/global-configuration#password-policy) |
 
 Every event also carries `userAgent`, and failed events carry a machine-readable `reasonCode`. See [Login Records](/en/admin/audit-compliance/login-records) for the full field and reason-code reference.
 
@@ -126,22 +126,19 @@ are omitted from the additional fields.
 
 `Portal Management → [Select Portal] → Settings → Login Log tab`
 
-  <img
-    src="/images/portal/portal-login-log-settings.png"
-    alt="API Portal Settings Login Log tab: save to database and send to connectors"
-    width="1100"
-  />
+{/* TODO: screenshot — API Portal Settings, Login Log tab: current connector table and the static "always saved" warning (no Save to Database toggle); old file: /images/portal/portal-login-log-settings.png; target: /images/2026-09-2/portal-login-log-settings.png */}
 
 ### 2.2 Screen Fields
 
 | Field | Description |
 |-------|-------------|
-| **Save to Database** | When enabled, login log records are written to the MongoDB `portal_login_logs` collection. |
 | **Connector Targets** | List of external connection configurations to which login logs are sent. |
 
 :::info
 
-Portal login log settings are **independent per portal**. Each portal can have its own connectors.
+Portal login log records are **always** written to the MongoDB `portal_login_logs` collection; this cannot be turned off. Portal login log settings are **independent per portal** — each portal can have its own connectors.
+
+This connector list is only used while the **Session** stream's SIEM authority is **Legacy**. Once an administrator switches Session to **Active** on [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding), portal sign-in/sign-out events are delivered by the rules and destinations configured there instead, for **every** portal at once, and this list stops being used.
 
 :::
 
@@ -156,10 +153,20 @@ The steps match API Manager:
 
 ### 2.4 Events Emitted
 
-| Event | loginStatus → eventType | Description |
-|-------|-------------------------|-------------|
-| Successful login | `SUCCESS` → `LOGIN_SUCCESS` | Portal user signed in |
-| Failed login | `FAILURE` → `LOGIN_FAILURE` | Invalid credentials |
+The portal emits ten event types. For the first two, the `eventType` sent to a connector is translated to the value existing connectors already expect; every other type is sent with its own name, unchanged:
+
+| Event | eventType sent to connector | Description |
+|-------|------------------------------|-------------|
+| Successful login | `LOGIN_SUCCESS` | Portal user signed in |
+| Failed login | `LOGIN_FAILURE` | Invalid credentials, or the sign-in was refused for another reason (an account waiting for approval, unconfirmed, disabled, rejected, or belonging to another portal) |
+| Sign-out | `PORTAL_LOGOUT` | The portal user signed out |
+| Account locked | `PORTAL_ACCOUNT_LOCKED` | The account was locked after too many failed sign-in attempts |
+| Password changed | `PORTAL_PASSWORD_CHANGED` | The account's password was changed — self-service, by an administrator, via a reset link, or because a forced/expired password had to be replaced |
+| Password change required | `PORTAL_PASSWORD_CHANGE_REQUIRED` | The account must change its password before it can be used further |
+| Password reset requested | `PORTAL_PASSWORD_RESET_REQUESTED` | The account holder requested a password reset |
+| Password policy violation | `PORTAL_PASSWORD_POLICY_VIOLATION` | A password was rejected for not meeting the portal's configured [password policy](/en/api-portal/api-portal-settings#password-policy--account-lockout) |
+| Account disabled | `PORTAL_ACCOUNT_DISABLED` | The account was disabled — today, only by the [inactive-account job](/en/api-portal/api-portal-settings#security) |
+| Account unlocked | `PORTAL_ACCOUNT_UNLOCKED` | An administrator unlocked the account |
 
 ### 2.5 JSON Payload Sent to Connectors
 
@@ -209,33 +216,12 @@ When a connector is inactive, nothing is sent to that connector even if a log ev
 
 ---
 
-## 5. Turning Off Database Persistence
+## 5. Database Persistence
 
-This applies to the **API Portal** layer only. When a portal's **Save to Database** toggle is off, Apinizer does **not** write that portal's login log records to **MongoDB**, and they are only forwarded to the configured connectors.
-
-Management Console login records are always persisted and cannot be switched off.
-
-:::warning
-
-If a portal's **Save to Database** is off and **all** its connectors are inactive, its login log records may be **lost**. At least one active target is recommended.
-
-:::
+Login log records are **always** written to the Apinizer database, for both layers — Management Console records to `persistent_audit_event`, and portal records to `portal_login_logs`. Neither can be turned off; the connector targets configured above are an **additional** copy, sent alongside the database write, not instead of it.
 
 ---
 
-## 6. Related Technical Components (Developer Reference)
+## 6. Known Limitations / Roadmap
 
-| Component | File | Description |
-|-----------|------|-------------|
-| Manager settings | SIEM & Log Forwarding | Destinations with a rule on the **Session** stream |
-| Manager service | `UserLoginService.logLoginAttempt()` | Routes login/failure events to DB and connectors |
-| Portal entity | `PortalLoginLogSettings.java` | Per-portal settings, `portal_login_log_settings` collection |
-| Portal service | `PortalLoginLogService.save()` | Routes portal login events to DB and connectors |
-| Event model | `LoginLogConnectorEvent.java` | Shared JSON model sent to connectors |
-| Enum | `EnumLoginLogSource` | `API_MANAGER` / `API_PORTAL` |
-
----
-
-## 7. Known Limitations / Roadmap
-
-- **Portal logout:** Portal user sign-out is not logged yet (planned with the portal audit work).
+No known limitations at this time.

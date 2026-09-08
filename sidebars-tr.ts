@@ -622,6 +622,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "admin/user-access-management/genel-bakis",
+        "admin/hesap-ayarlari",
         "admin/user-access-management/kullanicilar",
         "admin/user-access-management/takimlar",
         "admin/user-access-management/rol-yetki-detaylari",
