@@ -836,15 +836,6 @@ const sidebars: SidebarsConfig = {
         "integrations/connectors/logback-connector",
         "integrations/connectors/linux-script-connector"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analytics Reports",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-traffic-time-metrics"
-      ]
     }
   ],
   "analytics-and-monitoring": [

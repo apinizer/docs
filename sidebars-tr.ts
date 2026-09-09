@@ -834,15 +834,6 @@ const sidebars: SidebarsConfig = {
         "integrations/konnektorler/logback-konnektor",
         "integrations/konnektorler/linux-script-konnektor"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analitik Raporları",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-trafigi-(zaman-metrikleri)"
-      ]
     }
   ],
   "analitik-ve-i-zleme": [
