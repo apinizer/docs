@@ -61,6 +61,7 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/create-api-proxy-from-file",
                 "api-proxies/crud/create-ai-api-proxy",
                 "api-proxies/crud/create-mcp-api-proxy",
+                "api-proxies/crud/create-mcp-gateway-from-api-proxy",
                 "api-proxies/crud/create-a2a-api-proxy",
                 "api-proxies/crud/update-api-proxy",
                 "api-proxies/crud/update-api-proxy-from-url",
