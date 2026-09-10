@@ -877,6 +877,7 @@ const sidebars: SidebarsConfig = {
         "analytic/analytics-reports/endpoint-boyut-metrikleri",
         "analytic/analytics-reports/istemci-trafigi-ve-zaman-metrikleri",
         "analytic/analytics-reports/ip-trafigi-ve-zaman-metrikleri",
+        "analytic/analytics-reports/canary-ve-mirror-metrikleri",
         "analytic/analytics-reports/rapor-uretici",
         "analytic/analytics-reports/istek-almayan-endpoint'ler",
         "analytic/analytics-reports/istek-atmayan-client'lar",
