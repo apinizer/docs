@@ -681,6 +681,7 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
+        "admin/identity-management/token-yonetim-ayarlari",
         "admin/identity-management/acl-raporu",
         "admin/identity-management/yasal-saklama-ve-temizleme"
       ]
@@ -738,12 +739,9 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "admin/system-settings/ldap-ile-giris-ayarlari",
-        "admin/system-settings/login-log-konnektor-yapilandirmasi",
         "admin/system-settings/lisans-yonetimi",
         "admin/system-settings/hata-mesajlari",
-        "admin/system-settings/ip-geolocation-ayari",
-        "admin/system-settings/token-yonetim-ayarlari",
-        "admin/system-settings/api-istemcisi-secret-saklama-ayarlari"
+        "admin/system-settings/ip-geolocation-ayari"
       ]
     },
     {

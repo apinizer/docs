@@ -684,6 +684,7 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
+        "admin/identity-management/token-management-settings",
         "admin/identity-management/acl-report",
         "admin/identity-management/legal-holds-and-purge"
       ]
@@ -741,12 +742,9 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "admin/system-settings/ldap-login-settings",
-        "admin/system-settings/login-log-connector-configuration",
         "admin/system-settings/license-management",
         "admin/system-settings/error-messages",
-        "admin/system-settings/ip-geolocation-setting",
-        "admin/system-settings/token-management-settings",
-        "admin/system-settings/api-client-secret-settings"
+        "admin/system-settings/ip-geolocation-setting"
       ]
     },
     {

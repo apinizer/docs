@@ -135,6 +135,16 @@ const config: Config = {
           {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
           {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
           {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          // APNZ-6804 — admin pages relocated to match where the setting now lives in the product.
+          // Token Management Settings moved under Identity; the API client secret storage default
+          // became a section of General Settings; the Login Log connector page was split into the
+          // SIEM & Log Forwarding page (Manager) and the API Portal login logs page (Portal).
+          {from: '/en/admin/system-settings/token-management-settings', to: '/en/admin/identity-management/token-management-settings'},
+          {from: '/tr/admin/system-settings/token-yonetim-ayarlari', to: '/tr/admin/identity-management/token-yonetim-ayarlari'},
+          {from: '/en/admin/system-settings/api-client-secret-settings', to: '/en/admin/system-settings/global-configuration'},
+          {from: '/tr/admin/system-settings/api-istemcisi-secret-saklama-ayarlari', to: '/tr/admin/system-settings/global-yapilandirma'},
+          {from: '/en/admin/system-settings/login-log-connector-configuration', to: '/en/admin/system-settings/siem-log-forwarding'},
+          {from: '/tr/admin/system-settings/login-log-konnektor-yapilandirmasi', to: '/tr/admin/system-settings/siem-log-yonlendirme'},
           // 2026.07.0 → 2026.09.0 release rename (ALTER script pages)
           {from: '/tr/release-notes/2026-07-0-log-tablosu-alter', to: '/tr/release-notes/2026-09-0-log-tablosu-alter'},
           {from: '/en/release-notes/2026-07-0-log-table-alter', to: '/en/release-notes/2026-09-0-log-table-alter'},
