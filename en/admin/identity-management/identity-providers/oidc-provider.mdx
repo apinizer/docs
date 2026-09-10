@@ -250,6 +250,48 @@ Directory preview only **reads** the provider directory. No credential, organiza
 
 :::
 
+## Troubleshooting — synchronization fails with "user fetch failed"
+
+When a synchronization run fails, **Administration > Logging > Application Logs** shows an `IdentitySyncService: user fetch failed ...` line. That line only says the fetch failed; the **reason** is in the provider line just above it.
+
+When the source answered with something other than the expected user/group/role list, the provider writes this **WARN** line:
+
+```
+OidcIdentitySyncProvider: Keycloak admin response is NOT a JSON array — kind=HTML diagnosis='...'
+path=/admin/realms/<realm>/users status=200 contentType=text/html bodyLength=1834 bodyPreview=[...]
+providerId=... realm=... adminBaseUrl=...
+```
+
+The fields are: a fixed classification of the answer (`kind`), a readable explanation (`diagnosis`), which endpoint was read (`path` — query parameters are never written), the HTTP status that came back (`status`), the response type (`contentType`), the body length (`bodyLength`), the first 200 characters of the body (`bodyPreview` — token-, password- and query-string values are masked with `***`), and the provider being synchronized (`providerId`, `realm`, `adminBaseUrl`).
+
+The run itself also fails with an `IdentitySyncService: user fetch failed ...` line that repeats `kind`, `path`, `status`, `contentType` and `bodyLength` — so the classification is still readable when only ERROR-level lines were kept. Only the WARN line above shows the body preview.
+
+Where to look, by `kind`:
+
+| kind | What it means | What to do |
+|---|---|---|
+| `KEYCLOAK_ERROR_OBJECT` | The source returned its own error object instead of a list (`error` / `error_description`, or `errorMessage`). The error code and description are printed in `diagnosis`. | This is usually a permission or client problem. Verify that the service account holds `view-users`, `query-groups` and `view-realm` under `realm-management` (plus `view-clients` when Role Sync Source is Client Roles). |
+| `HTML` | The answer is an HTML page — typically the Keycloak login screen, or an error page from a reverse proxy in front of it. | Verify the Admin Base URL on the **Endpoints** tab and the Realm on the **General** tab; on older Keycloak versions the address ends with an `/auth` prefix. If a reverse proxy or WAF fronts Keycloak, check that the `/admin/realms/...` path is not intercepted. |
+| `EMPTY` | The source answered successfully but with no body. Keycloak returns an empty array for an empty list, never an empty body. An empty body ends the paging loop early, so the list Apinizer read is **partial**. | A reverse proxy or load balancer in between may be dropping the body. Call the same address directly from the Apinizer server and compare the answer. The run is marked as an incomplete read: the records that were read are still applied, deactivation is skipped, and the run ends with a warning. |
+| `JSON_OBJECT` | The answer is valid JSON but a single object, not a list. | Verify that the Admin Base URL points at a Keycloak Admin API root; it may be routed to a different service (or to an API gateway). |
+| `MALFORMED` | The answer is neither a JSON array nor a JSON object — a truncated or binary body. | Check for a proxy that rewrites or compresses the answer, and compare a direct call from the Apinizer server. |
+
+The same diagnosis applies to user, group and role reads alike; the `path` field says which read failed.
+
+A matching line is written when the admin **token** request answers successfully but carries no `access_token` (`OidcIdentitySyncProvider: OIDC admin token response carries no access_token — kind=... diagnosis=...`). It reports the same classification for the **Token Endpoint** on the **Endpoints** tab, and — because a successful answer there would contain a real token — it never prints a body preview.
+
+:::note A failed run deactivates no credentials
+
+When the user list cannot be read, the run ends with an error and **no credential is deactivated** — this is what keeps unread records from being treated as "removed at the source". For details, see [Behavior and Safety Notes](/en/admin/identity-management/identity-providers/credential-sync#behavior-and-safety-notes).
+
+:::
+
+:::tip Try the connection test first
+
+**Connection Test** on the provider screen runs the same reads with a single record and reports them step by step, surfacing the same problem without waiting for a synchronization run. See [Connection Test and Directory Preview](#connection-test-and-directory-preview).
+
+:::
+
 ## Related Pages
 
 For how a JWT, OAuth 2, or Basic/Plain-Text Authentication policy selects an identity service (including OIDC), see [JWT Authentication](/en/develop/policies/jwt) and [OAuth 2 Authentication](/en/develop/policies/oauth2). For how the [OIDC Authentication](/en/develop/policies/oidc-authentication) policy can reference this provider directly instead of configuring endpoints inline, see its [Shared OIDC Provider](/en/develop/policies/oidc-authentication#connecting-to-a-shared-oidc-provider) section. For the synchronized records, see [Credentials](/en/admin/identity-management/credentials). For scheduling, deactivation behavior, and monitoring shared with the other providers, see [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync).

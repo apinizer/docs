@@ -266,6 +266,48 @@ Açılan seçeneklere göre ek gereksinimler:
 
 Bu roller olmadan Keycloak Admin REST API ilgili çağrılara `403 Forbidden` döner; senkronizasyon koşumu hatayı raporlar ve **mevcut hiçbir kimlik bilgisini deaktive etmez** (bkz. [Davranış ve Güvenlik Notları](/tr/admin/identity-management/identity-providers/credential-sync#davranış-ve-güvenlik-notları)).
 
+## Sorun Giderme — Senkronizasyon "kullanıcı çekilemiyor" ile düşüyor
+
+Senkronizasyon koşumu düştüğünde **Administration > Logging > Application Logs** ekranında `IdentitySyncService: user fetch failed ...` satırı görünür. Bu satır yalnızca "çekilemedi" der; **nedeni** hemen öncesindeki sağlayıcı satırındadır.
+
+Kaynak, beklenen kullanıcı/grup/rol listesi yerine başka bir yanıt döndürdüyse şu **WARN** satırı yazılır:
+
+```
+OidcIdentitySyncProvider: Keycloak admin response is NOT a JSON array — kind=HTML diagnosis='...'
+path=/admin/realms/<realm>/users status=200 contentType=text/html bodyLength=1834 bodyPreview=[...]
+providerId=... realm=... adminBaseUrl=...
+```
+
+Satırdaki alanlar: yanıtın sabit sınıflandırması (`kind`), okunabilir açıklaması (`diagnosis`), hangi uç noktanın okunduğu (`path` — sorgu parametreleri yazılmaz), dönen HTTP durumu (`status`), yanıtın türü (`contentType`), gövde uzunluğu (`bodyLength`), gövdenin ilk 200 karakteri (`bodyPreview` — token/parola değerleri ve URL sorgu dizeleri `***` ile maskelenir) ve senkronize edilen sağlayıcı (`providerId`, `realm`, `adminBaseUrl`).
+
+Koşumun kendisi de `IdentitySyncService: user fetch failed ...` satırıyla düşer ve o satır `kind`, `path`, `status`, `contentType`, `bodyLength` değerlerini tekrar eder; yani yalnızca ERROR seviyesi tutulmuş bir logda da sınıflandırma okunabilir. Gövde önizlemesi sadece yukarıdaki WARN satırında yer alır.
+
+`kind` alanına göre nereye bakılacağı:
+
+| kind | Anlamı | Yapılacak |
+|---|---|---|
+| `KEYCLOAK_ERROR_OBJECT` | Kaynak, liste yerine kendi hata nesnesini döndürdü (`error` / `error_description` ya da `errorMessage`). Hata kodu ve açıklaması `diagnosis` alanında yazılıdır. | Genellikle yetki veya istemci sorunudur. Service account'un `realm-management` altındaki `view-users`, `query-groups`, `view-realm` (ve İstemci Rolleri seçiliyse `view-clients`) rollerini doğrulayın. |
+| `HTML` | Yanıt bir HTML sayfasıdır — genellikle Keycloak giriş ekranı ya da araya giren bir ters vekil sunucunun hata sayfası. | **Endpointler** sekmesindeki Admin Base URL ile **Genel** sekmesindeki Realm değerini doğrulayın; eski Keycloak sürümlerinde adres `/auth` ön ekiyle biter. Keycloak'ın önünde bir ters vekil sunucu / WAF varsa `/admin/realms/...` yolunun ona takılmadığını kontrol edin. |
+| `EMPTY` | Kaynak başarılı bir yanıt döndürdü ama gövde boş. Keycloak boş listeyi boş dizi olarak döndürür, boş gövde döndürmez. Boş gövde sayfalama döngüsünü erken bitirdiği için Apinizer'ın okuduğu liste **eksiktir**. | Araya giren ters vekil sunucu / yük dengeleyici gövdeyi düşürüyor olabilir. Aynı adrese Apinizer sunucusundan doğrudan istek atarak yanıtı karşılaştırın. Koşum eksik okuma olarak işaretlenir: okunan kayıtlar yine uygulanır, deaktivasyon atlanır ve koşum uyarı ile biter. |
+| `JSON_OBJECT` | Yanıt geçerli bir JSON nesnesidir ama liste değildir. | Admin Base URL'in bir Keycloak Admin API kökünü gösterdiğini doğrulayın; farklı bir servise (veya API Gateway'e) yönlendirilmiş olabilir. |
+| `MALFORMED` | Yanıt ne JSON dizisi ne de JSON nesnesidir — kırpılmış ya da ikili bir gövde. | Yanıtı yeniden yazan veya sıkıştıran bir vekil sunucu olup olmadığını kontrol edin ve Apinizer sunucusundan doğrudan yapılan bir çağrıyla karşılaştırın. |
+
+Aynı teşhis kullanıcı, grup ve rol okumalarının hepsinde geçerlidir; `path` alanı hangi okumanın düştüğünü söyler.
+
+Admin **token** isteği başarılı yanıt verdiği hâlde içinde `access_token` yoksa eşdeğer bir satır yazılır (`OidcIdentitySyncProvider: OIDC admin token response carries no access_token — kind=... diagnosis=...`). Bu satır aynı sınıflandırmayı **Endpointler** sekmesindeki Token Endpoint için verir ve oradaki başarılı bir yanıt gerçek bir token taşıyacağı için gövde önizlemesi **hiç** basmaz.
+
+:::note Koşu düşerse kimlik bilgileri deaktive edilmez
+
+Kullanıcı listesi okunamadığında koşu hatayla biter ve **hiçbir kimlik bilgisi deaktive edilmez**; okunamamış kayıtların "kaynaktan silinmiş" sayılması bu şekilde engellenir. Ayrıntı için [Davranış ve Güvenlik Notları](/tr/admin/identity-management/identity-providers/credential-sync#davranış-ve-güvenlik-notları) bölümüne bakabilirsiniz.
+
+:::
+
+:::tip Önce Bağlantı Testi
+
+Sağlayıcı ekranındaki **Bağlantı Testi** aynı okumaları tek kayıtla dener ve adım adım sonuç verir; bir senkronizasyon koşumu beklemeden aynı sorunu yüzeye çıkarır. Bkz. [Bağlantı Testi ve Dizin Önizleme](#bağlantı-testi-ve-dizin-önizleme).
+
+:::
+
 ## İlgili Sayfalar
 
 Token taşıyan politikalarda bu sağlayıcının nasıl referans gösterileceği için [OIDC Kimlik Doğrulama](/tr/develop/politikalar/oidc) sayfasını, senkronize edilen kayıtlar için [Kimlik Bilgileri](/tr/admin/identity-management/kimlik-bilgileri) sayfasını, ortak senkronizasyon davranışı için [Kimlik Bilgisi Senkronizasyonu](/tr/admin/identity-management/identity-providers/credential-sync) sayfasını inceleyebilirsiniz.

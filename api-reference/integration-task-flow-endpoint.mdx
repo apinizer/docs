@@ -1,0 +1,79 @@
+---
+title: "Task Flow Trigger Endpoint"
+description: "Trigger a published task flow over HTTP with a personal API access token, including the accepted token headers, the order in which the request is checked, and the exact meaning of each response code."
+---
+
+## Overview
+
+A task flow whose **Endpoint** option is on can be triggered over HTTP, in addition to being run by a scheduler or by the execute button in the Manager. The endpoint is served by the **Integration** component, not by the Manager and not by the API gateway, so its base URL is the address of your integrator server.
+
+This page documents that single call. For creating a task flow, activating its Endpoint option and reading its execution log, see [Task Flow Design](/en/integrations/api-integrator-task-flow-builder/task-flow-design).
+
+## Endpoint
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/integration/execute/{taskFlowId}` | Start a published task flow (`200`) |
+
+`{taskFlowId}` is the identifier shown in the task flow's own endpoint URL in the Manager. The full address is displayed on the task flow editing screen once the Endpoint option is activated — copy it from there rather than assembling it by hand.
+
+```bash
+curl -i "https://integrator.example.com/api/integration/execute/6612c0b4e3a94b0f2c8d1a77" \
+  -H "Authorization: Bearer apnz_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+```
+
+A `200` means the flow has been **accepted and started**. Execution then continues in the background: the response does not wait for the flow to finish and does not carry its result. Watch the run in [Task Flow Monitor](/en/integrations/api-integrator-task-flow-builder/taskflow-monitor).
+
+## Authentication
+
+The call is authenticated with a **personal API access token** — the same token type used by the Management API. Create one from **Profile menu (top right) → My Profile**. The token belongs to the user who created it, so it stops working the moment that user is deactivated, or the token itself is revoked or reaches its expiry date.
+
+Either header carries it:
+
+| Header | Example |
+|---|---|
+| `Authorization` | `Authorization: Bearer apnz_XXXXXXXX` |
+| `APINIZER-TOKEN` | `APINIZER-TOKEN: apnz_XXXXXXXX` |
+
+Both headers accept the token with a `Bearer ` or `Basic ` scheme prefix or with no prefix at all, and surrounding whitespace is ignored. If a request carries a usable token in both headers, `Authorization` wins.
+
+:::tip
+
+Send the token in `APINIZER-TOKEN` when the client already puts something else in `Authorization` — a browser session, a saved Basic credential, or a reverse proxy that adds its own header. Both are read, so the task flow token is no longer hidden by the other one.
+
+:::
+
+## Order of checks
+
+The request is authenticated **first**, and only then is the task flow looked up. This order is deliberate: if the lookup ran first, an unauthenticated caller could tell an id that exists from one that does not simply by comparing status codes, and so enumerate the published task flows of an installation. Authenticating first means an anonymous probe learns nothing about what exists.
+
+## Response codes
+
+| Status | Meaning | Body |
+|---|---|---|
+| `200` | The task flow was found, is published, and has been started | `The task has been started.` |
+| `401` | No token, an unknown token, a revoked or expired token, or a token belonging to a deactivated account | Empty |
+| `404` | Authenticated, but the task flow does not exist **or** its Endpoint option is not activated | Empty |
+
+Two properties of these responses are intentional and are relied on as a security contract:
+
+- **Every `401` is identical.** The body is empty and no field distinguishes a wrong token from a revoked one or from a deactivated account. The response carries `WWW-Authenticate: Bearer realm="apinizer-integration"`, which names the scheme the caller must use but never the reason the credential was refused.
+- **Every `404` is identical.** A task flow that does not exist and one whose Endpoint option is switched off answer the same way, byte for byte. Turning the Endpoint option off is therefore enough to withdraw a published task flow: an existing token can no longer tell that it ever existed.
+
+## Troubleshooting
+
+**A token that works elsewhere returns `401` here.** Check, in order:
+
+1. Is a second credential being sent? A REST client with a saved authentication profile, a browser session, or a reverse proxy may be adding its own `Authorization` header. Put the task flow token in `APINIZER-TOKEN` and it will be read regardless.
+2. Is the token still valid? Open **Profile menu → My Profile** and confirm the token is not revoked and its expiry date has not passed.
+3. Is the owning user still active? A deactivated account invalidates every token it holds.
+
+The Integration server log records the category of every refusal at `INFO` level, without ever writing the token itself:
+
+```
+Task flow 6612c0b4e3a94b0f2c8d1a77 execution refused at authentication: reason=UNKNOWN_TOKEN
+```
+
+In practice `reason` is `MISSING_TOKEN` when neither header carried a value, and `UNKNOWN_TOKEN` for every credential that was supplied but refused — a wrong token, a revoked or expired one, and a token whose owning user has been deactivated all report the same category, because the check that rejects them runs before the category is decided. So the line separates "the client is not sending the token" from "the token was refused"; to tell the refusal cases apart, work through the three checks above.
+
+**The call returns `404` although the task flow exists.** Its Endpoint option is not activated. Open the task flow for editing and switch the option on; the response is deliberately the same as for an id that does not exist, so the status code alone cannot tell the two apart.

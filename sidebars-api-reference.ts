@@ -800,6 +800,15 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Integration Task Flow Endpoint",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "integration-task-flow-endpoint"
+          ]
+        },
+        {
+          "type": "category",
           "label": "Appendix",
           "collapsed": true,
           "collapsible": true,
