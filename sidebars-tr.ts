@@ -834,15 +834,6 @@ const sidebars: SidebarsConfig = {
         "integrations/konnektorler/logback-konnektor",
         "integrations/konnektorler/linux-script-konnektor"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analitik Raporları",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-trafigi-(zaman-metrikleri)"
-      ]
     }
   ],
   "analitik-ve-i-zleme": [
@@ -886,6 +877,7 @@ const sidebars: SidebarsConfig = {
         "analytic/analytics-reports/endpoint-boyut-metrikleri",
         "analytic/analytics-reports/istemci-trafigi-ve-zaman-metrikleri",
         "analytic/analytics-reports/ip-trafigi-ve-zaman-metrikleri",
+        "analytic/analytics-reports/canary-ve-mirror-metrikleri",
         "analytic/analytics-reports/rapor-uretici",
         "analytic/analytics-reports/istek-almayan-endpoint'ler",
         "analytic/analytics-reports/istek-atmayan-client'lar",

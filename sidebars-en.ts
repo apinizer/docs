@@ -836,15 +836,6 @@ const sidebars: SidebarsConfig = {
         "integrations/connectors/logback-connector",
         "integrations/connectors/linux-script-connector"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analytics Reports",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-traffic-time-metrics"
-      ]
     }
   ],
   "analytics-and-monitoring": [
@@ -888,6 +879,7 @@ const sidebars: SidebarsConfig = {
         "analytic/analytics-reports/endpoint-size-metrics",
         "analytic/analytics-reports/client-traffic-and-time-metrics",
         "analytic/analytics-reports/ip-traffic-and-time-metrics",
+        "analytic/analytics-reports/canary-and-mirror-metrics",
         "analytic/analytics-reports/report-generator",
         "analytic/analytics-reports/endpoints-not-receiving-requests",
         "analytic/analytics-reports/clients-not-making-requests",
