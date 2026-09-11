@@ -752,6 +752,7 @@ const sidebars: SidebarsConfig = {
             "limit-assignments",
             "api-clients",
             "consumers-and-applications",
+            "usage-reports",
             "identity-sync-runs",
             "lifecycle-purge-runs",
             { "type": "category", "label": "AI Privacy Presets", "collapsed": true, "collapsible": true, "items": ["ai-privacy-presets", "ai-privacy-presets/list-ai-privacy-presets", "ai-privacy-presets/get-ai-privacy-preset", "ai-privacy-presets/create-ai-privacy-preset", "ai-privacy-presets/update-ai-privacy-preset", "ai-privacy-presets/delete-ai-privacy-preset"] },
@@ -771,7 +772,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "reports",
             "reports/api-report",
-            "reports/organization-api-data-model-access-report"
+            "reports/organization-api-data-model-access-report",
+            "reports/inactive-clients-report"
           ]
         },
         {

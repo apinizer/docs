@@ -1,0 +1,167 @@
+---
+title: "Usage Reports Management API"
+description: "Read what an organization, consumer, application, API client or API proxy consumed in a period — tokens, cost in US dollars, gateway traffic — together with its live quota budgets and the breakdown one level below, through five read-only Management API endpoints."
+---
+
+## Overview
+
+The [AI Budgets API](/api-reference/ai-budgets) answers what the **ceilings** are. This page answers the other half of the same question: **how much of them is gone**, and what a subject actually consumed in a period. It is the surface a FinOps owner automates against — chargeback exports, month-end reconciliation, "who is burning the budget" alerts — and it writes nothing.
+
+Five endpoints, one response shape, five subjects: a consumer **organization**, a single **consumer**, a portal **application**, an **API client**, and an **API proxy**. Every address is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and the rule that a project outside the caller's scope is always `404 resourceNotFound`, never `403`. All five subjects are project-owned, so a call against the admin (platform) project is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
+
+References are **portable**: a subject is addressed by its organization `code`, `consumerKey`, `applicationKey`, `apiClientKey` or API proxy `name`. No Mongo identifier, no traffic-log username and no quota identity value ever crosses the boundary.
+
+## Endpoints
+
+| Method | Path | Subject | Breakdown |
+|---|---|---|---|
+| `GET` | `/credential-organizations/{organizationCode}/usage` | One consumer organization | Per consumer |
+| `GET` | `/consumers/{consumerKey}/usage` | One consumer | — |
+| `GET` | `/applications/{applicationKey}/usage` | One portal application | Per API client |
+| `GET` | `/api-clients/{apiClientKey}/usage` | One API client | — |
+| `GET` | `/api-proxies/{apiProxyName}/usage` | One API proxy | — |
+
+All five accept the same query parameters:
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `from` | 30 days before `to` | Start of the period. ISO-8601 UTC: `2026-08-01`, `2026-08-01T00:00:00Z` or an offset date-time such as `2026-08-01T03:00:00+03:00` |
+| `to` | now | End of the period, same spellings |
+| `model` | every model | Exact LLM model id, e.g. `gpt-5`. Narrows the whole report to that model's requests, and keeps the scope-total budget rows so a per-model figure still has something to be measured against |
+| `environmentName` | every environment of the project | Restricts the traffic-log blocks to one environment |
+
+An inverted period (`from` after `to`), a period wider than **366 days**, or an unparsable bound is refused with `400 malformedRequest` rather than quietly corrected.
+
+## Response
+
+```json
+{
+  "scope":   { "type": "ORGANIZATION", "key": "acme-partners", "name": "acme-partners" },
+  "period":  { "from": "2026-08-12T00:00:00Z", "to": "2026-09-11T00:00:00Z",
+               "effectiveFrom": "2026-08-12T00:00:00Z", "effectiveTo": "2026-09-11T23:59:59.999Z",
+               "timeZone": "UTC" },
+  "filters": { "model": null, "environmentName": null, "environmentApplied": false },
+  "ai": {
+    "dataSource": "ROLLUP_DAILY",
+    "granularity": "DAY",
+    "freshness": "hourly",
+    "totals":  { "tokenInput": 4820113, "tokenOutput": 918204, "tokenCached": 120400,
+                 "tokenTotal": 5858717, "costUsd": 214.382100, "requests": 20418, "failedRequests": 37 },
+    "byModel": [
+      { "provider": "openai", "model": "gpt-5", "tokenInput": 4120113, "tokenOutput": 818204,
+        "tokenCached": 120400, "tokenTotal": 5058717, "costUsd": 198.210400, "requests": 17820 }
+    ]
+  },
+  "aiLicensed": true,
+  "traffic": { "dataSource": "TRAFFIC_LOG", "totalRequests": 20418, "successfulRequests": 20381,
+               "blockedRequests": 0, "erroredRequests": 37,
+               "successRatePercent": 99.8, "avgTimeMs": 812.4 },
+  "children": {
+    "type": "CONSUMER",
+    "items": [ { "key": "con_8f3a1c", "name": "Ada Lovelace", "tokenTotal": 3120400,
+                 "costUsd": 118.204000, "requests": 9820, "usagePercent": 53.3 } ],
+    "total": 14,
+    "truncated": false
+  },
+  "budgets": [
+    { "family": "AI_COST", "unit": "USD", "window": "ONE_MONTH", "dimension": null,
+      "limit": 500.00, "consumed": 214.38, "remaining": 285.62, "usagePercent": 42.9,
+      "windowStartsAt": "2026-09-01T00:00:00Z", "resetsAt": "2026-10-01T00:00:00Z",
+      "assignmentKey": "lim_3d91", "planKey": "partner-monthly", "source": "TYPED" }
+  ],
+  "budgetsAsOf": "2026-09-11T08:31:02Z",
+  "partial": false,
+  "unavailableEnvironments": [],
+  "notes": []
+}
+```
+
+### The three blocks, and where each comes from
+
+| Block | Source | What it covers |
+|---|---|---|
+| `ai` | Declared in `ai.dataSource` — see below | LLM token counts and cost in US dollars |
+| `traffic` | Always the Elasticsearch traffic log | Gateway request counts, success rate, average total time |
+| `budgets` | The quota usage snapshot | Live quota windows: ceiling, consumed, remaining, percentage, reset time |
+
+**`ai.dataSource` is `ROLLUP_DAILY`** for a consumer, an organization and an AI proxy. Those subjects are read from the hourly token-usage rollup — the same table the AI Reports screens and the quota percentages use. It is independent of the traffic log's index-lifecycle retention, so a question about last quarter answers correctly instead of quietly short. Its grain is a UTC calendar day, so `period.effectiveFrom`/`effectiveTo` widen `from`/`to` to whole days and tell you which days were actually measured.
+
+**`ai.dataSource` is `TRAFFIC_LOG`** for an application and an API client. The rollup carries no application or API-client dimension, so those two are read from the traffic log at exact timestamps (`granularity: EXACT`). Two consequences worth planning around: their AI figures are bounded by however long the traffic log is retained, and traffic written before **2026.09.2** carries no client attribution fields, so it can be matched only through the application's own credential usernames — an API client that existed before that release shows no usage for the period before it.
+
+**`budgets` ignores `from`/`to` entirely.** A quota window is a live thing; the block describes the windows that are open right now, with `budgetsAsOf` naming how fresh the snapshot is (it is refreshed about once a minute). `remaining` is `max(limit - consumed, 0)`, so a counter that overshot its ceiling reports `0` rather than a negative number.
+
+### Reading the other fields
+
+- **`filters.environmentApplied`** is `false` when `environmentName` was sent but could not be applied to the `ai` block, because the daily rollup has no environment dimension. The traffic block is still narrowed. The flag exists so a narrowed request never looks like it narrowed something it did not.
+- **`children`** carries at most **200** rows, ordered by token total, and sets `truncated: true` whenever rows were dropped — by that 200-row cap, or by the traffic log's own bucket window before the report ever saw them. `total` is then a lower bound rather than an exact count, and the report is marked `partial` with the `child-list-truncated` note; when `truncated` is `false`, `total` is exact. `usagePercent` is each row's share of the **whole** scope — including rows that were dropped and traffic that carried no client key — so the kept rows keep their true weight and the answered rows add up to less than 100% rather than being renormalised. A child is keyed by its own public key (`consumerKey`, `apiClientKey`) — never by a traffic-log username.
+- **`partial`** is `true` when some source could not be read; `unavailableEnvironments` names the environments whose traffic log failed. The call still answers `200` with what was readable: a FinOps report that returns a clean `0` for a source it never reached is worse than one that says it could not look.
+- **`notes`** explains a zero or a gap in machine-readable form: `no-members` (the organization currently has no consumer), `not-ai-proxy` (the proxy is not an AI proxy, so `ai` is `null`), `rollup-unavailable`, `member-list-truncated`, `child-list-truncated` (the breakdown carries fewer rows than the scope has), `model-list-truncated` (more models were used than `ai.byModel` can carry — `ai.totals` still covers all of them), `ai-module-not-licensed`, `client-attribution-since-2026.09.2`.
+- **`aiLicensed`** reports whether the AI Gateway module is licensed on the installation. It is **informational only** — no block is withheld because of it; it simply explains why the AI figures are zero where the module is absent.
+
+### Budget rows
+
+| Field | Meaning |
+|---|---|
+| `family` | `AI_TOKEN`, `AI_COST` or `REQUEST_QUOTA` |
+| `unit` | `TOKENS`, `USD` or `REQUESTS` — matching the family |
+| `window` | `ONE_HOUR`, `ONE_DAY` or `ONE_MONTH` |
+| `dimension` | `{ "type": "MODEL" \| "PROVIDER", "ref": "..." }` for a per-model / per-provider sub-limit, `null` for the scope total |
+| `assignmentKey` | Public handle of the limit assignment the counter accrues under, when there is one |
+| `planKey` | Key of the limit plan that assignment references, when there is one |
+| `source` | `TYPED` (a limit assignment), `LEGACY_BUDGET` (an AI budget owner definition), `POLICY` (a summary of per-identity policy/rate-limit counters) |
+
+A `POLICY` row is a **summary**, one per policy window, with `limit` and `consumed` left `null` and `usagePercent` carrying the worst percentage observed. Such a counter is keyed by a request identity — an IP address, a header value, a full `Authorization` value — which the platform stores encrypted precisely because it may embed a secret. Listing those identities on an automation surface would publish that set, and summing per-identity ceilings would be a number that means nothing.
+
+## Errors
+
+Every error follows the [Common Contract's error envelope](/api-reference/apiops-common-contract#error-response) — branch on `errorKey`, never on `message`.
+
+| Error key | When |
+|---|---|
+| `malformedRequest` | `from` is after `to`, the period is wider than 366 days, a date could not be parsed, or the admin (platform) project was addressed (`params.reason = platformScopeNotSupported`) |
+| `resourceNotFound` | An unknown `organizationCode` / `consumerKey` / `applicationKey` / `apiClientKey` / API proxy name, an `environmentName` that does not belong to the project, or a project outside the caller's scope |
+| `permissionDenied` | Authenticated, but the caller holds none of the categories this endpoint accepts |
+
+An unreachable Elasticsearch cluster or a failed rollup read is **not** an error — it answers `200` with `partial: true`. See [Common Contract → Error keys](/api-reference/apiops-common-contract#error-keys) for the complete closed set.
+
+## Permissions & Licensing
+
+- The four identity-shaped endpoints (organization, consumer, application, API client) accept the **Identity** *or* the **AI Budgets** permission at **View**. Either is enough: a budget owner and an identity owner both legitimately need this number, and neither should have to hold the other's category.
+- The API proxy endpoint accepts **API Management** *or* **Analytics** at **View** — a proxy's traffic is API-management data, and the analytics role already reads exactly these figures on the reports screens.
+- Every denial is the same `404 resourceNotFound`, so a caller cannot learn which category it is missing.
+- **No license module is required.** The `aiLicensed` flag is reported for context only; no part of the response is withheld on an installation without the AI Gateway module.
+
+## Example
+
+```bash
+# 1. Last 30 days of an organization, with its per-consumer breakdown
+curl "https://apinizer.example.com/apiops/projects/finance/credential-organizations/acme-partners/usage" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 2. One consumer, one calendar month, one model
+curl "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/usage?from=2026-08-01&to=2026-08-31&model=gpt-5" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 3. An application and the API clients under it, PROD only
+curl "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/usage?environmentName=PROD" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 4. One API client
+curl "https://apinizer.example.com/apiops/projects/finance/api-clients/cli_74b2e0/usage?from=2026-09-01" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 5. One AI proxy — tokens, cost and traffic together
+curl "https://apinizer.example.com/apiops/projects/finance/api-proxies/chat-gateway/usage" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+A month-end chargeback export is the organization call per organization, reading `ai.totals.costUsd` and the `children` rows; a budget-alarm job is any of the five, reading the `budgets` rows and branching on `usagePercent` and `resetsAt`.
+
+## Related Documentation
+
+- [AI Budgets API](/api-reference/ai-budgets) - The ceilings themselves: scope rules, hierarchy, effective limit, and the budget update
+- [Limit Assignments Management API](/api-reference/limit-assignments) - The assignment whose public handle appears as `assignmentKey` on a budget row
+- [Consumers & Applications Management API](/api-reference/consumers-and-applications) - The owners addressed by `consumerKey` and `applicationKey` on this page
+- [API Clients API](/api-reference/api-clients) - The client addressed by `apiClientKey`, and its migration from a legacy credential
+- [Reports API](/api-reference/reports) - Inventory reports (what exists) as opposed to the consumption reports on this page
+- [Common Contract](/api-reference/apiops-common-contract) - The shared error envelope, correlation IDs, and status-code rules every endpoint on this page follows
