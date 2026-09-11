@@ -22,7 +22,7 @@ Date fields can also be typed directly, in addition to picking a date from the c
 
 When this screen is opened from an asset's own **Audit and Rollback** tab (see [Asset Lifecycle](/en/concepts/core-concepts/asset-lifecycle)), the object identifier and object type are fixed to that asset and cannot be changed.
 
-The **Source** filter narrows the list to one of the four front doors a record can come from: **Manager** (the Management Console and the Management APIs), **APIOps**, **Portal** (the API Portal's management backend — see [Portal Events](#portal-events) below), or **System** (a background job or migration with no request behind it). The **Portal ID** column, shown in the platform-wide (project-less) view, identifies which portal a **Portal**-sourced record belongs to; it is empty for every other source.
+The **Source** filter narrows the list to one of the four front doors a record can come from: **Manager** (the Management Console and the Management APIs), **APIOps**, **Portal** (the API Portal's management backend — see [Portal Events](#portal-events) below), or **System** (a background job or migration with no request behind it). The **Portal ID** column, shown in the platform-wide (project-less) view, identifies which portal a **Portal**-sourced record belongs to; it is empty for every other source. A **Project** column names the project the record belongs to; it is empty for **Manager Request** and **Access Denied** records, which belong to no project.
 
 ## Event Types
 
@@ -32,12 +32,14 @@ Audit Records can capture eighteen different kinds of events, shown in the **Eve
 |---|---|
 | **Entity** | An asset — an API Proxy, a Policy, a connection, and so on — is created, updated, or deleted. This is the event covered by [Change Details](#change-details) below. |
 | **Manager Request** | A write operation reaches the Management Console screens, the Management APIs, APIops, or the API Portal's management backend, once the setting described below is turned on. |
-| **Access Denied** | A request to the Management Console or the Management APIs is rejected because the caller is not authorized. Recorded regardless of the setting below. |
+| **Access Denied** | A request to the Management Console or the Management APIs is rejected — either because the caller was not authorized for the operation, or because the caller presented an authentication token that was invalid or expired. Recorded regardless of the setting below. |
 | **Secret Revealed** | A secret already stored in Apinizer is shown to an operator in clear text — an API client secret [reveal](/en/admin/identity-management/credentials#the-client-secret-is-shown-once), a certificate, keystore or private key download, an LLM provider, vector database, MCP connection, A2A connection or OIDC identity provider edit form that returns a decrypted value, a Portal account password reveal, or the eye or copy button of a masked secret field in the Management Console. The record names the entity, the kind of secret, and how it was disclosed, and — where exactly one secret is involved — a non-reversible fingerprint of the value, never the value itself. Outcome is always *success*; a refusal is already covered by **Access Denied** above and is not recorded twice. |
 | **Export** | An export package leaves the installation, whether produced by the Export/Import Wizard, the legacy export endpoint, or APIops. One record per **package**, whichever surface produced it — never one per object inside it. The record carries the package's object types, its item count, whether it carries secret material, and whether the package itself is passphrase-encrypted. Outcome is *success* or *failure*, depending on whether the package was actually produced. |
 | **API Token Created** | A Management API access token is minted for a user, from the Users screen or through APIops. The record carries the token's owner and a non-reversible fingerprint of the token — never the token itself. |
 | **API Token Revoked** | A Management API access token is revoked. Carries the same fields as **API Token Created**, fingerprinted the same way, so the two records can be paired to see a token's whole lifetime. |
 | **PII Unmask** | A pseudonymized PII value handled by the AI Gateway is turned back into the original. Outcome is *success* or *failure*; a request rejected for lack of permission is already recorded as **Access Denied** above and is not written here a second time. |
+
+An **Access Denied** record produced by an authorization failure and one produced by an invalid or expired authentication token are both written with outcome *denied*, and the record distinguishes the two causes. A request that presents no credentials at all, and the sign-in, token-refresh, and sign-out endpoints, are not recorded here — a failed sign-in already produces its own [Login Records](/en/admin/audit-compliance/login-records) entry. To keep a burst of invalid-token requests from flooding the log, at most 20 such records are written per second.
 
 Opening a record's details additionally shows its **Outcome** (success, failure, or denied), the **User Agent** sent by the client, a **Correlation ID** that ties together every audit row produced by the same request, and the **Source** the request came from (Management Console, APIops, API Portal, or System for background operations with no request behind them).
 
@@ -109,19 +111,41 @@ They are always written to this screen's `audit_event` collection, but — unlik
 
 A denied write request produces two rows that share the same Correlation ID: an **Access Denied** row (always recorded) and, when the setting below is on, a **Manager Request** row with the outcome *denied*. This is intentional; filter by Correlation ID to see them together.
 
-Recording of **Manager Request** events is off by default. Enable it from **Management → System Settings → General Settings → Audit Log**. Once enabled, every write operation (HTTP POST) sent to the Management Console screens, the Management APIs, APIops, and the API Portal's management backend is recorded — except the sign-in, token refresh, and sign-out endpoints, which are already tracked in detail on the [Login Records](/en/admin/audit-compliance/login-records) page.
+Recording of **Manager Request** events is off by default. Enable it from **Management → System Settings → General Settings → Audit Log**. Once enabled, every write operation (POST, PUT, PATCH, or DELETE) sent to the Management Console screens, the Management APIs, APIops, and the API Portal's management backend is recorded — except the sign-in, token refresh, and sign-out endpoints, which are already tracked in detail on the [Login Records](/en/admin/audit-compliance/login-records) page.
 
-**Access Denied** events are always recorded independently of this setting, since they represent rejected requests rather than completed operations. A single rejected request can therefore appear both as a **Manager Request** record with a denied outcome and, if the rejection was an authorization failure, as a separate **Access Denied** record.
+**Access Denied** events are always recorded independently of this setting, since they represent rejected requests rather than completed operations. A single rejected request can therefore appear both as a **Manager Request** record with a denied outcome and, if the rejection was an authentication or authorization failure, as a separate **Access Denied** record.
 
 :::warning
 
-The request body, the query string, and authentication headers (such as Authorization or Cookie) are never written to audit records for these events — only the path, the HTTP method, the outcome, and the duration are captured.
+The query string and authentication headers (such as Authorization or Cookie) are never written to audit records for these events — only the path, the HTTP method, the outcome, and the duration are captured, unless the request body capture described below is turned on for this record.
 
 :::
+
+### Recording the request body
+
+Beyond the path and the method, you can additionally capture the **request body** of a Manager Request record. Enable it from **Management → System Settings → General Settings → Audit Log → Record request body**; it is off by default and has no effect unless **Audit manager requests** above is also on.
+
+This capture is narrower than **Manager Request** recording itself:
+
+- It applies only to the Management Console's own `/api` endpoints — not to APIops, not to the API Portal's management backend, and not to the Management APIs used for integration.
+- Only an `application/json` request body is captured; any other content type is skipped.
+- A body larger than 16 KB is marked as truncated and is not stored at all, rather than being stored partially.
+- Certificate, keystore, JWK, cryptographic key, license, export, and package import/export endpoints are always excluded, regardless of this setting.
+- Field names that look like a secret are removed from the captured body, and values that look like a token or a key are replaced with a short, non-reversible hash — the same discipline applied everywhere else in audit records.
+
+The captured body reaches an external SIEM destination only when the destination's *Include the reference object in the payload* switch is on — see [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding#fields-per-stream).
 
 ## Change Details
 
 The "Change Details" screen is displayed by clicking the detail button with the eye icon on the right of the data. The page allows you to see changes made on the system by comparing them as old version and new version through the diff editor it provides.
+
+For a record written from this version onward, the detail screen also shows:
+
+- A **change status**, telling you how complete the comparison below is — whether it reflects a full comparison against the previous version, whether this is the object's first recorded version so there was nothing to compare against, whether only hidden fields could have changed (see [Changes that only affect hidden fields](#changes-that-only-affect-hidden-fields) below), or whether the change was large enough that only the list of changed fields is kept rather than a full value-by-value comparison.
+- A set of tags summarizing what kind of change this was, at a glance — for example an endpoint added or removed, a policy changed, or a role's permissions changed.
+- A table listing every changed field, with its operation, its path, and its old and new value. A changed entry inside a list — an endpoint, a policy, an ACL grant — is identified by its own name or identifier, so it keeps the same row across records even when its position in the list changes.
+
+Records written before this version keep the old/new comparison in the diff editor only, with no change status, tags, or field-level table.
 
 <Frame caption="Audit Record — detail and JSON Diff">
   <img
@@ -150,7 +174,7 @@ The first time you save an asset that carries hidden fields after the upgrade, t
 
 ### Changes that only affect hidden fields
 
-When only a hidden field changes — for example when a password or an API key is rotated — the old and the new snapshot look identical, because neither of them contains the value. An audit record is still created in this case, so the operation, the user who performed it and its time remain traceable. Only the value itself is not visible.
+When only a hidden field changes — for example when a password or an API key is rotated — the old and the new snapshot look identical, because neither of them contains the value. An audit record is still created in this case, so the operation, the user who performed it and its time remain traceable. Only the value itself is not visible. From this version, the change status on such a record says so explicitly, rather than leaving it to look like nothing changed.
 
 ### Restoring a previous record
 
