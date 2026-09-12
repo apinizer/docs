@@ -157,6 +157,294 @@ curl "https://apinizer.example.com/apiops/projects/finance/api-proxies/chat-gate
 
 A month-end chargeback export is the organization call per organization, reading `ai.totals.costUsd` and the `children` rows; a budget-alarm job is any of the five, reading the `budgets` rows and branching on `usagePercent` and `resetsAt`.
 
+## Rankings and per-API breakdowns
+
+The five endpoints above describe **one subject at a time**. A portal page or a FinOps board usually needs the other two shapes as well: *who spent the most this month*, and *which APIs did this consumer actually use*. Three more read-only endpoints answer exactly those, under the same `/apiops/projects/{projectName}` address and with the same period rules, filters and `dataSource` declaration.
+
+| Method | Path | Answers |
+|---|---|---|
+| `GET` | `/usage/top` | The period's ranking of one dimension by one metric, with each row's share of the total |
+| `GET` | `/usage/consumers/{consumerKey}/api-proxies` | Which API proxies one consumer called, and how much |
+| `GET` | `/usage/applications/{applicationKey}/api-proxies` | Which API proxies one application called, and how much |
+
+### Ranking — `GET /usage/top`
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `dimension` | *required* | `consumers`, `applications`, `api-clients`, `models` or `api-proxies`. Any other value is `400 malformedRequest` (`params.parameter = dimension`) |
+| `metric` | `tokens` | `tokens`, `cost` or `requests`. Decides both the ordering and what `value` / `sharePercent` mean |
+| `organization` | every organization | A consumer organization `code`; narrows the ranking to that organization's traffic |
+| `limit` | `50` | Rows the answer may carry, at most `500`. A value above the ceiling is clamped, not refused |
+| `from`, `to`, `model`, `environmentName` | as above | The same period and filter rules as the five subject endpoints |
+
+```json
+{
+  "dimension": "consumers",
+  "metric": "cost",
+  "unit": "USD",
+  "period":  { "from": "2026-08-12T00:00:00Z", "to": "2026-09-11T00:00:00Z",
+               "effectiveFrom": "2026-08-12T00:00:00Z", "effectiveTo": "2026-09-11T23:59:59.999Z",
+               "timeZone": "UTC" },
+  "filters": { "organizationCode": "acme-partners", "environmentApplied": false },
+  "dataSource": "ROLLUP_DAILY",
+  "freshness": "hourly",
+  "total": 1284.502310,
+  "limit": 50,
+  "truncated": false,
+  "items": [
+    { "rank": 1, "key": "con_8f3a1c", "name": "Ayse Yilmaz", "value": 612.400000,
+      "sharePercent": 47.6, "tokenTotal": 18450233, "costUsd": 612.400000, "requests": 91204 },
+    { "rank": 2, "key": "con_2b71de", "name": "billing-batch", "value": 388.102310,
+      "sharePercent": 30.2, "tokenTotal": 11002914, "costUsd": 388.102310, "requests": 40551 }
+  ],
+  "partial": false,
+  "unavailableEnvironments": [],
+  "notes": []
+}
+```
+
+Three properties of this answer are worth reading carefully, because a chart drawn from it depends on them:
+
+- **`total` is the whole dimension, not the rows.** It is summed over every matching row *before* `limit` is applied, and it also contains consumption that could not be attributed to a nameable row. The shares of a truncated answer therefore add up to **less** than 100%. They are floored to one decimal, never rounded, so the sum can never exceed 100 either.
+- **`truncated` is the only honest signal that rows were left out.** A full-looking list of `limit` rows is not evidence that nothing was dropped.
+- **`dataSource` says which source was read.** `consumers`, `models` and `api-proxies` come from the daily AI usage rollup — written hourly, kept independently of the traffic log's retention, and the same numbers the AI Reports screen shows. `applications` and `api-clients` have no rollup scope at all and are read from the **traffic log**, so they are bounded by its retention and, for traffic written before 2026.09.2, attributable only through the owner's own credentials (`notes` carries `client-attribution-since-2026.09.2`). On a rollup dimension `metric=requests` counts **AI-attributed** requests only, which the note `requests-are-ai-attributed` states.
+
+A row whose source reference cannot be translated into a public key — an unresolved rollup reference, an application that has since been deleted — is **not** itemised; it stays inside `total` and `notes` carries `unresolved-rows-dropped`. This is deliberate: the reference may be a raw traffic-log username, which never crosses the API boundary.
+
+### Per-API breakdown — `GET /usage/{consumers|applications}/{key}/api-proxies`
+
+Accepts `from`, `to`, `model`, `environmentName` and `limit` (default `50`, at most `500`).
+
+```json
+{
+  "scope":  { "type": "CONSUMER", "key": "con_8f3a1c", "name": "Ayse Yilmaz" },
+  "period": { "from": "2026-08-12T00:00:00Z", "to": "2026-09-11T00:00:00Z", "timeZone": "UTC" },
+  "trafficDataSource": "TRAFFIC_LOG",
+  "aiDataSource": "ROLLUP_DAILY",
+  "limit": 50,
+  "truncated": false,
+  "items": [
+    { "proxyName": "chat-gateway", "requests": 84120, "failedRequests": 412,
+      "successRatePercent": 99.5, "avgTimeMs": 812.4,
+      "ai": { "tokenTotal": 18450233, "costUsd": 612.400000 } },
+    { "proxyName": "petstore", "requests": 7084, "failedRequests": 0,
+      "successRatePercent": 100.0, "avgTimeMs": 41.2 }
+  ],
+  "partial": false,
+  "notes": []
+}
+```
+
+`ai` is **absent**, not a row of zeros, on a proxy that carried no AI traffic for this subject — a block of zeros would read as "an AI proxy nobody used". For a **consumer** the AI half comes from the rollup, so a proxy whose traffic has already aged out of the log still appears with its token and cost picture and `requests: 0`. For an **application** both halves come from the traffic log, which is why that answer carries the attribution note.
+
+### Errors and permissions
+
+The error envelope, the `404` for a project outside the caller's scope and the `400 malformedRequest` for the admin project are exactly those of the five endpoints above. `dimension` and `metric` add one case each: an unknown value is `400 malformedRequest` with `params.parameter` naming which one. Authorization is decided **before** the dimension is validated, so a caller outside the project always receives the same `404` and learns nothing from the difference.
+
+Permissions follow the same pairing: `dimension=api-proxies` accepts **API Management** *or* **Analytics** at **View**; every other dimension and both breakdown endpoints accept **Identity** *or* **AI Budgets** at **View**.
+
+### Examples
+
+```bash
+# Top 10 consumers by cost this month, inside one organization
+curl "https://apinizer.example.com/apiops/projects/finance/usage/top?dimension=consumers&metric=cost&organization=acme-partners&from=2026-09-01&limit=10" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Which models the project spent its tokens on
+curl "https://apinizer.example.com/apiops/projects/finance/usage/top?dimension=models&metric=tokens" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Busiest API clients, PROD only
+curl "https://apinizer.example.com/apiops/projects/finance/usage/top?dimension=api-clients&metric=requests&environmentName=PROD" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Which APIs one consumer used
+curl "https://apinizer.example.com/apiops/projects/finance/usage/consumers/con_8f3a1c/api-proxies?from=2026-09-01" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Which APIs one application used
+curl "https://apinizer.example.com/apiops/projects/finance/usage/applications/app_2d7e9b/api-proxies" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+## Trends, hierarchy and budget boards
+
+The endpoints above answer **one figure at a time**. A page embedded in a customer portal or a FinOps board usually needs three more shapes: *how did this move over the period*, *how does a group break down*, and *who is about to run out*. Three read-only views answer exactly those, under the same address as the subject they describe — the summary card is `.../usage`, and each view appends its own segment.
+
+| Method | Path | Answers |
+|---|---|---|
+| `GET` | `/{collection}/{key}/usage/timeseries` | The period trend of one subject, bucketed by day, week or month |
+| `GET` | `/credential-organizations/{organizationCode}/usage/hierarchy` | The sub-organization tree with rolled-up totals, or one page of the organization's consumers |
+| `GET` | `/{organizations\|applications}/{key}/usage/budget-board` | One row per direct child, carrying its live quota window closest to the limit |
+
+`{collection}` is the same set as above: `credential-organizations`, `consumers`, `applications`, `api-clients`, `api-proxies`.
+
+### Trend — `GET .../usage/timeseries`
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `from`, `to` | last 30 days | As above. In addition, the period may not span more than **366 UTC calendar days** — every source here is grained by whole days |
+| `granularity` | `day` | `day`, `week` or `month` |
+| `include` | `ai,traffic` | Which blocks to fill. A block that was not requested is answered as `null`, never as `0` |
+| `model`, `environmentName` | — | As above |
+
+```json
+{
+  "scope":   { "type": "CONSUMER", "key": "con_8f3a1c", "name": "Ada Lovelace" },
+  "period":  { "from": "2026-09-01T00:00:00Z", "to": "2026-09-04T00:00:00Z",
+               "effectiveFrom": "2026-09-01T00:00:00Z", "effectiveTo": "2026-09-04T23:59:59.999Z",
+               "timeZone": "UTC" },
+  "filters": { "model": null, "environmentName": null, "environmentApplied": false },
+  "granularity": "DAY",
+  "aiDataSource": "ROLLUP_DAILY",
+  "aiFreshness": "hourly",
+  "trafficDataSource": "TRAFFIC_LOG",
+  "series": [
+    { "bucketStart": "2026-09-01T00:00:00Z", "tokenInput": 120400, "tokenOutput": 24100,
+      "tokenCached": 0, "tokenTotal": 144500, "costUsd": 5.412000,
+      "aiRequests": 812, "aiFailedRequests": 3,
+      "requests": 840, "failedRequests": 5, "avgTimeMs": 742.1 },
+    { "bucketStart": "2026-09-02T00:00:00Z", "tokenInput": 0, "tokenOutput": 0,
+      "tokenCached": 0, "tokenTotal": 0, "costUsd": 0.000000,
+      "aiRequests": 0, "aiFailedRequests": 0,
+      "requests": 0, "failedRequests": 0, "avgTimeMs": null }
+  ],
+  "total": 4,
+  "partial": false,
+  "unavailableEnvironments": [],
+  "notes": []
+}
+```
+
+**Every bucket of the period is present**, including the quiet ones — the example above lists the first two of the period's four daily buckets, which is why `total` reads 4. A source can only report the days it actually holds documents for; the series is therefore generated from the requested window and filled with whatever came back. That is what makes `0` and *unread* two different answers: a zero bucket means the day existed and nothing happened, while a source that could not be read sets `partial: true` and names the environment in `unavailableEnvironments`. `avgTimeMs` is `null` rather than `0` for a bucket with no request — an average that was never measured is not zero.
+
+**A week starts on Monday and a month on the 1st, in UTC** (ISO-8601, the same convention Elasticsearch uses). A period that begins mid-week therefore opens with a bucket whose `bucketStart` is the preceding Monday; that bucket carries only the days inside the period, so a chart must label it as the calendar week it belongs to rather than as a whole week of traffic.
+
+**The AI block and the traffic block count different things.** `tokenTotal` / `costUsd` / `aiRequests` are LLM consumption; `requests`, `failedRequests` and `avgTimeMs` are gateway traffic. An AI proxy that also fronts non-AI endpoints has traffic without tokens, which is why the two are never merged into a single `requests` field. `aiDataSource` declares where the AI half came from, exactly as `ai.dataSource` does on the summary card — `ROLLUP_DAILY` for a consumer, an organization and an AI proxy; `TRAFFIC_LOG` for an application and an API client.
+
+### Hierarchy — `GET /credential-organizations/{code}/usage/hierarchy`
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `from`, `to` | last 30 days | As above, capped at 366 calendar days |
+| `level` | `organization` | `organization` for the subtree, `consumer` for the paged consumer list |
+| `includeDescendants` | `false` | With `level=consumer`, also list the consumers of descendant organizations |
+| `page`, `size` | `0`, `20` (max `200`) | Paging of the consumer list |
+
+```json
+{
+  "scope": { "type": "ORGANIZATION", "key": "acme-partners", "name": "acme-partners" },
+  "level": "ORGANIZATION",
+  "dataSource": "ROLLUP_DAILY",
+  "freshness": "hourly",
+  "nodes": [
+    { "code": "acme-partners", "name": "Acme Partners", "classification": "ORGANIZATION",
+      "depth": 0, "shared": false, "memberCount": 3, "descendantMemberCount": 11,
+      "direct": { "tokenTotal": 144500, "requests": 812, "failedRequests": 3, "costUsd": 5.412000 },
+      "rollup": { "tokenTotal": 982400, "requests": 5140, "failedRequests": 21, "costUsd": 38.104000 },
+      "budgetPercent": 49.1,
+      "children": [ { "code": "acme-emea", "classification": "ORGANIZATION", "depth": 1, "…": "…" } ] }
+  ],
+  "partial": false,
+  "notes": []
+}
+```
+
+**At every node `rollup` equals `direct` plus the sum of the children's `rollup`.** That is the property the whole view exists for: an owner reads a parent row, expands it, and the children must add up. `direct` is what the organization's own consumers spent; `rollup` is the whole subtree.
+
+**Nodes are addressed by organization `code`**, never by an internal identifier. `classification` says what a node is: a real `ORGANIZATION`, or one of the two synthetic buckets the report produces for consumption that belongs to no organization (`UNASSIGNED`) and for traffic that carried no consumer identity at all (`ANONYMOUS`). Those buckets exist so that no spend is silently dropped from the totals.
+
+With `level=consumer` the answer carries `members` instead of `nodes`:
+
+```json
+{
+  "level": "CONSUMER",
+  "members": {
+    "content": [
+      { "consumerKey": "con_8f3a1c", "name": "Ada Lovelace", "organizationCode": "acme-partners",
+        "organizationPath": "Acme / Partners",
+        "usage": { "tokenTotal": 144500, "requests": 812, "failedRequests": 3, "costUsd": 5.412000 },
+        "budgetPercent": 28.9 }
+    ],
+    "totalElements": 11, "page": 0, "size": 20
+  }
+}
+```
+
+A consumer that no longer resolves — a deleted account, or a usage row the rollup could only file under a username — keeps its figures and answers `consumerKey: null` with the note `unresolved-members`. The figures stay so the members still add up to the organization; the key is withheld because the only identifier left is a traffic-log username, which never crosses this boundary.
+
+The figures come from the hourly token rollup, which has **no environment dimension**, so this endpoint accepts no `environmentName` and `filters.environmentApplied` is always `false`. `budgetPercent` is filled only when the requested period sits inside a single calendar month — a monthly ceiling cannot be compared against a multi-month window.
+
+### Budget board — `GET .../usage/budget-board`
+
+Available for an organization (rows are its consumers) and for an application (rows are its API clients).
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `page`, `size` | `0`, `20` (max `200`) | Paging |
+| `sort` | `percent,desc` | `percent[,asc\|desc]`; `name` is always accepted as the tie-breaker |
+
+```json
+{
+  "scope": { "type": "ORGANIZATION", "key": "acme-partners", "name": "acme-partners" },
+  "childType": "CONSUMER",
+  "summary": { "total": 11, "ok": 7, "warning": 2, "exceeded": 1, "noBudget": 1 },
+  "items": [
+    { "key": "con_8f3a1c", "name": "Ada Lovelace",
+      "family": "AI_COST", "unit": "USD", "window": "ONE_MONTH",
+      "limit": 500.00, "consumed": 512.40, "remaining": 0.00, "percent": 102.5,
+      "windowStartsAt": "2026-09-01T00:00:00Z", "resetsAt": "2026-10-01T00:00:00Z",
+      "assignmentKey": "lim_3d91", "planKey": "partner-monthly", "source": "TYPED",
+      "status": "EXCEEDED" }
+  ],
+  "totalElements": 11, "page": 0, "size": 20,
+  "asOf": "2026-09-11T08:31:02Z",
+  "notes": []
+}
+```
+
+**The board is independent of `from`/`to`** and accepts neither: these are the quota windows the gateway is counting into right now, and `asOf` says how far behind the snapshot is (about a minute).
+
+**One row per child, carrying its worst live window.** A child may own several at once — a monthly token ceiling, a monthly cost ceiling, a daily request quota — and the row shows whichever is closest to its limit, with `family` and `unit` naming the number. Without them a bare `512.40` could be dollars, tokens or requests.
+
+`status` is `OK`, `WARNING` at **80%** or more, `EXCEEDED` at **100%** or more, and `NO_BUDGET` when the child has no live ceiling at all. A child with no ceiling is still a row rather than a gap — a board that hid it would quietly suggest it was fine — and `summary` counts **every** child, not only the page that was answered, so an owner can reconcile the counters against his own expectation before paging through the rows.
+
+Two kinds of counter are deliberately not eligible for a board row. A per-model sub-limit is a slice of the child's budget rather than the budget, and ranking children by a slice would put a child that is 90% through one model above a child that is 99% through everything. And a policy or rate-limit counter is keyed by a request identity — an IP address, a header value, a whole `Authorization` value — which the platform stores encrypted precisely because it may embed a secret; such a counter describes a caller, not the child, and never reaches this board.
+
+### Examples
+
+```bash
+# Weekly trend of one consumer, tokens only
+curl "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/usage/timeseries?from=2026-07-01&to=2026-09-30&granularity=week&include=ai" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Daily traffic trend of an AI proxy in one environment
+curl "https://apinizer.example.com/apiops/projects/finance/api-proxies/chat-gateway/usage/timeseries?granularity=day&include=traffic&environmentName=PROD" \
+  -H "Authorization: Bearer $TOKEN"
+
+# The organization tree for last month
+curl "https://apinizer.example.com/apiops/projects/finance/credential-organizations/acme-partners/usage/hierarchy?from=2026-08-01&to=2026-08-31" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Its consumers, including every sub-organization, second page
+curl "https://apinizer.example.com/apiops/projects/finance/credential-organizations/acme-partners/usage/hierarchy?level=consumer&includeDescendants=true&page=1&size=50" \
+  -H "Authorization: Bearer $TOKEN"
+
+# Who is about to run out, worst first
+curl "https://apinizer.example.com/apiops/projects/finance/credential-organizations/acme-partners/usage/budget-board" \
+  -H "Authorization: Bearer $TOKEN"
+
+# The API clients of one application, alphabetically
+curl "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/usage/budget-board?sort=name,asc" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+A portal chart is the trend call per subject; a FinOps drill-down is the hierarchy call, expanding a node into `level=consumer`; a "who is about to run out" alarm is the budget board, reading `summary.exceeded` and `summary.warning` before it ever pages through `items`.
+
+### Errors and permissions
+
+These three views share the summary card's gate exactly — the same permission pairs, the same `404` for every denial, the same `400 malformedRequest` for the admin project. They add three more `malformedRequest` cases: an unknown `granularity`, an unknown token in `include`, and an unknown `level`. A misspelled parameter is refused rather than silently ignored, because a caller who believes his filter worked reads the wrong number. An unknown `sort` column on the budget board is `unsupportedSortField`.
+
 ## Related Documentation
 
 - [AI Budgets API](/api-reference/ai-budgets) - The ceilings themselves: scope rules, hierarchy, effective limit, and the budget update

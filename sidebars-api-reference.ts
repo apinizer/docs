@@ -773,7 +773,8 @@ const sidebars: SidebarsConfig = {
             "reports",
             "reports/api-report",
             "reports/organization-api-data-model-access-report",
-            "reports/inactive-clients-report"
+            "reports/inactive-clients-report",
+            "reports/inactive-endpoints-report"
           ]
         },
         {
