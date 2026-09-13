@@ -1,0 +1,107 @@
+---
+title: "Elasticsearch Sizing and Tuning Recommendations"
+description: "You can plan the memory, disk and retention settings of your Elasticsearch nodes for installations that store high volumes of traffic logs, and keep the search screens fast on very large datasets."
+---
+
+## Who This Is For
+
+This guide targets installations whose traffic-log indices accumulate records in the billions. As the record count grows, the first thing to degrade is not search speed but node memory: under memory pressure garbage collection pauses grow longer, queries slow down and nodes stop responding one after another. The settings below exist to break that chain.
+
+## Memory (Heap) Planning
+
+### Keep the Heap At or Below 31 GB
+
+Below 32 GB, Java stores object addresses in a compressed form. Above that boundary addresses grow, the same data consumes more memory, and a 32 GB heap usually holds **less** data than a 31 GB heap.
+
+- Set the heap to at most **31 GB** per node.
+- Leave the remaining physical memory to the operating system; Elasticsearch reads on-disk index files through the OS cache, and that cache matters at least as much as the heap.
+- A practical starting point: half of the physical memory, never exceeding 31 GB.
+
+:::warning
+If you have more memory available, **add nodes** instead of growing the heap. Giving one node a 64 GB heap is both slower and more fragile than giving two nodes 31 GB each.
+:::
+
+### Garbage Collector Settings
+
+On large heaps, garbage collection pauses surface as query timeouts. The two values below make collection start early and keep up with sudden load spikes:
+
+```
+-XX:G1ReservePercent=25
+-XX:InitiatingHeapOccupancyPercent=30
+```
+
+Add these to the JVM options of the Elasticsearch nodes. The first enlarges the space reserved for emergencies; the second starts collection once the heap reaches 30% occupancy.
+
+### Cap the Field Data Cache
+
+Sorting and aggregation grow the field data cache. Without a cap, that cache can consume the entire heap:
+
+```yaml
+indices.fielddata.cache.size: 20%
+```
+
+With a cap in place, the oldest entries are evicted once the cache fills: the query slows down but the node stays up. Without a cap, the node runs out of memory.
+
+### Bitset Memory for Nested Fields
+
+Traffic-log records carry nested fields such as header and parameter lists. By default, Elasticsearch builds the parent-matching structures for these fields ahead of time and keeps them in memory. As the record count grows, those structures occupy a permanent portion of the heap.
+
+Apinizer lets you turn this behavior off from the **Elasticsearch Connection Settings** screen: when you disable *Load Fixed Bitset Filters Eagerly*, the structure is built on demand and the permanent memory cost disappears.
+
+:::warning
+This is a **static** index setting: it applies only to indices created **after** the change. Once you save, run **Create Index Template** and wait for the next rollover. Existing indices keep the previous behavior.
+:::
+
+The cost of disabling it is that the first query touching nested fields becomes somewhat slower. On installations under memory pressure this trade is almost always worth making.
+
+## Shard Planning
+
+Shard counts hurt at both extremes: too few shards fill a single node, too many split every query into hundreds of tiny tasks and inflate coordination cost.
+
+| Metric | Target |
+|---|---|
+| Data per shard | 20 – 50 GB |
+| Total shards per node | No more than 20 times the heap size in GB (roughly 600 for a 31 GB heap) |
+| Replica count | At least 1 in production |
+
+Estimate your daily record volume and configure daily or weekly rollover so that the target shard size is met. Tying the rollover threshold to **size** rather than record count is more resilient.
+
+## Retention and Lifecycle
+
+Traffic logs cannot be kept forever at the same cost. Define the phases from Apinizer's **Index Lifecycle Policy** screen:
+
+- **Hot**: the actively written index, on the fastest disk.
+- **Warm**: writes stop, the shard count can be reduced.
+- **Cold**: rarely read, moved to cheaper storage.
+- **Delete**: the index is removed once retention expires.
+
+### If You Cannot Delete
+
+If legal or corporate requirements prevent you from using the delete phase, you have two options:
+
+1. **Close the index**: A closed index stays on disk, stops serving searches and writes, and consumes no memory. It can be reopened when needed. This is the most practical option for short-term archives.
+2. **Snapshot and restore on demand**: Take a snapshot of the index to object storage or a shared disk and remove the index from the cluster. Restore it whenever the data is required. This is the cheapest option for long-term retention.
+
+:::info
+With either method, closed or removed indices are excluded from searches on the Apinizer screens. Keep the period that must remain searchable open.
+:::
+
+## Disk Watermarks
+
+Elasticsearch changes its behavior automatically based on disk usage. Knowing the thresholds prevents the "index turned read-only" alert arriving at midnight:
+
+| Watermark | Usage | Effect |
+|---|---|---|
+| Low | 85% | No new shards are allocated to this node |
+| High | 90% | Existing shards start moving to other nodes |
+| Flood stage | 95% | All indices are marked read-only and writes stop |
+
+To keep traffic-log writes flowing, plan retention so that disk usage stays below 75%, and define an alert for the 85% watermark.
+
+## Showing the Total Record Count as "More Than 10,000"
+
+On the traffic list screens, the total record count is shown as **"more than 10,000"** instead of an exact figure once the index is very large. This is deliberate: recounting billions of records on every page change is the most expensive part of the query and contributes nothing to the page being displayed.
+
+- Listing, filtering and sorting work exactly as before.
+- Once you page beyond the first 10,000 records, the system computes the exact total and the paginator settles on the real number.
+- The totals and breakdowns on the report screens are **not** affected; those are always produced with an exact count.
