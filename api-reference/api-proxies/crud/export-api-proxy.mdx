@@ -41,6 +41,7 @@ Authorization: Bearer YOUR_TOKEN
 |-----------|------|----------|---------|-------------|
 | encrypt | boolean | No | false | When `true`, encrypts the entire export package — including object names — with the passphrase supplied in the `X-Apinizer-Package-Passphrase` header |
 | withDependencies | boolean | No | false | When `true`, the package also includes every object the proxy references (global policies, policy groups, certificates, credentials, connections, LLM providers, environment variables, etc.), which the import binds to same-named objects in the target project. When `false` (default), only the proxy itself is exported (previous behavior) |
+| includeReferencedProxies | boolean | No | true | Only meaningful together with `withDependencies=true`. For an MCP gateway that exposes another API Proxy's endpoints as tools: when `true` (default), those source API Proxies are packaged with the gateway, together with their own dependencies, so the import can rebind the gateway's tools on its own. When `false`, the source proxies are left out of the package, and the import instead binds each tool to the proxy of the same name and API type already in the target project — the shape a pipeline that promotes its API Proxies separately wants, so each proxy travels exactly once. Has no effect on a proxy that isn't an MCP gateway, or when `withDependencies=false` |
 
 ## Response
 
@@ -167,6 +168,15 @@ curl -X GET \
   --output apiProxyExportFile.zip
 ```
 
+### Example 5: Export an MCP Gateway Without Its Source Proxies
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyMcpGateway/export/?withDependencies=true&includeReferencedProxies=false" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  --output myMcpGateway.zip
+```
+
 ## Notes and Warnings
 
 - **Export Format**:
@@ -222,9 +232,71 @@ curl -X GET \
   - On import, the target project's `withDependencies=true` resolves bundled objects against same-named objects already in the target project
   - Has no effect on the proxy itself; it only controls whether referenced objects are packaged alongside it
 
+- **MCP Gateway Source Proxy Bundling (`includeReferencedProxies`)**:
+  - Only applies to an MCP gateway proxy (`type=MCP`) exported with `withDependencies=true`; ignored otherwise
+  - `true` (default): each API Proxy the gateway exposes as a tool travels inside the same package, together with its own dependencies
+  - `false`: those source proxies are left out; on import, each tool is instead bound to the API Proxy of the same name and API type already in the target project — see [Import-Time Errors for MCP Gateway Source Proxies](#import-time-errors-for-mcp-gateway-source-proxies) for what happens when that resolution fails
+  - Choose `false` when a pipeline already promotes its API Proxies through their own export/import step, so a proxy used as an MCP tool doesn't travel a second time bundled inside the gateway's package
+
+## Import-Time Errors for MCP Gateway Source Proxies
+
+These errors surface on the **import** endpoints ([Import API Proxy](/api-reference/api-proxies/crud/import-api-proxy), [Import API Proxy (With Override)](/api-reference/api-proxies/crud/import-api-proxy-and-override)) when the uploaded package is an MCP gateway exported with `withDependencies=true`, and are only relevant because of this endpoint's `includeReferencedProxies` parameter — they are documented here, next to the parameter that controls whether the source proxy travels in the package at all. All three are checked, and refused, before anything is written to the target project.
+
+### Source Proxy Not Found (`mcpSourceProxyUnresolved`)
+
+The API Proxy behind one of the gateway's tools was not packaged (`includeReferencedProxies=false` at export) and no proxy of the same name and API type exists in the target project.
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/import/?withDependencies=true" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -F "apiProxyExportFile=@myMcpGateway.zip"
+```
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "The MCP gateway 'MyMcpGateway' cannot be imported: the API Proxy 'OrdersAPI' behind one of its tools does not exist in the target project and is not in the package. Export the gateway again with its source API Proxies included, map the tool to an existing proxy, or create that proxy here first."
+}
+```
+
+**Fix**: export again with `includeReferencedProxies=true` (or leave it at its default), map the tool to an existing proxy on the wizard's mapping step, or create the proxy in the target project first.
+
+### Source Proxy Ambiguous (`mcpSourceProxyAmbiguous`)
+
+More than one API Proxy of the same name and the same API type already exists in the target project, so name-based resolution cannot pick one.
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "The MCP gateway 'MyMcpGateway' cannot be imported: more than one API Proxy named 'OrdersAPI' of the same API type exists in the target project, so the proxy its tool should call cannot be determined. Rename the duplicates, or map the tool to the intended proxy, before importing."
+}
+```
+
+**Fix**: rename the duplicate proxies in the target project, or export with `includeReferencedProxies=true` so the intended proxy travels with the package instead of being resolved by name.
+
+### MCP Tool Endpoint Missing (`mcpToolEndpointMissing`)
+
+A tool is pinned to one specific operation (HTTP method + path) of its source proxy, and the proxy the import resolved does not have that operation.
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "The MCP gateway 'MyMcpGateway' cannot be imported: its tool 'GET /orders' is pinned to the endpoint GET /orders of the API Proxy 'OrdersAPI', and that endpoint does not exist on the proxy this import would bind it to. Map the tool to a proxy that has the endpoint, or add the endpoint there, and import again."
+}
+```
+
+**Fix**: add the missing endpoint to the target proxy, or map the tool to a proxy that already has it.
+
+:::note
+Importing an MCP gateway that exposes another API Proxy's endpoints as tools (`withDependencies=true`, with `includeReferencedProxies` either `true` or `false`) requires the destination to be on **Apinizer 2026.09.3 or later** — such a package cannot be imported into an earlier installation.
+:::
+
 ## Related Documentation
 
 - [Import API Proxy](/api-reference/api-proxies/crud/import-api-proxy) - Import API Proxy without overriding existing one
 - [Import API Proxy (With Override)](/api-reference/api-proxies/crud/import-api-proxy-and-override) - Import API Proxy with override option
 - [Get API Proxy](/api-reference/api-proxies/crud/get-api-proxy) - Get API Proxy details
+- [Export Import](/en/admin/secrets-management/export-import) - The Export/Import Wizard, including MCP Source API Proxy mapping
+- [MCP Gateway](/en/ai-gateway/mcp-gateway) - Configuring an API Proxy as an MCP Gateway
 

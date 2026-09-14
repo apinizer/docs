@@ -16,7 +16,7 @@ The renewed Export/Import Wizard lets you export an object (API Proxy, Proxy Gro
 
 ## Supported Object Types
 
-The wizard groups the exportable/importable object types into six categories. The **Dependencies** column shows whether exporting that type involves an extra dependency step:
+The wizard groups the exportable/importable object types into seven categories. The **Dependencies** column shows whether exporting that type involves an extra dependency step:
 
 | Category | Object Type | Dependencies |
 |----------|-------------|---------------|
@@ -39,6 +39,7 @@ The wizard groups the exportable/importable object types into six categories. Th
 | Identity | API Client | Yes |
 | Identity | Limit Assignment | Yes |
 | Identity | Access Entitlement | Yes |
+| Connections | Connection | Yes |
 | Monitoring & Reporting | Task Flow | Yes |
 | Monitoring & Reporting | Uptime Monitor | Yes |
 | Monitoring & Reporting | Anomaly Detector | Yes |
@@ -72,11 +73,21 @@ The entity-level Export/Import wizard is reachable from two places: the **Export
 
 The whole-project package is not part of the entity wizard's type catalog. That is a deliberate scope split: a project package carries different semantics — creating a new project, inspecting the package, choosing relative paths.
 
+## The Connection Object Type in the Wizard
+
+**Connection** is a main object type of its own, under the wizard's **Connections** category — separate from the lightweight single-file **Import** dialog every connection type's own list screen carries (see [Import Advisories Outside the Wizard](#import-advisories-outside-the-wizard) below). It covers: Database Pool, Kafka, Elasticsearch, Mail, FTP, Graylog, Syslog, RabbitMQ, ActiveMQ, Webhook, Logback, SNMP, LDAP Pool and Linux Script.
+
+- **Certificate dependencies travel with it**: Kafka's and Syslog's key store and trust store, Webhook's key store and trust store, an LDAP Pool's certificate, and a Mail connection's certificate all surface automatically on this type's dependency step and can be packaged along — resolved the same way as any other certificate dependency described in Mapping & Dependencies above. A `${VARIABLE}` reference in a connection's host, URL or password field travels the same way, as an environment or global variable dependency.
+- **OTLP is outside this type**: an OpenTelemetry (OTLP) connection is not part of this catalog and keeps its own separate path — it still exports and imports through the Import dialog on its own admin screen.
+- **How it differs from the list screen's legacy Export button**: that button (and the simple **Import** dialog described below) carries no dependencies — it exports only the connection's own fields, without a certificate or key store. When you need the certificate to travel **together with** the connection (for example an LDAP Pool secured with mTLS), use the wizard's **Connection** type instead of that legacy button.
+
+It's reachable the same way as every other type — the project menu's **Export/Import** group and **Administration → Export/Import** — gated by the **Connections** permission category.
+
 ## Usage Flow
 
 The flow adapts automatically to whether the object type you pick carries dependencies:
 
-- **Types with dependencies** (API Proxy, Proxy Group, API Creator, Global Policy, Policy Group, Settings Group, Test Collection, Credential, Identity Service, LLM Provider, Model Definition, Vector DB, Knowledge Base, API Client, Limit Assignment, Access Entitlement, Task Flow, Uptime Monitor, Anomaly Detector, Custom Query, Custom Query Filter, Report Configuration, SIEM Settings, API Product) go through the wizard's full steps: you select the object(s), the dependency tree is resolved, you choose which dependencies to include on export; on import, every dependency is mapped to its counterpart in the target project. If none of the selected objects turn out to have a resolvable dependency, the Dependencies step shows an explicit empty-state message instead of a blank list.
+- **Types with dependencies** (API Proxy, Proxy Group, API Creator, Global Policy, Policy Group, Settings Group, Test Collection, Credential, Identity Service, Connection, LLM Provider, Model Definition, Vector DB, Knowledge Base, API Client, Limit Assignment, Access Entitlement, Task Flow, Uptime Monitor, Anomaly Detector, Custom Query, Custom Query Filter, Report Configuration, SIEM Settings, API Product) go through the wizard's full steps: you select the object(s), the dependency tree is resolved, you choose which dependencies to include on export; on import, every dependency is mapped to its counterpart in the target project. If none of the selected objects turn out to have a resolvable dependency, the Dependencies step shows an explicit empty-state message instead of a blank list.
 - **Types without dependencies** (Environment Variable, Global Variable, the certificate family, IP Group, Consumer Role, Registered Organization, Limit Plan, Provider Definition, PII Preset, Prompt Guard Preset, DLP Preset, Prompt Template, Prompt Decorator, Topic Category) skip the extra dependency/mapping step — the object is exported directly as soon as it is selected, and on import the wizard moves straight from the file upload to the options step.
 
 <Tabs>
@@ -352,6 +363,13 @@ Dependency detection and mapping are the most critical part of the wizard — ho
     - Model Definition and Vector DB also go through the dependency step: a custom model definition can reference a custom provider definition, and a Vector DB connection's settings can contain environment variable references — both are resolved and mapped the same way as any other dependency. When neither applies to the selection, the step shows the same empty-state message described above. PII Preset and Prompt Guard Preset carry no reference to another exportable object — each is a self-contained pattern definition — so both are exported directly, without a separate dependency step. A Provider Definition is likewise self-contained (it only carries its own default endpoint and auth settings) and is exported directly as well.
     - PII Preset and Prompt Guard Preset — including the ones scoped to your own project — can only be created or edited by a system administrator. From a regular project, the wizard's object list only shows presets already made available to your project; the platform's built-in preset catalog does not appear there.
   </Accordion>
+  <Accordion title="MCP Source API Proxy Dependency & Mapping">
+    - When an MCP Gateway exposes another API Proxy's endpoints as tools (Expose Tools mode), each distinct API Proxy behind those tools surfaces as its own dependency, labeled **MCP Source API Proxies** — this is different from the inline server definition described above (a Passthrough proxy's backend, or a Tool/Agent Call policy's embedded server), which keeps traveling inline as part of the gateway's own package.
+    - On import, every source proxy reference is resolved in this order: (1) the mapping you make explicitly on the wizard's mapping step; (2) failing that, exactly one API Proxy in the target project carrying the same name **and** the same API type; (3) failing that, the copy of the proxy the package carries, when you kept it included on export — that copy is imported as a new object and then bound to the tool. A package re-imported into the very same installation can additionally resolve by the proxy's original id when none of the above applies.
+    - **Replace Existing** on the MCP Gateway itself never replaces the source proxy it resolves to: when the tool binds to a proxy that already exists in the target through step 1 or 2 above, that proxy's own content is left untouched — only the gateway's own definition is replaced. The source proxy follows its own Replace Existing / Import as New choice only when it was also selected as a main object in the same operation.
+    - Before anything is written, the import is refused in three cases: the source proxy can't be resolved by mapping, by name+type, or from the package at all (`mcpSourceProxyUnresolved`); more than one API Proxy of the same name and API type exists in the target, so which one to bind to is ambiguous (`mcpSourceProxyAmbiguous`); or a tool is pinned to one specific operation (HTTP method + path) of the source proxy and that operation doesn't exist on the proxy the import would bind it to (`mcpToolEndpointMissing`). Each message names the gateway and the tool and says what to do next — map the tool to the intended proxy on the mapping step, add the missing endpoint there, or export the gateway again with its source proxies included.
+    - This dependency requires the destination to be on **Apinizer 2026.09.3 or later**: a package carrying it cannot be imported into an earlier installation.
+  </Accordion>
 </AccordionGroup>
 
 An Uptime Monitor's or Anomaly Detector's notification connector — the mail or webhook connection its alerts go out on — is packaged as a dependency the same way any other connector-based reference is, and so is its failover connection, when failover is enabled for it, exactly like a SIEM destination's failover connector (see [SIEM Settings](#siem-settings) below).
@@ -426,7 +444,7 @@ SIEM Settings is the wizard's one **Admin** type: unlike everything else in the 
 
 ## Import Advisories Outside the Wizard
 
-Every Connection type — Kafka, Webhook, Email, Elasticsearch, database, and the rest listed under [Connection Management](/en/integrations/connection-management/overview) — is outside this wizard's type catalog and instead carries its own lightweight, single-file **Import** dialog directly on its own list screen (see each connection type's own page, for example [Kafka](/en/integrations/connection-management/kafka)). It applies the uploaded package straight away, without this wizard's dependency or mapping steps. An encrypted package can be imported there too: when the uploaded file is passphrase-protected, the dialog asks for the passphrase after the first **Import** attempt — enter the passphrase the package was exported with and press **Import** again. A wrong passphrase is reported inline and can be corrected without re-selecting the file.
+Every Connection type — Kafka, Webhook, Email, Elasticsearch, database, and the rest listed under [Connection Management](/en/integrations/connection-management/overview) — carries its own lightweight, single-file **Import** dialog directly on its own list screen (see each connection type's own page, for example [Kafka](/en/integrations/connection-management/kafka)). It applies the uploaded package straight away, without this wizard's dependency or mapping steps, and keeps working this way regardless of the wizard's own **Connection** type described above. OTLP is the one connection kind that has no wizard-catalog counterpart at all — it only ever exports and imports through this dialog. An encrypted package can be imported there too: when the uploaded file is passphrase-protected, the dialog asks for the passphrase after the first **Import** attempt — enter the passphrase the package was exported with and press **Import** again. A wrong passphrase is reported inline and can be corrected without re-selecting the file.
 
 That dialog now surfaces the same two advisories the wizard's own Review & Import step does — a reference the import could not resolve and had to clear, or a provider's secret that was overwritten because an existing target was replaced — right on the dialog itself, worded exactly like the wizard's. Previously this information only ever reached a server log line, never the screen the operator was looking at.
 
