@@ -157,7 +157,9 @@ Alarm is a monitoring system that continuously checks specific conditions in you
 Determines when the alarm will be triggered. The trigger type picker is **searchable** and groups the
 types into three **categories**; each type is shown in lists with a **category badge**:
 
-- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk, Gateway Thread Count
+- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk, Gateway
+  Thread Count, Gateway Heap Usage Percentage, Gateway Deadlock Count, Gateway Executor Pool Saturation
+  Percentage, Gateway Connection Pool Usage Percentage, Gateway GC Time Percentage
 - **Platform**: API Traffic (logs in database), SSL/JWK remaining duration, application log count
 - **AI**: AI Gateway metrics (token usage, daily cost, guardrail/PII count, provider failover, quota,
   catalog drift, shadow AI)
@@ -168,6 +170,11 @@ types into three **categories**; each type is shown in lists with a **category b
     - K8S Node CPU Percentage
     - Elasticsearch Health / CPU / Disk Percentage
     - Gateway Thread Count
+    - Gateway Heap Usage Percentage
+    - Gateway Deadlock Count
+    - Gateway Executor Pool Saturation Percentage
+    - Gateway Connection Pool Usage Percentage
+    - Gateway GC Time Percentage
   </Card>
   <Card title="Platform" icon="database">
     - API Traffic (Logs in Database)
@@ -192,10 +199,49 @@ types into three **categories**; each type is shown in lists with a **category b
     **K8S Node CPU Percentage**: Checks the CPU usage percentage of Kubernetes nodes. Alarm is triggered when CPU usage percentage exceeds the threshold value. Requires threshold value (e.g., 80 = 80%).
   </Accordion>
 
-  <Accordion title="Gateway Trigger Types">
-    **Gateway Thread Count**: Reads the live JVM thread count of every API Gateway worker pod through the Gateway Management API address(es) defined on the environment (Environment > Management API settings) and evaluates each pod separately. The alarm is triggered when the thread count of any pod **exceeds** the threshold (strict comparison: a pod exactly at the threshold is shown as *Warning*, not triggered). Requires threshold value (e.g., 2000 = 2000 threads). Does not require a connection definition, but the environment must have at least one Gateway Management API address.
+  <Accordion title="Gateway Diagnostics Trigger Types">
+    **Gateway diagnostics triggers** share one mechanism: each reads a live JVM/pool figure from every
+    API Gateway worker pod through the Gateway Management API address(es) defined on the environment
+    (Environment > Management API settings), on every run, and evaluates each pod (or pod/pool
+    combination) separately. An optional **Environment** selector limits the check to one environment;
+    when left blank, every published environment is checked. A pod or address that cannot be read is
+    listed as *Warning* without a value and does not trigger the alarm by itself; the run is recorded as
+    *Error Occurred* only when no pod at all could be read (for example when every address is
+    unreachable, the environment has no management address, or the selected environment was deleted).
+    Reads time out after 70 seconds. Does not require a connection definition, but the environment must
+    have at least one Gateway Management API address.
 
-    An optional **Environment** selector limits the check to one environment; when left blank, every published environment is checked. The alarm history lists each pod with its environment, IP and measured thread count. A pod or address that cannot be read is listed as *Warning* without a value and does not trigger the alarm by itself; the run is recorded as *Error Occurred* only when no pod at all could be read (for example when every address is unreachable, the environment has no management address, or the selected environment was deleted). E-mail and webhook templates render the threshold as `<n> threads`.
+    **Gateway Thread Count**: The live JVM thread count of each pod. The alarm is triggered when the
+    thread count of any pod **exceeds** the threshold (strict comparison: a pod exactly at the threshold
+    is shown as *Warning*, not triggered). Requires threshold value (e.g., 2000 = 2000 threads). The
+    alarm history lists each pod with its environment, IP and measured thread count. E-mail and webhook
+    templates render the threshold as `<n> threads`.
+
+    **Gateway Heap Usage Percentage**: Heap usage of each pod's JVM, as used heap divided by max heap ×
+    100. Threshold unit is `%`; recommended threshold 85. A pod whose JVM reports no heap ceiling (max
+    heap of -1, i.e. no `-Xmx` set) is listed as *Warning* rather than evaluated.
+
+    **Gateway Deadlock Count**: The number of deadlocked JVM threads on each pod. Threshold unit is
+    `deadlocks`; the recommended threshold is **0**, so the very first deadlock fires the alarm — unlike
+    the percentage triggers below, there is no separate warning band above the threshold, only Normal (0
+    deadlocks) and Breached (1 or more).
+
+    **Gateway Executor Pool Saturation Percentage**: Each registered executor pool of each pod, as
+    active threads divided by pool capacity × 100 — one row per pod and pool (for example
+    `pod-1 / async`, `pod-1 / logDispatch`). Capacity is the pool's maximum size, or its core size for a
+    pool with no fixed maximum (scheduled/cached pools). Threshold unit is `%`; recommended threshold 85.
+    Queue length and rejected-task count are shown in the row detail.
+
+    **Gateway Connection Pool Usage Percentage**: Each HTTP connection pool of each pod, as leased
+    connections divided by max total × 100 — one row per pod and pool. Threshold unit is `%`;
+    recommended threshold 85. A pool with requests currently waiting for a connection is shown in the
+    row detail and marked *Warning* even when it is below the threshold; a pool with no max total
+    configured is listed as *Warning*.
+
+    **Gateway GC Time Percentage**: The share of time each pod's JVM has spent in garbage collection,
+    as total GC time divided by JVM uptime × 100. Both figures are cumulative since the JVM started, so
+    this is the lifetime GC share, not the last interval's. Threshold unit is `%`; recommended threshold
+    5.
   </Accordion>
 
   <Accordion title="Elasticsearch Trigger Types">
@@ -237,6 +283,11 @@ Threshold value determines when the alarm will be triggered. Different units are
 |----------------|------|-------------|----------|
 | K8S Node CPU Percentage | % | 80 | When CPU usage exceeds 80% |
 | Gateway Thread Count | Threads | 2000 | When the live thread count of any gateway worker pod exceeds 2000 |
+| Gateway Heap Usage Percentage | % | 85 | When heap usage of any pod exceeds 85% |
+| Gateway Deadlock Count | Deadlocks | 0 | When any pod has at least one deadlocked thread |
+| Gateway Executor Pool Saturation Percentage | % | 85 | When active/capacity of any pool on any pod exceeds 85% |
+| Gateway Connection Pool Usage Percentage | % | 85 | When leased/max total of any pool on any pod exceeds 85% |
+| Gateway GC Time Percentage | % | 5 | When the lifetime GC share of any pod exceeds 5% |
 | Elasticsearch CPU Percentage | % | 80 | When CPU usage exceeds 80% |
 | Elasticsearch Disk Percentage | % | 90 | When disk usage exceeds 90% |
 | SSL Certificate Remaining Duration | Days | 30 | When remaining duration is less than 30 days |
@@ -264,7 +315,9 @@ Some trigger types require Elasticsearch connection:
 
 **Trigger Types Not Requiring Connection:**
 - Kubernetes trigger types
-- Gateway Thread Count (requires a Gateway Management API address on the environment instead)
+- Gateway diagnostics trigger types — Gateway Thread Count, Gateway Heap Usage Percentage, Gateway
+  Deadlock Count, Gateway Executor Pool Saturation Percentage, Gateway Connection Pool Usage Percentage,
+  Gateway GC Time Percentage (each requires a Gateway Management API address on the environment instead)
 - Certificate trigger types
 - Application log trigger types
 
