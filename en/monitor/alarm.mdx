@@ -157,7 +157,9 @@ Alarm is a monitoring system that continuously checks specific conditions in you
 Determines when the alarm will be triggered. The trigger type picker is **searchable** and groups the
 types into three **categories**; each type is shown in lists with a **category badge**:
 
-- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk
+- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk, Gateway
+  Thread Count, Gateway Heap Usage Percentage, Gateway Deadlock Count, Gateway Executor Pool Saturation
+  Percentage, Gateway Connection Pool Usage Percentage, Gateway GC Time Percentage
 - **Platform**: API Traffic (logs in database), SSL/JWK remaining duration, application log count
 - **AI**: AI Gateway metrics (token usage, daily cost, guardrail/PII count, provider failover, quota,
   catalog drift, shadow AI)
@@ -167,6 +169,12 @@ types into three **categories**; each type is shown in lists with a **category b
     - Pod / Node Health Status
     - K8S Node CPU Percentage
     - Elasticsearch Health / CPU / Disk Percentage
+    - Gateway Thread Count
+    - Gateway Heap Usage Percentage
+    - Gateway Deadlock Count
+    - Gateway Executor Pool Saturation Percentage
+    - Gateway Connection Pool Usage Percentage
+    - Gateway GC Time Percentage
   </Card>
   <Card title="Platform" icon="database">
     - API Traffic (Logs in Database)
@@ -184,19 +192,74 @@ types into three **categories**; each type is shown in lists with a **category b
   <Accordion title="Kubernetes Trigger Types">
     **Pod Health Status**: Checks the health status of Kubernetes pods. Alarm is triggered when any pod becomes unhealthy. Does not require threshold value.
 
+    Only pods belonging to Apinizer components are evaluated; pods of other applications that share the same namespace, and pods that have already run to completion (Succeeded), are left out of scope. Pod readiness is read from Kubernetes' own pod-level Ready status, so APM/service-mesh sidecar containers injected into the pod do not change the outcome.
+
     **Node Health Status**: Checks the health status of Kubernetes nodes. Alarm is triggered when any node becomes unhealthy. Does not require threshold value.
 
     **K8S Node CPU Percentage**: Checks the CPU usage percentage of Kubernetes nodes. Alarm is triggered when CPU usage percentage exceeds the threshold value. Requires threshold value (e.g., 80 = 80%).
   </Accordion>
 
+  <Accordion title="Gateway Diagnostics Trigger Types">
+    **Gateway diagnostics triggers** share one mechanism: each reads a live JVM/pool figure from every
+    API Gateway worker pod through the Gateway Management API address(es) defined on the environment
+    (Environment > Management API settings), on every run, and evaluates each pod (or pod/pool
+    combination) separately. An optional **Environment** selector limits the check to one environment;
+    when left blank, every published environment is checked. A pod or address that cannot be read is
+    listed as *Warning* without a value and does not trigger the alarm by itself; the run is recorded as
+    *Error Occurred* only when no pod at all could be read (for example when every address is
+    unreachable, the environment has no management address, or the selected environment was deleted).
+    Reads time out after 70 seconds. Does not require a connection definition, but the environment must
+    have at least one Gateway Management API address.
+
+    The row detail distinguishes two different *Warning* causes so a healthy pod is never mistaken for a
+    down one: **"unreachable: ..."** means the address itself could not be reached (network error, HTTP
+    error, or timeout), while **"responded, but ..."** means the pod answered normally but the specific
+    figure this trigger needs was not present in its response (for example an old worker build that
+    predates a newer diagnostics field) — the pod itself is up.
+
+    **Gateway Thread Count**: The live JVM thread count of each pod. The alarm is triggered when the
+    thread count of any pod **exceeds** the threshold (strict comparison: a pod exactly at the threshold
+    is shown as *Warning*, not triggered). Requires threshold value (e.g., 2000 = 2000 threads). The
+    alarm history lists each pod with its environment, IP and measured thread count. E-mail and webhook
+    templates render the threshold as `<n> threads`.
+
+    **Gateway Heap Usage Percentage**: Heap usage of each pod's JVM, as used heap divided by max heap ×
+    100. Threshold unit is `%`; recommended threshold 85. A pod whose JVM reports no heap ceiling (max
+    heap of -1, i.e. no `-Xmx` set) is listed as *Warning* rather than evaluated.
+
+    **Gateway Deadlock Count**: The number of deadlocked JVM threads on each pod. Threshold unit is
+    `deadlocks`; when you pick this trigger on a new alert the threshold is set to **0** automatically (a threshold you typed or a saved one is left as is), so the very first deadlock fires the alarm — unlike
+    the percentage triggers below, there is no separate warning band above the threshold, only Normal (0
+    deadlocks) and Breached (1 or more).
+
+    **Gateway Executor Pool Saturation Percentage**: Each registered executor pool of each pod, as
+    active threads divided by pool capacity × 100 — one row per pod and pool (for example
+    `pod-1 / async`, `pod-1 / logDispatch`). Capacity is the pool's maximum size, or its core size for a
+    pool with no fixed maximum (scheduled/cached pools). Threshold unit is `%`; recommended threshold 85.
+    Queue length and rejected-task count are shown in the row detail.
+
+    **Gateway Connection Pool Usage Percentage**: Each HTTP connection pool of each pod, as leased
+    connections divided by max total × 100 — one row per pod and pool. Threshold unit is `%`;
+    recommended threshold 85. A pool with requests currently waiting for a connection is shown in the
+    row detail and marked *Warning* even when it is below the threshold; a pool with no max total
+    configured is listed as *Warning*.
+
+    **Gateway GC Time Percentage**: The share of time each pod's JVM has spent in garbage collection,
+    as total GC time divided by JVM uptime × 100. Both figures are cumulative since the JVM started, so
+    this is the lifetime GC share, not the last interval's. Threshold unit is `%`; recommended threshold
+    5.
+  </Accordion>
+
   <Accordion title="Elasticsearch Trigger Types">
-    **Elasticsearch Health Status**: Checks the health status of Elasticsearch cluster. Alarm is triggered when cluster becomes unhealthy. Does not require threshold value. Requires connection definition.
+    **Elasticsearch Health Status**: Checks the health status of the Elasticsearch cluster (Green/Yellow/Red). Alarm is triggered when the cluster becomes unhealthy. Does not require threshold value. Requires connection definition. The evaluated row is labelled with the cluster's own name, as reported by the cluster itself, rather than a fixed "Elasticsearch cluster" label.
 
-    **Elasticsearch CPU Percentage**: Checks the CPU usage percentage of Elasticsearch cluster. Alarm is triggered when CPU usage percentage exceeds the threshold value. Requires threshold value (e.g., 80 = 80%). Requires connection definition.
+    **Elasticsearch CPU Percentage**: Checks the CPU usage percentage of every node in the Elasticsearch cluster separately. Alarm is triggered when the CPU usage percentage of any node exceeds the threshold value; the alarm history and the Live check panel list one row per node, each labelled **Elasticsearch node** with the node's name, its measured percentage, and a state badge, so the offending node can be identified. Requires threshold value (e.g., 80 = 80%). Requires connection definition.
 
-    **Elasticsearch Disk Percentage**: Checks the disk usage percentage of Elasticsearch cluster. Alarm is triggered when disk usage percentage exceeds the threshold value. Requires threshold value (e.g., 90 = 90%). Requires connection definition.
+    **Elasticsearch Disk Percentage**: Checks the disk usage percentage of every node in the Elasticsearch cluster separately. Alarm is triggered when the disk usage percentage of any node exceeds the threshold value; the alarm history and the Live check panel list one row per node, each labelled **Elasticsearch node**. Nodes that report no disk statistics (coordinating-only nodes) are skipped. Requires threshold value (e.g., 90 = 90%). Requires connection definition.
 
     **Elasticsearch Logs in Database**: Checks whether Elasticsearch logs are in the database. Alarm is triggered when logs are in the database. Does not require threshold value.
+
+    **When Elasticsearch cannot be checked**: for all four Elasticsearch trigger types, if the connection cannot be evaluated the run's result is **Error Occurred**, its summary states that the check **could not be checked**, and the reason is one of three: the connection is not defined or is disabled, the cluster could not be reached, or the cluster returned no node statistics. The summary and reason text — like the rest of the trigger history and Live check rows — is shown in the interface's current language.
   </Accordion>
 
   <Accordion title="Certificate Trigger Types">
@@ -227,6 +290,12 @@ Threshold value determines when the alarm will be triggered. Different units are
 | Trigger Type | Unit | Example Value | Description |
 |----------------|------|-------------|----------|
 | K8S Node CPU Percentage | % | 80 | When CPU usage exceeds 80% |
+| Gateway Thread Count | Threads | 2000 | When the live thread count of any gateway worker pod exceeds 2000 |
+| Gateway Heap Usage Percentage | % | 85 | When heap usage of any pod exceeds 85% |
+| Gateway Deadlock Count | Deadlocks | 0 | When any pod has at least one deadlocked thread |
+| Gateway Executor Pool Saturation Percentage | % | 85 | When active/capacity of any pool on any pod exceeds 85% |
+| Gateway Connection Pool Usage Percentage | % | 85 | When leased/max total of any pool on any pod exceeds 85% |
+| Gateway GC Time Percentage | % | 5 | When the lifetime GC share of any pod exceeds 5% |
 | Elasticsearch CPU Percentage | % | 80 | When CPU usage exceeds 80% |
 | Elasticsearch Disk Percentage | % | 90 | When disk usage exceeds 90% |
 | SSL Certificate Remaining Duration | Days | 30 | When remaining duration is less than 30 days |
@@ -254,6 +323,9 @@ Some trigger types require Elasticsearch connection:
 
 **Trigger Types Not Requiring Connection:**
 - Kubernetes trigger types
+- Gateway diagnostics trigger types — Gateway Thread Count, Gateway Heap Usage Percentage, Gateway
+  Deadlock Count, Gateway Executor Pool Saturation Percentage, Gateway Connection Pool Usage Percentage,
+  Gateway GC Time Percentage (each requires a Gateway Management API address on the environment instead)
 - Certificate trigger types
 - Application log trigger types
 
@@ -380,9 +452,11 @@ summary metric cards:
   <Accordion title="Trigger history">
     The result of each evaluation — paginated table:
     - **Evaluated at**: Evaluation date/time
-    - **Value**: The measured value
+    - **Value**: The measured value. For Gateway Deadlock Count, the value is shown with its `deadlocks` unit suffix (for example "2 deadlocks"); other trigger types show a bare number.
     - **Result**: 🟢 Threshold Not Exceeded · 🔴 Threshold Exceeded · 🟠 Error Occurred
     - **Summary**: Check summary
+    - **Detail**: shown under the summary when present — the longer explanation (for example which
+      pod/address could not be read, or how many objects breached)
   </Accordion>
 
   <Accordion title="Configuration">
@@ -403,8 +477,13 @@ without saving** — and shows whether the alarm would fire:
   record** and updates the current value in the list view; it does **NOT** fire notifications/recipients.
   The last evaluation time is shown below the button.
 - **Worst object**: The value of the currently worst object with a threshold-marked bar.
-- **Objects evaluated**: The evaluated objects and an "n of m breached" badge.
-- **Last 12 evaluations**: A line chart of recent evaluations with a red dashed threshold line.
+- **Objects evaluated**: The evaluated objects and an "n of m breached" badge. For Elasticsearch CPU/Disk
+  triggers each object is one cluster node, labelled **Elasticsearch node**; for the health trigger it is
+  the cluster itself, labelled with its real cluster name.
+- **Last 12 evaluations**: For triggers with a measured value, a line chart of recent evaluations with a
+  red dashed threshold line. For status-only checks (for example Elasticsearch health, or any run that
+  ended in an error) there is no single number to plot, so each of the last 12 runs is instead shown as a
+  coloured status bar (breached/normal/error); hovering a bar shows that run's date and result.
 - **Result box**: "Condition met — the alert would fire" (red), "Condition not met" (green), or an
   evaluation error (amber).
 
@@ -579,6 +658,16 @@ On the alarm list page, you can view and manage all your alarms.
     - Check Kubernetes cluster connection
     - Check system resources
     - Check alarm configuration
+  </Accordion>
+
+  <Accordion title="The Same Alarm Appears Twice in History With the Same Timestamp">
+    **Possible Cause:**
+    - API Manager runs with more than one replica and the same check ran on two replicas at the same moment
+
+    **Solution:**
+    - Upgrade API Manager to the current version: with concurrently running replicas, each check now runs on one replica only
+    - Review the alarm history again after the next check interval to confirm a single row is produced
+    - If repeated rows persist, delete the alarm and create it again
   </Accordion>
 
   <Accordion title="Too Many Notifications Coming">

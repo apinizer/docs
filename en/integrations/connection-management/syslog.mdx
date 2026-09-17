@@ -589,7 +589,7 @@ In this step, you can export existing connections for backup, moving to differen
       </Card>
       
       <Card title="Method 2: From the List Screen" icon="list">
-        Select **⋮ → Export** from action menu. ZIP file is automatically downloaded.
+        The row's **⋮** menu now has two items: the primary **Export** opens the Export/Import Wizard with this connection preselected — its certificate/key store and any `${VARIABLE}` reference surface automatically on the dependency step; the secondary **Export as File** downloads the ZIP described below directly, without going through the wizard.
       </Card>
       
       <Card title="File Format" icon="file-zipper">
@@ -615,10 +615,9 @@ In this step, you can export existing connections for backup, moving to differen
   <Accordion title="Import">
     <CardGroup cols={2}>
       <Card title="Import Steps" icon="upload">
-        - Click **[Import Syslog Connection]** button on main list.
-        - Select downloaded ZIP file.
-        - System checks: Is format valid? Is there name conflict? Are dependencies present?
-        - Then click **[Import]** button.
+        - Click **[Import Syslog Connection]** button on the main list — it now opens the Export/Import Wizard's import step with type **Connection** preselected (Admin scope when opened from Administration); the old upload dialog is gone.
+        - Select the exported package and follow the wizard's steps.
+        - The wizard checks format, name conflicts and dependency availability before you confirm the import.
       </Card>
       
       <Card title="Import Scenarios" icon="info-circle">
@@ -728,6 +727,33 @@ The Gateway diagnostics carry the same two counters per connection: `idleReconne
 The thirty-second threshold needs no configuration on the connection and is not exposed on the screen. Where a receiving side or a firewall closes sessions much sooner, it can be shortened for the whole node by starting the Gateway with `-Dapinizer.syslog.socketIdleReconnectMillis=<milliseconds>`; a value of `0` turns the proactive refresh off and restores the earlier behaviour.
 
 :::
+
+### Receivers That Close the Connection Right After Accepting It {#connect-time-liveness}
+
+The idle-reconnect refresh above only helps when Apinizer is the one leaving a connection unused. Some receivers behave differently: they complete the TCP handshake and then close the session immediately, before a single byte is exchanged — a session-limit ceiling or a source-IP rejection typically does this. Apinizer cannot see that at connect time, so without a check the first write on the fresh socket would fail, the retry on another fresh socket would also land on a receiver that closes it right away, and this could repeat rapidly enough to open a new TCP connection for every batch, with records silently lost in between.
+
+Apinizer now reads from the socket for a short moment right after it connects (after the TLS handshake too, when TLS is used) and before writing anything to it. If the receiver has already closed the session, that read reports it immediately and the connection is treated as a normal connection failure — it counts toward the three-consecutive-failure threshold that moves traffic to the failover connector, and a fresh attempt follows five seconds later, exactly as for any other connection error. If the receiver stays quiet, as an ordinary syslog receiver does, the check simply times out and the socket is used right away; no extra I/O and no measurable delay are added once the connection is up and being reused for further batches.
+
+When a receiver instead accepts the connection cleanly but closes it again after every batch, reconnecting on every failed write could still open connections at a very high rate. Apinizer paces reconnects after a write failure to at most roughly ten per second per socket, and once at least ten batches have gone through in a summary window with more than half of them needing this kind of recovery, a distinct warning is logged once a minute:
+
+```
+Syslog receiver drops the connection after nearly every batch (recovered X of Y batches, reconnects N, peerClosedAtAccept M); delivery may be silently lost - check receiver session limits (connectionId=..., target=...)
+```
+
+That line is the signal to check the receiving side's own session limits or connection policy — the sender is retrying correctly, but a receiver that behaves this way can still lose records between the moment a batch is accepted into the kernel send buffer and the moment the receiver's next close is discovered.
+
+:::info
+
+Two JVM system properties tune this behaviour for the whole node; both apply only to Apinizer's TCP syslog sender, not to any other connector.
+
+- `-Dapinizer.syslog.connectLivenessMillis=<milliseconds>` — how long the connect-time liveness read waits before deciding the receiver is silent and healthy. Default **100 ms**, capped at 2000 ms; `0` turns the check off entirely, restoring the pre-APNZ-6839 behaviour where a receiver that closes the session at accept time is only discovered on the next write.
+- `-Dapinizer.syslog.minReconnectIntervalMillis=<milliseconds>` — the minimum time between two reconnects that follow a write failure on the same socket. Default **100 ms**, capped at 5000 ms; `0` removes the pacing. This does not affect the first connection, the proactive idle refresh above, or the half-open health probe — those already have their own, longer intervals.
+
+An out-of-range or unparseable value falls back to the default and is logged as a warning rather than failing the connection.
+
+:::
+
+The periodic per-socket summary described above now also reports two more counters: `reconnects`, the number of fresh TCP connections opened on that socket (the first connection counts too, so a socket that has never dropped still shows `1`), and `peerClosedAtAccept`, how many of those connections were found closed by the connect-time liveness check right after being opened. A `peerClosedAtAccept` count above zero means the fault is on the receiving side — a session limit, a source-IP rejection, or a load balancer in between — rather than in the network path or on the Apinizer side.
 
 ## Splitting Oversized Messages {#splitting-oversized-messages}
 

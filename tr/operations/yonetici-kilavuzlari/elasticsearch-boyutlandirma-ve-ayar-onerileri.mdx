@@ -1,0 +1,116 @@
+---
+title: "Elasticsearch Boyutlandırma ve Ayar Önerileri"
+description: "Yüksek hacimli trafik logu tutan kurulumlarda Elasticsearch düğümlerinin bellek, disk ve saklama ayarlarını planlayabilir, arama ekranlarının büyük veri üzerinde hızlı kalmasını sağlayabilirsiniz."
+---
+
+## Kimler İçin
+
+Bu kılavuz, trafik logu indekslerinde milyar mertebesinde kayıt biriken kurulumlar içindir. Kayıt sayısı arttıkça ilk bozulan şey arama hızı değil, düğümlerin belleğidir: bellek baskısı altında çöp toplama süreleri uzar, sorgular yavaşlar ve düğümler sırayla yanıt veremez hale gelir. Aşağıdaki ayarlar bu zinciri kırmak içindir.
+
+## Bellek (Heap) Planlaması
+
+### Heap 31 GB'ı Geçmemeli
+
+Java, 32 GB'ın altındaki heap'lerde nesne adreslerini sıkıştırılmış biçimde tutar. Bu sınırın üstüne çıkıldığında adresler büyür, aynı veri için daha fazla bellek harcanır ve 32 GB heap genellikle 31 GB heap'ten **daha az** veri tutar.
+
+- Düğüm başına heap değerini en fazla **31 GB** olarak ayarlayın.
+- Fiziksel belleğin kalanını işletim sistemine bırakın; Elasticsearch disk üzerindeki indeks dosyalarını işletim sistemi önbelleği üzerinden okur ve bu önbellek en az heap kadar önemlidir.
+- Pratik bir başlangıç noktası: fiziksel belleğin yarısı, 31 GB'ı aşmamak kaydıyla.
+
+:::warning
+Daha fazla belleğiniz varsa heap'i büyütmek yerine **düğüm sayısını artırın**. Tek düğüme 64 GB heap vermek, iki düğüme 31 GB'er vermekten hem daha yavaş hem daha kırılgandır.
+:::
+
+### Çöp Toplayıcı Ayarları
+
+Büyük heap'lerde çöp toplama duraklamaları sorgu zaman aşımı olarak görünür. Aşağıdaki iki değer, toplamanın erken başlamasını ve ani yük artışlarında yetişebilmesini sağlar:
+
+```
+-XX:G1ReservePercent=25
+-XX:InitiatingHeapOccupancyPercent=30
+```
+
+Bu değerler Elasticsearch düğümlerinin JVM seçeneklerine eklenir. İlki acil durumlar için ayrılan boş alanı büyütür, ikincisi toplamanın heap doluluğu %30'a geldiğinde başlamasını sağlar.
+
+### Alan Verisi Önbelleğine Tavan Koyun
+
+Sıralama ve toplama işlemleri alan verisi önbelleğini büyütür. Bu önbelleğin tavanı tanımlı değilse heap'in tamamını yiyebilir:
+
+```yaml
+indices.fielddata.cache.size: 20%
+```
+
+Tavan konduğunda önbellek dolduğunda en eski girdiler atılır; sorgu yavaşlar ama düğüm ayakta kalır. Tavansız kurulumda ise düğüm belleği tükenir.
+
+### Nested Alanların Bitset Belleği
+
+Trafik logu kayıtları, başlık ve parametre listeleri gibi iç içe geçmiş alanlar taşır. Elasticsearch bu alanlar için üst kayıt eşleştirme yapılarını varsayılan olarak bellekte önceden hazırlar ve orada tutar. Kayıt sayısı büyüdükçe bu yapılar heap'in kalıcı bir bölümünü işgal eder.
+
+Apinizer, bu davranışı **Elasticsearch Bağlantı Ayarları** ekranından kapatmanıza izin verir: *Sabit Bitset Filtrelerini Önceden Yükle* seçeneğini kapattığınızda yapı isteğe bağlı olarak üretilir, kalıcı bellek tüketimi ortadan kalkar.
+
+:::warning
+Bu ayar **statik** bir indeks ayarıdır: yalnızca ayardan **sonra oluşturulan** indekslerde geçerli olur. Kaydettikten sonra **Create Index Template** işlemini çalıştırmanız ve bir sonraki rollover'ı beklemeniz gerekir. Mevcut indeksler eski davranışla çalışmaya devam eder.
+
+Mevcut (rollover öncesi) indekslere de uygulamak isterseniz, statik ayar yalnızca **kapalı** indekste değiştirilebilir: indeksi kapatın, ayarı yazın, indeksi açın. Zaten arşiv amacıyla kapatıp açtığınız dönemler için ek maliyet yoktur; açık kalması gereken güncel indekslerde bu işlem kısa bir arama kesintisi yaratır.
+
+```
+POST .ds-apinizer-log-apiproxy-<ad>-<numara>/_close
+PUT  .ds-apinizer-log-apiproxy-<ad>-<numara>/_settings
+{ "index.load_fixed_bitset_filters_eagerly": false }
+POST .ds-apinizer-log-apiproxy-<ad>-<numara>/_open
+```
+
+Etkiyi `GET _nodes/stats/indices?filter_path=**.segments.fixed_bit_set_memory_in_bytes` ile önce/sonra karşılaştırarak ölçebilirsiniz.
+:::
+
+Ayarı kapatmanın bedeli, iç içe alanlar üzerinde arama yapıldığında ilk sorgunun bir miktar yavaşlamasıdır. Bellek baskısı yaşayan kurulumlarda bu takas neredeyse her zaman kazançlıdır.
+
+## Shard Planlaması
+
+Shard sayısı hem çok az hem çok fazla olduğunda zarar verir: az shard tek düğümü doldurur, çok shard her sorguyu yüzlerce küçük göreve böler ve koordinasyon maliyetini şişirir.
+
+| Ölçüt | Hedef |
+|---|---|
+| Shard başına veri | 20 – 50 GB |
+| Düğüm başına toplam shard | Heap GB değerinin 20 katını aşmasın (31 GB heap için yaklaşık 600) |
+| Replica sayısı | Üretimde en az 1 |
+
+Günlük kayıt hacminizi tahmin edip shard başına hedef boyutu tutturacak şekilde günlük veya haftalık rollover kurun. Rollover eşiğini kayıt sayısına değil **boyuta** bağlamak daha dayanıklıdır.
+
+## Saklama Süresi ve Yaşam Döngüsü
+
+Trafik logu sonsuza kadar aynı maliyetle tutulamaz. Apinizer'ın **Index Lifecycle Policy** ekranından fazları tanımlayın:
+
+- **Hot**: aktif yazılan indeks, en hızlı disk üzerinde.
+- **Warm**: yazma kapanır, shard sayısı azaltılabilir.
+- **Cold**: nadiren okunur, daha ucuz depolamaya taşınır.
+- **Delete**: saklama süresi dolan indeks silinir.
+
+### Silmek İstemiyorsanız
+
+Yasal veya kurumsal nedenlerle silme fazını kullanamıyorsanız iki seçeneğiniz var:
+
+1. **İndeksi kapatma**: Kapatılan indeks disk üzerinde kalır, arama ve yazmaya kapanır ve bellek tüketmez. Gerektiğinde tekrar açılır. Kısa vadeli arşiv için en pratik yöntemdir.
+2. **Anlık görüntü alıp ihtiyaç anında geri yükleme**: İndeksin anlık görüntüsünü nesne depolamaya veya paylaşımlı diske alıp indeksi kümeden kaldırın. Veri gerektiğinde geri yüklenir. Uzun vadeli saklama için en ucuz yöntemdir.
+
+:::info
+Her iki yöntemde de kapatılan veya kaldırılan indeksler Apinizer ekranlarındaki aramalara dahil olmaz. Arama yapılması gereken dönemi açık bırakın.
+:::
+
+## Disk Doluluk Eşikleri
+
+Elasticsearch disk doluluğuna göre otomatik davranış değiştirir. Eşikleri bilmek, gece yarısı gelen "indeks salt okunur oldu" uyarısını önler:
+
+| Eşik | Doluluk | Sonuç |
+|---|---|---|
+| Düşük | %85 | Yeni shard'lar bu düğüme yerleştirilmez |
+| Yüksek | %90 | Mevcut shard'lar başka düğümlere taşınmaya başlar |
+| Taşma | %95 | Tüm indeksler salt okunur işaretlenir, yazma durur |
+
+Trafik logu yazımının durmaması için disk doluluğunu %75'in altında tutacak bir saklama planı kurun ve %85 eşiği için uyarı tanımlayın.
+
+## Toplam Kayıt Sayısı Her Zaman Kesindir
+
+Yönetim ekranındaki trafik listesinde (Analiz > API Trafiği) toplam kayıt sayısı her zaman **kesin** sayıdır: bir saatte 700.000 istek geldiyse ekranda 700.000 görünür ve tamamı sayfalanabilir. Rapor ekranlarındaki toplam ve kırılım değerleri ile API Portal trafik ekranları da kesin sayımla üretilir.
+
+Çok büyük indekslerde bu sayım sorgunun en pahalı parçasıdır. Aynı sorgu (aynı filtre ve mutlak tarih aralığı) tekrarlandığında sonuç Elasticsearch'ün shard istek önbelleğinden gelir; sayfa ileri-geri geçişleri bu yüzden ilk sorgudan hızlıdır. "Son 1 saat" gibi göreli aralıklar Elasticsearch tarafından önbelleğe alınmaz.

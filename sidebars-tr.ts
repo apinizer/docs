@@ -664,7 +664,6 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/erisim-kontrolu",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-grup-acl",
-            "admin/identity-management/rate-limit-kontrol-listesi",
             "admin/identity-management/kota-kullanimi-ve-uyarilar"
           ]
         },
@@ -681,6 +680,7 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
+        "admin/identity-management/token-yonetim-ayarlari",
         "admin/identity-management/acl-raporu",
         "admin/identity-management/yasal-saklama-ve-temizleme"
       ]
@@ -738,12 +738,9 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "admin/system-settings/ldap-ile-giris-ayarlari",
-        "admin/system-settings/login-log-konnektor-yapilandirmasi",
         "admin/system-settings/lisans-yonetimi",
         "admin/system-settings/hata-mesajlari",
-        "admin/system-settings/ip-geolocation-ayari",
-        "admin/system-settings/token-yonetim-ayarlari",
-        "admin/system-settings/api-istemcisi-secret-saklama-ayarlari"
+        "admin/system-settings/ip-geolocation-ayari"
       ]
     },
     {
@@ -1065,6 +1062,7 @@ const sidebars: SidebarsConfig = {
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
             "operations/yonetici-kilavuzlari/elasticsearch-index-alan-temizleme",
+            "operations/yonetici-kilavuzlari/elasticsearch-boyutlandirma-ve-ayar-onerileri",
             "operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi",
             "operations/yonetici-kilavuzlari/coredns-host-alias-yapilandirmasi",
             "operations/yonetici-kilavuzlari/apinizer-pod-auto-scaling",

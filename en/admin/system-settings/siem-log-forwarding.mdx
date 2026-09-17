@@ -130,6 +130,10 @@ The destination list shows the name, the connector type and connection configura
 - **Privacy Profile** — *Apply privacy profile* plus **Apply recommended SIEM profile**, which fills in the identity rules for you.
 - **Stream Rules** — one section per stream, each starting with *Send this stream to this destination*.
 
+:::info
+A **Database** destination's connector uses the same **Operation** field as the Gateway Runtime connectors — only **Insert-Update-Delete** is offered, regardless of database type. See [Adding Log Connectors](/en/admin/server-management/adding-connectors-to-gateway-environments#database-recipient-operation-field) for details.
+:::
+
 Use **Send test event** on a saved destination to verify connectivity before you switch a stream over.
 
 <Frame caption="SIEM &amp; Log Forwarding — Destinations tab">
@@ -265,7 +269,7 @@ Rules apply only to streams whose authority is **Active**. While a stream is on 
 
 Sensitive data is handled in two layers.
 
-**The first layer cannot be turned off.** Token values, passwords and password hashes, `Authorization`, `Cookie` and `Set-Cookie` headers, API-key headers, query strings, certificate and key material, and the privacy salt itself are never part of a v2 payload. They are not in the allowlist, and a second check removes any remaining field whose name resembles a credential.
+**The first layer cannot be turned off.** Token values, passwords and password hashes, `Authorization`, `Cookie` and `Set-Cookie` headers, API-key headers, query strings, certificate and key material, and the privacy salt itself are never part of a v2 payload. They are not in the allowlist, and a second check removes any remaining field whose name resembles a credential. The same check runs over the change list described under [Fields per stream](#fields-per-stream): a changed field whose name resembles a credential carries `"[REDACTED]"` in place of both the old and the new value. The token-signing key of a Gateway Runtime (the RSA private key shown on the JWT Token Validation Keys tab) belongs to this layer as well: it appears neither in the environment's audit record, nor in the change list, nor in a captured request body.
 
 **The second layer is the privacy profile you configure per destination.** It is optional and it applies on every profile except **Legacy Raw**, after the envelope has been produced and before the size policy runs. On a **CEF 0** or **LEEF 2.0** destination it therefore runs before the line is formatted, so a masked field reaches the line already masked. Each rule targets an envelope field by name, by regular expression, or by built-in PII type (national identity number, IBAN, e-mail address, phone number, card number) and applies one operation: mask, hash, delete, encrypt or detect.
 
@@ -298,13 +302,13 @@ The size policy applies on every profile except **Legacy Raw** and bounds the UT
 | Setting | Behaviour |
 |---|---|
 | Off (default) | No limit — the same behaviour as before the upgrade. |
-| **Truncate data** | The bulk fields inside `data` — `reference`, `message`, `stackTrace` — are shortened largest-first until the payload fits, each one marked with a truncation note, and `apinizer.truncated` is set to `true`. The envelope fields are never touched. If truncation is not enough, the event is dropped. |
+| **Truncate data** | The bulk fields inside `data` — `reference`, `message`, `stackTrace`, `changes` — are shortened largest-first until the payload fits, each one marked with a truncation note, and `apinizer.truncated` is set to `true`. The envelope fields are never touched. If truncation is not enough, the event is dropped. |
 | **Drop the event** | The event is not sent and is counted as an oversize drop. |
 | **Replace data with a hash** | `data` is replaced by its SHA-256 digest and byte count, so the event is still correlatable but carries no payload. |
 
 The minimum you can configure is **1024 bytes**. For syslog destinations, **8192 bytes with Truncate data** is a good starting point — most RFC 5424 receivers accept between 2 and 8 KB per message and silently cut anything longer. Kafka, Webhook and Elasticsearch destinations normally need no limit.
 
-Application stack traces and audit reference objects are the two fields that make an event large. Both are opt-in or bounded: the reference object is off by default on the Audit stream, and the stack trace switch on the Application stream can be turned off for a destination that does not need it.
+Application stack traces, audit reference objects and audit change lists are the fields that make an event large. All three are opt-in or bounded: the reference object is off by default on the Audit stream, the change list is on by default but is already capped before this policy ever runs — at most 200 entries, each value cut at 512 characters, the whole list at 512 KB — and the stack trace switch on the Application stream can be turned off for a destination that does not need it.
 
 :::info
 
@@ -403,6 +407,74 @@ This page's whole configuration — every destination and both local storage swi
 
 For the full behavior — what belongs to the package, how a name collision is handled, how server-managed fields are treated — see [SIEM Settings](/en/admin/secrets-management/export-import#siem-settings) on the Export/Import wizard page.
 
+## Session stream — event types and legacy payload {#session-stream-event-types-and-legacy-payload}
+
+The [Streams](#streams) table above names the Session event types; this section describes what each one means and exactly what a **Legacy Raw** destination receives for them. It applies to Management Console sign-ins. Portal sign-ins travel on the same stream but carry their own event names and their own payload shape — see [API Portal Login Logs](/en/api-portal/login-logs#connector-delivery-and-payload) for those.
+
+Whichever authority is in force, a Session record is **always** written to the Apinizer database (`persistent_audit_event` for the Management Console, `portal_login_logs` for a portal) and that cannot be turned off. A destination is an **additional** copy sent alongside the database write, never instead of it.
+
+### Management Console event types
+
+| Event | `eventType` | Description |
+|-------|-------------|-------------|
+| Successful login | `LOGIN_SUCCESS` | Username and password verified |
+| Failed login | `LOGIN_FAILURE` | Invalid credentials or locked account |
+| Sign-out | `LOGOUT` | The user signed out of the Management Console |
+| Token refresh (project switch) | `TOKEN_REFRESH_SUCCESS` | The session token was renewed for a different project |
+| Token refresh denied | `TOKEN_REFRESH_FAILURE` | The user has no permission in the requested project (`reasonCode=NO_PROJECT_PERMISSION`) |
+| Account locked | `ACCOUNT_LOCKED` | The account was locked after too many failed attempts |
+| Password changed | `PASSWORD_CHANGED` | A user's password was set or changed — by the account holder or by an administrator |
+| Password change required | `PASSWORD_CHANGE_REQUIRED` | The user signed in with a password that must be changed before anything else can be done |
+| Password policy violation | `PASSWORD_POLICY_VIOLATION` | A password was rejected for not meeting the configured [password policy](/en/admin/system-settings/global-configuration#password-policy) |
+
+Every event also carries `userAgent`, and a failed event carries a machine-readable `reasonCode`. See [Login Records](/en/admin/audit-compliance/login-records) for the full field and reason-code reference.
+
+### Legacy Raw payload
+
+This is what the **Legacy Raw** profile produces; its field list is frozen and does not grow in later versions. Switch the destination to **Apinizer JSON v2** for the canonical envelope, the shared actor/target blocks and field-level privacy — see [Schema v2](#schema-v2).
+
+```json
+{
+  "source": "API_MANAGER",
+  "principal": "username",
+  "email": null,
+  "displayName": null,
+  "eventDate": "2026-03-31T10:00:00Z",
+  "eventType": "LOGIN_SUCCESS",
+  "remoteAddress": "1.2.3.4",
+  "message": null,
+  "errorType": null,
+  "portalId": null,
+  "accountId": null
+}
+```
+
+A failed sign-in fills `message` and `errorType`:
+
+```json
+{
+  "source": "API_MANAGER",
+  "principal": "username",
+  "email": null,
+  "displayName": null,
+  "eventDate": "2026-03-31T10:01:00Z",
+  "eventType": "LOGIN_FAILURE",
+  "remoteAddress": "1.2.3.4",
+  "message": "Bad credentials",
+  "errorType": "org.springframework.security.authentication.BadCredentialsException",
+  "portalId": null,
+  "accountId": null
+}
+```
+
+**Graylog destinations** receive the same event as a GELF message whose short message is `LogLogin`. With **Append to Message** on, the JSON above is written to the GELF `full_message` field; with **Append to Attributes** on, each populated field (`source`, `principal`, `email`, `displayName`, `eventDate`, `eventType`, `remoteAddress`, `message`, `errorType`, `portalId`, `accountId`, `userAgent`, `reasonCode`, `targetProjectId`) is sent as a separate GELF additional field. Fields that are `null` are omitted.
+
+:::info
+
+A **Database** destination writes Session records into the `log_LoginLog` table, which is **not created automatically** — create it before enabling the destination. See [Apinizer Log Table Creation Commands](/en/operations/administrator-guides/apinizer-log-table-creation-commands#login-log) for the CREATE TABLE statement for each supported database (Oracle, MySQL/MariaDB, PostgreSQL, SQL Server).
+
+:::
+
 ## Schema v2 {#schema-v2}
 
 ### Envelope
@@ -489,17 +561,114 @@ Fields may be added to the envelope and to `data` in later versions without rais
 
 ### Fields per stream
 
-The `data` object carries a fixed set of fields defined in the platform. It cannot be extended, and it can only be narrowed — with a privacy profile, or with the two content switches on the rule.
+The `data` object carries a fixed set of fields defined in the platform. It cannot be extended, and it can only be narrowed — with a privacy profile, or with the content switches on the rule:
+
+| Switch | Stream(s) | Default | When it is off |
+|---|---|---|---|
+| *Include the reference object in the payload* | Audit, Portal | Off | `data.reference` is omitted |
+| *Include the change list in the payload* | Audit, Portal | On | `data.changes` and `data.changedPaths` are omitted; `data.changesStatus` and `data.changeKinds` are still sent on every entity-change event |
+| *Include the stack trace in the payload* | Application | On | `data.stackTrace` is omitted |
 
 **Audit**
 
 | Envelope field | Comes from the legacy field |
 |---|---|
 | `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `clientIp`, `userAgent` |
-| `target.type`, `target.id`, `target.name`, `target.projectId` | `className`, `objectId`, `objectName`, `projectId` |
+| `target.type`, `target.id`, `target.name`, `target.projectId`, `target.projectName` | `className`, `objectId`, `objectName`, `projectId`, the project's own name |
 | `event.action` | `eventType`, dotted with `state` for entity changes |
 | `data.id`, `data.state`, `data.origin` | `id`, `state`, `source` |
 | `data.reference` | `referenceObjectJson`, parsed into an object — sent **only** when *Include the reference object in the payload* is on. The previous-state copy of that object is never sent. The detail fields of the sensitive-access events live here too — for example `entityType` (the affected asset's own type, such as `Certificate`, kept separate from `target.type` so you can filter and correlate on it), `disclosedKind` and `via` on `SECRET_REVEALED`, or `sensitiveIncluded` on `EXPORT` — so a SIEM rule that filters on them needs this switch on for the destination. |
+| `data.changesStatus` | Set on every entity-change event, regardless of the content switches above — `DIFFED` when the fields below reflect an actual comparison against the previous version, `NO_PREVIOUS_SNAPSHOT` when there was nothing to compare against (the object's first save), `SECRET_FIELDS_MAY_HAVE_CHANGED` when the only fields that could have changed are ones that are never written to an audit record at all (see [Hidden Fields in Audit Records](/en/admin/audit-compliance/audit-records#hidden-fields-in-audit-records)), and `TOO_MANY_CHANGES` when the comparison produced more entries than the platform keeps — `data.changedPaths` still lists every changed path in that case; only `data.changes` is capped. |
+| `data.changeKinds` | A system-defined summary of what kind of change this was, one or more of `ENDPOINT_ADDED`, `ENDPOINT_REMOVED`, `ENDPOINT_METHOD_CHANGED`, `ENDPOINT_PATH_CHANGED`, `RELATIVE_PATH_CHANGED`, `POLICY_ADDED`, `POLICY_REMOVED`, `POLICY_CHANGED`, `ROUTING_CHANGED`, `CREDENTIAL_ACL_CHANGED`, `ROLE_PERMISSION_CHANGED`, `USER_ROLE_CHANGED`, `SETTING_CHANGED` or `LICENSE_CHANGED`. `RELATIVE_PATH_CHANGED` refers to the API Proxy's Client Route relative path. `LICENSE_CHANGED` tells you the licence key was replaced without carrying the key itself (its old and new values are always `"[REDACTED]"`). Set regardless of the content switches above. |
+| `data.changedPaths` | Every path that changed, addressed the same way as `data.changes` below. Sent only when *Include the change list in the payload* is on. |
+| `data.changes` | One entry per changed value: `op` (`add`, `remove`, `replace` or `move`), `path`, and — for an entry inside a list, such as one endpoint of an API Proxy — `key`, the id or name that was matched between the two versions so that same endpoint keeps the same `path` across events even if its position in the list changes. `old` and `new` carry the previous and current value; a field whose name resembles a secret (for example a setting named after a password, token or secret, or the licence key) carries `"[REDACTED]"` in both instead — the entry itself, its `op` and its `path` are still sent, so the fact that such a field was added, removed or changed always reaches the SIEM. A value longer than 512 characters is cut, and the list stops at 200 entries (`data.changesStatus` then reads `TOO_MANY_CHANGES`). Sent only when *Include the change list in the payload* is on; it is what replaces the need for the previous-state copy of the whole object mentioned above. |
+
+#### Change list examples
+
+An endpoint added to an API Proxy:
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68c1f2a180f5de2a3c29e001",
+  "timestamp": "2026-09-10T09:12:41.000Z",
+  "event": { "category": "AUDIT", "action": "ENTITY.UPDATED", "outcome": "SUCCESS", "severity": 3 },
+  "actor": { "user": "admin", "ip": "10.0.0.7", "userAgent": "Mozilla/5.0", "sessionId": null },
+  "target": {
+    "type": "ApiProxy",
+    "id": "68493bb680f5de2a3c29c609",
+    "name": "Swagger Petstore Documentation",
+    "projectId": "68493b6e80f5de2a3c29c5ee",
+    "projectName": "Public APIs"
+  },
+  "correlationId": "3b1f9a2c-6e4d-4a1b-9c0e-2b3c4d5e6f70",
+  "source": { "component": "MANAGER", "host": "manager-0", "environmentId": null },
+  "apinizer": {
+    "version": "2026.09.3",
+    "configRevision": 21,
+    "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+    "synthetic": false,
+    "truncated": false
+  },
+  "data": {
+    "id": "68c1f2a180f5de2a3c29e001",
+    "state": "UPDATED",
+    "origin": "MANAGER",
+    "changesStatus": "DIFFED",
+    "changeKinds": ["ENDPOINT_ADDED"],
+    "changedPaths": ["/apiMethodList/8f1e2c3a-9b4d-4e77-8a2f-1a7c8b9d0e11"],
+    "changes": [
+      {
+        "op": "add",
+        "path": "/apiMethodList/8f1e2c3a-9b4d-4e77-8a2f-1a7c8b9d0e11",
+        "key": "/pet/findByStatus",
+        "new": { "name": "/pet/findByStatus", "httpMethod": "GET", "active": true }
+      }
+    ]
+  }
+}
+```
+
+A General Settings change (a platform-wide setting, so it carries no project):
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68c1f2a180f5de2a3c29e002",
+  "timestamp": "2026-09-10T09:15:03.000Z",
+  "event": { "category": "AUDIT", "action": "ENTITY.UPDATED", "outcome": "SUCCESS", "severity": 3 },
+  "actor": { "user": "admin", "ip": "10.0.0.7", "userAgent": "Mozilla/5.0", "sessionId": null },
+  "target": {
+    "type": "GeneralSettings",
+    "id": "605c1a2b3c4d5e6f70819203",
+    "name": "General Settings",
+    "projectId": null,
+    "projectName": null
+  },
+  "correlationId": "9d2e8f1a-4c3b-4a2d-8e1f-6b5c4d3e2f10",
+  "source": { "component": "MANAGER", "host": "manager-0", "environmentId": null },
+  "apinizer": {
+    "version": "2026.09.3",
+    "configRevision": 22,
+    "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+    "synthetic": false,
+    "truncated": false
+  },
+  "data": {
+    "id": "68c1f2a180f5de2a3c29e002",
+    "state": "UPDATED",
+    "origin": "MANAGER",
+    "changesStatus": "DIFFED",
+    "changeKinds": ["SETTING_CHANGED"],
+    "changedPaths": ["/navbarColor"],
+    "changes": [
+      { "op": "replace", "path": "/navbarColor", "old": "#245ca4", "new": "#1e3a5f" }
+    ]
+  }
+}
+```
 
 **Session**
 
@@ -550,7 +719,7 @@ There is no `actor.userAgent` for this stream. The request body, headers and que
 
 **Portal**
 
-This stream shares its source record — and therefore its envelope shape — with Audit; see the Audit table above. The one difference is `source.component`, which is `PORTAL` rather than `MANAGER`, and the actor: it is the developer's own portal account whenever the API Portal backend could identify one, never the Management API service account it authenticates with — see [Portal Events](/en/admin/audit-compliance/audit-records#portal-events). Every row also carries `data.portalId`.
+This stream shares its source record — and therefore its envelope shape — with Audit; see the Audit table above, including `target.projectName` and the `data.changesStatus`/`data.changeKinds`/`data.changedPaths`/`data.changes` fields. The one difference is `source.component`, which is `PORTAL` rather than `MANAGER`, and the actor: it is the developer's own portal account whenever the API Portal backend could identify one, never the Management API service account it authenticates with — see [Portal Events](/en/admin/audit-compliance/audit-records#portal-events). Every row also carries `data.portalId`.
 
 ## CEF and LEEF
 
@@ -589,6 +758,7 @@ The severity in the header is the event severity on a 0–10 scale. When the pro
 | `cs4` with `cs4Label=targetName` | Target name |
 | `cs5` with `cs5Label=projectId` | Project identifier |
 | `cs6` with `cs6Label=sessionId` | Session identifier |
+| `flexString2` with `flexString2Label=projectName` | Project name |
 | `cn1` with `cn1Label=severity` | Severity |
 | `flexString1` with `flexString1Label=environmentId` | Environment identifier |
 | `msg` | Everything left in the `data` object, as compact JSON |
@@ -618,6 +788,7 @@ The sixth header field, `x09`, declares the tab character as the separator betwe
 | `sessionId` | Session identifier |
 | `resource`, `resourceType`, `resourceId` | Target name, type and identifier |
 | `projectId` | Project identifier |
+| `projectName` | Project name |
 | `correlationId` | Correlation identifier |
 | `eventId` | Event identifier |
 | `srcNode` | Name of the node that produced the event |
@@ -718,7 +889,9 @@ The Gateway does not expose a Prometheus endpoint; the same counters are publish
           "rejectedCount": 0,
           "lossCount": 0,
           "recoveredBatchCount": 0,
-          "idleReconnectCount": 0
+          "idleReconnectCount": 0,
+          "reconnectCount": 1,
+          "peerClosedAtAcceptCount": 0
         }
       }
     ]
@@ -729,6 +902,8 @@ The Gateway does not expose a Prometheus endpoint; the same counters are publish
 The `destinations` array reports what **that Gateway node** has delivered, with one row per destination, sorted by identifier so that two support bundles can be compared. A destination that is configured but has never produced an event appears with empty timestamps and zero counters, which distinguishes "the configuration never reached this node" from "it is here but nothing matched a rule". `sender` is filled in only for a Syslog destination whose connection pool has been created, and is `null` otherwise. The counters are in-memory and start again from zero when the pod restarts.
 
 Two of the `sender` counters separate a receiving side that closes idle sessions from one that genuinely cannot keep up: `idleReconnectCount` counts sockets the Gateway refreshed before writing because nothing had been sent on them for a while, and `recoveredBatchCount` counts batches that failed once and then succeeded on a fresh socket. A `recoveredBatchCount` that keeps rising while `lossCount` stays at zero means no records are being lost and the receiving side is closing sessions sooner than the Gateway's own threshold — see [Idle Connections and Reconnects](/en/integrations/connection-management/syslog#idle-connections-and-reconnects) on the Syslog connection page. A rising `lossCount` or `rejectedCount` is the different, more serious case.
+
+The remaining two `sender` counters point at the receiving side rather than the network: `reconnectCount` is the total number of fresh TCP connections a destination's sockets have opened since the pod started — a socket's first connection counts too, so a sender that has never dropped still shows one per socket, and anything above that is a drop followed by a reconnect. `peerClosedAtAcceptCount` counts how many of those connections the receiver closed again immediately after accepting them, before a single byte went through. A `peerClosedAtAcceptCount` above zero means the fault sits on the receiving side — a session limit, a source-IP rejection, or a load balancer in between — not in the network path or on the Gateway. When both counters climb together on nearly every batch, the receiver is opening and dropping a session per attempt (a connection storm): each dropped connection still counts as a connection failure, so three in a row move that destination's traffic to its failover connector, the same as any other connection error. See [Receivers That Close the Connection Right After Accepting It](/en/integrations/connection-management/syslog#connect-time-liveness) on the Syslog connection page for the receiver-side signal and the tuning properties.
 
 A `configRevision` that differs between nodes means a node has not received the latest save yet. A rising `send_failed` or `throttled` count is the earliest sign that a destination cannot keep up.
 
@@ -749,3 +924,4 @@ A `configRevision` that differs between nodes means a node has not received the 
 - **API Security and API Access destinations must use Schema v2, CEF or LEEF** — Legacy Raw is not available for these streams, because a new destination defaults to Legacy Raw and the events would otherwise be dropped silently.
 - **A newly introduced Portal domain event type is not added to an already-migrated destination's included event types automatically** — the same rule that already applies to Audit, Session, Token and Application (see [What the upgrade did](#what-the-upgrade-did)); a rule left with an empty **Included event types** list is unaffected and always picks up new types.
 - **The client IP and User-Agent on a portal-originated Session or Portal event depend on the API Portal backend sitting behind a reverse proxy or ingress that is configured to pass the real client address through** (`server.forward-headers-strategy` on the Portal backend, matching whatever your proxy sends). Without that, these fields fall back to the Portal backend's own host address rather than the end user's.
+- **The change list is on by default on every Audit and Portal destination, including ones created before this version.** *Include the change list in the payload* defaults to on, so an existing v2 destination starts sending `data.changes` and `data.changedPaths` after the upgrade without any action on your side; `data.changesStatus` and `data.changeKinds` are sent on every entity-change event regardless of the switch. A **Legacy Raw** destination is not affected at all — its field list is frozen.

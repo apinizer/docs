@@ -493,6 +493,33 @@ Otuz saniyelik eşik bağlantı üzerinde ayar gerektirmez ve ekranda gösterilm
 
 :::
 
+## Bağlantıyı Kabul Eder Etmez Kapatan Alıcılar {#baglanti-ani-canlilik}
+
+Yukarıdaki boşta-yenileme mekanizması yalnızca bağlantıyı boşta bırakan tarafın Apinizer olduğu durumlarda yardımcı olur. Bazı alıcılar farklı davranır: TCP el sıkışmasını tamamlar ve tek bir bayt bile alışverişi yapılmadan oturumu hemen kapatır — bunu genellikle bir oturum sayısı sınırı veya kaynak-IP reddi tetikler. Apinizer bunu bağlantı anında göremez; bir kontrol olmadan taze sokete yapılan ilk yazma başarısız olur, başka bir taze sokette yapılan yeniden deneme de yine hemen kapatan bir alıcıya denk gelir ve bu, her küme için yeni bir TCP bağlantısı açılacak kadar hızlı tekrarlanabilir; bu arada kayıtlar sessizce kaybolur.
+
+Apinizer artık bağlandıktan hemen sonra (TLS kullanılıyorsa TLS el sıkışmasından sonra da) ve herhangi bir şey yazmadan önce soketten kısa bir süre okuma yapar. Alıcı oturumu zaten kapatmışsa bu okuma bunu anında bildirir ve bağlantı normal bir bağlantı hatası olarak değerlendirilir — trafiği yedek connector'a taşıyan üç-ardışık-hata eşiğine dahil edilir ve tıpkı diğer bağlantı hatalarında olduğu gibi beş saniye sonra yeni bir deneme yapılır. Alıcı sessiz kalıyorsa, sıradan bir syslog alıcısında olduğu gibi, kontrol yalnızca zaman aşımına uğrar ve soket hemen kullanılır; bağlantı kurulup sonraki kümeler için yeniden kullanılmaya başladıktan sonra ekstra G/Ç veya ölçülebilir bir gecikme eklenmez.
+
+Bir alıcı bağlantıyı temiz şekilde kabul edip her kümeden sonra tekrar kapatıyorsa, her başarısız yazmadan sonra yeniden bağlanmak yine de çok yüksek bir hızda bağlantı açılmasına yol açabilir. Apinizer, bir yazma hatasından sonraki yeniden bağlanmaları soket başına saniyede en fazla yaklaşık on ile sınırlar; bir özet penceresinde en az on küme gönderilmiş ve bunların yarısından fazlası bu şekilde kurtarılmış olduğunda, dakikada bir kez ayrı bir uyarı loglanır:
+
+```
+Syslog receiver drops the connection after nearly every batch (recovered X of Y batches, reconnects N, peerClosedAtAccept M); delivery may be silently lost - check receiver session limits (connectionId=..., target=...)
+```
+
+Bu satır, alıcı tarafın kendi oturum sınırlarının veya bağlantı politikasının kontrol edilmesi gerektiğinin işaretidir — gönderen doğru şekilde yeniden deniyordur, ama bu şekilde davranan bir alıcıda, kümenin çekirdek gönderme tamponuna kabul edildiği an ile alıcının bir sonraki kapatmasının fark edildiği an arasında yine de kayıt kaybı olabilir.
+
+:::info
+
+İki JVM sistem özelliği bu davranışı düğüm genelinde ayarlar; ikisi de yalnızca Apinizer'ın TCP syslog gönderici için geçerlidir, başka bir connector'ı etkilemez.
+
+- `-Dapinizer.syslog.connectLivenessMillis=<milisaniye>` — bağlantı-anı canlılık okumasının, alıcının sessiz ve sağlıklı olduğuna karar vermeden önce ne kadar bekleyeceği. Varsayılan **100 ms**, üst sınır 2000 ms; `0` kontrolü tamamen kapatır ve APNZ-6839 öncesi davranışa döner: oturumu kabul anında kapatan bir alıcı ancak bir sonraki yazmada fark edilir.
+- `-Dapinizer.syslog.minReconnectIntervalMillis=<milisaniye>` — aynı soket üzerinde bir yazma hatasını izleyen iki yeniden bağlanma arasındaki en kısa süre. Varsayılan **100 ms**, üst sınır 5000 ms; `0` bu hız sınırlamasını kaldırır. Bu ayar ilk bağlantıyı, yukarıdaki proaktif boşta-yenilemeyi veya yarı-açık sağlık probunu etkilemez — onların zaten kendi, daha uzun aralıkları vardır.
+
+Aralık dışı veya ayrıştırılamayan bir değer, bağlantıyı başarısız kılmak yerine varsayılana düşer ve uyarı olarak loglanır.
+
+:::
+
+Yukarıda açıklanan periyodik soket-başı özet artık iki sayaç daha raporlar: `reconnects`, o soket üzerinde açılan taze TCP bağlantısı sayısı (ilk bağlantı da sayılır, yani hiç kopmamış bir soket bile `1` gösterir) ve `peerClosedAtAccept`, bu bağlantılardan kaçının bağlantı-anı canlılık kontrolü tarafından açıldıktan hemen sonra kapalı bulunduğu. Sıfırdan büyük bir `peerClosedAtAccept` sayısı, arızanın ağ yolunda veya Apinizer tarafında değil, alıcı tarafta olduğu anlamına gelir — bir oturum sınırı, bir kaynak-IP reddi ya da aradaki bir yük dengeleyici.
+
 ## Büyük Mesajları Bölme {#buyuk-mesajlari-bolme}
 
 :::info
@@ -715,8 +742,7 @@ Bu adımda, mevcut connection'ları yedekleme, farklı ortamlara taşıma veya p
       </Card>
       
       <Card title="Yöntem 2: Liste Ekranından" icon="list">
-        - Connection listesinde satır sonundaki **⋮** menüsünden **Export** seçeneğini tıklayın.
-        - ZIP dosyası otomatik olarak indirilir.
+        Satır sonundaki **⋮** menüsünde artık iki kalem vardır: birincil **Export**, bu connection ön-seçili olarak Dışa/İçe Aktarma Sihirbazı'nı açar — sertifika/key store'u ve varsa `${DEĞİŞKEN}` referansları bağımlılık adımında otomatik yüzeye çıkar; ikincil **Export as File** (Dosya Olarak Dışa Aktar) ise sihirbaza girmeden aşağıda anlatılan ZIP dosyasını doğrudan indirir.
       </Card>
       
       <Card title="Dosya Formatı" icon="file-zipper">
@@ -742,10 +768,9 @@ Bu adımda, mevcut connection'ları yedekleme, farklı ortamlara taşıma veya p
   <Accordion title="İçe Aktarma (Import)">
     <CardGroup cols={2}>
       <Card title="İçe Aktarma Adımları" icon="upload">
-        - Ana listede **[Import Syslog Bağlantısı]** butonuna tıklayın.
-        - İndirilen ZIP dosyasını seçin.
-        - Sistem kontrolleri: Format geçerli mi? İsim çakışması var mı? Bağımlılıklar mevcut mu?
-        - Ardından **[Import]** butonuna tıklayın.
+        - Ana listedeki **[Import Syslog Bağlantısı]** butonuna tıklayın — bu buton artık tip **Bağlantı (Connection)** ön-seçili olarak Dışa/İçe Aktarma Sihirbazı'nın içe aktarma adımını açar (Administration'dan açıldığında Admin kapsamında); eski yükleme diyaloğu kaldırıldı.
+        - Dışa aktarılan paketi seçin ve sihirbazın adımlarını izleyin.
+        - Sihirbaz, siz onaylamadan önce formatı, isim çakışmasını ve bağımlılıkların durumunu kontrol eder.
       </Card>
       
       <Card title="İçe Aktarma Senaryoları" icon="info-circle">

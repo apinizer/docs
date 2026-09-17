@@ -157,7 +157,7 @@ Alarm, sisteminizdeki belirli koşulları sürekli olarak kontrol eden ve bu ko�
 Alarmın ne zaman tetikleneceğini belirler. Tetiklenme tipi seçici **aranabilir** ve tipleri üç
 **kategoriye** göre gruplar; her tip listede bir **kategori rozeti** ile gösterilir:
 
-- **Infrastructure (Altyapı)**: Kubernetes pod/node sağlığı, K8S Node CPU, Elasticsearch sağlık/CPU/disk
+- **Infrastructure (Altyapı)**: Kubernetes pod/node sağlığı, K8S Node CPU, Elasticsearch sağlık/CPU/disk, Gateway Thread Sayısı, Gateway Heap Kullanım Yüzdesi, Gateway Deadlock Sayısı, Gateway Executor Havuzu Doluluk Yüzdesi, Gateway Bağlantı Havuzu Kullanım Yüzdesi, Gateway GC Süresi Yüzdesi
 - **Platform**: API Traffic (logların veritabanında olması), SSL/JWK kalan süre, uygulama log sayısı
 - **AI**: AI Gateway metrikleri (token kullanımı, günlük maliyet, guardrail/PII sayısı, provider failover,
   kota, katalog drift, shadow AI)
@@ -167,6 +167,12 @@ Alarmın ne zaman tetikleneceğini belirler. Tetiklenme tipi seçici **aranabili
     - Pod / Node Sağlık Durumu
     - K8S Node CPU Yüzdesi
     - Elasticsearch Sağlık / CPU / Disk Yüzdesi
+    - Gateway Thread Sayısı
+    - Gateway Heap Kullanım Yüzdesi
+    - Gateway Deadlock Sayısı
+    - Gateway Executor Havuzu Doluluk Yüzdesi
+    - Gateway Bağlantı Havuzu Kullanım Yüzdesi
+    - Gateway GC Süresi Yüzdesi
   </Card>
   <Card title="Platform" icon="database">
     - API Traffic (Logların Veritabanında Olması)
@@ -184,19 +190,87 @@ Alarmın ne zaman tetikleneceğini belirler. Tetiklenme tipi seçici **aranabili
   <Accordion title="Kubernetes Tetiklenme Tipleri">
     **Pod Sağlık Durumu**: Kubernetes pod'larının sağlık durumunu kontrol eder. Herhangi bir pod sağlıksız olduğunda alarm tetiklenir. Eşik değeri gerektirmez.
 
+    Yalnızca Apinizer bileşenlerine ait pod'lar değerlendirilir; aynı namespace'i paylaşan diğer uygulamaların pod'ları ile işini tamamlamış (Succeeded) pod'lar kapsam dışında bırakılır. Pod'un hazır olup olmadığı, Kubernetes'in pod düzeyindeki Ready durumundan okunur; böylece pod'a sonradan eklenen APM/servis ağı yan konteynerleri sonucu değiştirmez.
+
     **Node Sağlık Durumu**: Kubernetes node'larının sağlık durumunu kontrol eder. Herhangi bir node sağlıksız olduğunda alarm tetiklenir. Eşik değeri gerektirmez.
 
     **K8S Node CPU Yüzdesi**: Kubernetes node'larının CPU kullanım yüzdesini kontrol eder. CPU kullanım yüzdesi eşik değerini aştığında alarm tetiklenir. Eşik değeri gerektirir (örn: 80 = %80).
   </Accordion>
 
+  <Accordion title="Gateway Tetiklenme Tipleri">
+    Aşağıdaki altı **Gateway tanılama** tetikleyicisi ortak bir mekanizma paylaşır: ortam üzerinde tanımlı
+    Gateway Management API adres(ler)i (Ortam > Management API ayarları) üzerinden her API Gateway worker
+    pod'u ayrı ayrı okunur ve değerlendirilir; herhangi bir pod'un (ya da havuzun) değeri eşiği **aştığında**
+    alarm tetiklenir (katı karşılaştırma: tam eşik değerindeki satır *Uyarı* olarak gösterilir, alarm
+    tetiklenmez). Bağlantı tanımı gerektirmezler; ancak ortamda en az bir Gateway Management API adresi
+    tanımlı olmalıdır. İsteğe bağlı **Ortam** seçicisi kontrolü tek bir ortamla sınırlar; boş bırakıldığında
+    yayındaki tüm ortamlar kontrol edilir. Okunamayan bir pod ya da adres değer olmadan *Uyarı* olarak
+    listelenir ve tek başına alarmı tetiklemez; hiçbir pod okunamadığında (örneğin tüm adresler erişilemez
+    olduğunda, ortamda management adresi tanımlı olmadığında ya da seçili ortam silindiğinde) koşu
+    *Hata Oluştu* olarak kaydedilir ve değerlendirme 70 saniye içinde zaman aşımına uğrar.
+
+    Satır ayrıntısı, sağlıklı bir pod'un çökmüş sanılmaması için iki farklı *Uyarı* nedenini birbirinden
+    ayırır: **"unreachable: ..."** adresin kendisine ulaşılamadığı (ağ hatası, HTTP hatası ya da zaman
+    aşımı) anlamına gelir; **"responded, but ..."** ise pod normal cevap verdi ama bu tetikleyicinin
+    ihtiyaç duyduğu belirli değer cevapta yoktu (örneğin daha yeni bir tanılama alanından önceki eski bir
+    worker sürümü) anlamına gelir — bu durumda pod'un kendisi ayaktadır.
+
+    **Gateway Thread Sayısı (Gateway Thread Count)**: Her pod'un anlık JVM thread sayısını okur. Eşik
+    değeri gerektirir (örn: 2000 = 2000 thread). Alarm geçmişinde her pod ortamı, IP'si ve ölçülen thread
+    sayısıyla listelenir. E-posta ve webhook şablonlarında eşik `<n> threads` biçiminde yazılır.
+
+    **Gateway Heap Kullanım Yüzdesi (Gateway Heap Usage Percentage)**: Her pod'un JVM heap kullanımını
+    `kullanılan / maksimum × 100` olarak hesaplar. JVM'i heap üst sınırı bildirmeyen (`-1`) bir pod, değer
+    olmadan *Uyarı* olarak listelenir. Eşik değeri yüzde (%) cinsindendir; önerilen eşik **%85**.
+
+    **Gateway Deadlock Sayısı (Gateway Deadlock Count)**: Her pod'daki deadlock'a girmiş thread sayısını
+    okur. Yeni bir alarmda bu tip seçildiğinde eşik otomatik olarak **0** gelir (elle girilen ya da kayıtlı bir eşik değiştirilmez) — bu tetikleyicide %10'luk bir uyarı bandı yoktur, 0 değeri *Normal*, 1 ve
+    üzeri doğrudan alarmı tetikler.
+
+    **Gateway Executor Havuzu Doluluk Yüzdesi (Gateway Executor Pool Saturation Percentage)**: Her pod'daki
+    her executor havuzu için `aktif / kapasite × 100` hesaplanır; satır adı "pod / havuz adı" biçimindedir,
+    bir pod'da birden fazla havuz varsa birden fazla satır oluşur. Kapasite, havuzun maksimum boyutu ya da
+    sınırsız (scheduled/cached) havuzlarda çekirdek boyutudur. Satır ayrıntısında kuyruk uzunluğu ve
+    reddedilen görev sayısı da gösterilir. Eşik değeri yüzde (%) cinsindendir; önerilen eşik **%85**.
+
+    **Gateway Bağlantı Havuzu Kullanım Yüzdesi (Gateway Connection Pool Usage Percentage)**: Her pod'daki
+    her bağlantı havuzu için `leased / maxTotal × 100` hesaplanır; satır adı "pod / havuz" biçimindedir.
+    Bekleyen (pending) istek sayısı sıfırdan büyükse satır ayrıntısında gösterilir ve satırı eşiğin altında
+    olsa bile *Uyarı* durumuna yükseltir. `maxTotal` tanımlamayan bir havuz değer olmadan *Uyarı* olarak
+    listelenir. Eşik değeri yüzde (%) cinsindendir; önerilen eşik **%85**.
+
+    **Gateway GC Süresi Yüzdesi (Gateway GC Time Percentage)**: Her pod için `toplam GC süresi / JVM
+    çalışma süresi × 100` hesaplanır — her iki değer de JVM başlangıcından beri **kümülatiftir** (son
+    aralığın payı değil, ömür boyu pay). Eşik değeri yüzde (%) cinsindendir; önerilen eşik **%5**.
+  </Accordion>
+
   <Accordion title="Elasticsearch Tetiklenme Tipleri">
-    **Elasticsearch Sağlık Durumu**: Elasticsearch cluster'ının sağlık durumunu kontrol eder. Cluster sağlıksız olduğunda alarm tetiklenir. Eşik değeri gerektirmez. Bağlantı tanımı gerektirir.
+    **Elasticsearch Sağlık Durumu**: Elasticsearch cluster'ının sağlık durumunu kontrol eder. Cluster sağlıksız olduğunda alarm tetiklenir. Değerlendirme satırının adı, sabit bir metin değil kümenin yanıtta
+    bildirdiği **gerçek adıdır** (cluster_name). Eşik değeri gerektirmez. Bağlantı tanımı gerektirir.
 
-    **Elasticsearch CPU Yüzdesi**: Elasticsearch cluster'ının CPU kullanım yüzdesini kontrol eder. CPU kullanım yüzdesi eşik değerini aştığında alarm tetiklenir. Eşik değeri gerektirir (örn: 80 = %80). Bağlantı tanımı gerektirir.
+    **Elasticsearch CPU Yüzdesi**: Elasticsearch cluster'ındaki **her node ayrı ayrı** kontrol edilir; her
+    node için "Elasticsearch düğümü" etiketiyle bir satır oluşur (düğüm adı + ölçülen yüzde + durum
+    rozeti). Herhangi bir node'un CPU kullanım yüzdesi eşik değerini aştığında alarm tetiklenir; ihlal
+    açıklamasında eşiği aşan düğümlerin adları ve "toplam kaç düğümden kaçının aştığı" bilgisi birlikte
+    yer alır. Eşik değeri gerektirir (örn: 80 = %80). Bağlantı tanımı gerektirir.
 
-    **Elasticsearch Disk Yüzdesi**: Elasticsearch cluster'ının disk kullanım yüzdesini kontrol eder. Disk kullanım yüzdesi eşik değerini aştığında alarm tetiklenir. Eşik değeri gerektirir (örn: 90 = %90). Bağlantı tanımı gerektirir.
+    **Elasticsearch Disk Yüzdesi**: Elasticsearch cluster'ındaki **her node ayrı ayrı** kontrol edilir; her
+    node "Elasticsearch düğümü" etiketiyle listelenir. Herhangi bir node'un disk kullanım yüzdesi eşik
+    değerini aştığında alarm tetiklenir; ihlal açıklamasında eşiği aşan düğümlerin adları ve "toplam kaç
+    düğümden kaçının aştığı" bilgisi birlikte yer alır. Disk istatistiği bildirmeyen node'lar (yalnız
+    koordinasyon yapan node'lar) değerlendirmeye alınmaz. Eşik değeri gerektirir (örn: 90 = %90). Bağlantı
+    tanımı gerektirir.
 
     **Elasticsearch Loglarının Veritabanında Olması**: Elasticsearch loglarının veritabanında olup olmadığını kontrol eder. Loglar veritabanında olduğunda alarm tetiklenir. Eşik değeri gerektirmez.
+
+    :::note
+
+    Elasticsearch'e ulaşılamadığında — bağlantı tanımsız ya da pasif, kümeye erişilemedi ya da küme hiçbir
+    düğüm istatistiği döndürmedi — alarm sonucu **Hata Oluştu** olarak kaydedilir ve özet **"KONTROL
+    EDİLEMEDİ"** der; bu üç durum birbirinden ayrı, açık nedenlerle gösterilir. Özet artık bu durumlarda
+    yanlışlıkla "kontrol edildi" demez.
+
+    :::
   </Accordion>
 
   <Accordion title="Sertifika Tetiklenme Tipleri">
@@ -253,6 +327,12 @@ Eşik değeri, alarmın ne zaman tetikleneceğini belirler. Tetiklenme tipine g�
 | Tetiklenme Tipi | Birim | Örnek Değer | Açıklama |
 |----------------|------|-------------|----------|
 | K8S Node CPU Yüzdesi | % | 80 | CPU kullanımı %80'i aştığında |
+| Gateway Thread Sayısı | Thread | 2000 | Herhangi bir gateway worker pod'unun anlık thread sayısı 2000'i aştığında |
+| Gateway Heap Kullanım Yüzdesi | % | 85 | Herhangi bir pod'un heap kullanımı %85'i aştığında |
+| Gateway Deadlock Sayısı | Deadlock | 0 | Herhangi bir pod'da en az bir deadlock'a girmiş thread olduğunda |
+| Gateway Executor Havuzu Doluluk Yüzdesi | % | 85 | Herhangi bir pod/havuzda active/capacity oranı %85'i aştığında |
+| Gateway Bağlantı Havuzu Kullanım Yüzdesi | % | 85 | Herhangi bir pod/havuzda leased/maxTotal oranı %85'i aştığında |
+| Gateway GC Süresi Yüzdesi | % | 5 | Herhangi bir pod'un JVM başlangıcından beri kümülatif GC süresi payı %5'i aştığında |
 | Elasticsearch CPU Yüzdesi | % | 80 | CPU kullanımı %80'i aştığında |
 | Elasticsearch Disk Yüzdesi | % | 90 | Disk kullanımı %90'ı aştığında |
 | SSL Sertifika Kalan Süre | Gün | 30 | Kalan süre 30 günden az olduğunda |
@@ -280,6 +360,7 @@ Bazı tetiklenme tipleri için Elasticsearch bağlantısı gereklidir:
 
 **Bağlantı Gerektirmeyen Tetiklenme Tipleri:**
 - Kubernetes tetiklenme tipleri
+- Gateway Thread Sayısı, Gateway Heap Kullanım Yüzdesi, Gateway Deadlock Sayısı, Gateway Executor Havuzu Doluluk Yüzdesi, Gateway Bağlantı Havuzu Kullanım Yüzdesi, Gateway GC Süresi Yüzdesi (bağlantı yerine ortamda Gateway Management API adresi gerektirir)
 - Sertifika tetiklenme tipleri
 - Uygulama log tetiklenme tipleri
 - AI tetiklenme tipleri
@@ -407,9 +488,15 @@ Altında 5 özet metrik kartı yer alır:
   <Accordion title="Trigger history (Tetiklenme geçmişi)">
     Her değerlendirmenin sonucu — sayfalı tablo:
     - **Evaluated at**: Değerlendirme tarih/saati
-    - **Value**: Ölçülen değer
+    - **Value**: Ölçülen değer. Gateway Deadlock Sayısı için değer `deadlock` birim eki ile gösterilir; diğer tetikleyici tiplerinde değer çıplak (birimsiz) gösterilir.
     - **Result**: 🟢 Eşik Aşılmadı · 🔴 Eşik Aşıldı · 🟠 Hata Oluştu
     - **Summary**: Kontrol özeti
+    - **Detail**: varsa özetin altında gösterilir — daha uzun açıklama (örn. hangi pod/adresin
+      okunamadığı ya da kaç nesnenin eşiği aştığı)
+
+    Elasticsearch tetikleyicilerinin özet ve açıklama metinleri artık arayüz dilinde gösterilir. Bu
+    değişiklikten önce oluşmuş geçmiş kayıtları ham İngilizce metinle görünmeye devam eder; bu beklenen bir
+    davranıştır.
   </Accordion>
 
   <Accordion title="Configuration (Yapılandırma)">
@@ -431,7 +518,11 @@ Görüntüleme ekranının sağ kolonundaki **Live check** paneli, alarmın koş
   altında son değerlendirme saati görünür.
 - **Worst object**: Şu an en kötü durumdaki nesnenin değeri ve eşik işaretli bar.
 - **Objects evaluated**: Değerlendirilen nesneler ve "n / m breached" rozeti.
-- **Last 12 evaluations**: Son değerlendirmelerin çizgi grafiği + kırmızı kesikli eşik çizgisi.
+- **Last 12 evaluations (Son 12 değerlendirme)**: Sayısal değer üreten tetikleyicilerde (örn. Elasticsearch
+  CPU/Disk Yüzdesi) son değerlendirmelerin çizgi grafiği + kırmızı kesikli eşik çizgisi gösterilir. Sayısal
+  değer üretmeyen durum kontrollerinde (örn. Elasticsearch/Pod/Node Sağlık Durumu) ve hatayla sonuçlanan
+  koşularda, grafik yerine koşu başına renkli bir durum çubuğu gösterilir (yeşil: eşik aşılmadı, kırmızı:
+  eşik aşıldı, turuncu: hata oluştu); çubuğun üzerine gelindiğinde tarih ve sonuç görünür.
 - **Sonuç kutusu**: "Condition met — the alert would fire" (kırmızı), "Condition not met" (yeşil) veya
   değerlendirme hatası (amber).
 
@@ -606,6 +697,16 @@ Alarm listesi sayfasında tüm alarmlarınızı görüntüleyebilir ve yönetebi
     - Kubernetes cluster bağlantısını kontrol edin
     - Sistem kaynaklarını kontrol edin
     - Alarm yapılandırmasını kontrol edin
+  </Accordion>
+
+  <Accordion title="Aynı Alarm Geçmişte Aynı Saatle İki Kez Görünüyor">
+    **Olası Neden:**
+    - API Manager birden fazla kopya (replica) ile çalışıyor ve aynı kontrol iki kopyada aynı anda çalışmış
+
+    **Çözüm:**
+    - API Manager'ı güncel sürüme yükseltin: eş zamanlı çalışan kopyalarda her kontrol artık yalnızca bir kopyada çalışır
+    - Bir sonraki kontrol aralığından sonra alarm geçmişini tekrar inceleyerek tek satır oluştuğunu doğrulayın
+    - Tekrar eden kayıtlar sürüyorsa alarmı silip yeniden oluşturun
   </Accordion>
 
   <Accordion title="Çok Fazla Bildirim Geliyor">
