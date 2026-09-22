@@ -1,0 +1,387 @@
+---
+title: "AI Loop Guard Policy"
+description: "AI Loop Guard policies detect the same request being replayed too many times within a sliding time window — an agent stuck in a retry loop, or a client hammering the same prompt — and flag or block it. It is a traffic-shape guardrail, not a content guardrail."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-loop-guard
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## How Detection Works
+
+The policy builds an isolation key from the model, the API proxy, the caller's identity and the exact request body, and atomically increments a sliding-window counter for that key. If the same request is seen more than `maxRepeats` times within `windowSeconds`, the configured `action` applies.
+
+This is distinct from the [Semantic Cache Policy](/api-reference/policies/policies/policy-ai-semantic-cache) (which serves cached answers for cost, and never blocks) and from content-based guardrails (which inspect what the request *says*, not how often it repeats).
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| windowSeconds | integer | No | 60 | Sliding-window size, in seconds, over which repeats are counted. Must be positive. |
+| maxRepeats | integer | No | 5 | Repeat threshold within the window. Must be positive. |
+| action | string | No | `FLAG` | `FLAG` lets the request pass and records a guardrail hit for reporting. `BLOCK` rejects the request once the threshold is exceeded. |
+| failOpenOnCacheError | boolean | No | true | When the counter cache is unreachable: `true` lets the request pass unchecked; `false` rejects it. |
+| anonymousHandling | string | No | `SKIP` | Behaviour when the caller's identity cannot be resolved. `SKIP` bypasses the guard for that request. `SHARED_POOL` counts anonymous traffic in one shared counter (no per-caller isolation). `DENY` rejects the request with HTTP 401. |
+| countingMode | string | No | `ALL_REQUESTS` | Whether a request that was itself rejected by this guard still counts toward the window. `ALL_REQUESTS` counts every request, including rejected ones — the historical, backward-compatible behaviour, useful for slowing down an abusive caller. `ACCEPTED_ONLY` counts only requests that were let through, which keeps the counter from overshooting the limit once it is already at capacity. |
+| limitChangeAction | string | No | `NONE` | What happens to an already-open window's counter when `maxRepeats` changes on a redeploy. `NONE` leaves the counter untouched — the new limit takes effect only once the current window ends. `CLAMP` caps the counter to the *previous* limit, preserving real consumption without resetting it. `RESET` zeroes the counter, and only ever applies when the limit was raised. |
+
+:::note action: MASK is not meaningful here
+`action` accepts the same three values as other AI guardrails, but `MASK` has nothing to redact in a traffic-shape check — any non-`BLOCK` value is treated as `FLAG`.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-loop-guard",
+            "name": "agent-retry-guard",
+            "description": "Stop a stuck agent from replaying the same tool call",
+            "active": true,
+            "windowSeconds": 60,
+            "maxRepeats": 5,
+            "action": "BLOCK",
+            "failOpenOnCacheError": true,
+            "anonymousHandling": "SKIP",
+            "countingMode": "ALL_REQUESTS",
+            "limitChangeAction": "NONE"
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-loop-guard",
+    "description": "Stop a stuck agent from replaying the same tool call",
+    "active": true,
+    "windowSeconds": 60,
+    "maxRepeats": 5,
+    "action": "BLOCK",
+    "failOpenOnCacheError": true,
+    "anonymousHandling": "SKIP",
+    "countingMode": "ACCEPTED_ONLY",
+    "limitChangeAction": "CLAMP"
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Fields](#fields) above. `type` (`ai-loop-guard`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `windowSeconds` not positive; `maxRepeats` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/agent-retry-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-loop-guard",
+      "description": "Stop a stuck agent from replaying the same tool call",
+      "active": true,
+      "windowSeconds": 60,
+      "maxRepeats": 5,
+      "action": "BLOCK"
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+##### Full JSON Body Example — Tightening the Threshold
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-loop-guard",
+    "description": "Stop a stuck agent from replaying the same tool call",
+    "active": true,
+    "windowSeconds": 30,
+    "maxRepeats": 3,
+    "action": "BLOCK",
+    "limitChangeAction": "CLAMP"
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/agent-retry-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-loop-guard",
+      "active": true,
+      "windowSeconds": 30,
+      "maxRepeats": 3,
+      "action": "BLOCK"
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/agent-retry-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **`FLAG` is the default action.** A new policy only records guardrail hits for reporting until `action` is explicitly set to `BLOCK`.
+- **`countingMode: ALL_REQUESTS` is the historical default.** It counts rejected requests too, which slows down an abusive caller but can leave the counter sitting above the limit. Switch to `ACCEPTED_ONLY` when the count should reflect only traffic that actually reached the backend.
+- **`limitChangeAction` only matters at the moment `maxRepeats` changes**, and only for a window that is already open — it has no effect on every request, only on the redeploy that changes the limit.
+- **Fail-open by default.** `failOpenOnCacheError: true` lets traffic through when the counter cache is unreachable; set it to `false` for a fail-closed posture where an unverifiable request is rejected instead.
+- **Anonymous traffic is skipped by default.** With `anonymousHandling: SKIP`, requests whose identity cannot be resolved bypass the guard silently. If this policy sits before the authentication policy in the pipeline, every request can look anonymous here — put authentication policies first.
+
+## Related Documentation
+
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [Semantic Cache Policy](/api-reference/policies/policies/policy-ai-semantic-cache)

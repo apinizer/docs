@@ -56,6 +56,10 @@ The body is a polymorphic `ConnectionConfigLlm` object. It **must** include `"_c
   "apiVersion": "v1",
   "authScheme": "BEARER",
   "authHeaderName": "Authorization",
+  "credentialSource": "GATEWAY",
+  "apiKeyLocation": "HEADER",
+  "apiKeyPrefix": null,
+  "allowClientOverride": false,
   "apiKey": "sk-your-deepseek-api-key",
   "providerRpmLimit": 500,
   "providerTpmLimit": 100000,
@@ -98,10 +102,14 @@ The body is a polymorphic `ConnectionConfigLlm` object. It **must** include `"_c
 | organizationId | string | No | - | Organization identifier (OpenAI `org-...`) |
 | authScheme | string | No | provider default | Auth scheme enum constant (`BEARER`, `API_KEY_HEADER`, `BASIC`, `AWS_SIGV4`, `OAUTH2`, `NONE`, `CUSTOM`); auto-filled from `providerType` when null |
 | authHeaderName | string | No | provider default | Credential header name; auto-filled from `providerType` when blank |
-| apiKey | string | No | - | Primary auth secret (Bearer token, api-key). Encrypted at rest; never returned |
-| apiSecret | string | No | - | Secondary auth secret (e.g. AWS SigV4 secretKey). Encrypted at rest; never returned |
+| credentialSource | string | No | GATEWAY | Who supplies the credential: `GATEWAY` (this connection stores `apiKey`/`apiSecret`/`serviceAccountJson` and signs every request) or `CLIENT` (the gateway stores no credential and forwards the caller's own auth header untouched) |
+| apiKeyLocation | string | No | HEADER | Where the key travels on the upstream request: `HEADER` or `QUERY` (appended as `?<authHeaderName>=<key>`). Applies only to the API-key family of `authScheme` (`BEARER`, `API_KEY_HEADER`, `CUSTOM`) |
+| apiKeyPrefix | string | No | scheme default | Value prefix placed in front of the key. `null`/omitted uses the auth scheme's own prefix (`"Bearer "` for `BEARER`, none for `API_KEY_HEADER`/`CUSTOM`); `""` sends the raw key with no prefix |
+| allowClientOverride | boolean | No | false | `GATEWAY` mode only: if the incoming request already carries the auth header, that header is kept instead of the stored credential |
+| apiKey | string | No | - | Primary auth secret (Bearer token, api-key, Basic password, AWS access key). Encrypted at rest; never returned |
+| apiSecret | string | No | - | Secondary auth secret (AWS SigV4 secret key, Basic username; usually blank). Encrypted at rest; never returned |
 | region | string | No | - | Region (e.g. Bedrock AWS region) |
-| serviceAccountJson | string | No | - | GCP Vertex service-account JSON blob. Encrypted at rest; never returned |
+| serviceAccountJson | string | No | - | GCP Vertex service-account JSON blob (`OAUTH2` credential type). Encrypted at rest; never returned |
 | supportedModels | array | No | - | Per-provider model snapshots (see fields below) |
 | providerRpmLimit | integer | No | - | Organization-level requests-per-minute limit |
 | providerTpmLimit | integer | No | - | Organization-level tokens-per-minute limit |
@@ -111,13 +119,25 @@ The body is a polymorphic `ConnectionConfigLlm` object. It **must** include `"_c
 | allowedModelIds | array[string] | No | - | Integration-level model filter; empty/null = all models allowed |
 | metadata | array | No | - | Custom key/value metadata entries (see fields below) |
 
+#### Credential Type by `authScheme`
+
+`authScheme` decides which credential fields the connection actually uses. `credentialSource`,
+`apiKeyLocation` and `apiKeyPrefix` only apply to the API-key family.
+
+| authScheme | Credential type | Fields used |
+|------------|------------------|-------------|
+| `BEARER`, `API_KEY_HEADER`, `CUSTOM` | API key | `apiKey` (+ `apiKeyLocation`, `apiKeyPrefix`) |
+| `BASIC` | Basic auth | `apiKey` (password), `apiSecret` (username, optional) |
+| `AWS_SIGV4` | AWS Signature V4 | `apiKey` (access key), `apiSecret` (secret key), `region` |
+| `OAUTH2` | Service account JSON | `serviceAccountJson` |
+| `NONE` | No credential | — |
+
 :::note `endpoint` and `apiVersion` runtime semantics
 
 `endpoint` takes the **base address only** (e.g. `https://api.deepseek.com/v1`) — the request path
 (`/chat/completions`, `/embeddings`, `/audio/transcriptions`, `/audio/speech`, `/images/generations`,
 `/responses`) is appended automatically based on the request type. Putting a path in `endpoint`
-produces a broken URL at request time; to set a custom path, use
-[LLM Provider Definitions](/api-reference/llm-provider-definitions) instead. A query string embedded in
+produces a broken URL at request time. A query string embedded in
 `endpoint` is not lost, but it is relocated to the end of the resolved address, after the appended path.
 
 `apiVersion` only reaches the request URL for `AZURE_OPENAI` connections, where it is added as an
@@ -155,7 +175,11 @@ against the effective URL `endpoint` + path.
 | pricePerMillionInput | number | No | USD per 1M input tokens |
 | pricePerMillionOutput | number | No | USD per 1M output tokens |
 | pricePerMillionCached | number | No | USD per 1M cached tokens |
-| capabilities | array[string] | No | Model capabilities (e.g. `chat`, `function_calling`, `vision`) |
+| pricePerMillionCacheWrite | number | No | USD per 1M cache-write tokens (flat rate; overridden per TTL by `cacheWritePricesByTtl`) |
+| cacheWritePricesByTtl | array | No | Cache-write price per TTL — see [Cache-Write Price Fields](/api-reference/llm-models/create-llm-model#cache-write-price-cachewritepricesbyttl-fields) |
+| contextTierPrices | array | No | Long-context price tiers (input/output multipliers above a token threshold) — see [Context-Tier Price Fields](/api-reference/llm-models/create-llm-model#context-tier-price-contexttierprices-fields) |
+| serviceTierPrices | array | No | Provider service-tier price multipliers (batch/priority/flex) — see [Service-Tier Price Fields](/api-reference/llm-models/create-llm-model#service-tier-price-servicetierprices-fields) |
+| capabilities | array[string] | No | Capability tags; normalized on save — see [Capabilities Normalization](/api-reference/llm-models/create-llm-model#capabilities-normalization) |
 | modality | string | No | Modality enum constant (`TEXT`, `VISION`, `AUDIO`, `EMBEDDING`, `RERANK`, `MULTIMODAL`, `IMAGE`) |
 
 #### Metadata Entry Fields
@@ -262,8 +286,11 @@ curl -X POST \
   - `"_class": "llm"` is mandatory in the body
 - **Secret Fields (INV-06)**:
   - `apiKey`, `apiSecret` and `serviceAccountJson` are encrypted before persistence and never returned in read responses
+- **Credential Source & Transport**:
+  - `credentialSource: CLIENT` means this connection stores no credential — leave `apiKey`/`apiSecret`/`serviceAccountJson` blank; the gateway forwards the caller's own auth header instead
+  - `apiKeyLocation` and `apiKeyPrefix` only take effect when `authScheme` is `BEARER`, `API_KEY_HEADER` or `CUSTOM`
 - **Enum Serialization**:
-  - Enum values (`providerType`, `authScheme`, `deploymentType`, model `modality`) must be sent as the enum constant name (e.g. `DEEPSEEK`, `BEARER`, `CLOUD`, `TEXT`), not lowercase
+  - Enum values (`providerType`, `authScheme`, `credentialSource`, `apiKeyLocation`, `deploymentType`, model `modality`) must be sent as the enum constant name (e.g. `DEEPSEEK`, `BEARER`, `GATEWAY`, `HEADER`, `CLOUD`, `TEXT`), not lowercase
 - **Automatic Defaults**:
   - Blank endpoint/apiVersion/authScheme/authHeaderName/deploymentType are auto-filled from the `providerType` default
 - **Deploy on Save**:

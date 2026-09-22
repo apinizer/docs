@@ -1,0 +1,429 @@
+---
+title: "Groundedness Guard Policy"
+description: "The Groundedness Guard policy checks whether an LLM's response is actually supported by the RAG context your own proxy injected into the same request — an LLM-as-judge hallucination check, scoped narrowly to your own retrieved data."
+---
+
+## General Information
+
+### Policy Types
+
+```plaintext
+ai-groundedness-guard
+```
+
+Response-phase only, non-streaming responses only. Always judge-based — there is no cheap deterministic check for "is this text supported by that text", so a judge configuration is required.
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Scope
+
+This policy only checks the response against the RAG context **your own Apinizer proxy retrieved and injected in the same request/response cycle** — it is not a general "is this fact true" check against outside knowledge, and it produces no per-claim citations. It only detects the retrieved context when the RAG Injection policy on the same proxy uses `injectionMode=TEMPLATE` (the default template, or a custom one that still contains the `<CONTEXT>...</CONTEXT>` markers). When no RAG context is detectable — including a request the RAG Injection policy did not touch at all — this policy is a silent no-op, not an error.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| action | string | No | `FLAG` (monitoring-only, default) or `BLOCK`. |
+| failMode | string | No | `FAIL_OPEN` or `FAIL_CLOSED` — behaviour when the judge call itself errors or times out. Default `FAIL_CLOSED`: the response is blocked rather than let an unverified answer through. |
+| latencyMode | string | No | `INLINE`, `ASYNC` or `SHADOW`. Default `INLINE` — this is a response-blocking security check, so it does not default to fire-and-forget the way some other AI guardrails do. |
+| maxWaitMs | integer | No | Bounded max wait (ms) for `ASYNC`/`INLINE`. Default `3000`. |
+| externalGuardrail | object | **Yes** | The judge configuration. See [Judge fields](#judge-fields). Always required — this policy has no builtin, non-judge leg. |
+| maxContextChars | integer | No | Truncation cap (chars) for the retrieved context before it is composed into the judge's input. Default `6000`. |
+| maxResponseChars | integer | No | Truncation cap (chars) for the response text before it is composed into the judge's input. Default `4000`. |
+
+### Judge fields
+
+`externalGuardrail` is always `type: "llm-judge"` for this policy — there is no `http-dlp` option, unlike the DLP-family guardrails.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | Must be `llm-judge`. |
+| llmProviderName | string | Yes | Name of the LLM connection to call as the judge. Resolved server-side; an unknown name is rejected with `400`. |
+| modelId | string | No | Judge model identifier. |
+| promptTemplate | string | **Yes** | The judge's prompt template. Unlike the Prompt Guard policy, a blank template is **rejected**, not defaulted — a blank template falls back to a generic safety-taxonomy judge that does not answer a groundedness question at all. |
+| jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. |
+| maxOutputTokens | integer | No | Judge max output tokens. |
+| timeoutMs | integer | No | HTTP call timeout (ms). |
+| maxInputChars | integer | No | Max input characters sent to the judge. |
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [],
+        "responsePolicyList": [
+          {
+            "type": "ai-groundedness-guard",
+            "name": "kb-groundedness-check",
+            "description": "Flags support-chat answers not grounded in the retrieved KB context",
+            "active": true,
+            "action": "FLAG",
+            "failMode": "FAIL_CLOSED",
+            "latencyMode": "INLINE",
+            "maxWaitMs": 3000,
+            "maxContextChars": 6000,
+            "maxResponseChars": 4000,
+            "externalGuardrail": {
+              "type": "llm-judge",
+              "llmProviderName": "openai-judge",
+              "modelId": "gpt-4o-mini",
+              "promptTemplate": "Task: Determine whether the ASSISTANT RESPONSE is fully grounded in the RETRIEVED CONTEXT...\n\n<<<PROMPT>>>",
+              "jsonMode": false,
+              "maxOutputTokens": 200,
+              "timeoutMs": 8000,
+              "maxInputChars": 12000
+            }
+          }
+        ],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+:::note Masked secrets
+The judge's LLM connection carries its own credentials in the LLM provider connection config, not in this policy — there is no secret field on `ai-groundedness-guard` itself.
+:::
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "RESPONSE",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-groundedness-guard",
+    "description": "Flags support-chat answers not grounded in the retrieved KB context",
+    "active": true,
+    "action": "FLAG",
+    "failMode": "FAIL_CLOSED",
+    "latencyMode": "INLINE",
+    "maxWaitMs": 3000,
+    "maxContextChars": 6000,
+    "maxResponseChars": 4000,
+    "externalGuardrail": {
+      "type": "llm-judge",
+      "llmProviderName": "openai-judge",
+      "modelId": "gpt-4o-mini",
+      "promptTemplate": "Task: Determine whether the ASSISTANT RESPONSE is fully grounded in the RETRIEVED CONTEXT...\n\n<<<PROMPT>>>",
+      "jsonMode": false,
+      "maxOutputTokens": 200,
+      "timeoutMs": 8000,
+      "maxInputChars": 12000
+    }
+  }
+}
+```
+
+#### Body Fields
+
+See [Fields](#fields) and [Judge fields](#judge-fields) above.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `maxWaitMs`/`maxContextChars`/`maxResponseChars` not positive; `externalGuardrail` missing; `externalGuardrail.type` blank; `externalGuardrail.llmProviderName` blank or does not resolve to an existing LLM connection in the project; `externalGuardrail.promptTemplate` blank; `externalGuardrail.timeoutMs`/`maxOutputTokens`/`maxInputChars` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/kb-groundedness-check/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "RESPONSE",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-groundedness-guard",
+      "description": "Flags ungrounded support-chat answers",
+      "active": true,
+      "action": "FLAG",
+      "externalGuardrail": {
+        "type": "llm-judge",
+        "llmProviderName": "openai-judge",
+        "promptTemplate": "Task: Determine whether the ASSISTANT RESPONSE is fully grounded in the RETRIEVED CONTEXT...\n\n<<<PROMPT>>>"
+      }
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the full `externalGuardrail` block, not just the field you are changing.
+
+##### Full JSON Body Example — Switching to BLOCK
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "RESPONSE",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-groundedness-guard",
+    "active": true,
+    "action": "BLOCK",
+    "failMode": "FAIL_CLOSED",
+    "externalGuardrail": {
+      "type": "llm-judge",
+      "llmProviderName": "openai-judge",
+      "modelId": "gpt-4o-mini",
+      "promptTemplate": "Task: Determine whether the ASSISTANT RESPONSE is fully grounded in the RETRIEVED CONTEXT...\n\n<<<PROMPT>>>",
+      "timeoutMs": 8000
+    }
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/kb-groundedness-check/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "RESPONSE",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-groundedness-guard",
+      "active": true,
+      "action": "BLOCK",
+      "externalGuardrail": {
+        "type": "llm-judge",
+        "llmProviderName": "openai-judge",
+        "promptTemplate": "Task: Determine whether the ASSISTANT RESPONSE is fully grounded in the RETRIEVED CONTEXT...\n\n<<<PROMPT>>>"
+      }
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/kb-groundedness-check/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **A missing or unresolvable judge is a visible skip, not a silent pass.** If the judge configuration cannot be resolved at runtime, the response is forwarded unchecked and a skip attribute is recorded — check your traffic reports for it rather than assuming every response was verified.
+- **A judge call failure defaults to blocking the response.** `failMode=FAIL_CLOSED` (default) rejects the response when the judge itself errors or times out, so a hallucination can never slip through just because the judge was unreachable. Set `FAIL_OPEN` only if letting an unverified response through is preferable to blocking it for your use case — the platform still logs a warning either way.
+- **Detection depends on the RAG Injection policy's `injectionMode`.** Only `injectionMode=TEMPLATE` (with the default `<CONTEXT>`/`</CONTEXT>` markers, or a custom template that keeps them) leaves a detectable trace of the retrieved context. With `PREPEND_USER`, `PREPEND_SYSTEM` or `SYSTEM_SUFFIX`, this policy cannot tell "no RAG ran" apart from "RAG ran in an undetectable mode" — both are treated as a silent no-op.
+- **Streaming responses are not checked.** This policy only evaluates non-streaming (unary) responses.
+- **Run PII Mask and DLP Guard before this policy in the response pipeline.** The judge call is itself an egress of response content to an external LLM provider, so it must only ever see already-masked/scrubbed text.
+- **A blank judge prompt template is rejected outright**, not defaulted to a generic safety judge — a generic safety-taxonomy prompt does not answer a groundedness question and would produce meaningless verdicts.
+
+## Related Documentation
+
+- [AI Guardrails](/en/ai-gateway/advanced-guardrails)
+- [Retrieval-Augmented Generation (RAG)](/en/ai-gateway/rag-injection)
+- [RAG Injection Policy](/api-reference/policies/policies/policy-ai-rag-injection)

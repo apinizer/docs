@@ -1,0 +1,504 @@
+---
+title: "AI Topic Guard Policy"
+description: "AI Topic Guard policies keep LLM traffic on an allowed set of topics — and off a denied set — using embedding-based similarity, with optional reuse of a built-in content-safety category catalog and an external adapter as a second opinion."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-topic-guard
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Topic Matching
+
+The prompt is embedded and compared, by cosine similarity, against the descriptions in `allowedTopics` and `deniedTopics`. A denied-topic match is evaluated **before** `allowedTopics`, and wins — a prompt matching a denied topic is flagged/blocked even if it would otherwise pass the allow list.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| allowedTopics | array of strings | No | Admin-defined descriptions of the topics the traffic is allowed to be about. |
+| similarityThreshold | number | No | Minimum cosine similarity, `-1.0` to `1.0`, for the prompt to be considered on-topic against `allowedTopics`. |
+| action | string | No | `FLAG` or `BLOCK` on an off-topic (allow-list) detection. |
+| deniedTopics | array of strings | No | Admin-defined descriptions of topics that are never allowed, regardless of `allowedTopics`. Can be populated by hand, or copied from the platform's built-in content-safety category catalog (Guardrails hub → Content Safety tab, MLCommons AILuminate hazard categories) — either way, this field stores plain text; no catalog reference is retained. |
+| deniedSimilarityThreshold | number | No | Minimum cosine similarity, `-1.0` to `1.0`, for a `deniedTopics` match. `null` falls back to `similarityThreshold`. |
+| deniedAction | string | No | `FLAG` or `BLOCK` on a denied-topic match. `null` falls back to `action`. |
+| embeddingProviderName | string | No | Name of the LLM provider connection config used to compute embeddings. |
+| embeddingModelId | string | No | Embedding model identifier. |
+| embeddingDimension | integer | No | Expected embedding vector dimension. |
+
+---
+
+## Evaluation Timing
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| latencyMode | string | No | `INLINE` (default) or `ASYNC`. `INLINE` blocks the request thread for the embed + similarity check; `ASYNC` runs it bounded by `maxWaitMs`. |
+| maxWaitMs | integer | Conditional | Max wait in milliseconds under `ASYNC`. Must be positive if set. |
+| failOpenOnError | boolean | No | Whether an embedding-call failure lets the request pass (`true`, default) or blocks it (`false`). |
+
+---
+
+## External Guardrail
+
+`engine` decides which decision sources feed the policy's verdict.
+
+| Value | Behaviour |
+|-------|-----------|
+| `BUILTIN` (default) | Only the embedding similarity check (`allowedTopics`/`deniedTopics`) is evaluated. |
+| `BUILTIN_PLUS_EXTERNAL` | The similarity check and the external adapter both run. Either one can trigger a block. |
+| `EXTERNAL_ONLY` | Only the external adapter is evaluated. |
+
+`failMode` governs what happens when the external adapter call itself errors or times out:
+
+| Value | Behaviour |
+|-------|-----------|
+| `FAIL_CLOSED` (default) | The request is blocked. |
+| `FAIL_OPEN` | The request continues; a `FAIL_OPEN` signal is recorded so the bypass is visible. |
+
+### `externalGuardrail` Fields
+
+Only the `llm-judge` adapter is supported on this policy.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | Must be `llm-judge`. |
+| llmProviderName | string | Yes | Name of the LLM provider connection config used to run the judge call. Required whenever `externalGuardrail` is present, regardless of `type`. |
+| promptTemplate | string | Conditional | Judge prompt template. **Required, non-blank, for this policy** — unlike the Prompt Guard policy, a blank template here falls back to a generic native safety judge that does not actually answer a topic-relevance question, so it is rejected at save time instead. |
+| modelId | string | No | Judge model identifier. |
+| jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. |
+| maxOutputTokens | integer | No | Judge max output tokens. Must be positive if set. |
+| timeoutMs | integer | No | HTTP call timeout in milliseconds. Must be positive if set. |
+| maxInputChars | integer | No | Max input characters sent to the judge. Must be positive if set. |
+
+---
+
+## Other Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| decodeEncodedContent | boolean | No | Decodes base64/hex/URL/unicode segments before embedding. Default `false`. |
+| includeSystemPrompts | boolean | No | Also embeds `system`-role messages in the topic comparison. `null` means `false` — only the last user message is embedded by default. |
+| includeAssistantPrompts | boolean | No | Also embeds `assistant`-role messages. `null` means `false`. |
+| includeToolPrompts | boolean | No | Also embeds `tool`-role messages. `null` means `false`. |
+
+:::note Opt-in, not opt-out
+Unlike the role-scope fields on the Prompt Guard policy, `includeSystemPrompts`/`includeAssistantPrompts`/`includeToolPrompts` here default to embedding **only the last user message**. Turning any of them on switches this guard to whole-conversation scanning, which changes embedding size, cost and similarity scores — opt in deliberately.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-topic-guard",
+            "name": "support-scope-guard",
+            "description": "Keeps the support assistant on billing/account topics",
+            "active": true,
+            "allowedTopics": [
+              "billing and invoices",
+              "account settings and password resets"
+            ],
+            "similarityThreshold": 0.78,
+            "action": "BLOCK",
+            "deniedTopics": [
+              "medical advice or diagnosis"
+            ],
+            "deniedSimilarityThreshold": 0.7,
+            "deniedAction": "BLOCK",
+            "embeddingProviderName": "internal-embedding-model",
+            "embeddingModelId": "text-embedding-3-small",
+            "embeddingDimension": 1536,
+            "latencyMode": "INLINE",
+            "failOpenOnError": true,
+            "engine": "BUILTIN"
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Allow List Plus Denied Topics
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-topic-guard",
+    "description": "Keeps the support assistant on billing/account topics",
+    "active": true,
+    "allowedTopics": [
+      "billing and invoices",
+      "account settings and password resets"
+    ],
+    "similarityThreshold": 0.78,
+    "action": "BLOCK",
+    "deniedTopics": [
+      "medical advice or diagnosis"
+    ],
+    "deniedSimilarityThreshold": 0.7,
+    "deniedAction": "BLOCK",
+    "embeddingProviderName": "internal-embedding-model",
+    "embeddingModelId": "text-embedding-3-small",
+    "embeddingDimension": 1536,
+    "latencyMode": "ASYNC",
+    "maxWaitMs": 1000,
+    "failOpenOnError": true
+  }
+}
+```
+
+##### Full JSON Body Example — With an External LLM-Judge
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-topic-guard",
+    "description": "Embedding similarity plus a judge model as a second opinion",
+    "active": true,
+    "allowedTopics": ["billing and invoices"],
+    "similarityThreshold": 0.78,
+    "action": "BLOCK",
+    "embeddingProviderName": "internal-embedding-model",
+    "engine": "BUILTIN_PLUS_EXTERNAL",
+    "failMode": "FAIL_CLOSED",
+    "externalGuardrail": {
+      "type": "llm-judge",
+      "llmProviderName": "internal-guard-model",
+      "promptTemplate": "Is the following user message strictly about billing, invoices, or account settings? Answer YES or NO.\n\nMessage: {{input}}",
+      "timeoutMs": 2000
+    }
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Topic Matching](#topic-matching), [Evaluation Timing](#evaluation-timing), [External Guardrail](#external-guardrail) and [Other Fields](#other-fields) above. `type` (`ai-topic-guard`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `similarityThreshold`/`deniedSimilarityThreshold` outside `-1.0`–`1.0`; `maxWaitMs` not positive; `engine` is not `BUILTIN` but `externalGuardrail` is missing; `externalGuardrail.type`/`llmProviderName` blank; blank `promptTemplate` for an `llm-judge` adapter; `timeoutMs`/`maxOutputTokens`/`maxInputChars` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-scope-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-topic-guard",
+      "description": "Keeps the support assistant on billing/account topics",
+      "active": true,
+      "allowedTopics": ["billing and invoices"],
+      "similarityThreshold": 0.78,
+      "action": "BLOCK",
+      "embeddingProviderName": "internal-embedding-model"
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep — including every entry in `allowedTopics` and `deniedTopics`.
+
+##### Full JSON Body Example — Adding a Denied Topic
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-topic-guard",
+    "description": "Keeps the support assistant on billing/account topics",
+    "active": true,
+    "allowedTopics": ["billing and invoices"],
+    "similarityThreshold": 0.78,
+    "action": "BLOCK",
+    "deniedTopics": [
+      "medical advice or diagnosis",
+      "legal advice"
+    ],
+    "deniedAction": "BLOCK",
+    "embeddingProviderName": "internal-embedding-model"
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-scope-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-topic-guard",
+      "active": true,
+      "allowedTopics": ["billing and invoices"],
+      "similarityThreshold": 0.78,
+      "action": "BLOCK",
+      "deniedTopics": ["medical advice or diagnosis", "legal advice"],
+      "embeddingProviderName": "internal-embedding-model"
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-scope-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **A denied-topic match always wins.** `deniedTopics` is evaluated before `allowedTopics`, so a prompt matching a denied topic is flagged/blocked even if it would also match an allowed topic.
+- **`deniedSimilarityThreshold`/`deniedAction` left `null` track `similarityThreshold`/`action` dynamically**, not a frozen copy taken at save time — changing the allow-list threshold later also changes the effective denied-topic threshold, unless you set the denied fields explicitly.
+- **An embed-call failure passes the request through by default** (`failOpenOnError: true`). Set it to `false` only if blocking on an embedding-provider outage is the safer failure mode for this traffic.
+- **`promptTemplate` is mandatory for an `llm-judge` external adapter on this policy** — unlike the Prompt Guard policy, a blank template is rejected rather than silently falling back to a generic judge that can't answer a topic-relevance question.
+- **`includeSystemPrompts`/`includeAssistantPrompts`/`includeToolPrompts` default to off** — enabling any of them switches this guard from "last user message only" to whole-conversation embedding, which changes cost and similarity scores; opt in deliberately.
+- **`deniedTopics` entries copied from the built-in content-safety catalog carry no back-reference.** Editing the catalog category later does not update a policy that already copied its description — re-copy it by hand if you want the update.
+
+## Related Documentation
+
+- [Advanced Guardrails](/en/ai-gateway/advanced-guardrails)
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [Prompt Guard Policy](/api-reference/policies/policies/policy-ai-prompt-guard)
+- [DLP Guard Policy](/api-reference/policies/policies/policy-ai-dlp-guard)

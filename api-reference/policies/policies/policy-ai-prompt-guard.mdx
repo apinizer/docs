@@ -1,0 +1,525 @@
+---
+title: "AI Prompt Guard Policy"
+description: "AI Prompt Guard policies scan LLM prompts for jailbreak and prompt-injection attempts using an embedded list of regex rules, and optionally add an external LLM-judge adapter as a second opinion."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-prompt-guard
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Guard Definitions
+
+`policyAiPromptGuardDefList` carries the embedded regex rules. Each entry is matched independently; a `BLOCK` match short-circuits the whole list, a `FLAG` match keeps scanning (a later `BLOCK` still wins).
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| id | integer | No | Set by the platform once the rule is saved; ignored on write. |
+| presetId | string | No | Back-reference to the catalog rule this definition was copied from. A provenance marker only, not an APIops name-based reference — import clears it and the copy stays fully functional, just localized. |
+| name | string | Yes | Rule name. Used as the anonymous label reported in logs and traffic data instead of the raw regex. |
+| ruleValue | string | Yes | Regex pattern matched against the resolved scan text. |
+| action | string | No | `BLOCK` (default) or `FLAG`. `MASK` is accepted but this policy never redacts — a `MASK` def behaves exactly like `FLAG` here. |
+| category | string | No | Category label (e.g. `jailbreak`, `system-leak`, `injection`), surfaced on a match for reporting. |
+| enabled | boolean | No | Whether this definition is active. Default `true`. |
+| description | string | No | Free-text description for UI display. |
+
+---
+
+## External Guardrail
+
+`engine` decides which decision sources feed the policy's verdict.
+
+| Value | Behaviour |
+|-------|-----------|
+| `BUILTIN` (default) | Only `policyAiPromptGuardDefList` is evaluated. No external call is made. |
+| `BUILTIN_PLUS_EXTERNAL` | The regex list and the external adapter both run. Either one alone can trigger a block; a builtin `BLOCK` short-circuits and skips the external call. |
+| `EXTERNAL_ONLY` | Only the external adapter is evaluated; `policyAiPromptGuardDefList` is ignored even if non-empty. |
+
+When `engine` is anything other than `BUILTIN`, `externalGuardrail` is required. `latencyMode` controls how the evaluation is scheduled and applies to both the builtin and the external path.
+
+| Value | Behaviour |
+|-------|-----------|
+| `INLINE` (default) | Synchronous — the request thread blocks until the verdict is known. |
+| `ASYNC` | Runs off the request thread, bounded by `maxWaitMs` (default `500`). On timeout the request fails open and continues. |
+| `SHADOW` | Fire-and-forget — the request is never blocked or flagged, decisions are logged only. Used for calibration before turning a rule set live. |
+
+`failMode` governs what happens when the external adapter call itself errors or times out (a transport failure, not a content match):
+
+| Value | Behaviour |
+|-------|-----------|
+| `FAIL_CLOSED` (default) | The request is blocked. |
+| `FAIL_OPEN` | The request continues; a `FAIL_OPEN` signal is recorded so the bypass is visible. |
+
+A configuration inconsistency (`engine` requests an external evaluation but `externalGuardrail` is missing, or its provider can't be resolved) is **not** a runtime failure: the effective engine silently degrades to `BUILTIN` for that request rather than applying `failMode`.
+
+### `externalGuardrail` Fields
+
+Only the `llm-judge` adapter is supported on this policy.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | Must be `llm-judge`. |
+| llmProviderName | string | Yes | Name of the LLM provider connection config used to run the judge call. |
+| modelId | string | No | Judge model identifier (e.g. `llama-guard3:1b`). |
+| promptTemplate | string | No | Judge prompt template. Blank falls back to a generic native safety judge — this is an intended passthrough for this policy, not an error. |
+| jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. |
+| maxOutputTokens | integer | No | Judge max output tokens. Must be positive if set. |
+| timeoutMs | integer | No | HTTP call timeout in milliseconds. Must be positive if set. |
+| maxInputChars | integer | No | Max input characters sent to the judge. Must be positive if set. |
+
+---
+
+## Other Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | boolean | No | Whether the guard runs at all. Default `true`. |
+| decodeEncodedContent | boolean | No | Decodes base64/hex/URL/unicode segments before scanning, so an encoded payload the model would itself decode isn't invisible to the guard. Default `false`. |
+| includeSystemPrompts | boolean | No | Scans `system`-role messages and the Anthropic top-level `system` field. `null` means `true` — this guard scans every role by default; set `false` to narrow the scan. |
+| includeAssistantPrompts | boolean | No | Scans `assistant`-role messages. `null` means `true`. |
+| includeToolPrompts | boolean | No | Scans `tool`-role messages. `null` means `true`. |
+
+:::note Opt-out, not opt-in
+Unlike the role-scope fields on the Topic Guard policy, `includeSystemPrompts`/`includeAssistantPrompts`/`includeToolPrompts` here default to scanning **everything**. Omit them to keep full coverage; set one to `false` only to deliberately narrow the scan.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-prompt-guard",
+            "name": "jailbreak-guard",
+            "description": "Blocks common jailbreak/injection patterns",
+            "active": true,
+            "enabled": true,
+            "policyAiPromptGuardDefList": [
+              {
+                "name": "ignore-previous-instructions",
+                "ruleValue": "(?i)ignore (all )?previous instructions",
+                "action": "BLOCK",
+                "category": "jailbreak",
+                "enabled": true
+              }
+            ],
+            "latencyMode": "INLINE",
+            "engine": "BUILTIN",
+            "failMode": "FAIL_CLOSED",
+            "includeSystemPrompts": true,
+            "includeAssistantPrompts": true,
+            "includeToolPrompts": true
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Builtin Only
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-prompt-guard",
+    "description": "Blocks common jailbreak/injection patterns",
+    "active": true,
+    "enabled": true,
+    "policyAiPromptGuardDefList": [
+      {
+        "name": "ignore-previous-instructions",
+        "ruleValue": "(?i)ignore (all )?previous instructions",
+        "action": "BLOCK",
+        "category": "jailbreak",
+        "enabled": true
+      },
+      {
+        "name": "suspicious-role-override",
+        "ruleValue": "(?i)you are now (dan|unfiltered)",
+        "action": "FLAG",
+        "category": "role-override",
+        "enabled": true
+      }
+    ],
+    "latencyMode": "INLINE",
+    "decodeEncodedContent": true
+  }
+}
+```
+
+##### Full JSON Body Example — With an External LLM-Judge
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-prompt-guard",
+    "description": "Regex list plus a judge model as a second opinion",
+    "active": true,
+    "enabled": true,
+    "policyAiPromptGuardDefList": [
+      {
+        "name": "ignore-previous-instructions",
+        "ruleValue": "(?i)ignore (all )?previous instructions",
+        "action": "BLOCK",
+        "category": "jailbreak"
+      }
+    ],
+    "latencyMode": "ASYNC",
+    "maxWaitMs": 2000,
+    "engine": "BUILTIN_PLUS_EXTERNAL",
+    "failMode": "FAIL_OPEN",
+    "externalGuardrail": {
+      "type": "llm-judge",
+      "llmProviderName": "internal-guard-model",
+      "modelId": "llama-guard3:1b",
+      "jsonMode": true,
+      "timeoutMs": 2000
+    }
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Guard Definitions](#guard-definitions), [External Guardrail](#external-guardrail) and [Other Fields](#other-fields) above. `type` (`ai-prompt-guard`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `engine` is not `BUILTIN` but `externalGuardrail` is missing; `externalGuardrail.type` blank or unsupported; `externalGuardrail.llmProviderName` blank; `timeoutMs`/`maxOutputTokens`/`maxInputChars` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/jailbreak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-prompt-guard",
+      "description": "Blocks common jailbreak/injection patterns",
+      "active": true,
+      "policyAiPromptGuardDefList": [
+        {
+          "name": "ignore-previous-instructions",
+          "ruleValue": "(?i)ignore (all )?previous instructions",
+          "action": "BLOCK",
+          "category": "jailbreak"
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep — including every rule in `policyAiPromptGuardDefList`.
+
+##### Full JSON Body Example — Adding a Rule
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-prompt-guard",
+    "description": "Blocks common jailbreak/injection patterns",
+    "active": true,
+    "policyAiPromptGuardDefList": [
+      {
+        "name": "ignore-previous-instructions",
+        "ruleValue": "(?i)ignore (all )?previous instructions",
+        "action": "BLOCK",
+        "category": "jailbreak"
+      },
+      {
+        "name": "system-prompt-exfiltration",
+        "ruleValue": "(?i)(repeat|print) (your |the )?system prompt",
+        "action": "BLOCK",
+        "category": "system-leak"
+      }
+    ]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/jailbreak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-prompt-guard",
+      "active": true,
+      "policyAiPromptGuardDefList": [
+        {
+          "name": "ignore-previous-instructions",
+          "ruleValue": "(?i)ignore (all )?previous instructions",
+          "action": "BLOCK",
+          "category": "jailbreak"
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/jailbreak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **An empty or disabled def list is a no-op**, not a block-everything rule — with `policyAiPromptGuardDefList` empty and `engine: BUILTIN`, the policy never triggers.
+- **`BLOCK` always wins over `FLAG`**, independent of list order — the whole list is scanned, and the first `BLOCK` match short-circuits.
+- **`SHADOW` never blocks or flags**, regardless of `engine`. Use it to calibrate a rule set or an external judge against live traffic before promoting it to `INLINE`/`ASYNC`.
+- **A misconfigured external engine degrades to `BUILTIN` silently for that request** — a missing `externalGuardrail` or an unresolved provider name does not apply `failMode`; only a runtime call failure (timeout/error) does.
+- **`decodeEncodedContent` widens what is scanned, it never narrows it** — when nothing decodes, or the flag is off, the guard sees the byte-identical original text.
+
+## Related Documentation
+
+- [Advanced Guardrails](/en/ai-gateway/advanced-guardrails)
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [Topic Guard Policy](/api-reference/policies/policies/policy-ai-topic-guard)
+- [PII Mask Policy](/api-reference/policies/policies/policy-ai-pii-mask)
+- [DLP Guard Policy](/api-reference/policies/policies/policy-ai-dlp-guard)

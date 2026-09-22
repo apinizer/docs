@@ -87,6 +87,24 @@ If no price actually changed, nothing is saved and no worker deployment is trigg
 Importing model definitions does not trigger this synchronization. After an import, save the catalog entry once from the UI so its price reaches the LLM connections that use the model.
 :::
 
+### Cache-Write, Context-Tier, and Service-Tier Pricing {#advanced-pricing}
+
+Beyond the base input/output/cached-token price, a catalog entry's **Capacity & Pricing** tab can also carry three further cost dimensions that mirror how modern providers actually bill:
+
+- **Cache-write price** — the per-1M-token price charged for **writing** into the provider's prompt cache (Anthropic bills this at roughly 1.25× the input price for its 5-minute cache and 2× for its 1-hour cache). A flat per-1M price applies by default; an optional **per-TTL price table** overrides it for a specific cache lifetime the provider reports (`5m`, `1h`, and so on).
+- **Context-tier multipliers** — an input/output price **factor** (not an absolute price) applied to the **whole request** once its prompt token count — input, cached, and cache-write combined — crosses a configured threshold, the way Gemini 2.5 Pro and Claude Sonnet 4.5 both roughly double their price above 200K tokens. When more than one tier matches, the one with the highest threshold wins.
+- **Service-tier multipliers** — an input/output price factor keyed to the `service_tier` value the provider echoes back in its response. OpenAI's `priority` and `flex` tiers and its Batch API are the built-in shapes; a custom row matches on the provider's own reported tier name instead.
+
+These three fields are edited the same way as the base price, and the worker's cost calculation consumes them the same way it consumes the base price.
+
+:::note Not part of ongoing Price Change Propagation
+Unlike the base per-token/per-unit prices and the lifecycle fields described above, cache-write, context-tier, and service-tier pricing are copied onto a connection's model **once** — when the model is first added to a connection and those fields are still empty (see [Filling model type and pricing from the catalog](/en/ai-gateway/llm-providers#catalog-hydration)). Editing them later on a catalog entry that connections already have a value for does **not** push the change out to those connections; update the value directly on the connection's **Supported Models** table instead, or clear it there so the next save re-hydrates it from the catalog.
+:::
+
+### Capability Tag Normalization
+
+Capability tags (`function_calling`, `vision`, `prompt_caching`, `reasoning`, `structured_output`, `streaming`, `web_search`, plus any tag of your own) are cleaned up to one canonical spelling whenever a connection is saved: known aliases collapse into the matching canonical tag (`tools` / `tool_use` → `function_calling`, `json_mode` → `structured_output`, and so on), and modality-only noise (`chat`, `embedding`, `code`) is dropped, since the model's own **Modality** field already carries that fact. A tag Apinizer doesn't recognize survives unchanged as a custom tag. This normalization runs on a connection's own **Supported Models** entries and on a model newly registered into the shared catalog from a connection — it is a save-time cleanup, not part of catalog Price Change Propagation described above.
+
 ## Adding a Custom Model
 
 <Steps>
@@ -118,25 +136,23 @@ Importing model definitions does not trigger this synchronization. After an impo
 Alongside the model pricing catalog, there is a **provider type catalog**. These are two different concepts — don't confuse them:
 
 - **LLM provider connection** (see [LLM Providers and Connections](/en/ai-gateway/llm-providers)) — a **configured, running connection instance** with credentials.
-- **LLM provider definition** — a template for a provider *type*: its default endpoint, default API version, default auth scheme, and so on. When you create a new connection, the form pre-fills from this definition; the definition itself carries **no secrets**.
+- **LLM provider definition** — reference data describing a provider *type*: its default endpoint, default API version, default auth scheme, and so on. When you create a connection through the [Choose a provider](/en/ai-gateway/llm-providers#choosing-a-provider-type) dialog, the form pre-fills from this definition; the definition itself carries **no secrets**.
 
-The catalog is the union of the **built-in** definitions shipped with Apinizer and any project-specific **custom** definitions. It has its own UI surface: **AI Gateway** → **LLM Providers** → **Definitions** tab, where every definition can be viewed, and a custom one can also be created, edited, exported, or deleted — see [Adding a Custom Provider Definition](/en/ai-gateway/llm-providers#adding-a-custom-provider-definition).
+The catalog is a **fixed, read-only seed** shipped with Apinizer — every tile under the picker's Managed cloud and Self-hosted groups. Nothing in it can be created, edited, or deleted, either from the UI or through APIops. If your provider isn't in the catalog, use [Custom Provider](/en/ai-gateway/llm-providers#custom-provider) instead — its adapter and paths are defined directly on the connection, not in this catalog.
 
-:::note Built-in Definitions: Editable in the UI, Read-Only over APIops
-Definitions seeded at install (OpenAI, Anthropic, Azure, and so on) can be edited and deleted from the **Definitions** tab, and an edit you save is never overwritten by a later version — the shipped catalog only seeds definitions that do not exist yet. The APIops REST API is stricter and rejects any create, update or delete on a `builtIn` definition. A custom definition has no restrictions on either surface — create one directly from the Definitions tab's own form, or by importing a **Provider Definition** package through the [Export/Import Wizard](/en/admin/secrets-management/export-import) or through the APIops REST API.
+:::note Catalog Refreshes Only Add What's Missing
+A version upgrade may ship an **LLM catalog refresh** — the provider landscape churns, so the shipped catalog is re-published from time to time (most recently APNZ-6550) — but a refresh only **inserts entries that don't exist yet**. It never overwrites or removes an existing entry, so nothing about how an existing connection resolves its defaults changes because of an upgrade; the same holds for a model price you edited in the model pricing catalog.
 :::
 
 ### How a Connection's Defaults Are Resolved
 
 A provider's paths and capability flags (chat completion path, embedding support, and so on) are looked up in this order:
 
-1. **This provider's own definition** — a value set on the definition itself always wins.
-2. **Apinizer's own built-in default** for that provider type, when the definition left a value blank.
+1. **The value copied onto the connection itself** when its provider type was picked — or typed by hand, for a [custom provider](/en/ai-gateway/llm-providers#custom-provider) — always wins, and can be edited any time under the connection's Advanced section.
+2. **Apinizer's own built-in default** for that provider type, when the connection left a value blank.
 3. A **last-resort fallback**, when neither of the above says anything.
 
-A product upgrade that refreshes the built-in catalog never touches a **custom** definition — even one whose code happens to match a built-in provider type — and it does not touch an existing **built-in** definition either: the refresh only inserts definitions and models that are missing. Anything you configured, on your own definition or on a shipped one, is safe across upgrades; the same holds for a model price you edited in the catalog. It's also why the create form for a custom provider (see [Adding a Custom Provider Definition](/en/ai-gateway/llm-providers#adding-a-custom-provider-definition)) requires the wire protocol and chat completion path up front: a genuinely custom provider code has no built-in default to fall back to, so leaving those blank would resolve to nothing at request time.
-
-The provider type catalog can also be managed through the APIops REST API; see [API Reference: LLM Provider Definitions](/api-reference/llm-provider-definitions).
+The provider type catalog itself is managed through Apinizer only — there's no APIops surface for it. A connection built on top of it, including a custom one, is managed through the APIops [LLM Providers](/api-reference/llm-providers) endpoint.
 
 ## Next Steps
 

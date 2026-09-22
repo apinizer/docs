@@ -1,0 +1,411 @@
+---
+title: "AI Context Integrity Policy"
+description: "AI Context Integrity policies guard the structure of the conversation a client sends to an LLM: fabricated role markers hidden inside message content, and messages carrying a role outside an allowed set or too many injected system turns. This is distinct from content-based prompt-injection detection."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-context-integrity
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Two Independent Detections
+
+1. **Role-marker injection** (`roleMarkerDetectionEnabled`) — scans message content for fabricated role markers or chat-template control tokens (for example ChatML `<|im_start|>system`, Llama `[INST]`/`<<SYS>>`, or a plain `system:` line prefix) that could trick the model into treating injected text as a prior system or assistant turn. Built-in patterns are always applied; `customMarkerPatternList` adds more on top of them.
+2. **Role-sequence validation** (`roleSequenceValidationEnabled`) — checks that every message's `role` is in `allowedRoles` and that the client did not inject more than `maxSystemMessages` `system` turns.
+
+Each detection is independently toggled; both are checked when both are enabled. On a violation, `action` decides the outcome.
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| enabled | boolean | No | true | Master switch for the entire policy. |
+| action | string | No | `BLOCK` | Action taken on a violation. `BLOCK` rejects the request. `FLAG` lets the request pass and records a guardrail hit for reporting. `MASK` redacts the matched role markers from the request body and lets the (sanitised) request pass — only role-marker matches can be masked; a role-sequence violation with `action: MASK` degrades to `FLAG` because a structural mismatch cannot be redacted. |
+| roleMarkerDetectionEnabled | boolean | No | true | Enables the fabricated-turn / role-marker injection scan. |
+| customMarkerPatternList | array of string | No | [] | Extra regular-expression patterns applied in addition to the built-in role-marker patterns. Every pattern is compiled and screened for catastrophic backtracking before it can be deployed. |
+| roleSequenceValidationEnabled | boolean | No | false | Enables the role-sequence validation (allowed roles + system-turn cap). |
+| allowedRoles | array of string | No | [] | Allowed message roles for role-sequence validation. An empty list falls back to the built-in default set: `system`, `user`, `assistant`, `tool`, `developer`. |
+| maxSystemMessages | integer | No | 1 | Maximum number of client-supplied `system` turns tolerated by role-sequence validation. |
+
+:::note MASK only redacts role markers
+`action: MASK` only has an effect on the role-marker detection. A role-sequence violation (illegal role, or too many `system` turns) cannot be masked — it is treated as `FLAG` instead, even when `action` is set to `MASK`.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-context-integrity",
+            "name": "conversation-integrity",
+            "description": "Block fabricated system-turn injection in chat requests",
+            "active": true,
+            "enabled": true,
+            "action": "BLOCK",
+            "roleMarkerDetectionEnabled": true,
+            "customMarkerPatternList": [],
+            "roleSequenceValidationEnabled": true,
+            "allowedRoles": ["system", "user", "assistant"],
+            "maxSystemMessages": 1
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Both Detections
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-context-integrity",
+    "description": "Block fabricated system-turn injection in chat requests",
+    "active": true,
+    "enabled": true,
+    "action": "BLOCK",
+    "roleMarkerDetectionEnabled": true,
+    "customMarkerPatternList": ["(?i)###\\s*override"],
+    "roleSequenceValidationEnabled": true,
+    "allowedRoles": ["system", "user", "assistant", "tool"],
+    "maxSystemMessages": 1
+  }
+}
+```
+
+##### Full JSON Body Example — Role-Marker Detection Only, Masking
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-context-integrity",
+    "description": "Redact fabricated role markers instead of blocking",
+    "active": true,
+    "enabled": true,
+    "action": "MASK",
+    "roleMarkerDetectionEnabled": true,
+    "roleSequenceValidationEnabled": false
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Fields](#fields) above. `type` (`ai-context-integrity`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; a `customMarkerPatternList` entry fails to compile or is rejected as catastrophic-backtracking risk; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/conversation-integrity/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-context-integrity",
+      "description": "Block fabricated system-turn injection",
+      "active": true,
+      "action": "BLOCK",
+      "roleSequenceValidationEnabled": true,
+      "maxSystemMessages": 1
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+##### Full JSON Body Example — Adding an Allowed Role
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-context-integrity",
+    "description": "Block fabricated system-turn injection in chat requests",
+    "active": true,
+    "action": "BLOCK",
+    "roleMarkerDetectionEnabled": true,
+    "roleSequenceValidationEnabled": true,
+    "allowedRoles": ["system", "user", "assistant", "tool", "developer"],
+    "maxSystemMessages": 2
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/conversation-integrity/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-context-integrity",
+      "active": true,
+      "action": "BLOCK",
+      "maxSystemMessages": 2
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/conversation-integrity/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **Both detections are independently toggled, and at least one must be enabled to do anything.** With both `roleMarkerDetectionEnabled: false` and `roleSequenceValidationEnabled: false`, the policy is a no-op even if `enabled: true`.
+- **`action: MASK` only redacts role markers.** A role-sequence violation always falls back to `FLAG` behaviour under `MASK`, because there is nothing in a structural mismatch that can be safely redacted.
+- **`allowedRoles` empty means the built-in default set applies** (`system`, `user`, `assistant`, `tool`, `developer`) — sending an empty array does not mean "allow every role".
+- **This is a structural guard, not a content guard.** It does not evaluate what a message says (see prompt-injection / jailbreak detection for that); it only evaluates whether the conversation's shape (embedded role markers, role sequence) has been tampered with.
+- **Custom patterns are screened for catastrophic backtracking before deployment.** A pattern that fails the safety probe is rejected at save time rather than reaching the request path.
+
+## Related Documentation
+
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [AI Loop Guard Policy](/api-reference/policies/policies/policy-ai-loop-guard)

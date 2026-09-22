@@ -57,7 +57,7 @@ Yerleşik bir model **AI Gateway** → **LLM Sağlayıcıları** → **Model Kat
 
 Yerleşik bir kayıtta iki alan sabittir: **sağlayıcısı** ve **model ID'si**. Sürüm yükseltmesi kaydı bu ikisiyle tanır; değiştirilebilseydi bir sonraki katalog tazelemesi modeli bulamaz ve ikinci bir kopyasını eklerdi. Geri kalan her şey — görünen ad, fiyat, bağlam penceresi, azami çıktı token'ı, yetenekler, modalite ve kullanımdan kaldırma işareti — sizindir. Farklı bir model ID'si olan bir varyant gerekiyorsa **Klonla** ile kopya üretip onu düzenleyin.
 
-Yerleşik bir kaydı düzenlemek kurulum geneli bir değişikliktir (kayıt tüm projelerce paylaşılır), bu yüzden Sistem Yöneticisi yetkisi ister. APIops REST API'si daha katıdır ve `builtIn` bir modelde oluşturma, güncelleme ve silmenin tamamını reddeder: o yüzey proje kapsamlıdır, yerleşik kayıt ise değildir. Aynı ayrım sağlayıcı tanımları için de geçerlidir.
+Yerleşik bir kaydı düzenlemek kurulum geneli bir değişikliktir (kayıt tüm projelerce paylaşılır), bu yüzden Sistem Yöneticisi yetkisi ister. APIops REST API'si daha katıdır ve `builtIn` bir modelde oluşturma, güncelleme ve silmenin tamamını reddeder: o yüzey proje kapsamlıdır, yerleşik kayıt ise değildir. Sağlayıcı tipi kataloğunda bu ayrım yoktur — o katalog ne arayüzde ne APIops'ta düzenlenebilir (bkz. [Sağlayıcı Tipi Kataloğu](#saglayici-tipi-katalogu)).
 
 Bir proje seçmeden **Administration** bağlamında bu ekrana giren bir Sistem Yöneticisi, yalnızca yerleşik kayıtları değil, kurulumdaki **tüm projelerin özel (custom) kayıtlarını** da görür ve düzenler — Administration bağlamı kasıtlı olarak kurulum geneli bir görünümdür.
 :::
@@ -100,6 +100,24 @@ Sonlanma Tarihi fiyatla birlikte taşındığı için, katalogda bir sonlanma ta
 Model tanımlarının dışa/içe aktarma ile taşınması bu senkronu tetiklemez. İçe aktarma sonrasında fiyatın bağlı bağlantılara yansıması için katalog kaydının arayüzden bir kez kaydedilmesi gerekir.
 :::
 
+### Cache-Yazma, Bağlam-Katmanı ve Servis-Katmanı Fiyatlandırması {#gelismis-fiyatlandirma}
+
+Temel giriş/çıkış/önbellek token fiyatının ötesinde, bir katalog kaydının **Kapasite & Fiyat** sekmesi, modern sağlayıcıların gerçek faturalama biçimini yansıtan üç ek maliyet boyutu da taşıyabilir:
+
+- **Cache-yazma fiyatı** — sağlayıcının prompt önbelleğine **yazma** işlemi için alınan, 1 milyon token başına fiyat (Anthropic, 5 dakikalık önbelleği giriş fiyatının yaklaşık 1,25 katı, 1 saatlik önbelleği ise 2 katı olarak faturalandırır). Varsayılan olarak düz bir 1M-token fiyatı uygulanır; isteğe bağlı bir **TTL başına fiyat tablosu**, sağlayıcının bildirdiği belirli bir önbellek ömrü (`5m`, `1h` vb.) için bu değeri geçersiz kılar.
+- **Bağlam-katmanı çarpanları** — isteğin prompt token sayısı (giriş, önbellek ve cache-yazma toplamı) yapılandırılmış bir eşiği geçtiğinde **isteğin tamamına** uygulanan bir giriş/çıkış fiyat **çarpanı** (mutlak bir fiyat değil) — Gemini 2.5 Pro ve Claude Sonnet 4.5'in 200K token üzerinde fiyatını kabaca ikiye katlaması gibi. Birden fazla katman eşleşirse, eşiği en yüksek olan kazanır.
+- **Servis-katmanı çarpanları** — sağlayıcının yanıtında geri bildirdiği `service_tier` değerine bağlı bir giriş/çıkış fiyat çarpanı. OpenAI'nin `priority` ve `flex` katmanları ile Batch API'si yerleşik biçimler olarak gelir; özel bir satır, sağlayıcının kendi bildirdiği katman adıyla eşleşir.
+
+Bu üç alan, temel fiyatla aynı şekilde düzenlenir ve worker'ın maliyet hesaplaması onları temel fiyatı kullandığı şekilde kullanır.
+
+:::note Sürmekte olan Fiyat Değişikliğinin Yayılması'nın parçası değildir
+Yukarıda anlatılan temel token/birim fiyatlarının ve yaşam döngüsü alanlarının aksine, cache-yazma, bağlam-katmanı ve servis-katmanı fiyatlandırması bir bağlantının modeline **yalnızca bir kez** kopyalanır — model bir bağlantıya ilk eklendiğinde ve bu alanlar henüz boşken (bkz. [Model tipi ve fiyatların katalogdan otomatik doldurulması](/tr/ai-gateway/llm-saglayicilari#katalogdan-otomatik-doldurma)). Bağlantıların zaten bir değere sahip olduğu bir katalog kaydını sonradan düzenlemek bu değişikliği **o bağlantılara yaymaz**; değeri doğrudan bağlantının **Desteklenen Modeller** tablosundan güncelleyin, ya da bir sonraki kayıtta katalogdan yeniden doldurulması için orada boşaltın.
+:::
+
+### Yetenek Etiketi Normalizasyonu
+
+Yetenek etiketleri (`function_calling`, `vision`, `prompt_caching`, `reasoning`, `structured_output`, `streaming`, `web_search`, ve kendi eklediğiniz herhangi bir etiket), bir bağlantı her kaydedildiğinde tek bir kanonik yazıma temizlenir: bilinen takma adlar eşleştiği kanonik etikete indirgenir (`tools` / `tool_use` → `function_calling`, `json_mode` → `structured_output` vb.) ve yalnızca modaliteyi tekrar eden gürültü (`chat`, `embedding`, `code`) atılır, çünkü modelin kendi **Modalite** alanı bu bilgiyi zaten taşır. Apinizer'ın tanımadığı bir etiket, özel bir etiket olarak değişmeden kalır. Bu normalizasyon, bir bağlantının kendi **Desteklenen Modeller** kayıtları üzerinde ve bir bağlantıdan paylaşılan kataloga yeni kaydedilen bir model üzerinde çalışır — yukarıda anlatılan katalog Fiyat Değişikliğinin Yayılması'nın bir parçası değil, kayıt-anı temizliğidir.
+
 ## Sağlayıcı Tipi Kataloğu {#saglayici-tipi-katalogu}
 
 Model fiyat kataloğunun yanı sıra bir de **sağlayıcı tipi kataloğu** bulunur. Bu ikisi farklı kavramlardır — karıştırmayın:
@@ -107,23 +125,21 @@ Model fiyat kataloğunun yanı sıra bir de **sağlayıcı tipi kataloğu** bulu
 - **LLM sağlayıcı bağlantısı** (bkz. [LLM Sağlayıcıları ve Bağlantılar](/tr/ai-gateway/llm-saglayicilari)) — kimlik bilgileriyle **yapılandırılmış, çalışan bir bağlantı örneği**.
 - **LLM sağlayıcı tanımı** — bir sağlayıcı *tipinin* şablonu: varsayılan uç nokta, varsayılan API sürümü, varsayılan kimlik doğrulama şeması gibi bilgileri taşır. Yeni bir bağlantı oluştururken form bu tanımdan varsayılan değerlerle doldurulur; tanımın kendisinde bir sır (secret) **bulunmaz**.
 
-Katalog, kurulumla gelen **hazır** tanımlarla projeye özel **özel** tanımların birleşimidir. Katalog, **AI Gateway** → **LLM Sağlayıcılar** sayfasının **Tanımlar** tab'ında görüntülenir: ad, kod, varsayılan uç nokta bilgileri ve hazır/özel rozeti kolonlarıyla listelenir; özel bir tanım burada oluşturulabilir, düzenlenebilir, dışa aktarılabilir ya da silinebilir — bkz. [Özel Sağlayıcı Tanımı Ekleme](/tr/ai-gateway/llm-saglayicilari#ozel-saglayici-tanimi-ekleme).
+Katalog, kurulumla birlikte gelen sağlayıcı tanımlarının **salt-okunur** bir seed listesidir: ad, kod, varsayılan uç nokta bilgileri ve varsayılan kimlik doğrulama şemasını taşır. Ayrı bir ekranda görüntülenmez; bir bağlantı oluştururken açılan **Sağlayıcı seçin** penceresinden seçim yaparsınız — bkz. [Sağlayıcı Tipini Seçme](/tr/ai-gateway/llm-saglayicilari#saglayici-tipini-secme).
 
-:::note Hazır Tanımlar: Arayüzde Düzenlenebilir, APIops'ta Salt Okunur
-Kurulumla birlikte gelen tanımlar (OpenAI, Anthropic, Azure vb.) **Tanımlar** tab'ından düzenlenebilir ve silinebilir; kaydettiğiniz bir düzenleme sonraki sürümlerde geri ezilmez — kurulumla gelen katalog yalnızca henüz var olmayan tanımları tohumlar. APIops REST API bu konuda daha katıdır: `builtIn` bir tanım üzerinde oluşturma, güncelleme ve silme isteklerini reddeder. Özel bir tanımda iki yüzeyde de bu kısıtlardan hiçbiri yoktur — Tanımlar tab'ının kendi formundan doğrudan oluşturun, ya da Dışa/İçe Aktarma Sihirbazı üzerinden bir **Provider Definition** paketi içe aktararak ya da APIops REST API ile ekleyin.
+:::note Katalog Salt Okunur, Özel Sağlayıcı Bağlantı Üzerindedir
+Ne arayüzde ne de APIops REST API'sinde bu katalog üzerinde oluşturma, düzenleme ya da silme işlemi yapılabilir — manager REST yalnızca `GET` sunar. Katalogda karşılığı olmayan bir sağlayıcı, ayrı bir tanım kaydı değil, kendi **LLM Sağlayıcı** bağlantınızdır: sağlayıcı tipi **Diğer** olarak kaydedilir, adapter ailesi ve istek yollarını doğrudan bağlantı üzerinde siz girersiniz — bkz. [Özel Sağlayıcı](/tr/ai-gateway/llm-saglayicilari#ozel-saglayici).
 :::
 
 ### Bir Bağlantının Varsayılanları Nasıl Çözümlenir {#varsayilanlarin-cozumlenmesi}
 
 Bir sağlayıcının yolları ve yetenek bayrakları (chat completion yolu, embedding desteği vb.) şu sırayla aranır:
 
-1. **Bu sağlayıcının kendi tanımı** — tanımın kendisinde ayarlanmış bir değer her zaman kazanır.
-2. **Apinizer'ın o sağlayıcı tipi için kendi hazır varsayılanı**, tanım bir değeri boş bıraktıysa.
+1. **Bağlantının kendi değeri** — katalogdan kopyalanmış ya da özel bir sağlayıcıda sizin girdiğiniz değer her zaman kazanır.
+2. **Apinizer'ın o sağlayıcı tipi için kendi hazır varsayılanı**, bağlantı bir değeri boş bıraktıysa.
 3. Yukarıdakilerin ikisi de bir şey söylemiyorsa devreye giren bir **son çare yedek**.
 
-Hazır kataloğu tazeleyen bir ürün yükseltmesi, kodu bir hazır sağlayıcı tipiyle aynı olsa bile **özel** bir tanıma asla dokunmaz — var olan bir **hazır** tanıma da dokunmaz: tazeleme yalnızca eksik olan tanımları ve modelleri ekler. Kendi tanımınızda ya da kurulumla gelen bir tanımda yapılandırdığınız her şey yükseltmeler boyunca güvendedir; katalogda düzenlediğiniz model fiyatı için de aynısı geçerlidir. Bu aynı zamanda özel bir sağlayıcı için oluşturma formunun ([bkz. Özel Sağlayıcı Tanımı Ekleme](/tr/ai-gateway/llm-saglayicilari#ozel-saglayici-tanimi-ekleme)) wire protocol ve chat completion yolunu baştan neden zorunlu kıldığını da açıklar: gerçekten özel bir sağlayıcı kodunun geri düşebileceği hazır bir varsayılan yoktur, bu yüzden bu alanları boş bırakmak istek anında hiçbir şeye çözümlenirdi.
-
-Sağlayıcı tipi kataloğu APIops REST API ile de yönetilebilir; bkz. [API Referansı: LLM Provider Definitions](/api-reference/llm-provider-definitions).
+Hazır kataloğu tazeleyen bir ürün yükseltmesi yalnızca eksik olan sağlayıcı tanımlarını ve modelleri ekler; var olan bir kayda hiçbir zaman dokunmaz. Bağlantılar katalogdan ayrı, kendi kopyalarını taşıdığı için bir bağlantı üzerinde düzenlediğiniz uç yolu ya da katalogda düzenlediğiniz model fiyatı yükseltmeler boyunca güvendedir.
 
 ## Sonraki Adımlar
 
