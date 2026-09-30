@@ -740,7 +740,6 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "ai-gateway",
-            { "type": "category", "label": "LLM Provider Definitions", "collapsed": true, "collapsible": true, "items": ["llm-provider-definitions", "llm-provider-definitions/list-llm-provider-definitions", "llm-provider-definitions/get-llm-provider-definition", "llm-provider-definitions/create-llm-provider-definition", "llm-provider-definitions/update-llm-provider-definition", "llm-provider-definitions/delete-llm-provider-definition"] },
             { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/test-llm-provider-connection"] },
             { "type": "category", "label": "Model Catalog", "collapsed": true, "collapsible": true, "items": ["llm-models", "llm-models/list-llm-models", "llm-models/get-llm-model", "llm-models/create-llm-model", "llm-models/update-llm-model", "llm-models/delete-llm-model"] },
             { "type": "category", "label": "VectorDB Connections", "collapsed": true, "collapsible": true, "items": ["vector-dbs", "vector-dbs/list-vector-dbs", "vector-dbs/get-vector-db", "vector-dbs/create-vector-db", "vector-dbs/update-vector-db", "vector-dbs/delete-vector-db", "vector-dbs/test-vector-db-connection"] },
