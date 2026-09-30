@@ -7,6 +7,7 @@ import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 import {Card, CardGroup} from '@site/src/components/Card';
 import {Accordion} from '@site/src/components/Accordion';
+import {Steps, Step} from '@site/src/components/Steps';
 
 ## Logging Categories
 
@@ -23,24 +24,233 @@ Apinizer's logging mechanism is primarily divided into two main categories:
 
 ## System Log Subcategories
 
-System Logs are divided into five subcategories. Three of these can be sent to an external product via Syslog:
+System Logs are divided into five subcategories. Four of these can be sent to an external product via Syslog:
 
 <Tabs>
     <TabItem value="logs-that-can-be-sent-via-syslog" label="Logs That Can Be Sent via Syslog">
         <ul>
-            <li><strong>Audit Log (System Operations)</strong>: Logs related to changes and operations made in the Apinizer management application.</li>
+            <li><strong>Audit Log (System Operations)</strong>: Logs related to changes and operations made in the Apinizer management application. Optionally also covers write requests to the Management Console/APIs and rejected requests; see <a href="/en/admin/audit-compliance/audit-records">Audit Records</a>. Destinations are configured on the <a href="/en/admin/system-settings/siem-log-forwarding">SIEM &amp; Log Forwarding</a> page.</li>
             <li><strong>Token Log</strong>: Contains logs related to token acquisition when Apinizer is used as a token provider.</li>
             <li><strong>Application Log</strong>: Software logs of Apinizer applications/modules. By default, kept at error (Error) level, and users can change the level as needed.</li>
+            <li><strong>Login Audit</strong>: Successful and failed sign-in attempts, sign-outs, and project token refresh events; see <a href="/en/admin/audit-compliance/login-records">Login Records</a>. Forwarded as the <strong>Session</strong> stream on the <a href="/en/admin/system-settings/siem-log-forwarding">SIEM &amp; Log Forwarding</a> page — see <a href="/en/admin/system-settings/siem-log-forwarding#session-stream-event-types-and-legacy-payload">Session stream — event types and legacy payload</a>.</li>
         </ul>
     </TabItem>
 
     <TabItem value="logs-not-sent-via-syslog" label="Logs Not Sent via Syslog">
         <ul>
             <li><strong>Test Console Audit</strong>: Audit logs related to the use of the Test Console in the Apinizer management application interface. Not sent to external syslog products.</li>
-            <li><strong>Login Audit</strong>: Log records of successful and failed login attempts to the Apinizer management application interface. Not sent to external syslog products.</li>
         </ul>
     </TabItem>
 </Tabs>
+
+## Where the Destinations Are Configured
+
+Audit, login, token and application log destinations are configured on the **[SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding)** page, under **Administration → System Settings**. That page replaced the four recipient sections that used to live under General Settings, and it adds per-stream filtering rules, a privacy profile and an event size limit for every destination.
+
+Traffic logs are not part of that page — they continue to be forwarded by the log connectors of the Gateway environment; see [Transferring Traffic Logs to Syslog](/en/operations/administrator-guides/traffic-logs-syslog-transfer).
+
+## Payload Formats
+
+Every destination sends one of the following formats, selected per destination:
+
+| Profile | What your parser receives |
+|---|---|
+| **Legacy Raw** | Today's output, unchanged and frozen. Every field documented on this page and on [Transferring System Logs to Syslog](/en/operations/administrator-guides/system-logs-syslog-transfer) is produced exactly as before, so an existing parser keeps working. Fields added to Apinizer in later versions do **not** appear in this output. |
+| **Apinizer JSON v2** | A canonical envelope shared by all four streams — a stable field order, a severity value, an explicit outcome, and a curated `data` object from which token values, passwords and authentication headers are excluded by construction. |
+| **CEF 0** | A single-line ArcSight Common Event Format record, produced from the same envelope after the privacy profile and the size limit have been applied. Selectable on Syslog destinations only; see [CEF and LEEF](/en/admin/system-settings/siem-log-forwarding#cef-and-leef). |
+| **LEEF 2.0** | A single-line, tab-separated IBM QRadar Log Event Extended Format record, produced the same way. Selectable on Syslog destinations only. |
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68493da280f5de2a3c29c975",
+  "timestamp": "2026-09-02T14:31:05.123Z",
+  "event": { "category": "AUDIT", "action": "ENTITY.UPDATED", "outcome": "SUCCESS", "severity": 3 },
+  "actor": { "user": "admin", "ip": "10.0.0.7", "userAgent": "Mozilla/5.0", "sessionId": null },
+  "target": { "type": "ApiProxy", "id": "68493bb680f5de2a3c29c609", "name": "Swagger Petstore Documentation", "projectId": "68493b6e80f5de2a3c29c5ee" },
+  "correlationId": "dccababd-16e3-415e-b801-9f6a52b6a28c",
+  "source": { "component": "MANAGER", "host": "manager-0", "environmentId": null },
+  "apinizer": { "version": "2026.09.2", "configRevision": 17, "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60", "synthetic": false, "truncated": false },
+  "data": { "id": "68493da280f5de2a3c29c975", "state": "UPDATED", "origin": "MANAGER" }
+}
+```
+
+:::info
+
+New fields may be added to the v2 envelope without raising `schemaVersion` — your parser must ignore fields it does not recognise. The full field reference for each stream, together with the filtering rules, the privacy profile and the event size policy, is on the [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding) page.
+
+:::
+
+## Mutual TLS (mTLS) Setup
+
+A syslog server that requires client authentication accepts a connection only from a client that presents a certificate it trusts. Apinizer presents that certificate from a key store you register, and verifies the server with a trust store you register. Neither is mandatory: a Syslog connection with SSL turned on and both fields empty keeps working as server-only TLS, and an installation that does not use TLS at all keeps sending over plain TCP or UDP.
+
+<Steps>
+  <Step title="Produce a client certificate with your certificate authority">
+    Create a key pair and a signing request for Apinizer, have your corporate authority sign it, and package the result as a PKCS#12 file. The example below produces `apinizer-gateway.p12`.
+
+    ```bash
+    # 1. Private key and certificate signing request for the Apinizer client
+    openssl req -new -newkey rsa:2048 -nodes \
+      -keyout apinizer-gateway.key \
+      -out apinizer-gateway.csr \
+      -subj "/CN=apinizer-gateway/O=Example Corp"
+
+    # 2. Sign the request with the corporate certificate authority
+    openssl x509 -req -days 825 \
+      -in apinizer-gateway.csr \
+      -CA corp-ca.crt -CAkey corp-ca.key -CAcreateserial \
+      -out apinizer-gateway.crt
+
+    # 3. Package the key and the certificate into a PKCS#12 key store
+    openssl pkcs12 -export \
+      -inkey apinizer-gateway.key \
+      -in apinizer-gateway.crt \
+      -certfile corp-ca.crt \
+      -name apinizer-gateway \
+      -out apinizer-gateway.p12
+    ```
+
+    The common name you choose here is the name the syslog server will match against its permitted-peer list, so agree on it with the team that runs the server.
+  </Step>
+
+  <Step title="Register the key store in Apinizer">
+    On the **Key Stores** page under **Secret**, add a new record, upload `apinizer-gateway.p12` and enter the password you used when exporting it. This record is what the **Keystore** field on the Syslog connection offers. See [Keystore Management](/en/admin/secrets-management/keystore-management).
+  </Step>
+
+  <Step title="Register the trust store">
+    Package the certificate of the authority that issued the **server** certificate into its own store and register it the same way. It is used only for verification, so it holds no private key.
+
+    ```bash
+    openssl pkcs12 -export -nokeys \
+      -in corp-ca.crt \
+      -name corp-ca \
+      -out syslog-truststore.p12
+    ```
+
+    A trust store selected on the connection becomes the only trust anchor for that connection: the public authorities that ship with the JVM are not added to it. Leave the field empty if the server certificate is issued by a public authority.
+  </Step>
+
+  <Step title="Configure the Syslog connection">
+    Open the connection from the **Connection → Syslog Connection** section of the left menu, set the protocol to TCP and turn on **Enable SSL**, then select the **Keystore** and the **Truststore** you registered. Leave **Hostname Verification** on so the name in the server certificate is matched against the **Syslog Server Hostname** you entered; turn it off only when the certificate deliberately carries a different name. The port is usually 6514 with the RFC 5425 message format. Field-by-field descriptions are on the [Syslog connection](/en/integrations/connection-management/syslog) page.
+  </Step>
+
+  <Step title="Read the Test Connection result">
+    **[Test Connection]** reports the session that was actually negotiated:
+
+    ```text
+    ok: tls: TLSv1.3 / TLS_AES_256_GCM_SHA384 / peer=CN=syslog.example.com / clientCert=CN=apinizer-gateway (expires 2036-08-31)
+    ```
+
+    Read it as a checklist: `peer` is the certificate the server presented, and `clientCert` is the one Apinizer presented — `clientCert=none` means no key store is in effect and the server is only seeing an anonymous client. Two failures have their own wording:
+
+    - `TLS configuration error: ...` — the selected key store or trust store could not be read. Nothing is sent and the connection is never retried without TLS.
+    - a failure mentioning `certificate_required` — the server asked for a client certificate and did not receive one it accepts.
+
+    A successful test against a TLS server takes about a second longer than a plain one, because a server that rejects the client certificate only announces it after the handshake and Apinizer waits for that answer.
+  </Step>
+
+  <Step title="Require client authentication on the syslog server">
+    The server side has to ask for the certificate and accept the name you issued. In rsyslog this is the `gtls` stream driver with an authentication mode of `x509/name` and a permitted-peer list:
+
+    ```text
+    module(load="imtcp"
+           StreamDriver.Name="gtls"
+           StreamDriver.Mode="1"
+           StreamDriver.AuthMode="x509/name"
+           PermittedPeer=["apinizer-gateway"])
+
+    global(DefaultNetstreamDriver="gtls"
+           DefaultNetstreamDriverCAFile="/etc/rsyslog.d/certs/corp-ca.crt"
+           DefaultNetstreamDriverCertFile="/etc/rsyslog.d/certs/syslog-server.crt"
+           DefaultNetstreamDriverKeyFile="/etc/rsyslog.d/certs/syslog-server.key")
+
+    input(type="imtcp" port="6514")
+    ```
+
+    On syslog-ng the equivalent is a `network()` source with `transport("tls")` whose `tls()` block sets `peer-verify(required-trusted)` together with the authority, certificate and key files.
+  </Step>
+</Steps>
+
+:::note
+
+When the certificate inside a key store record is renewed, save the Syslog connection again (or redeploy the environment). The open connections are rebuilt with the new material at that point; renewing the store on its own does not disturb a running connection.
+
+If a selected key store becomes unreadable while the system is running — it was deleted, or its password changed — delivery on that connection stops rather than silently continuing without the certificate. The events are handed to the failover connector when one is configured and dropped otherwise, an error is logged every 30 seconds, and the destination's health card turns **Failing**.
+
+:::
+
+## RFC 5424 Structured Data
+
+RFC 5424 reserves a field between the frame header and the message for machine-readable metadata. Apinizer can fill it so that a SIEM can route and correlate on the frame itself, without parsing the message body first. It is turned on per connection with **Write RFC 5424 Structured Data**, and it is written only over TCP with the **RFC 5424** or **RFC 5425** message format — UDP and RFC 3164 have no such field and ignore the setting.
+
+A frame with structured data looks like this:
+
+```text
+<110>1 2026-09-03T10:23:25.922Z gw-1 Apinizer - - [origin software="Apinizer" swVersion="2026.09.2"][timeQuality tzKnown="1"][apinizer@99999 stream="AUDIT" eventType="ENTITY" outcome="SUCCESS" eventId="68493da280f5de2a3c29c975" correlationId="dccababd-16e3-415e-b801-9f6a52b6a28c" severity="3"] {"logType":"AUDIT","schemaVersion":2,"eventId":"68493da280f5de2a3c29c975"}
+```
+
+| Element | When it is written | What it carries |
+|---|---|---|
+| `origin` | Whenever structured data is on | `software="Apinizer"`, plus `swVersion` where the version is known on that path |
+| `timeQuality` | Whenever structured data is on | `tzKnown="1"` |
+| `apinizer@<number>` | Only when an **Enterprise Number (PEN)** is set on the connection **and** the frame carries an event from the SIEM & Log Forwarding page | `stream`, `eventType`, `outcome`, `eventId`, `correlationId`, `severity` |
+
+The `99999` above is an example. Substitute your own Private Enterprise Number, which you can request free of charge from [IANA](https://www.iana.org/assignments/enterprise-numbers/assignment/apply/); the field accepts 1 to 10 digits. Until you have one, leave it empty and the frames carry only `origin` and `timeQuality` — a number that is not yours must not be used, because it is what tells the receiver whose definition of these fields applies.
+
+:::info
+
+Structured data carries metadata only. The event itself stays in the message part of the frame, and the message hostname, the acting user and the payload fields are never copied into it.
+
+The setting belongs to the connection, not to a destination: while it is on, every RFC 5424 or RFC 5425 frame that connection sends carries `origin` and `timeQuality`, including traffic logs and application logs that share the same connection. The `apinizer@` element is the exception — it is written only for events dispatched from the SIEM & Log Forwarding page, so a destination on the **Legacy Raw** profile never produces it. The frame sent by **[Test Connection]** carries no structured data either; use the **Schema & Samples** tab to see the exact element that your configuration produces.
+
+:::
+
+## Reassembling Split Messages {#reassembling-split-messages}
+
+When a Syslog connection's **Max Message Size (Bytes)** is set, a record larger than that size arrives at the receiver as several syslog messages instead of one — see [Splitting Oversized Messages](/en/integrations/connection-management/syslog#splitting-oversized-messages) for the setting itself and what each part looks like. Reassembly happens on the receiving side; Apinizer has no way to confirm the receiver put the parts back together.
+
+Every part's message body starts with `[chunk i/N id] ` — the part's position, the total number of parts, and an identifier shared by every part of that one record. Group incoming messages by that identifier, order them by position, strip the prefix, and concatenate the remaining text in order to get the original record back.
+
+:::warning
+
+Do this **before** running any JSON parsing rule over the message. A part is a fragment of the original text, prefix included — not a document your JSON parser can read on its own.
+
+:::
+
+### rsyslog
+
+rsyslog's built-in modules do not correlate messages by content, so reassembly needs a small external collector. Route the messages that carry the chunk prefix to it with `omprog`, and have the collector hold each identifier's parts in memory — keyed by `id`, ordered by `i` — until `i` reaches `N`, then emit the concatenated, prefix-stripped result and forward it wherever the reassembled records belong (a file, another syslog target, your SIEM's ingestion endpoint).
+
+```
+ruleset(name="apinizerChunks") {
+    action(type="omprog" binary="/opt/apinizer/reassemble-chunks.sh" template="RSYSLOG_TraditionalFileFormat")
+}
+
+if $msg contains '[chunk ' then {
+    call apinizerChunks
+} else {
+    action(type="omfile" file="/var/log/apinizer.log")
+}
+```
+
+The collector script matches each line against `^\[chunk (\d+)/(\d+) ([^\]]+)\] ` to pull out the position, total and identifier, buffers by identifier, and flushes a record once every position from 1 to its total has arrived. Add a timeout that flushes and logs whatever parts did arrive if the last part never shows up, so a lost part does not hold a record in memory forever.
+
+### Splunk
+
+A field extraction plus a `stats` aggregation reassembles the parts in a search:
+
+```spl
+index=syslog "[chunk "
+| rex field=_raw "^\[chunk (?<chunk_i>\d+)/(?<chunk_n>\d+) (?<chunk_id>\S+)\] (?<chunk_body>.*)"
+| eval chunk_i=tonumber(chunk_i)
+| sort chunk_id, chunk_i
+| stats list(chunk_body) as parts by chunk_id
+| eval original_message=mvjoin(parts, "")
+```
+
+`chunk_i` is cast to a number before sorting, otherwise `"10"` would sort before `"2"` as text. `stats list()` keeps at most 100 values per group — enough for any realistic chunk count, but worth knowing if a single record is ever split into hundreds of parts. For a production pipeline, do the same grouping in a scheduled search or at index time with a lookup-based sessionization, so JSON-extraction rules that run downstream see only fully reassembled events.
 
 ## Frequently Asked Questions
 
@@ -52,12 +262,44 @@ System Logs are divided into five subcategories. Three of these can be sent to a
     </Accordion>
 
     <Accordion title="Do System Audit logs coming via Syslog cover User Audit logs?">
-        No, <strong>System Audit logs</strong> that can be sent via Syslog and the mentioned <strong>User Audit logs</strong> have different content:
+        No, <strong>System Audit logs</strong> and <strong>User Audit logs</strong> have different content and are configured separately:
 
         <ul>
-            <li><strong>System Audit Logs</strong>: "Who did what on which page" - general logs related to changes made on the system.</li>
-            <li><strong>User Audit Logs</strong>: There is no separate "user audit" log under this definition externally. Generally, user-focused audits are handled under special category logs such as <strong>Login Audit</strong> and <strong>Test Console Usage Audits</strong>, and these are not currently sent to external applications.</li>
+            <li><strong>System Audit Logs</strong>: "Who did what on which page" - general logs related to changes made on the system. Sent via the Audit Log connector described on this page.</li>
+            <li><strong>Login Audit Logs</strong>: Successful and failed sign-in attempts, sign-outs, and token refresh events. Sent as the <strong>Session</strong> stream on the SIEM &amp; Log Forwarding page; see <a href="/en/admin/system-settings/siem-log-forwarding#session-stream-event-types-and-legacy-payload">Session stream — event types and legacy payload</a>.</li>
+            <li><strong>Test Console Usage Audits</strong>: Not currently sent to external applications.</li>
         </ul>
+    </Accordion>
+
+    <Accordion title="Can Login Audit logs be forwarded to a Graylog connector?">
+        Yes. Graylog connectors receive Login Audit logs as GELF messages: the short message is <code>LogLogin</code>, the JSON event body goes into <code>full_message</code> when <strong>Append to Message</strong> is enabled, and every non-empty event field is sent as a separate additional field when <strong>Append to Attributes</strong> is enabled. Syslog, Kafka, RabbitMQ, ActiveMQ, Webhook, Elasticsearch and database connectors are supported as well; see <a href="/en/admin/system-settings/siem-log-forwarding#session-stream-event-types-and-legacy-payload">Session stream — event types and legacy payload</a>.
+    </Accordion>
+
+    <Accordion title="What fields do Manager Request and Access Denied audit events add?">
+        When the Audit Log setting described in <a href="/en/admin/audit-compliance/audit-records">Audit Records</a> is turned on, write requests to the Management Console/APIs are captured as <strong>Manager Request</strong> events, and every rejected request is captured as an <strong>Access Denied</strong> event. Both are additive to the existing Audit Log structure: the fields already documented in <a href="/en/operations/administrator-guides/system-logs-syslog-transfer">Transferring System Logs to Syslog</a> are unchanged, and every audit event forwarded via Syslog now also carries:
+
+        <ul>
+            <li><strong>eventType</strong>: Always present — <code>ENTITY</code> for the changes already documented, or <code>MANAGER_REQUEST</code> / <code>ACCESS_DENIED</code> for these two.</li>
+            <li><strong>outcome</strong>: Always present — <code>SUCCESS</code>, <code>FAILURE</code>, or <code>DENIED</code>.</li>
+            <li><strong>source</strong>: Always present — <code>MANAGER</code>, <code>APIOPS</code>, <code>PORTAL</code>, or <code>SYSTEM</code>.</li>
+            <li><strong>clientIp</strong>, <strong>userAgent</strong>, <strong>correlationId</strong>: Present only when known for the request.</li>
+        </ul>
+
+        Example of a Manager Request event:
+
+        ```text
+        2026-09-02T08:14:22.101Z apinizer_demo Apinizer_demo {"id":"690b1a2c3d4e5f6789abcdef","principal":"admin","auditEventDate":"2026-09-02T08:14:22.101Z","state":"CREATED","objectId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","objectName":"POST /api/apiproxy","referenceObjectJson":"{\"httpMethod\":\"POST\",\"path\":\"/api/apiproxy\",\"status\":200,\"durationMs\":184}","className":"MANAGER_REQUEST","eventType":"MANAGER_REQUEST","outcome":"SUCCESS","clientIp":"10.24.5.101","userAgent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64)","correlationId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","source":"MANAGER"}
+        ```
+
+        Example of an Access Denied event:
+
+        ```text
+        2026-09-02T08:16:47.552Z apinizer_demo Apinizer_demo {"id":"690b1a3d4e5f6789abcdef01","principal":"jdoe","auditEventDate":"2026-09-02T08:16:47.552Z","state":"CREATED","objectId":"/api/apiproxy/68493bb680f5de2a3c29c609","objectName":"403 DELETE /api/apiproxy/68493bb680f5de2a3c29c609","referenceObjectJson":"{\"path\":\"/api/apiproxy/68493bb680f5de2a3c29c609\",\"method\":\"DELETE\",\"problemTitle\":\"Forbidden\",\"exceptionClass\":\"com.apinizer.manager.errors.ExceptionTranslator$MapBasedProblem\"}","className":"ACCESS_DENIED","eventType":"ACCESS_DENIED","outcome":"DENIED","clientIp":"10.24.5.212","userAgent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)","source":"MANAGER"}
+        ```
+
+        In the Access Denied example, <strong>problemTitle</strong> and <strong>exceptionClass</strong> describe the rejection response itself, not the caller's request — they never contain data the caller sent.
+
+        A database connector configured for the Audit Log only writes the original set of columns shown in <a href="/en/operations/administrator-guides/system-logs-syslog-transfer">Transferring System Logs to Syslog</a>; the additional fields above are only available through JSON-based connectors (Syslog, Kafka, Webhook, Elasticsearch).
     </Accordion>
 
 
@@ -71,6 +313,9 @@ To transfer API traffic and system logs to syslog, you can visit the following p
     </Card>
     <Card title="System Log Transfer" icon="server" href="/en/operations/administrator-guides/system-logs-syslog-transfer">
         System log transfer settings to syslog
+    </Card>
+    <Card title="SIEM &amp; Log Forwarding" icon="shield" href="/en/admin/system-settings/siem-log-forwarding">
+        Destinations, per-stream rules, payload profiles, privacy profile and event size policy
     </Card>
 </CardGroup>
 

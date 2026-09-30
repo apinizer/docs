@@ -67,6 +67,26 @@ Bu iki bölgedeki başlık, parametre ve gövde verilerinin yazılmaması verita
 
 :::
 
+## Streaming (SSE) Yanıtları
+
+Sunucu tarafı akış (Server-Sent Events) kullanan API Proxy'lerde yanıt gövdesi daha önce trafik kaydında `<<Server Side Streaming Operation Enabled>>` yer tutucusu olarak görünüyordu. Artık istemciye gerçekten yazılan olay akışı kaydedilir:
+
+- Akış boyunca **tek bir trafik kaydı** üretilir; kayıt bağlantı kapandığında tamamlanır. Her chunk için ayrı kayıt oluşturulmaz — böylece korelasyon bozulmaz ve uzun bağlantılar log hacmini sınırsız büyütmez.
+- Akış yalnızca, o istek için **istemciye giden yanıt gövdesini** (Response to Client body) gerçekten kaydedecek en az bir etkin log connector'ı varsa yakalanır — istek için çözülen connector ayarlarına (metot bazlı override'lar dahil) ya da connector üzerindeki *blok/hata durumunda kapalı alanları logla* seçeneğine göre. İstek için gövde loglama kapalıysa veya saklama profili yük (payload) içeriğine izin vermiyorsa yer tutucu korunur ve yakalama tamponu hiç oluşturulmaz.
+- Kaydedilen gövde **Maksimum gövde boyutu** (`LOGGING_TRAFFIC_MAX_BODY_SIZE`) ayarıyla sınırlıdır. Sınır aşılırsa kopyalama durur ve kaydın sonuna `<<Streaming Body Truncated>>` işareti eklenir; kesilmiş bir gövdenin tam sanılması böylece engellenir.
+- **AI Gateway** proxy'leri de kapsam dahilindedir: **AI Proxy Routing** ekranındaki **Streaming** ayarı açıkken LLM sağlayıcısından akan yanıt, aynı kapı (yanıt gövdesi loglaması ve saklama profili), aynı gövde sınırı ve aynı kesme işaretiyle kaydedilir. Kaydedilen içerik istemciye gerçekten gönderilen akıştır — yanıt üzerinde çalışan maskeleme/DLP politikalarının çıktısı, sağlayıcının ham yanıtı değil.
+- İstemci bağlantıyı kesse veya arka uçta hata oluşsa da o ana kadar yazılmış gövde aynı tek kayda işlenir.
+
+:::warning Kapasite planlaması — eşzamanlı akış × gövde sınırı
+Streaming gövde logu açıkken her akış, worker belleğinde en fazla **Maksimum gövde boyutu** (`LOGGING_TRAFFIC_MAX_BODY_SIZE`, varsayılan 25 MB) kadar bir yakalama tamponu tutar; akış kapanınca bu tampon aynı boyda bir kayıt metnine dönüşür ve kayıt yazılana kadar bellekte kalır. Kaba hesap: **eşzamanlı akış sayısı × min(akış gövdesi, gövde sınırı)** — 100 eşzamanlı uzun AI yanıtı ile varsayılan sınırda 2,5 GB'a kadar heap gerekebilir. Uzun akışların yaygın olduğu ortamlarda genel sınırı düşürmek yerine ilgili log connector'ının **Response to Client** bölgesindeki **Kısmi boyut** (`sizeBodyToClient`) ayarıyla kaydedilecek gövdeyi küçük tutun; gövdeye ihtiyaç yoksa o istekler için gövde loglamasını kapatın (tampon hiç oluşmaz). Sınır aşımı yalnız kaydı kısaltır, istemciye giden akışı asla etkilemez.
+:::
+
+:::note Kapsam dışı kalan akışlar
+**Sıkıştırılmış SSE** (`Content-Encoding` taşıyan akışlar) gateway tarafından şeffaf biçimde aktarılır; güvenle açılıp mevcut gizlilik/maskeleme zincirinden geçirilemediği için bu akışlarda yer tutucu korunur. İkili (binary) akışlar da kaydedilmez.
+
+Saklama profili gövde kaydına izin vermiyorsa (`NO_PAYLOAD` / `NO_PERSIST`) hiç tampon oluşturulmaz. Gizlilik (PII) maskeleme, kayıt kalıcılaştırılmadan önce mevcut mekanizma üzerinden uygulanır.
+:::
+
 ## Log Ayarları Sekmesi
 
 API Proxy detay sayfasında **Log Ayarları** _(Log Settings)_ sekmesi, trafik log konfigürasyonunu yönetmek için ayrılmış özel bir sekmedir. Eskiden [Settings](/tr/develop/api-proxy-konfigurasyonu/settings) sekmesinin en altında yer alan log ayarları bölümü, artık bu ayrı sekmeden yönetilir.
@@ -150,6 +170,7 @@ Her konnektör nesnesi için aşağıdaki alanlar bağımsız olarak yapılandı
 Belirli API metodları için varsayılan konnektör ayarlarından farklı log ayarları tanımlayabilirsiniz. Örneğin hassas bir metot için gövde loglamasını kapatabilir, diğer metodlar için açık bırakabilirsiniz.
 
 - **Metod Geçersiz Kılması Ekle** _(Add Method Override)_: Metod ve konnektör seçerek özel ayar tanımlarsınız.
+- Metodlar, yolun önünde HTTP metodu ile listelenir (örneğin `GET /pet/{petId}`); böylece aynı yolu paylaşan ancak metodu farklı olan uç noktalar birbirinden ayırt edilebilir. SOAP operasyonları gibi HTTP metodu bulunmayan kayıtlar yalnızca adıyla listelenir.
 - Her geçersiz kılma için başlık, parametre ve gövde loglaması ayrı ayrı yapılandırılabilir.
 - Mevcut geçersiz kılmalar düzenlenebilir veya silinebilir.
 
@@ -165,15 +186,15 @@ API Proxy trafik loglarında hassas verilerin korunması için gizlilik ayarlar�
 
 ### Bir Gizlilik Kuralı Veriyi Nasıl Bulur
 
-Her kural önce **neyi arayacağına**, sonra **onunla ne yapacağına** karar verir. Veriyi bulmanın üç yolu vardır:
+Her kural önce **neyi arayacağına**, sonra **onunla ne yapacağına** karar verir. Bunu tanım eklerken **Kural tipi** ile seçersiniz. Veriyi bulmanın üç yolu vardır:
 
 | Kural Tipi | Neyi Eşler | Ne Zaman Kullanılır |
 |------------|------------|---------------------|
-| **Öğe adı** | Verilen ada sahip alan, header veya query parametresi — değeri ne olursa olsun | Hassas veri her zaman bilinen bir alanda duruyorsa (`password`, `cardNumber` gibi). Loglanan header ve parametreleri de kapsayan tek tip budur |
-| **Düzenli ifade** | Gövdede kalıbınıza uyan her değer | Format API'lerinize özgüyse — sipariş kodu, iç referans numarası |
-| **Hazır PII tipi** | Bilinen bir kişisel veri formatı, nerede geçerse geçsin | Değer herhangi bir alana düşebiliyorsa ya da AI prompt'u gibi serbest metin içindeyse |
+| **Öğe adı** | Verilen ada sahip alan, header veya query parametresi — değeri ne olursa olsun | Hassas veri her zaman bilinen bir alanda duruyorsa (`password`, `cardNumber` gibi). Ada göre eşleyen tek tip budur; loglanan header'ları, parametreleri ve loglanan URL'in query string'ini kapsar |
+| **Düzenli ifade** | Kalıbınıza uyan her metin — gövdede, istek yolunda, query string'de, loglanan header listelerinde ve loglanan parametre listelerinde | Format API'lerinize özgüyse — sipariş kodu, iç referans numarası |
+| **Hazır PII tipi** | Bilinen bir kişisel veri formatı — gövde, adres, loglanan header listeleri ve loglanan parametre listeleri dahil, nerede geçerse geçsin | Değer herhangi bir alana, `/user/12345678901` gibi bir yol parçasına ya da AI prompt'u gibi serbest metne düşebiliyorsa |
 
-Hazır tipler TC Kimlik No (TCKN), Türkiye IBAN, Türkiye telefon numarası, e-posta adresi ve kredi kartı numarasını kapsar.
+Hazır tipler TC Kimlik No (TCKN), Türkiye IBAN, Türkiye telefon numarası, e-posta adresi ve kredi kartı numarasını kapsar; katalogda IP Adresi ve URL dahil ek hazır tipler de bulunur.
 
 ### İşlemler
 
@@ -181,7 +202,14 @@ Hazır tipler TC Kimlik No (TCKN), Türkiye IBAN, Türkiye telefon numarası, e-
 - **Silme** — değeri kaldırır
 - **Hashleme** — tek yönlü hash saklar; orijinal değer geri alınamaz
 - **Şifreleme** — geri çözülebilir şifreli değer saklar
-- **Tespit** — loglanan içeriği değiştirmeden verinin bulunduğunu raporlar
+- **Tespit Et** — kaydı değiştirmez; kural tipi ne olursa olsun (öğe adı, düzenli ifade, hazır PII tipi) yalnızca eşleşmeyi not eder, veriyi maskelemez, silmez, hash'lemez veya şifrelemez. Trafik log tarafında bu tespitler için ayrı bir rapor ekranı yoktur
+
+:::warning Yükseltme Notu
+
+**Öğe adı** kural tipiyle birlikte **Tespit Et** işlemi seçili bir kural, yükseltmeden sonra da veriyi
+maskelemez. Bu alanın loglarda gizlenmesini istiyorsanız kuralın işlemini **Maskele** olarak değiştirin.
+
+:::
 
 ### Maskeleme Biçimi
 
@@ -204,9 +232,17 @@ Korunacak karakter sayısı değerin uzunluğuna eşit ya da büyükse hiçbir �
 
 ### Bilinmesi Gerekenler
 
+**URL de kapsama girer, ama farklı kural tipleriyle.** Loglanan query string hem ada göre (bir `id` kuralı, parametre listesindeki `id` değerini nasıl gizliyorsa `?id=...` içindekini de aynı şekilde gizler) hem de desene göre maskelenir. İstek yolu ise **yalnızca** düzenli ifade ya da hazır PII tipiyle maskelenir; çünkü bir yol parçasının eşleşecek bir adı yoktur. `/user/12345678901` içindeki numarayı gizlemek için hazır TCKN kuralı ya da `[0-9]{5,}` gibi bir desen tanımlayın. **Backend'e fiilen gönderilen adres (Gönderilen Adres / routing address) de aynı kurallara tabidir.** Adresin yalnız yol ve query string bölümü, `httpRequestQueryString` ve `httpRequestPathInfo` ile birebir aynı kurallarla maskelenir; şema, host ve port (`https://host:8443` kısmı) hiçbir zaman değiştirilmez — bu bölüm PII taşımaz ve trafik listeleriyle raporların backend'e göre gruplandığı anahtardır. URL'e yüzde-kodlu gelen değerler (`user%40example.com`) desen uygulanmadan önce çözülür; böylece hazır e-posta kuralı orada da yakalar. Hiçbir kural eşleşmezse loglanan URL geldiği gibi yazılır.
+
 **Hazır tipler değerin yalnız biçimini değil, kendisini de doğrular.** TCKN, IBAN ve kredi kartı numaraları kalıp eşleştikten sonra doğrulanır (kontrol hanesi, mod-97, Luhn). Biçimi doğru olup doğrulamayı geçemeyen bir değer bilinçli olarak maskelenmeden bırakılır; böylece sıradan 11 haneli sayılar, tutarlar ve referans kodları loglarınızda bozulmaz. Maskelenmesini beklediğiniz bir değer görünmeye devam ediyorsa, önce gerçekten geçerli bir numara olduğunu doğrulayın.
 
 **Bu kurallar yalnızca trafik loglarına uygulanır.** Elasticsearch, Kafka ve diğer log connector'lerine yazılanı değiştirir; gateway'in istemciye döndürdüğünü veya backend'e gönderdiğini değiştirmez. Trafiğin kendisinde maskeleme için AI PII Mask politikasını ya da bir dönüşüm politikasını kullanın.
+
+**Düzenli ifade ve Hazır PII tipi kuralları artık ayrıştırılmış header ve parametre listelerini de tarar.** Bu iki kural tipi, hem istemciden gelen hem hedefe giden istekteki, hem de yanıt tarafındaki (hedeften gelen, istemciye giden) loglanan header listelerinde ve istek tarafındaki loglanan parametre listelerinde çalışır — yalnızca gövde ve adres alanlarıyla sınırlı değildir. Aynı kapsam, ilgili proxy'nin izleme (trace) kaydındaki öncesi/sonrası header ve parametre alanları için de geçerlidir. Örneğin hazır TCKN kuralı tanımlıysa, geçerli bir TCKN değeri hem adreste hem de ayrıştırılmış parametre listesinde maskelenir. Bu tarama yalnızca ilgili kural tanımlıysa çalışır; hiçbir Düzenli ifade veya Hazır PII tipi kuralı tanımlı değilse ek bir maliyeti yoktur.
+
+:::warning
+Hazır PII tipi olarak **IP Adresi** veya **URL** kuralı tanımlarsanız `X-Forwarded-For`, `Referer`, `Location` gibi header değerleri de trafik kaydında maskelenir. Gerçek istek ve yanıt hiçbir zaman değişmez; yalnızca log kaydındaki kopya maskelenir.
+:::
 
 Detaylı bilgi için [Log Konnektörü Eklenmesi](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi) sayfasına bakabilirsiniz.
 
@@ -215,6 +251,24 @@ Detaylı bilgi için [Log Konnektörü Eklenmesi](/tr/admin/server-management/ga
 Log Ayarları bölümünde, log ayarları API Proxy bazlı olarak yönetilir.
 
 :::
+
+## Ortam Kısıtlarını Ezme {#ortam-kisitlarini-ezme}
+
+Bu sekmedeki konnektör ayarları son sözü söylemez. Bir konnektör Gateway Runtime ortamına eklenirken yönetici ona bir **detay filtresi** ve **boyut limitleri** iliştirebilir; bu, hangi proxy ne isterse istesin loglanabilecekleri daraltan, ortam geneline ait bir kuraldır.
+
+Bu sekmenin üst çubuğundaki **Ortam kısıtlarını ez** seçeneği, yalnızca bu API Proxy'yi o kuraldan muaf tutar. Sık karşılaşılan bir duruma verilen cevaptır: ortam, log hacmini kontrol etmek için yanıt gövdelerini kapalı tutar, ama bir entegrasyon incelemededir ve bir süre tam kayıt gerekir.
+
+Anahtar tek başına çalışır; konnektörden ayrıca bir izin beklenmez. Karar tümüyle proxy sahibine aittir ve ortamdaki [log konnektörünün](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi) tipinden bağımsız olarak geçerlidir.
+
+**Ezmenin atladığı şeyler:** ortam konnektörünün detay filtresi (hangi alanlara izin verdiği) ve gövde boyut sınırları. Anahtar etkinken bu proxy'nin kendi log ayarları tek başına karar verir; ortamın keseceği bir gövde tam olarak kaydedilir.
+
+:::warning Asla atlamadığı şeyler
+**Gizlilik ayarları bu anahtarın dışındadır.** Maskeleme, hash'leme, silme ve şifreleme kuralları ezmeden bağımsız olarak her kayda uygulanır — bunlar bir görüntüleme tercihi değil, veri koruma yükümlülüğüdür ve proxy seviyesindeki bir anahtar onları kaldıramaz.
+
+[Veri saklama profili](#veri-saklama-profili) de etkilenmez. **No Payload** veya **No Persist** yürürlükteyken gövde hiç toplanmaz, dolayısıyla ezmenin yeniden açacağı bir şey yoktur.
+:::
+
+Ayar varsayılan olarak kapalıdır ve proxy'nin kendi log ayarı kaydında tutulur; bu kaydın gateway'e giden kendi dağıtım kanalı vardır. **Kaydetmek yeterlidir — API Proxy yeniden dağıtımı (redeploy) GEREKMEZ**, değişiklik bir sonraki istekte geçerlidir.
 
 ## Veri Saklama Profili {#veri-saklama-profili}
 

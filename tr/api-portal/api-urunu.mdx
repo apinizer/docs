@@ -71,13 +71,17 @@ Yayınlanmamış ürün oluşturur. Tipik adımlar: General → APIs → API Spe
 | **API Specification** | Ürün OpenAPI / endpoint görünümü |
 | **Documentation** | Portal doküman sayfaları |
 | **Files** | İndirilebilir dosyalar |
-| **Plans** | Active/Retired planlar; Duplicate; kota/rate limit/onay/fiyat; aşımda Block 429 veya Continue & charge |
+| **Plans** | Active/Retired planlar; Duplicate; fiyat/onay; **kota ve hız limiti doğrudan plan üzerinde sayı olarak girilir** ve sistem bu sayılardan gateway'in uyguladığı limit profilini kendisi üretir. Katalogdan hazır bir profil seçmek gelişmiş bir seçenektir — bkz. [Abonelik Planı Limit Profilleri](#abonelik-plani-limit-profilleri) |
 | **Subscriptions (N)** | Salt okunur: org → app → plan + durum + kullanım özeti |
 | **Security** | Paketlenen proxy’lerde tutarlı ACL-managed auth; hazır değilse publish engeli |
 | **Visibility** | Keşfedilebilirlik (erişim/onay planlarda) |
 | **Danger Zone** | Unpublish / Delete |
 
 Manuel plan onayları ürün Subscriptions özetinde yapılmaz; **API Product App Registers** / [Onay İstekleri](/tr/api-portal/onay-istekleri) tarafındadır.
+
+:::info
+Bu Subscriptions panelindeki kullanım özeti, trafiği yalnızca eski kullanıcı adı/parola credential'ı taşıyan uygulamalara değil, kimliği tipli bir API İstemcisi (client id, trafik satırının username/key alanıyla eşleşir) olan uygulamalara da atfeder.
+:::
 
 ### Plan tipleri
 
@@ -89,6 +93,88 @@ Manuel plan onayları ürün Subscriptions özetinde yapılmaz; **API Product Ap
 | **Tiered** | Kademeli |
 
 Her abonelikte tüketici **tek plan** seçer. Onay: plan seviyesinde **Auto approval** / **Approval Required**. Ürün seviyesinde auto-approve alanı deprecated’tir; dokümanda öğretilmez.
+
+Plan editöründe aşım davranışı için **Engelle (429)** ve **Devam et ve ücretlendir** seçenekleri sunulur. **Metered (Kullanım başına)** ve **Tiered (Kademeli)** fiyatlama tiplerinde her çağrı zaten faturalandığı için **Engelle** seçeneği ekranda pasiftir ve seçilemez — bu fiyatlama tiplerinde aşımda istek reddedilmez, yalnızca sayılır. Planın fiyatlama tipini Metered veya Tiered'a değiştirdiğinizde, önceden **Engelle** seçili olsa bile aşım seçimi otomatik olarak **Devam et ve ücretlendir**'e döner.
+
+### Plan limitlerinin uygulanabilmesi için gereken kimlik doğrulama {#plan-limiti-kimlik-dogrulama}
+
+Plan limitleri **isteği yapan tüketiciye** göre sayılır. Bu nedenle ürüne bağlı her proxy'nin, isteğin kimin adına geldiğini belirleyebilmesi gerekir. Proxy tüketiciyi tanıyamazsa istek anonim kabul edilir, planın kotası ve rate limiti **hiç uygulanmaz** ve aşımda 429 dönmez.
+
+Bir proxy şu durumda tüketiciyi tanır:
+
+| Proxy'deki durum | Plan limiti uygulanır mı |
+|------------------|--------------------------|
+| **Aktif** Basic / Base64 / Digest / mTLS kimlik doğrulama politikası | Evet |
+| **Aktif** JWT veya OAuth2 politikası, token'ı üçüncü taraf üretiyor | Evet |
+| **Aktif** JWT veya OAuth2 politikası, token'ı Apinizer üretiyor, grant type **password** ve sağlayıcı **Secret Manager (ACL)** | Evet |
+| **Aktif** JWT veya OAuth2 politikası, token'ı Apinizer üretiyor, grant type **password** ama sağlayıcı LDAP / Veritabanı / API | Hayır — yalnızca imza doğrulanır, tüketici çözülmez |
+| **Aktif** JWT veya OAuth2 politikası, token'ı Apinizer üretiyor ve grant type **client_credentials** | Hayır — yalnızca imza doğrulanır, tüketici çözülmez |
+| **Aktif** JWT veya OAuth2 politikası, kimlik kaynağı bir **OIDC kimlik sağlayıcısı** ve token isteğin anında bu sağlayıcıya doğrulatılıyor (onay türü **password** dışında) | Sağlayıcıda [**Eşleşen Consumer Zorunlu Olsun**](/tr/develop/politikalar/jwt) açıksa Evet, kapalıysa Hayır — token doğrulanır ama isteğe bir Consumer bağlanmaz |
+| Kimlik doğrulama politikası var ama **pasif** | Hayır |
+| Hiç kimlik doğrulama politikası yok | Hayır |
+| Yalnızca OIDC oturum doğrulaması | Hayır |
+
+Kimlik doğrulama politikası doğrudan proxy'de değil, **aktif** bir Politika Grubu'nun içinde de olabilir; bu durumda politika grubun içinden de sayılır. Politika grubunun kendisi **pasifse** içindeki hiçbir politika çalışmaz — grup içindeki kimlik doğrulama politikası aktif olsa bile tüketici tanınmaz. Bu kural hem yukarıdaki tabloya hem Security sekmesindeki tüketici kimliği kolonuna aynı şekilde uygulanır (Apinizer 2026.09.4).
+
+Politikayı etkinleştirmek tek başına yeterli değildir: değişiklik **proxy yeniden yüklenene (redeploy)** kadar ağ geçidine ulaşmaz.
+
+Bu durum artık üç yerde uyarı olarak gösterilir:
+
+* **Manager > API Product > Planlar** ve **Abonelikler** sekmelerinin üstünde sarı uyarı. Metin, tüketiciyi **tanımayan** proxy'lerin nedenine göre değişir: tanımayan proxy'lerin **tümünde** tek sebep pasif bir kimlik doğrulama politikasıysa politikayı etkinleştirip yeniden yüklemeniz istenir; tanımayan proxy'lerin **tümünde** sebep token'ın yalnızca imzayla doğrulanması ya da kimlik doğrulama şemasının tüketiciyi hiç tanımlamamasıysa onay türünü ya da kimlik sağlayıcıyı değiştirmeniz istenir; sebepler karışıksa ya da tanımayan proxy'lerden birinde hiç kimlik doğrulama politikası yoksa nedeni Security sekmesinden görmenizi isteyen genel bir uyarı gösterilir. Bağlı proxy'lerin **hepsi** tüketiciyi tanıyor ama en az biri henüz yeniden yüklenmediyse, bunun yerine yalnızca yeniden yükleme gerektiğini belirten ayrı bir uyarı görünür (Apinizer 2026.09.4).
+* **Manager > API Product > Security** sekmesindeki proxy tablosunda **Tüketici kimliği** kolonu: her proxy için "Tanınıyor" / "Tanınmıyor" ve tanınmama nedeni.
+* **Developer Portal ürün sayfası > API Specification**: kimlik doğrulama tipi pasif bir politikadan geliyorsa tipin yanında **(pasif)** etiketi ve altında tüketiciye yönelik uyarı.
+
+### Abonelik Planı Limit Profilleri {#abonelik-plani-limit-profilleri}
+
+Plan ekranında girdiğiniz **hız limiti** ve **kota** değerleri, gateway'in fiilen uyguladığı limitlerdir. Kaydettiğinizde sistem bu sayılardan plana ait bir **İstek Hızı limit profili** üretir, yayınlar ve planın onaylı tüm aboneliklerini bu profile bağlar. Sayıları değiştirdiğinizde profil yeni bir sürümle güncellenir; sayıları tamamen kaldırdığınızda profil emekliye ayrılır ve o plan için limit uygulanmaz.
+
+Bu profil kataloğa da yazılır ama **düzenlemeye kapalıdır** ve varsayılan olarak listede görünmez — tek düzenleme noktası plan ekranıdır. Ayrıntı: [Limit Planları](/tr/ai-gateway/limit-planlari).
+
+Hız limiti ve kota **en az 1 çağrıya** izin vermelidir. `0` (ya da negatif bir sayı) girilerek kaydedilen bir plan, kaydedilmeden önce reddedilir ve hangi kutunun düzeltilmesi gerektiğini söyleyen bir uyarı gösterilir — sıfır limit hiçbir trafiğe izin vermez ve gateway'in uygulayabileceği bir profile dönüştürülemez. Bir planı hız limitsiz ya da kotasız bırakmak için sıfır yazmak yerine ilgili kutucuğun işaretini kaldırın.
+
+İşaretli bir kutucuğun yanındaki sayıyı **boş bırakmak** da "limit yok" anlamına gelmez: Hız Limiti ya da Kota kutucuğu işaretliyken sayı zorunludur, kutunun altında bir uyarı çıkar ve sayı girilene kadar Kaydet düğmesi pasif kalır. O limiti kapatmak için kutucuğun işaretini kaldırın.
+
+Dışa/içe aktarma ile — ya da bir portal kopyalamasıyla — gelen bir plan, limit profilini içe aktarmanın bir parçası olarak alır ve sayılarını hemen uygular; ayrıntı: [Dışa/İçe Aktarma](/tr/admin/secrets-management/export-import#api-urunu-abonelik-planlari).
+
+Eski bir sürümde oluşturulmuş bir planda, hiçbir profilin karşılamadığı bir hız limiti ya da kota görünüyorsa plan ekranı **bu limitlerin gateway'de uygulanmadığını** bildiren bir uyarı gösterir. Değerleri kontrol edip planı kaydedin; profil kaydetme sırasında oluşturulur ve uyarı kaybolur.
+
+#### Gelişmiş: katalogdan hazır bir profil kullanma
+
+Plan ekranındaki **Gelişmiş — katalogdan bir limit profili kullan** bölümünden, plana ait otomatik profil yerine katalogdaki hazır bir profili seçebilirsiniz. Bu seçim iki aile için ayrı ayrı yapılır:
+
+| Değer | Anlamı |
+|-------|--------|
+| **Kapalı** | Bu aile için katalog profili kullanılmaz (İstek Hızı'nda: planın kendi sayıları geçerlidir). |
+| **Plan** | [Limit Planları](/tr/ai-gateway/limit-planlari) kataloğundaki, **platform kapsamlı ve yayınlanmış** bir profile referans verir. |
+
+- İstek Hızı için bir katalog profili seçtiğinizde, plandaki hız limiti ve kota kutuları **pasifleşir** ve kaydettikten sonra seçilen profilin pencerelerinden doldurulur; böylece portal, raporlar ve APIops hep fiilen uygulanan tavanı gösterir.
+- Yalnızca **platform kapsamlı** ve **yayınlanmış** profiller seçilebilir; proje kapsamlı, taslak ya da başka bir abonelik planına ait profiller listede çıkmaz.
+- Seçilen profilin ailesi, referansın ailesiyle (İstek Hızı / AI Token Bütçesi) eşleşmek zorundadır.
+- Ürün planının aşım davranışı (**Block 429** ya da **Continue & charge**) seçilen profilin aşım davranışıyla tutarlı olmalıdır: **Continue & charge**, yalnızca **Yalnızca Say** ya da yalnızca-uyar türünde bir profille; **Block 429** ise yalnızca engelleyen bir profille eşleştirilebilir. Uyumsuz bir kombinasyon gönderilirse sunucu isteği `400 Bad Request` ile reddeder.
+- Bir profil daha sonra güncellenirse (ör. aşım davranışı değiştirilirse), ona referans veren ürün planları üzerinde otomatik bir tutarlılık kontrolü **çalışmaz** — bu geriye dönük kontrol ileride eklenecektir.
+
+:::tip
+Plana ait otomatik profilin aşım davranışı plandan türetilir: **Continue & charge** ya da **Metered / Tiered** fiyatlama, "engelleme, say" anlamına gelir; diğer durumlarda profil aşımda engeller. Bu yüzden otomatik profil için aşım uyumsuzluğu hatası oluşmaz.
+:::
+
+#### Değişiklik Etki Önizlemesi
+
+Yayında olan bir plan üzerinde Limit Profili referansı ya da aşım davranışı değiştirildiğinde, kaydetmeden önce ekran bu değişiklikten etkilenecek abonelik ve uygulama sayısını gösteren bir onay penceresi açar. Onaylamadan devam edilirse değişiklik kaydedilmez.
+
+### Tipli Limit Bağlama {#tipli-limit-baglama}
+
+Bir abonelik onaylandığında, seçilen plandaki Limit Profili referansları o abonelik sahibi uygulama için **uygulama seviyesinde** bir bağlama (binding) doğurur; bu bağlama uygulamanın tüm trafiğine uygulanır.
+
+- **Plan değişikliği** aynı bağlamayı yeni plana taşır, sayaç sıfırlanmaz.
+- **Abonelik sona erdiğinde** bağlama, aynı uygulamanın başka bir aktif aboneliğine devredilir (varsa); yoksa bağlama da sona erer.
+- Aynı uygulama ve aynı plan ailesi için her zaman **tek** bir bağlama bulunur. İki farklı abonelik aynı aile için farklı bir profil istiyorsa, mevcut bağlama **korunur**; onay ekranında bu durum bir uyarıyla bildirilir ve profili değiştirmek isteyen operatör **Profili Değiştir** eylemiyle bilinçli bir geçiş yapar (bkz. [Onay İstekleri](/tr/api-portal/onay-istekleri)).
+- Birden çok projede kullanılan portal uygulamalarının bağlaması **admin** projesi altında tutulur.
+
+### Sürüm Yükseltmesi {#surum-yukseltmesi}
+
+Sürüm yükseltmesi **elle bir işlem gerektirmez**. Yükseltmede, kota/hız limiti değeri girilmiş her ürün planı için otomatik bir **İstek Hızı** limit profili oluşturulur (önceki sürümde oluşturulmuş otomatik profiller varsa yenisi açılmaz, mevcut olan devralınır), plan bu profile bağlanır ve **onaylanmış** aboneliklerin uygulama seviyesindeki bağlamaları da aynı adımda kurulur. Limit taşımayan planlar **Kapalı** kalır.
+
+Aynı adımlar her gece yeniden çalışır; bir plan herhangi bir nedenle profilsiz kalırsa (içe aktarma, ortam terfisi, elle veri düzeltmesi) en geç ertesi gün kendiliğinden düzelir. Bağlama var olduğunda ne yaptığı için Limit Planları sayfasındaki [Limitlerin Uygulanması](/tr/ai-gateway/limit-planlari#gölge-modu) bölümüne bakın.
 
 ### Görünürlük {#visibility-görünürlük}
 
@@ -123,7 +209,7 @@ Abonelik consumer tarafında (ürün veya [My Apps](/tr/api-portal/uygulama-prom
 1. Catalog’dan API’leri paketle  
 2. OpenAPI yükle  
 3. En az bir Active plan tanımla (kota/rate/onay)  
-4. Security hazır olsun  
+4. Security hazır olsun — bağlı proxy'lerde **aktif** ve tüketiciyi tanıyan bir kimlik doğrulama politikası bulunsun, aksi halde plan limitleri uygulanmaz ([ayrıntı](#plan-limiti-kimlik-dogrulama))  
 5. Visibility ayarla  
 6. Publish  
 7. Gerekirse [API Katalog](/tr/api-portal/api-katalog) ile paketleme durumunu doğrula  
@@ -131,6 +217,7 @@ Abonelik consumer tarafında (ürün veya [My Apps](/tr/api-portal/uygulama-prom
 ## İlgili Sayfalar
 
 * [API Katalog](/tr/api-portal/api-katalog)
+* [Limit Planları](/tr/ai-gateway/limit-planlari)
 * [API Ürün Kategorileri](/tr/api-portal/api-urun-kategorileri)
 * [Onay İstekleri](/tr/api-portal/onay-istekleri)
 * [API Ürün Uygulama Kayıtları](/tr/api-portal/api-urun-uygulama-kayitlari)

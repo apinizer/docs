@@ -1,0 +1,943 @@
+---
+title: "SIEM ve Log Yönlendirme"
+description: "Apinizer denetim, oturum, token ve uygulama olaylarını SIEM sisteminize yönlendirebilir, her hedef için hangi olayların hangi yük biçiminde gönderileceğine karar verebilir, gizlilik profili ve boyut sınırı uygulayabilir ve her hattı eski alıcı listelerinden bu sayfadaki kurallara kontrollü biçimde geçirebilirsiniz."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+:::info
+
+**Yönetim → Sistem Ayarları → SIEM ve Log Yönlendirme** yolunu izleyerek bu ekrana erişebilirsiniz. Ekranı yalnızca **Yönetici (Admin)** rolüne sahip kullanıcılar açabilir. Değişiklikleri kaydetmek için **Kaydet ve Yükle** butonuna tıklayınız; kayıt sonrası yapılandırma çalışan ağ geçidi ortamlarına anında iletilir.
+
+:::
+
+## Genel Bakış
+
+Denetim, oturum, token ve uygulama olayları için **kayıt sistemi Apinizer yapılandırma veritabanıdır**. SIEM tarafına yönlendirdiğiniz her şey, korelasyon, alarm ve uzun süreli arşiv amacıyla üretilen bir **kopyadır**.
+
+Teslim sözleşmesi **en iyi çaba (best effort)** ilkesine dayanır:
+
+- Olay, onu üreten akış üzerinde konnektöre teslim edilir; konnektör olayı tamponlar ve gönderir.
+- Konnektörün kuyruğu dolduğunda olaylar düşürülür; olayı üreten isteğin bekletilmesi tercih edilmez.
+- UDP ve düz TCP syslog üzerinde "teslim edildi" bilgisi gözlemlenemez. Bu nedenle test butonu syslog hedefleri için **Gönderildi** değil **Kuyruğa alındı** sonucunu bildirir.
+- Kalıcı bir kuyruktan yeniden gönderim yapılmaz. SIEM erişilemez durumdaysa kayıt Apinizer veritabanında durur, ancak SIEM'e sonradan ulaşmaz.
+
+:::warning
+
+SIEM kopyasına tek başına dayanan bir uyumluluk kontrolü tasarlamayınız. Kesin yanıt gerektiğinde Apinizer veritabanındaki kayıtları (Denetim Kayıtları, Giriş Kayıtları, Token İstekleri, Uygulama Logları) sorgulayınız; SIEM kopyasını korelasyon ve alarm için kullanınız.
+
+:::
+
+## Kavramlar
+
+### Hatlar
+
+**Hat**, tek bir olay ailesidir. Her hattın kendi üreticisi, Apinizer veritabanında kendi koleksiyonu, kendi olay tipleri ve kendi sonuç türetme biçimi vardır.
+
+| Hat | Neyi kaydeder | Apinizer veritabanı koleksiyonu | Olay tipleri | Sonuç |
+|---|---|---|---|---|
+| **Denetim (Audit)** | Yönetimsel değişiklikler, Yönetim Konsolu istekleri, reddedilen istekler, hassas erişim olayları (gizli değer görüntüleme, dışa aktarma, API token yaşam döngüsü, PII maskesi kaldırma) ve operasyon olayları (dağıtım, API Promotion yaşam döngüsü, ACL verme/geri alma) | `audit_event` | `ENTITY`, `MANAGER_REQUEST`, `ACCESS_DENIED`, `SECRET_REVEALED`, `EXPORT`, `API_TOKEN_CREATED`, `API_TOKEN_REVOKED`, `PII_UNMASK`, `DEPLOY`, `UNDEPLOY`, `PROMOTION_REQUESTED`, `PROMOTION_APPROVED`, `PROMOTION_REJECTED`, `PROMOTION_STARTED`, `PROMOTION_EXECUTED`, `PROMOTION_CANCELLED`, `ACL_GRANT`, `ACL_REVOKE` | `SUCCESS`, `FAILURE`, `DENIED` |
+| **Oturum (Session)** | Yönetim Konsolu ve API Portal giriş, çıkış, token yenileme, hesap kilitleme ve parola yaşam döngüsü olayları | `persistent_audit_event` | `LOGIN_SUCCESS`, `LOGIN_FAILURE`, `LOGOUT`, `TOKEN_REFRESH_SUCCESS`, `TOKEN_REFRESH_FAILURE`, `ACCOUNT_LOCKED`, `PASSWORD_CHANGED`, `PASSWORD_CHANGE_REQUIRED`, `PASSWORD_POLICY_VIOLATION` | Olay tipinden türetilir; `ACCOUNT_LOCKED` için `DENIED`, `PASSWORD_POLICY_VIOLATION` için `FAILURE` |
+| **Token** | Ağ geçidinde token üretimi, yenilenmesi ve reddi | `log_tokentraffic` | `TOKEN_ISSUED`, `TOKEN_REFRESHED`, `TOKEN_REJECTED` | Hata yoksa `SUCCESS`, varsa `FAILURE`; kimlik doğrulama hataları `DENIED` |
+| **Uygulama (Application)** | Yönetim Konsolu, ağ geçidi, önbellek ve entegrasyon modüllerinin bileşen logları | `apinizer_log` | `LOG.TRACE` … `LOG.ERROR` | `WARN` ve `ERROR` için `FAILURE`, diğerleri `SUCCESS` |
+| **API Güvenliği (API Security)** | Ağ geçidinde engellenen veya hata veren HTTP, gRPC ve WebSocket istekleri — başarılı istekler hiç kaydedilmez | `log_apisecurityevent` | `AUTHENTICATION`, `AUTHORIZATION`, `QUOTA`, `THROTTLING`, `VALIDATION`, `IP_SECURITY`, `THREAT`, `ROUTING`, `GATEWAY`, `OTHER` | Engellenen istek `DENIED`, hata veren istek `FAILURE` |
+| **API Erişimi (API Access)** | Ağ geçidinden geçen **her** istek — başarılılar dâhil — gövdesiz metadata olarak; HTTP, gRPC ve WebSocket trafiğinin tamamı | `log_apiaccess` | API Güvenliği ile aynı on kategori | Tamamlanan istek `SUCCESS`, engellenen istek `DENIED`, hata veren istek `FAILURE` |
+| **Portal** | API Portal'ın kendi alan olayları — bir uygulamanın kaydedilmesi/silinmesi, bir aboneliğin talep edilmesi/onaylanması/reddedilmesi/iptali, bir organizasyon üyeliği veya katılım talebinin yönetilmesi, bir destek talebinin açılması, kişisel bir API erişim token'ının oluşturulması/iptali | `audit_event` (Denetim ile aynı koleksiyon — bkz. [Portal Olayları](/tr/admin/audit-compliance/denetim-kayitlari#portal-olaylari)) | `PORTAL_APP_CREATED`, `PORTAL_APP_DELETED`, `PORTAL_SUBSCRIPTION_REQUESTED`, `PORTAL_SUBSCRIPTION_APPROVED`, `PORTAL_SUBSCRIPTION_REJECTED`, `PORTAL_SUBSCRIPTION_CANCELLED`, `PORTAL_ORG_MEMBER_INVITED`, `PORTAL_ORG_MEMBER_ADDED`, `PORTAL_ORG_MEMBER_ROLE_CHANGED`, `PORTAL_ORG_MEMBER_REMOVED`, `PORTAL_ORG_JOIN_REQUESTED`, `PORTAL_ORG_JOIN_APPROVED`, `PORTAL_ORG_JOIN_REJECTED`, `PORTAL_TICKET_CREATED`, `PORTAL_API_TOKEN_CREATED`, `PORTAL_API_TOKEN_REVOKED` | `SUCCESS`, `FAILURE`, `DENIED` |
+
+:::info
+Portal giriş ve çıkışları **Portal** hattının parçası DEĞİLDİR — bunlar Oturum (Session) olaylarıdır ve `persistent_audit_event` yerine ayrı bir koleksiyonda, `portal_login_logs`'ta fiziksel olarak tutulur. Yukarıdaki **Oturum** satırındaki `PORTAL_LOGIN_SUCCESS`, `PORTAL_LOGIN_FAILURE`, `PORTAL_LOGOUT`, `PORTAL_ACCOUNT_LOCKED`, `PORTAL_ACCOUNT_UNLOCKED`, `PORTAL_PASSWORD_CHANGED`, `PORTAL_PASSWORD_CHANGE_REQUIRED`, `PORTAL_PASSWORD_RESET_REQUESTED`, `PORTAL_PASSWORD_POLICY_VIOLATION` veya `PORTAL_ACCOUNT_DISABLED` olay tipi `source.component: PORTAL` ve `data.portalId` taşır; böylece bir kural, Yönetim Konsolu girişlerine dokunmadan portal girişlerini seçebilir veya dışlayabilir — tam katalog için bkz. [API Portal Giriş Kayıtları](/tr/api-portal/giris-kayitlari#olay-tipleri-ve-sebep-kodlari) (toplam on tip). `PORTAL_ACCOUNT_DISABLED` şimdilik yalnızca [inaktif-hesap görevi](/tr/api-portal/api-portal-ayarlari#güvenlik) tarafından yazılır; `PORTAL_ACCOUNT_UNLOCKED` yalnızca bir yöneticinin [Accounts/Developers](/tr/api-portal/hesaplar-gelistiriciler#aksiyonlar) ekranındaki açık **Unlock** işlemiyle yazılır — kilit kendiliğinden dolduğunda kendi olayını üretmez, ardından gelen giriş satırı ne olduğunu anlatır.
+:::
+
+:::warning API Erişimi yüksek hacimli hattır
+
+API Erişimi hattı **istek başına bir olay** üretir; yani olay hacmi, arıza sayınızla değil trafik hacminizle birlikte büyür. Hattı iki anahtar yönetir ve ikisi de **varsayılan olarak kapalıdır**:
+
+- **Yerel saklama** — olayların `log_apiaccess` koleksiyonuna yazılıp yazılmayacağı; **Hatlar** sekmesinden açılır. Açarken onay istenir, çünkü o andan itibaren her istek bir veritabanı yazımı demektir.
+- **Yetki (Authority)** — hattın bu sayfadaki hedeflerden gönderilip gönderilmeyeceği.
+
+İkisinden birini açmadan önce koleksiyona kısa bir saklama süresi tanımlayın — önerilen aralık **3-7 gündür** — bunu [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasındaki **API Access Events** satırından yapabilirsiniz; ayrıca hattı yönlendiren kuralda [örneklemeyi](#örnekleme) değerlendirin.
+
+:::
+
+:::info Engellenen ve hata veren istekler iki hatta birden düşer
+
+Bir politikanın engellediği veya hatayla sonuçlanan bir istek **hem** bir API Güvenliği olayı **hem** bir API Erişimi olayı üretir. İki hattın bu noktada örtüşmesi bilinçlidir: böylece bir hedef, trafiği almadan yalnızca güvenlik olaylarına ya da güvenlik olaylarını çiftlemeden yalnızca trafiğe abone olabilir.
+
+İki hattı da aynı hedefe yönlendiriyorsanız API Erişimi kuralında **Sonuçlar** alanını `SUCCESS` yapın. Böylece engellenen ve hata veren istekleri API Güvenliği kuralı, yalnızca başarılı istekleri de API Erişimi kuralı taşır ve hiçbir şey iki kez sayılmaz.
+
+:::
+
+İstek/yanıt gövdelerini de içeren tam trafik logları ayrı bir mekanizmadır ve SIEM hatlarına dahil değildir; bunlar ağ geçidi ortamının log konnektörleri üzerinden iletilmeye devam eder. Bir API Erişimi olayı yalnızca metadata'dır; gövde, header veya sorgu dizesi asla taşımaz.
+
+### Hedefler
+
+**Hedef**, bir konnektör ile birlikte olay o konnektöre ulaşmadan önce uygulanan her şeydir:
+
+| Bileşen | Anlamı |
+|---|---|
+| **Konnektör** | Yükü taşıyan bağlantı yapılandırması — Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog veya bir veritabanı konnektörü. |
+| **Yük profili** | Yükün biçimi. Aşağıya bakınız. |
+| **Hat kuralları** | Hat başına: o hattın bu hedefe gönderilip gönderilmeyeceği ve hangi olaylarının seçileceği. |
+| **Gizlilik profili** | Yük Apinizer'dan çıkmadan önce uygulanan isteğe bağlı maskeleme, hash'leme, silme veya şifreleme. |
+| **Boyut politikası** | İsteğe bağlı en büyük olay boyutu ve sınır aşıldığında yapılacak işlem. |
+
+Bir hat için kuralı olmayan hedef, o hattı hiç almaz. Aynı bağlantı yapılandırması birden fazla hedef tarafından kullanılabilir.
+
+### Yük profilleri
+
+| Profil | Ne üretir | Kullanılabildiği yerler |
+|---|---|---|
+| **Legacy Raw** | Konnektör tipiniz için bugünkü çıktı, değişmeden — veritabanı konnektörü yine SQL kolonlarını yazar, Graylog konnektörü yine GELF mesajı üretir, Elasticsearch konnektörü yine kendi dokümanını yazar, metin tabanlı konnektörler ise bugün aldıkları JSON'un aynısını alır. Alan listesi **dondurulmuştur**: sonraki sürümlerde Apinizer'a eklenen alanlar bu çıktıda görünmez. | Tüm konnektör tipleri |
+| **Apinizer JSON v2** | [Şema v2](#sema-v2) bölümünde anlatılan kanonik zarf — sabit alan sırası, tipli alan listesi, önem derecesi ve yalnızca o hat için açıkça izin verilen alanları taşıyan bir `data` nesnesi. | Syslog, Kafka, Webhook, RabbitMQ, ActiveMQ, Logback, Elasticsearch, Graylog |
+| **CEF 0** | ArcSight'ın CEF 0 sözdiziminde tek satır: boru ayraçlı başlık ve ardından `anahtar=değer` uzantısı. Alan eşlemesi için [CEF ve LEEF](#cef-leef) bölümüne bakınız. | Yalnızca Syslog |
+| **LEEF 2.0** | QRadar'ın LEEF 2.0 sözdiziminde tek satır: boru ayraçlı başlık ve ardından sekme ayraçlı `anahtar=değer` çiftleri. Alan eşlemesi için [CEF ve LEEF](#cef-leef) bölümüne bakınız. | Yalnızca Syslog |
+
+:::info
+
+Veritabanı konnektörleri sabit tablo kolonlarına yazdığı için v2 zarfını taşıyamaz; bu hedefler **Legacy Raw** profilinde kalır. Gizlilik profili ve boyut politikası **Legacy Raw dışındaki her profilde** uygulanır — CEF ve LEEF satırları da maskelenmiş ve boyutu uygulanmış zarftan üretilir. Maskeleme gereken bir hedefin Legacy Raw dışında bir profile geçirilmesi gerekir.
+
+:::
+
+Legacy Raw, yükseltme sonrası mevcut SIEM ayrıştırıcılarınızın çalışmaya devam etmesi için bayt düzeyinde uyumlu tutulur. Bugün ne gönderiyorsa onu göndermeye devam eder — token logundaki `clientInfo` gibi alanlar dahil. Alan listesinin özenle seçildiği yer v2 profilidir: token değerleri, parolalar ile `Authorization`, `Cookie` ve API anahtarı başlıkları bu profilin parçası hiçbir zaman olmaz, adı kimlik bilgisine benzeyen alanlar ise gönderimden hemen önce ikinci kez elenir.
+
+### Yetki
+
+Her hat, iki kaynaktan tam olarak biriyle beslenir ve aralarında hat bazında geçiş yaparsınız:
+
+| Yetki | Hedefler nereden gelir | Kurallar uygulanır mı? |
+|---|---|---|
+| **LEGACY** | Daha önce Genel Ayarlar altında yapılandırılmış alıcı listeleri | Hayır — her olay her alıcıya, yükseltme öncesindeki gibi gider |
+| **ACTIVE** | Bu sayfadaki hedefler | Evet — kurallar, yük profili, gizlilik profili ve boyut politikası uygulanır |
+
+Geçiş her iki yönde de anında etkilidir; hatları teker teker taşıyabilir ve olay kaybetmeden geri alabilirsiniz.
+
+:::info
+**Portal** hattının düşeceği bir eski (legacy) alıcı listesi yoktur — LEGACY'deyken (yükseltme sonrası varsayılan) on altı alan olayı hiçbir hedefe ulaşmaz. Bunları iletmeye başlamak için ACTIVE'e çevirin. Portal giriş/çıkışları bu anahtardan etkilenmez: onlar **Oturum** hattının yetkisini izler, bkz. aşağıdaki "Taşıma ve Geçiş Rehberi" bölümü.
+:::
+
+## Sayfa Turu
+
+Sayfa üç sekmeden oluşur.
+
+### Hedefler
+
+Sekmenin en üstünde, kaydedilmiş her hedef için bir **teslim sağlığı** kartı bulunur; ayrıntısı [Teslim Sağlığı](#teslim-sagligi) bölümündedir. Kartların altındaki hedef listesi; adı, konnektör tipi ile bağlantı yapılandırmasını, yük profilini, o hedefe yönlendirilen her hat için bir rozeti ve hedefin etkin olup olmadığını gösterir. **Hedef Ekle** hedef penceresini açar; burada şunları yapılandırırsınız:
+
+- **Ad**, **Açıklama** ve **Etkin** anahtarı.
+- **Konnektör** — **Konnektör Seç** ile Apinizer'ın başka ekranlarında da kullanılan konnektör düzenleyicisi açılır; mevcut bir hedef için **Konnektörü Düzenle** aynı düzenleyiciyi yeniden açar.
+- **Yük Profili** — liste konnektör tipine göre filtrelenir: **CEF 0** ve **LEEF 2.0** yalnızca konnektör bir Syslog bağlantısıyken seçilebilir, listenin altındaki açıklama bunu hatırlatır.
+- **Boyut Politikası** — *Olay boyutunu sınırla*, bayt cinsinden en büyük olay boyutu ve sınır aşıldığında yapılacak işlem.
+- **Gizlilik Profili** — *Gizlilik profilini uygula* ile birlikte kimlik kurallarını sizin yerinize dolduran **Önerilen SIEM profilini uygula** butonu.
+- **Hat Kuralları** — her hat için bir bölüm; her biri *Bu hattı bu hedefe gönder* anahtarıyla başlar. Denetim ve Portal bölümlerinde ayrıca *Referans nesnesini yüke ekle* (varsayılan kapalı) ve *Değişiklik listesini yüke ekle* (varsayılan açık) içerik anahtarları, Uygulama bölümünde ise *Hata yığınını yüke ekle* (varsayılan açık) anahtarı bulunur.
+
+:::info
+Bir **Veritabanı** hedefinin konnektörü, Gateway Runtime konnektörleriyle aynı **Operasyon** alanını kullanır — veritabanı tipinden bağımsız olarak yalnızca **Insert-Update-Delete** sunulur. Detay için bkz. [Log Konnektörü Eklenmesi](/tr/admin/server-management/gateway-ortamlarina-konnektor-eklenmesi#veritabani-alicisinda-operasyon-alani).
+:::
+
+Bir hattı taşımadan önce bağlantıyı doğrulamak için kaydedilmiş hedefin **Test olayı gönder** işlemini kullanınız.
+
+<Frame caption="SIEM ve Log Yönlendirme — Hedefler sekmesi">
+  <img
+    src="/images/2026-09-2/siem-log-forwarding-destinations.png"
+    alt="SIEM ve Log Yönlendirme Hedefler sekmesi: hedef kartları ve Teslimat Sağlığı özeti"
+    width="1000"
+    height="492"
+  />
+</Frame>
+
+### Hatlar
+
+Her hat için bir satır ve dört sütun bulunur:
+
+| Sütun | Ne yapar |
+|---|---|
+| **Hat** | Hattın adı. Platformda var olup henüz yapılandırılamayan bir hat *Planlandı* rozeti taşırdı; bu sürümde her hat yapılandırılabilir durumdadır. |
+| **Apinizer Veritabanı / Yerel Saklama** | Hattın yerel olarak saklanıp saklanmadığını ve ilgili log ailesinin saklama yapılandırmasına giden **Saklama ayarları** bağlantısını gösterir. Denetim, oturum, API güvenliği ve portal hatları *Her zaman saklanır* olarak işaretlidir ve kapatılamaz. Token ve uygulama hatlarında *Apinizer veritabanında sakla* anahtarı bulunur ve varsayılan olarak **açıktır**. API Erişimi hattında da aynı anahtar vardır; ancak varsayılan olarak **kapalıdır** ve açılırken onay ister — yukarıdaki uyarıya bakınız. Denetim satırı ayrıca, Yönetim Konsolu isteklerinin hiç kaydedilip kaydedilmeyeceğini belirleyen ve bir Genel Ayarlar değeri olmayı sürdüren *Yönetim isteklerini denetle* anahtarını taşır. |
+| **Hedefler** | O hat için yapılandırılmış her hedefin kural özeti. Hedef yoksa hücre bunu belirtir; hâlâ LEGACY olan hatlarda *Kurallar, yetki ACTIVE olduğunda etkinleşir* uyarısı görünür. |
+| **Yetki** | LEGACY ⇄ ACTIVE anahtarı; onay penceresi ve önerilen geçiş sırası ile birlikte. Anahtar kendi başına ve anında kaydedilir; yalnızca **kaydedilmiş** yapılandırmayı taşır: henüz kaydetmediğiniz hedef düzenlemeleri ekranda kalır ancak geçişe **dahil edilmez**, onay penceresi bunu ayrıca hatırlatır. Anahtarın onları da kapsaması gerekiyorsa önce kaydedin. |
+
+<Frame caption="SIEM ve Log Yönlendirme — Hatlar sekmesi">
+  <img
+    src="/images/2026-09-2/siem-log-forwarding-streams.png"
+    alt="SIEM ve Log Yönlendirme Hatlar sekmesi: yerel saklama, hedefler ve yetki sütunları"
+    width="1000"
+    height="688"
+  />
+</Frame>
+
+### Şema ve Örnekler
+
+Bir hat ve bir profil seçtiğinizde sekme, çalışan platformun o kombinasyon için ürettiği yükü ve izin verilen alan listesini gösterir. Profil listesinde CEF 0 ve LEEF 2.0 da yer alır; böylece bu satırların gerçek biçimini hedefi kurmadan önce görebilirsiniz. Ayrıştırıcınızı bu çıktıya göre kurunuz ve yanındaki notu okuyunuz: **şema sürümü artmadan yeni alanlar eklenebilir, bu nedenle ayrıştırıcınız bilinmeyen alanları yok saymalıdır**.
+
+Yükün altında ayrıca bir **RFC 5424 yapılandırılmış veri örneği** gösterilir. Bu, yükün parçası değil çerçeveleme üstverisidir ve yalnızca Syslog bağlantısında yapılandırılmış veri açıkken yazılır; örnekteki kurum numarası temsilîdir, gerçek değer bağlantı ayarından gelir.
+
+<Frame caption="SIEM ve Log Yönlendirme — Şema ve Örnekler sekmesi">
+  <img
+    src="/images/2026-09-2/siem-log-forwarding-schema.png"
+    alt="SIEM ve Log Yönlendirme Şema ve Örnekler sekmesi: hat ve profil seçicisi ile örnek yük"
+    width="1000"
+    height="519"
+  />
+</Frame>
+
+## Kurallar
+
+Kurallar, olay bir konnektöre teslim edilmeden önce, olayı üreten akış üzerinde **kaynağında** değerlendirilir. Betik ya da düzenli ifade eşlemesi yoktur; değerlendirme sabit sıralı denetimlerden oluşur ve token yolunda bile ucuz kalır.
+
+### Değerlendirme sırası
+
+| Adım | Denetim | Eşleştiğinde sonuç |
+|---|---|---|
+| 1 | Kural kapalı | Gönderilmez |
+| 2 | Olay tipi **Hariç tutulan olay tipleri** içinde | Gönderilmez — hariç tutma her zaman dahil etmeye üstün gelir |
+| 3 | **Dahil edilen olay tipleri** boş değil ve olay tipini içermiyor | Gönderilmez |
+| 4 | **Kapsam — hariç tut** boyutlarından herhangi biri eşleşiyor | Gönderilmez |
+| 5 | **Kapsam — dahil et** boş değil ve hiçbir boyut eşleşmiyor | Gönderilmez |
+| 6 | Eşik olayı eliyor — uygulama hattında **En düşük seviye**, diğer hatlarda **Sonuçlar** | Gönderilmez |
+| 7 | **Örnekleme yüzdesi** tanımlı (yalnızca API Erişimi) ve bu olay örneklem dilimine düşmüyor | Gönderilmez — örneklemeye takıldı |
+| 8 | **Saniyedeki en fazla olay** o saniye için tükenmiş | Kısıtlanır |
+| 9 | — | Gönderilir |
+
+Boş liste her zaman *hepsi* anlamına gelir: dahil edilen olay tipi yoksa tüm tipler, sonuç seçilmemişse tüm sonuçlar, kapsam boşsa tüm olaylar geçer. **Kapsam — dahil et** içindeki boyutlar VEYA ile birleşir; olayın doldurulmuş boyutlardan en az biriyle eşleşmesi yeterlidir. **Kapsam — hariç tut** içindeki herhangi bir boyutla eşleşen olay ise düşürülür.
+
+### Örnekleme
+
+**Örnekleme yüzdesi** alanı yalnızca **API Erişimi** kuralında görünür ve istek başına olay üreten bir hattı, olay adedine göre boyutlandırılan veya ücretlendirilen bir SIEM için taşınabilir kılan ayardır. Boş bırakırsanız kurala uyan her olay gönderilir; `10` yazarsanız yaklaşık onda biri gönderilir.
+
+İki noktada net olmakta fayda vardır:
+
+- **Yalnızca yönlendirmeyi seyreltir, saklamayı değil.** Örnekleme, hedefe neyin gideceğine karar verir. `log_apiaccess` koleksiyonuna neyin yazılacağını **etkilemez** — onu yalnızca yerel saklama anahtarı belirler. Bu nedenle Güvenlik Olayları ekranı, örnekleme yüzdesi ne olursa olsun bütün olayları göstermeye devam eder.
+- **Karar rastgele değil, deterministiktir.** Olayın kendi kimliğinden türetilir; aynı olay her değerlendirmede aynı sonucu alır ve bir istek, kendisini örnekleme dâhil eden hedeflerin ya hepsine ulaşır ya hiçbirine. Yeniden değerlendirme sonucu değiştirmez.
+
+Belirli bir gürültü türünü azaltmak için örnekleme doğru araç değildir; bunun için **Sonuçlar**, **Kapsam — dâhil et** veya **Kapsam — hariç tut** kullanın. Örneklemeyi, her şeyden temsilî bir kesit istediğiniz duruma saklayın.
+
+:::warning
+
+Örnekleme, API Erişimi hattını bir denetim izi olarak kullanmakla bağdaşmaz. Örneklenmiş bir hedef trafiğinizin tam değil istatistiksel bir görüntüsünü tutar; bir uyumluluk raporunu oraya bağlamayınız.
+
+:::
+
+### Kapsam boyutları
+
+| Boyut | Neyle eşleşir | Anlamlı olduğu hatlar |
+|---|---|---|
+| **Proje kimlikleri** | Etkilenen nesnenin ait olduğu proje | Denetim, Oturum, Token |
+| **API proxy kimlikleri**, **API proxy adları** | Olayın ilişkili olduğu API proxy | Token, Uygulama |
+| **HTTP metotları** | Token isteğinin HTTP metodu | Token |
+| **Kimlik bilgileri** | Token talep eden kimlik bilgisi veya istemci anahtarı | Token |
+| **Ortam kimlikleri** | Olayı üreten ortam | Token, Uygulama |
+| **Bileşenler** | Logu yazan Apinizer bileşeni — Manager, Gateway, Cache, Integration, Portal | Uygulama |
+| **İstemci CIDR blokları** | İstemci IP adresi; IPv4 veya IPv6 CIDR bloklarıyla eşleştirilir | Denetim, Oturum, Token |
+| **Portal kimlikleri** | Olayın ait olduğu API Portal | Oturum (yalnızca portal giriş/çıkış olaylarında), Portal |
+
+Adlar büyük/küçük harf duyarsız, kimlikler tam eşleşme ile karşılaştırılır.
+
+:::warning
+
+Yönetim Konsolu isteği ve erişim reddi denetim olayları hiçbir projeye ait değildir. **Proje kimlikleri** alanını bir proje kimliğiyle doldurursanız bu olaylar eşleşmeyi bırakır ve o hedeften kaybolur. Onları korumak için listeye `admin` değerini de ekleyiniz; bu değer projesi olmayan olayları seçer.
+
+:::
+
+:::warning
+
+Yönetim Konsolu girişlerinin eşleşecek bir **Portal kimlikleri**'i, portal girişlerinin ise eşleşecek bir **Proje kimlikleri**'i yoktur — Oturum hattında doldurulmuş bir **Portal kimlikleri** kapsamı yalnızca portal tarafını seçer, tıpkı **Proje kimlikleri**'nin yalnızca Yönetim Konsolu tarafını seçmesi gibi.
+
+:::
+
+### Örnekler
+
+| Amaç | Nasıl yapılandırılır |
+|---|---|
+| Yalnızca başarısız ve reddedilen yönetimsel işlemler gönderilsin | Denetim kuralı → **Sonuçlar**: `FAILURE`, `DENIED` |
+| Yüksek hacimli Yönetim Konsolu istek akışı bir hedefin dışında tutulsun | Denetim kuralı → **Hariç tutulan olay tipleri**: `MANAGER_REQUEST` |
+| Yalnızca tek bir projenin olayları gönderilsin | Denetim kuralı → **Kapsam — dahil et** → **Proje kimlikleri**: proje kimliği (platform seviyesindeki olaylar için `admin` de eklenir) |
+| Yalnızca uyarı ve hatalar gönderilsin | Uygulama kuralı → **En düşük seviye**: `WARN` |
+| Paylaşılan bir syslog hedefi token dalgasından korunsun | Token kuralı → **Saniyedeki en fazla olay**: `200` |
+| Başarılı API trafiği, güvenlik olayları çiftlenmeden yönlendirilsin | API Erişimi kuralı → **Sonuçlar**: `SUCCESS` (engellenen ve hata veren istekleri API Güvenliği kuralı taşımaya devam etsin) |
+| İstek başına olay üreten hat, olay adedine göre ücretlendirilen bir SIEM'de taşınabilir kalsın | API Erişimi kuralı → **Örnekleme yüzdesi**: `10` — kurala uyan olayların yaklaşık onda biri yönlendirilir, koleksiyon yine hepsini saklar |
+| Yalnızca token redleri gönderilsin | Token kuralı → **Dahil edilen olay tipleri**: `TOKEN_REJECTED` |
+| Yalnızca tek bir portalin giriş/çıkışları gönderilsin | Oturum kuralı → **Kapsam — dahil et** → **Portal kimlikleri**: portal kimliği |
+| Bir değişikliğin türü görülsün, ama alan bazlı eski/yeni değer ayrıntısı yüke eklenmesin | Denetim/Portal hedefi → **Değişiklik listesini yüke ekle**: kapalı (`data.changesStatus` ve `data.changeKinds` yine de gönderilir) |
+| Bir portalin uygulama/abonelik/destek talebi aktivitesi gönderilsin ama girişleri gönderilmesin | Kapsam kısıtı olmayan bir Portal kuralı; o hedef için Oturum kuralı kapalı bırakılır (veya başka bir portale kapsamlanır) |
+
+:::info
+
+Kurallar yalnızca yetkisi **ACTIVE** olan hatlarda uygulanır. Bir hat **LEGACY** durumdayken eski listedeki her alıcı her olayı almaya devam eder.
+
+:::
+
+## Gizlilik Profili
+
+Hassas veri iki katmanda ele alınır.
+
+**Birinci katman kapatılamaz.** Token değerleri, parolalar ve parola özetleri, `Authorization`, `Cookie` ve `Set-Cookie` başlıkları, API anahtarı başlıkları, sorgu dizeleri, sertifika ve anahtar materyali ile gizlilik tuzunun kendisi bir v2 yükünün parçası hiçbir zaman olmaz. Bunlar izin verilen alan listesinde yer almaz ve ikinci bir denetim, adı kimlik bilgisine benzeyen kalan alanları da kaldırır. Gateway Runtime ortamının token imzalama anahtarı (JWT Token Doğrulama Anahtarı sekmesindeki RSA özel anahtar) da bu katmanın parçasıdır: ne ortam kaydının denetim satırında ne değişiklik listesinde ne de yakalanan istek gövdesinde yer alır.
+
+**İkinci katman hedef başına yapılandırdığınız gizlilik profilidir.** İsteğe bağlıdır ve yalnızca **Apinizer JSON v2** yolunda, zarf üretildikten sonra ve boyut politikası çalışmadan önce uygulanır. Her kural bir zarf alanını adıyla, düzenli ifadeyle ya da hazır PII tipiyle (kimlik numarası, IBAN, e-posta adresi, telefon numarası, kart numarası) hedefler ve tek bir işlem uygular: maskeleme, hash'leme, silme, şifreleme veya tespit.
+
+Hedef penceresinde tek tıkla uygulanan önerilen profil, kimlik alanlarını (`user`, `email` ve kimlik bilgisi adı) tuzlu hash'e çevirir ve IP adresini okunabilir bırakır. Serbest metin alanları için hazır PII tespiti bu ekrandaki tablodan henüz düzenlenemez.
+
+**Yeni oluşturduğunuz bir hedefte API Güvenliği hattı maskelemeyle birlikte başlar.** Bu hattı yeni bir hedef için açtığınız anda hedefin gizlilik profiline üç hazır PII kuralı — TCKN, Türkiye IBAN'ı ve kart numarası — maskeleme işlemiyle eklenir. API Güvenliği olayı gövdesizdir, ancak `credential` ve `path` alanları çağıranın URL'e yazdığı ya da kota anahtarı olarak gönderdiği bir kimliği taşıyabilir. Üç kural hedefin gizlilik tablosunda listelenir ve kaydetmeden önce kaldırılabilir. Hâlihazırda var olan bir hedefe hiçbir şey uygulanmaz, kendi elinizle boşalttığınız ya da kapattığınız bir profil ezilmez ve kuralı sonradan kaldırmanız profili geri almaz; o noktadan sonra sıradan bir yapılandırmadır. Aynı varsayılan sunucu tarafında da uygulandığı için bu sayfadan geçmeden API ile oluşturulan bir hedef de korumasız kalmaz. Gizlilik profilinin tek bir hatta değil **hedefe** ait olduğunu unutmayınız: aynı hedef Denetim, Oturum veya Uygulama olaylarını da yönlendiriyorsa bu üç kural onlara da uygulanır.
+
+| Genel kural | Neden |
+|---|---|
+| Kimlikleri silmek yerine hash'leyiniz | Tuzlu hash aynı kullanıcıyı olaylar arasında tutarlı tutar; korelasyon ve kullanıcı bazlı alarm çalışmaya devam eder. |
+| IP adresini okunabilir bırakınız | SIEM tespitlerinin çoğu (imkânsız seyahat, kaba kuvvet, olağan dışı kaynak) IP üzerine kuruludur. |
+| Her şeyi maskelemeyiniz | Aşırı maskeleme SIEM'in ihtiyaç duyduğu sinyalleri siler; aşırı maskelenmiş bir akış denetimden geçer ama hiçbir şey tespit etmez. |
+| Hash kullanmadan önce tuz tanımlayınız | Tuzsuz hash kuralı kabul edilmez. |
+| Tuzu bilinçli döndürünüz | Rotasyon sonrası aynı kullanıcı farklı bir değere hash'lenir; rotasyon sınırının iki yakası arasında takma ad korelasyonu kırılır. Bunu SIEM ekibinizle planlayınız. |
+
+:::warning
+
+Bir olay için maskeleme başarısız olursa, o olay maskesiz gönderilmek yerine **hiç gönderilmez**. Kopyanın kaybı, hassas verinin sızmasına tercih edilir. Bu olaylar ayrı olarak sayılır ve görünür kalır.
+
+:::
+
+Zarfın yapısal alanları — `logType`, `schemaVersion`, `timestamp`, `event` altındaki her şey ve `apinizer` altındaki her şey — korumalıdır. Bunları hedefleyen bir gizlilik kuralı yok sayılır; maskelenmeleri alt taraftaki tüm ayrıştırıcıları bozardı.
+
+Gizlilik profilleri, bugünkü çıktıyı birebir üreten **Legacy Raw** hedeflerine uygulanmaz. Maskeleme gerekiyorsa hedefi **Apinizer JSON v2** profiline geçiriniz.
+
+## Boyut Politikası
+
+Boyut politikası da yalnızca v2 profilinde çalışır ve zarf dahil tüm yükün UTF-8 boyutunu sınırlar.
+
+| Ayar | Davranış |
+|---|---|
+| Kapalı (varsayılan) | Sınır yok — yükseltme öncesiyle aynı davranış. |
+| **Veriyi kırp** | `data` içindeki büyük alanlar — `changes`, `reference`, `message`, `stackTrace` — yük sığana kadar büyükten küçüğe kısaltılır (`changes` ve `reference` önce kısaltılır), her biri kırpma notuyla işaretlenir ve `apinizer.truncated` değeri `true` olur. Zarf alanlarına dokunulmaz. Kırpma yeterli olmazsa olay düşürülür. |
+| **Olayı düşür** | Olay gönderilmez ve boyut aşımı olarak sayılır. |
+| **Veriyi hash ile değiştir** | `data` yerine SHA-256 özeti ve bayt sayısı yazılır; olay korelasyon için kullanılabilir kalır ama yük taşımaz. |
+
+Yapılandırılabilen en düşük değer **1024 bayttır**. Syslog hedefleri için **8192 bayt ve Veriyi kırp** iyi bir başlangıçtır; RFC 5424 alıcılarının çoğu mesaj başına 2–8 KB kabul eder ve daha uzununu sessizce keser. Kafka, Webhook ve Elasticsearch hedefleri genellikle sınıra ihtiyaç duymaz.
+
+Bir olayı büyüten alanlar uygulama hata yığınları, denetim referans nesneleri ve denetim/Portal değişiklik listeleridir. Üçü de isteğe bağlıdır ya da sınırlanabilir: referans nesnesi denetim hattında varsayılan olarak kapalıdır, değişiklik listesi varsayılan olarak açıktır ve ihtiyaç duymayan bir hedef için kapatılabilir, hata yığını anahtarı ise aynı şekilde ihtiyaç duymayan bir hedef için kapatılabilir.
+
+:::info
+
+Bu, Syslog connection'ının kendisindeki **Maksimum Mesaj Boyutu (Bayt)** ayarından farklı bir kontroldür. Bu boyut politikası olayın içeriğini hedef boyuta sığması için kısaltır, düşürür veya hash'ler; Syslog connection'ındaki ayar ise içeriğin tamamını korur ve boyutu aşan mesajı birden fazla syslog mesajına böler. İkisinin bir hedefte birlikte kullanıldığında nasıl ilişkilendiğini görmek için bkz. [Büyük Mesajları Bölme](/tr/integrations/baglanti-yonetimi/syslog#buyuk-mesajlari-bolme).
+
+:::
+
+## Taşıma ve Geçiş Rehberi
+
+### Sürüm yükseltmesinde ne oldu
+
+Yükseltme sırasında, Genel Ayarlar altında uygulama, token, denetim ve giriş logları için yapılandırılmış her alıcı bu sayfada bir hedefe dönüştü:
+
+- Alıcı başına bir hedef; bağlantı yapılandırması ve kimliği değişmeden korundu.
+- Yük profili **Legacy Raw**, gizlilik profili ve boyut politikası tanımsız — çıktı, yükseltme öncesinde SIEM'inize ulaşanla birebir aynı.
+- O alıcının hizmet ettiği hat için bir kural; **Dahil edilen olay tipleri** listesi yükseltme anında var olan tüm olay tiplerini içerir (uygulama hattı istisnadır, seviye ile filtrelendiği için listesi boş bırakılır). Böylece SIEM'iniz önceden aldığının aynısını almaya devam eder, fazlasını almaz.
+- Token ve uygulama logları için yerel saklama anahtarları olduğu gibi taşındı.
+- Tüm hatlar **LEGACY** yetkisinde bırakıldı; siz aksine karar verene kadar hiçbir şey değişmedi.
+
+Korunacak bir alıcı listesinin bulunmadığı taze kurulumlarda her hat **ACTIVE** başlar — yalnızca eski alıcı listesi taşıyabilecek dört hat değil, hiç taşıması gereken bir liste olmayan API Güvenliği, API Erişimi ve Portal hatları da dahil.
+
+:::info
+
+Taşınan kural açık bir olay tipi listesi taşıdığı için, sonraki Apinizer sürümlerinde eklenen olay tipleri siz listeye ekleyene kadar o kural üzerinden **yönlendirilmez**. Bu bilinçli bir tercihtir: taşınan bir akış, yöneticinin kararı olmadan büyümez. **Dahil edilen olay tipleri** alanını boş bırakarak kendiniz yazdığınız bir kural ise sonradan eklenenler dahil tüm tipleri yönlendirir.
+
+:::
+
+### Bir hattın geçişi
+
+1. O hattın hedefini açınız ve kuralını gözden geçiriniz — olay tipleri, sonuçlar, kapsam ve saniyedeki olay sınırı.
+2. İsterseniz **Apinizer JSON v2** profiline geçiriniz ve yükü **Şema ve Örnekler** sekmesinde SIEM ekibinizle doğrulayınız.
+3. Bir test olayı gönderiniz ve ulaştığını teyit ediniz.
+4. **Hatlar** sekmesinde hattın yetkisini **ACTIVE** yapınız.
+5. Bir sonraki hatta geçmeden önce birkaç dakika sayaçları ve SIEM tarafını izleyiniz.
+
+Önerilen sıra **Denetim → Oturum → Token → Uygulama** şeklindedir: en düşük hacim önce, en yüksek ve en dalgalı olan en sonda.
+
+### Geri alma
+
+Bir hattı **LEGACY** durumuna geri almak anında etkilidir. Eski alıcı listeleri bu sayfadaki her kayıtta güncel tutulduğu için her iki yönde de kayıp yaşanmaz.
+
+Aynı mekanizma kademeli sürüm yükseltmesini de güvenli kılar. Önceki sürümü çalıştıran bir düğüm bu sayfayı bilmez ve güncel tutulan eski listeleri okur; aynı olayları yönlendirir, yalnızca yükseltilene kadar kural, gizlilik profili ve boyut politikası uygulamaz.
+
+### Portal girişlerinin iletimi
+
+Bu hat gelmeden önce her API Portal'ın kendi, ayrı bir giriş/çıkış alıcı listesi vardı — ilgili portalin [Ayarlar → Login Log sekmesinde](/tr/api-portal/api-portal-ayarlari#login-log) yapılandırılırdı. Bu sürüme yükseltme o listeyi olduğu gibi bıraktı **ve** buraya kopyaladı: bir portalin listesindeki her konnektör için, bu sayfada artık o portala kapsamlanmış (**Portal kimlikleri**) ve o portalin ürettiği on olay tipiyle sınırlı bir Oturum kuralı taşıyan bir hedef vardır — o portalin konnektörünün eskiden aldığı başka hiçbir şey değişmedi. **Bu sürümden önce kilitleme/parola-yaşam-döngüsü olay tiplerinin eklendiği bir hedef, o zaman verilen include listesini olduğu gibi korur** — yeni bir Oturum olay tipi mevcut bir kuralın include listesine otomatik EKLENMEZ (her hat için geçerli aynı kural, aşağıda), yani boş olmayan bir include listesine sahip zaten göç etmiş bir hedef kendiliğinden `PORTAL_ACCOUNT_UNLOCKED` (veya diğer parola-yaşam-döngüsü tipleri) almaya başlamaz; include listesi boş bırakılmış bir kural her zaman yeni tipleri de alır.
+
+Hangi listenin gerçekten canlı olduğuna **Portal** hattının değil **Oturum** hattının yetkisi karar verir:
+
+- **LEGACY** (yükseltme sonrası varsayılan): her portalin kendi alıcı listesi tıpkı eskisi gibi kullanılır — bu sayfadaki kopyaları vardır ama etkisizdir.
+- **ACTIVE**: portal başına alıcı listeleri artık **hiçbir portal için** kullanılmaz; her portal girişi ve çıkışı bunun yerine bu sayfadaki hedefler ve kurallarla iletilir — yükseltmenin oluşturduğu kopyalar dahil.
+
+Portal başına bir anahtar YOKTUR — Oturum'u ACTIVE'e çevirmek aynı adımda her portalin eski listesini emekliye ayırır; bu yüzden her portalin [Login Log sekmesi](/tr/api-portal/api-portal-ayarlari#login-log) bunu yaptığınızda bilgilendirici bir not gösterir.
+
+:::warning
+
+Alıcı listeleri ve iki yerel saklama anahtarı artık bu sayfaya aittir. Genel Ayarlar ekranı, Yönetim API'leri veya APIops üzerinden bu alanlar için gönderilen değerler yok sayılır; bütün proje yapılandırması içe aktarımındaki değerler de öyle. Bu ayarları buradan yapılandırınız — bu sayfanın kendi yapılandırması, Dışa/İçe Aktarma sihirbazındaki **SIEM Ayarları** tipiyle tek başına başka bir kuruluma taşınabilir; bkz. aşağıdaki [Dışa/İçe Aktarma](#disa-ice-aktarma).
+
+:::
+
+## Yerel Depolama ve Saklama
+
+**Hatlar** sekmesinin ilk sütunu, sayfadaki diğer her şeyden farklı bir soruyu yanıtlar: kopya nereye gönderiliyor değil, *kayıt Apinizer veritabanında tutuluyor mu*.
+
+| Hat | Yerel saklama | Bugünkü saklama süresi |
+|---|---|---|
+| **Denetim** | Her zaman saklanır — kapatılamaz | [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasındaki **Audit Records** satırından yapılandırılır; varsayılan olarak kapalıdır (etkinleştirildiğinde 365 gün). |
+| **Oturum** | Her zaman saklanır — kapatılamaz | [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasındaki **Login Records** satırından yapılandırılır; varsayılan olarak kapalıdır (etkinleştirildiğinde 365 gün). |
+| **Token** | Anahtarla açılıp kapatılır | [Log Saklama](/tr/admin/system-settings/sistem-ayarlari-ve-limitler#log-saklama-log-retention) bölümünden yapılandırılır; varsayılan olarak kapalıdır. |
+| **Uygulama** | Anahtarla açılıp kapatılır | Bileşen başına [Log Saklama](/tr/admin/system-settings/sistem-ayarlari-ve-limitler#log-saklama-log-retention) bölümünden ve [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasından yapılandırılır; varsayılan olarak kapalıdır. |
+| **API Güvenliği** | Her zaman saklanır — kapatılamaz | [Log Saklama](/tr/admin/system-settings/sistem-ayarlari-ve-limitler#log-saklama-log-retention) bölümünden ve [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasındaki **API Security Events** satırından yapılandırılır; varsayılan olarak kapalıdır (birim gün, 30). |
+| **API Erişimi** | Anahtarla açılıp kapatılır — varsayılan olarak kapalı, açılırken onay ister | [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) sayfasındaki **API Access Events** satırından yapılandırılır; varsayılan olarak kapalıdır (istek başına bir satır yazıldığından **3-7 gün** önerilir). |
+| **Portal** | Her zaman saklanır — kapatılamaz | Yukarıdaki Denetim ile aynı `audit_event` koleksiyonunu paylaştığından aynı **Audit Records** saklama satırına tabidir; on altı alan olayı, aşağıdaki **Portal Login Logs** saklama anahtarının kapsamı dışındadır — o anahtar yalnızca giriş/çıkış kayıtlarını kaldırır. |
+
+:::info
+Yukarıdaki **Oturum** satırı yalnızca Yönetim Konsolu girişleri için tam resimdir. Portal girişleri ve çıkışları ayrı bir koleksiyonda, `portal_login_logs`'ta tutulur; `persistent_audit_event`'in aksine bu koleksiyonun bir saklama anahtarı **vardır**: [Uygulama Logu Temizleme Görevleri](/tr/admin/audit-compliance/uygulama-logu-temizleme-gorevleri) altındaki **Portal Login Logs**, varsayılan olarak kapalı. Açıldığında yalnızca eski portal giriş/çıkış kayıtları silinir; `persistent_audit_event`'teki yönetici girişleri her koşulda etkilenmez.
+:::
+
+:::warning
+
+Token veya uygulama hattı için yerel saklamayı kapatmak, o kayıtların Apinizer veritabanında hiç tutulmaması ve [Token İstekleri](/tr/admin/audit-compliance/token-istekleri) ile [Uygulama Logları](/tr/admin/audit-compliance/application-logs) sayfalarında görünmemesi demektir. Bunu yalnızca en az bir hedefin kayıtları aldığı doğrulandıktan sonra yapınız.
+
+:::
+
+## Dışa/İçe Aktarma {#disa-ice-aktarma}
+
+Bu sayfanın tüm yapılandırması — her hedef ve iki yerel saklama anahtarı — başka bir Apinizer kurulumuna, [Dışa/İçe Aktarma sihirbazındaki](/tr/admin/secrets-management/export-import#siem-ayarlari) **SIEM Ayarları** tipiyle taşınabilir. Bu tipi yalnızca sistem yöneticisi dışa ya da içe aktarabilir — ister sihirbazdan ister APIops üzerinden — ve yalnızca **Administration → Dışa/İçe Aktar** grubundan erişilir; bu yapılandırmanın sahibi bir proje olmadığı için hiçbir projenin kendi Dışa/İçe Aktar menüsünde görünmez.
+
+- **Bir hedefin bağlantısı** — gönderdiği bağlantı yapılandırması ve varsa yedek (failover) bağlantısı dahil — diğer her bağlantı tabanlı tipte olduğu gibi bir bağımlılık olarak taşınır. Pakete dahil edin, ya da sihirbaz hedefte aynı ada sahip mevcut bir bağlantı yapılandırmasıyla adına göre eşlesin.
+- **Hat yetkisi (LEGACY/ACTIVE) hiçbir zaman taşınmaz.** Bir paketin içe aktarılması hedefte hiçbir hattı devreye almaz; bunu yalnızca hedefteki bu sayfanın kendisi yapabilir.
+- **Replace Existing**, hedefteki hedef listesini pakettekiyle **tümüyle** değiştirir ve iki yerel saklama anahtarını da paketten alır; hedefin kendi hat yetkisi olduğu gibi kalır. **Import as New** ise paketteki hedefleri hedefin mevcut listesine **ekler** — orada zaten kullanılan bir ad `-imported` soneki alır — ve hedefin kendi yerel saklama anahtarlarına ile hat yetkisine dokunmaz.
+- **Sihirbaz yalnızca hedefi sorar; yeni ad ya da Portal istemez.** SIEM yapılandırması kurulum genelinde tek bir nesnedir; bu yüzden **Import as New** onu yeniden adlandırmanızı istemez — `-imported` son ekini yalnızca içindeki hedefler alır — ve yükleme adımında **Hedef Portal** seçimi yoktur; o seçim API Ürünleri gibi Portal kapsamlı tiplere aittir.
+- **Bağlantısı hedefte çözülemeyen bir hedef** — pakete dahil edilmemiş ve hedefte aynı ad/tipte bir bağlantı da yoksa — yine de içe aktarılır, yalnızca **Enabled** anahtarı kapalı olarak; içe aktarma sonucu hedefin adını ve bulunamayan bağlantıyı adlandırır. Bozuk bir referansla asla etkin içe aktarılmaz, asla sessizce düşürülmez. Aynı kural yedek bağlantı için de geçerlidir.
+- **Import as New ile oluşan ve API Güvenliği hattını gönderen, kendi gizlilik profili olmayan bir hedef**, bu sayfadan doğrudan oluşturulan bir hedefle aynı şekilde yukarıdaki [Gizlilik Profili](#gizlilik-profili) bölümünde anlatılan maskeleme kurallarıyla gelir.
+- **Gizlilik tuzu pakette aynen, düz metin olarak taşınır** — bugün başka paketlerdeki bir bağlantının tuzunun taşındığı gibi. Bu bilinçlidir: iki kurulum aynı tuzu paylaşmadan aynı değeri aynı özete indirmez. Paket paylaşılan bir yerde duracaksa — örneğin bir CI deposunda — Dışa/İçe Aktarma sihirbazı sayfasındaki [Paket Şifreleme](/tr/admin/secrets-management/export-import#paket-şifreleme) ile parolalı dışa aktarın.
+
+Davranışın tamamı için — pakete ne girer, ad çakışması nasıl ele alınır, sunucu yönetimli alanlar nasıl davranır — bkz. Dışa/İçe Aktarma sihirbazı sayfasındaki [SIEM Ayarları](/tr/admin/secrets-management/export-import#siem-ayarlari).
+
+## SESSION hattı — olay tipleri ve legacy yük {#session-hatti-olay-tipleri-ve-legacy-yuk}
+
+Yukarıdaki [Hatlar](#hatlar) tablosu `SESSION` olay tiplerinin adlarını verir; bu bölüm her birinin ne anlama geldiğini ve bir **LEGACY_RAW** hedefinin tam olarak neyi aldığını anlatır. Buradaki içerik Yönetim Konsolu girişleri içindir. Portal girişleri aynı hat üzerinden gider ama kendi olay adlarını ve kendi yük biçimini taşır — onlar için bkz. [API Portal Giriş Kayıtları](/tr/api-portal/giris-kayitlari#konnektor-teslimi-ve-yuk-bicimi).
+
+Hattın yetkisi ne olursa olsun, bir `SESSION` kaydı **her zaman** Apinizer veritabanına yazılır (Yönetim Konsolu için `persistent_audit_event`, portal için `portal_login_logs`) ve bu davranış kapatılamaz. Hedefler, veritabanı yazımına **ek** olarak giden ikinci bir kopyadır; onun yerine geçmez.
+
+### Yönetim Konsolu olay tipleri
+
+| Olay | `eventType` | Açıklama |
+|------|-------------|----------|
+| Başarılı giriş | `LOGIN_SUCCESS` | Kullanıcı adı ve parola doğrulandı |
+| Başarısız giriş | `LOGIN_FAILURE` | Hatalı kimlik bilgisi veya kilitli hesap |
+| Çıkış | `LOGOUT` | Kullanıcı Yönetim Konsolu'ndan çıkış yaptı |
+| Token yenileme (proje değişimi) | `TOKEN_REFRESH_SUCCESS` | Oturum token'ı farklı bir proje için yenilendi |
+| Token yenileme reddi | `TOKEN_REFRESH_FAILURE` | Kullanıcının istenen projede yetkisi yok (`reasonCode=NO_PROJECT_PERMISSION`) |
+| Hesap kilitlendi | `ACCOUNT_LOCKED` | Çok sayıda başarısız denemeden sonra hesap kilitlendi |
+| Parola değişti | `PASSWORD_CHANGED` | Kullanıcının parolası — kullanıcının kendisi ya da bir yönetici tarafından — değiştirildi |
+| Parola değişikliği zorunlu | `PASSWORD_CHANGE_REQUIRED` | Kullanıcı, başka bir işlem yapmadan önce değiştirmesi gereken bir parolayla giriş yaptı |
+| Parola politikası ihlali | `PASSWORD_POLICY_VIOLATION` | Bir parola, yapılandırılmış [parola politikasına](/tr/admin/system-settings/global-yapilandirma#parola-politikasi) uymadığı için reddedildi |
+
+Her olay ayrıca `userAgent` taşır; başarısız olaylarda makine tarafından okunabilir bir `reasonCode` bulunur. Alan ve neden kodu listesi için bkz. [Giriş Kayıtları](/tr/admin/audit-compliance/giris-kayitlari).
+
+### LEGACY_RAW yük biçimi
+
+Aşağıdaki biçim **LEGACY_RAW** yük profilinin çıktısıdır; alan listesi dondurulmuştur ve sonraki sürümlerde büyümez. Kanonik zarf, ortak aktör/hedef blokları ve alan bazlı gizlilik için hedefi **APINIZER_JSON_V2** profiline geçirin — bkz. [Şema v2](#sema-v2).
+
+```json
+{
+  "source": "API_MANAGER",
+  "principal": "kullanici.adi",
+  "email": null,
+  "displayName": null,
+  "eventDate": "2026-03-31T10:00:00Z",
+  "eventType": "LOGIN_SUCCESS",
+  "remoteAddress": "1.2.3.4",
+  "message": null,
+  "errorType": null,
+  "portalId": null,
+  "accountId": null
+}
+```
+
+Başarısız bir girişte `message` ve `errorType` dolar:
+
+```json
+{
+  "source": "API_MANAGER",
+  "principal": "kullanici.adi",
+  "email": null,
+  "displayName": null,
+  "eventDate": "2026-03-31T10:01:00Z",
+  "eventType": "LOGIN_FAILURE",
+  "remoteAddress": "1.2.3.4",
+  "message": "Bad credentials",
+  "errorType": "org.springframework.security.authentication.BadCredentialsException",
+  "portalId": null,
+  "accountId": null
+}
+```
+
+**Graylog hedefleri** aynı olayı GELF mesajı olarak alır; kısa mesaj (short message) `LogLogin` değeridir. **Mesaja Ekle (Append to Message)** açıkken yukarıdaki JSON gövdesi GELF `full_message` alanına yazılır; **Özniteliklere Ekle (Append to Attributes)** açıkken dolu olan her alan (`source`, `principal`, `email`, `displayName`, `eventDate`, `eventType`, `remoteAddress`, `message`, `errorType`, `portalId`, `accountId`, `userAgent`, `reasonCode`, `targetProjectId`) ayrı bir GELF additional field olarak gönderilir. Değeri `null` olan alanlar gönderilmez.
+
+:::info
+
+**Database** tipindeki bir hedef `SESSION` kayıtlarını `log_LoginLog` tablosuna yazar. Bu tablo **otomatik oluşturulmaz** — hedefi etkinleştirmeden önce oluşturmanız gerekir. Desteklenen her veritabanı (Oracle, MySQL/MariaDB, PostgreSQL, SQL Server) için CREATE TABLE komutları: [Apinizer Log Tabloları Oluşturma Komutları](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari#login-log).
+
+:::
+
+## Şema v2 {#sema-v2}
+
+### Zarf
+
+Her **Apinizer JSON v2** olayı aynı yapıya ve aynı alan sırasına sahiptir. Zarf alanları değeri `null` olsa bile yazılır; böylece ayrıştırıcınız bu alanların varlığına güvenebilir. `data` içindeki alanlar ise değer taşımadıklarında hiç yazılmaz. Zaman damgaları UTC ISO-8601 biçiminde ve milisaniye hassasiyetindedir.
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68493da280f5de2a3c29c975",
+  "timestamp": "2026-09-02T14:31:05.123Z",
+  "event": {
+    "category": "AUDIT",
+    "action": "ENTITY.UPDATED",
+    "outcome": "SUCCESS",
+    "severity": 3
+  },
+  "actor": {
+    "user": "admin",
+    "ip": "10.0.0.7",
+    "userAgent": "Mozilla/5.0",
+    "sessionId": null
+  },
+  "target": {
+    "type": "ApiProxy",
+    "id": "68493bb680f5de2a3c29c609",
+    "name": "Swagger Petstore Documentation",
+    "projectId": "68493b6e80f5de2a3c29c5ee",
+    "projectName": "Petstore"
+  },
+  "correlationId": "dccababd-16e3-415e-b801-9f6a52b6a28c",
+  "source": {
+    "component": "MANAGER",
+    "host": "manager-0",
+    "environmentId": null
+  },
+  "apinizer": {
+    "version": "2026.09.2",
+    "configRevision": 17,
+    "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+    "synthetic": false,
+    "truncated": false
+  },
+  "data": {
+    "id": "68493da280f5de2a3c29c975",
+    "state": "UPDATED",
+    "origin": "MANAGER"
+  }
+}
+```
+
+| Zarf alanı | Anlamı |
+|---|---|
+| `logType`, `event.category` | Hat — `AUDIT`, `SESSION`, `TOKEN`, `APPLICATION`, `API_SECURITY` veya `PORTAL`. |
+| `schemaVersion` | Bu zarf için `2`. Yalnızca **kırıcı** bir değişiklikte artar; alan eklemek kırıcı değildir. |
+| `eventId` | Kaydın Apinizer veritabanındaki kimliği, yoksa üretilmiş bir kimlik. |
+| `event.action` | Olay tipi ve varsa alt tipiyle birlikte — örneğin `ENTITY.UPDATED` veya `LOG.ERROR`. |
+| `event.outcome` | `SUCCESS`, `FAILURE` veya `DENIED`. |
+| `event.severity` | Hat ve olay tipinden türetilen 0–10 arası değer. Aşağıdaki tabloya bakınız. |
+| `actor` | Olaya kimin sebep olduğu, bilindiği kadarıyla. |
+| `target` | Olayın neyle ilgili olduğu. |
+| `source.component` | Olayı üreten Apinizer bileşeni — `MANAGER`, `WORKER`, `CACHE`, `INTEGRATION` veya `PORTAL`. |
+| `apinizer.configRevision` | Olayı üreten yapılandırma sürümü — ayarlardaki bir değişiklikle akıştaki bir değişikliği ilişkilendirmek için kullanışlıdır. |
+| `apinizer.synthetic` | Yalnızca **Test olayı gönder** butonuyla üretilen olaylarda `true`. |
+| `apinizer.truncated` | Boyut politikası `data` alanını kısalttığında ya da değiştirdiğinde `true`. |
+| `data` | Aşağıda hat başına listelenen alanlar; başka hiçbir şey. |
+
+:::warning
+
+Sonraki sürümlerde `schemaVersion` artmadan zarfa ve `data` içine yeni alanlar eklenebilir. Ayrıştırıcınız tanımadığı alanları yok saymalı ve beklemediği bir alanda hata vermemelidir.
+
+:::
+
+### Önem derecesi
+
+| Hat | Değer |
+|---|---|
+| **Denetim** | Yönetim Konsolu isteği başarılı 1 · varlık değişikliği 3 · varlık silme 4 · Yönetim Konsolu isteği başarısız 5 · erişim reddi 6 · gizli değer görüntüleme 6 · dışa aktarma 6 · API token oluşturma 4 · API token iptali 3 · PII maskesi kaldırma 6 · promosyon başlangıcı 3 · dağıtım başarılı 4, başarısız 5 · promosyon talebi, onayı, iptali ve erişim verme (ACL) 4 · dağıtım kaldırma, promosyon reddi ve erişim geri alma (ACL) 5 · promosyon yürütme başarılı 4, başarısız 6 |
+| **Oturum** | Çıkış ve başarılı token yenileme 1 · başarılı giriş 2 · parola değiştirildi ve parola değişimi zorunlu 3 · parola politikası ihlali 4 · başarısız giriş ve başarısız token yenileme 5 · hesap kilitlendi 7 — `PORTAL_` ikizleri de aynı değeri taşır, artı `PORTAL_PASSWORD_RESET_REQUESTED` 3 (Yönetim Konsolu tarafında karşılığı yok — bkz. yukarıdaki Oturum tipleri), `PORTAL_ACCOUNT_DISABLED` 5 ve `PORTAL_ACCOUNT_UNLOCKED` 7 (geri aldığı kilitle aynı ağırlık) |
+| **Token** | Üretildi ve yenilendi 2 · reddedildi 5 |
+| **Uygulama** | Trace ve debug 0 · info 1 · warn 4 · error 7 |
+| **API Güvenliği** | Kimlik doğrulama/yetkilendirme/IP güvenliği reddi 7, başarısızlığı 5 · tehdit reddi 8, başarısızlığı 6 · kota/hız sınırlama reddi 5, başarısızlığı 4 · doğrulama 4 · yönlendirme/ağ geçidi reddi 4, başarısızlığı 5 · diğer kategoriler sonuca göre (reddedildi 6, başarısız 5) |
+| **Portal** | Denetim'deki karşılığına demirlenmiştir: token oluşturma 4, iptali 3 (API Token Oluşturuldu/İptal Edildi ile aynı) · bir üyelik/abonelik/katılım onayı ya da uygulama silme 4 · uygulama oluşturma, abonelik/üyelik/katılım talebi, davet 3 · abonelik/üyelik/katılım reddi/iptali/çıkarılması 5 · destek talebi oluşturma 1. Reddedilen veya başarısız bir sonuç, satırdaki değer daha düşük olsa bile hiçbir zaman düz reddedilme/başarısızlık tabanının (4/5) altına düşmez. |
+
+### Hat başına alanlar
+
+`data` nesnesi, platformda tanımlı sabit bir alan kümesi taşır. Genişletilemez; yalnızca daraltılabilir — gizlilik profiliyle ya da kuraldaki üç içerik anahtarıyla.
+
+**Denetim**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `clientIp`, `userAgent` |
+| `target.type`, `target.id`, `target.name`, `target.projectId`, `target.projectName` | `className`, `objectId`, `objectName`, `projectId`, `projectName` |
+| `event.action` | `eventType`; varlık değişikliklerinde `state` ile noktalı olarak birleştirilir |
+| `data.id`, `data.state`, `data.origin` | `id`, `state`, `source` |
+| `data.reference` | `referenceObjectJson`, nesne olarak ayrıştırılır — **yalnızca** *Referans nesnesini yüke ekle* açıkken gönderilir. Bu nesnenin önceki durum kopyası hiçbir zaman gönderilmez. Hassas erişim olaylarının detay alanları da buradadır — örneğin `entityType` (etkilenen varlığın gerçek tipi, örn. `Certificate`; filtreleme ve ilişkilendirme için `target.type`'tan ayrı tutulur), `SECRET_REVEALED` üzerindeki `disclosedKind` ve `via`, ya da `EXPORT` üzerindeki `sensitiveIncluded` — bu alanlara göre filtreleyen bir SIEM kuralı için hedefte bu anahtarın açık olması gerekir. |
+| `data.changesStatus`, `data.changeKinds`, `data.changedPaths`, `data.changes` | Yeni alanlar — varlık değişikliklerinde önceki ve yeni anlık görüntü arasındaki farkı taşır; bkz. aşağıdaki [Değişiklik listesi](#degisiklik-listesi). |
+
+**Oturum**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip`, `actor.userAgent` | `principal`, `remoteAddress`, `userAgent` |
+| `target.type`, `target.name`, `target.projectId` | sabit `User`, `principal`, `targetProjectId` |
+| `event.action` | `eventType` |
+| `data` | `reasonCode`, `errorType`, `message` (512 karakterle sınırlı), `loginSource`, `portalId`, `accountId`, `email`, `displayName` |
+
+Portal kaynaklı bir satırda (bir `PORTAL_` olay tipi), `target.type`/`target.name` yukarıdaki sabit `User`/`principal` yerine `PORTAL_ACCOUNT`/hesabın e-postasıdır; `actor.ip` ve `actor.userAgent`'ın son kullanıcıyı — API Portal arka ucunun host'unu değil — adlandırabilmesi için [Bilinen Sınırlar](#bilinen-sinirlar) altında anlatılan forward-headers yapılandırması gerekir; `loginSource` her zaman `API_PORTAL`'dır; `data` yalnızca `reasonCode`, `message`, `loginSource`, `portalId` ve — `PORTAL_ACCOUNT_DISABLED` ya da `PORTAL_ACCOUNT_UNLOCKED` gibi admin ya da görev kaynaklı bir satırda — etkilenen hesabı adlandıran `targetAccountId` taşır; `errorType`, `accountId`, `email` ve `displayName` portal satırının parçası değildir (hesap zaten `target` ile adlandırılmıştır).
+
+**Token**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `actor.user`, `actor.ip` | `usernameOrKey`, `httpRequestRemoteAddress` |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | sabit `ApiProxy`, `apiProxyId`, `apiProxyName`, `projectId` |
+| `correlationId`, `source.environmentId` | `apinizerCorrelationId`, `environmentId` |
+| `data` | `id`, `applicationId`, `applicationName`, `httpRequestHttpMethod`, `httpRequestContentType`, `xForwardedFor`, `errorType`, `parentErrorType`, `authTokenType`, `audience`, `scope`, `tokenNeverExpires`, `issuedAt`, `expiresAt`, `expiresIn`, `refreshTokenIssuedAt`, `refreshTokenExpiresAt`, `refreshTokenExpiresIn`, `refreshCount`, `maxRefreshCount` |
+
+Legacy Raw profilinin hâlâ taşıdığı token yanıt başlıkları, token yanıt gövdesi ve istemci tanımlayıcısı (`clientInfo`) v2 yükünün parçası **değildir**. Bir token hedefini v2'ye taşımanın başlıca nedeni budur.
+
+**Uygulama**
+
+| Zarf alanı | Hangi eski alandan gelir |
+|---|---|
+| `target.type`, `target.id`, `target.name` | sabit `ApiProxy`, `apiProxyId`, `apiProxyName`; log bir API proxy'ye aitse |
+| `source.component`, `source.host`, `source.environmentId` | `enumApplicationLog`, `hostName`, ortam adı |
+| `event.action` | `LOG.` ve ardından seviye |
+| `data` | `level`, `message`, `totalDuration`, `date` ve *Hata yığınını yüke ekle* açıkken `stackTrace` (varsayılan olarak açıktır) |
+
+Uygulama loglarında `actor` bulunmaz.
+
+**API Güvenliği**
+
+Bu hat yeni olduğu için diğer dördünden farklı, taşınan bir eski alan karşılığı yoktur — zarf doğrudan ağ geçidindeki isteğin metadata'sından üretilir:
+
+| Zarf alanı | İçerik |
+|---|---|
+| `actor.user`, `actor.ip` | İsteğin taşıdığı kimlik bilgisi (yoksa `anonymous`); istemcinin doğrudan bağlandığı IP adresi — iletilen başlıklar (X-Forwarded-For vb.) dikkate alınmaz |
+| `target.type`, `target.id`, `target.name`, `target.projectId` | sabit `ApiProxy`, API proxy kimliği, adı ve projesi |
+| `event.action` | Kategori adı — `AUTHENTICATION`, `AUTHORIZATION`, `QUOTA`, `THROTTLING`, `VALIDATION`, `IP_SECURITY`, `THREAT`, `ROUTING`, `GATEWAY` veya `OTHER` |
+| `event.outcome` | Engellenen istek için `DENIED`, hata veren istek için `FAILURE` |
+| `correlationId`, `source.environmentId` | İsteğin korelasyon kimliği ve ortamı |
+| `data` | `errorType`, `parentErrorType`, `resultType`, `statusCode`, `protocol`, `httpMethod`, `path`, `latencyMs` — değeri olmayan alanlar hiç yazılmaz |
+
+İstek/yanıt gövdesi, header'lar ve sorgu dizesi bu hatta hiçbir zaman yer almaz; `path` alanı sorgu dizesi çıkarılmış ve 512 karaktere kırpılmış haldedir. gRPC ve WebSocket isteklerinde `errorType` ve `parentErrorType` taşınmaz. Bu hat **Legacy Raw** yükünü desteklemez — bkz. [Bilinen Sınırlar](#bilinen-sinirlar).
+
+**Portal**
+
+Bu hat, kaynak kaydını — ve dolayısıyla zarf biçimini — Denetim ile paylaşır; yukarıdaki Denetim tablosuna bakınız. Tek fark `source.component`'tir — `MANAGER` yerine `PORTAL` — ve aktördür: API Portal arka ucu bir hesap belirleyebildiği her seferde aktör geliştiricinin kendi portal hesabıdır, kimlik doğrulaması için kullandığı Yönetim API'si servis hesabı asla değil — bkz. [Portal Olayları](/tr/admin/audit-compliance/denetim-kayitlari#portal-olaylari). Her satır ayrıca `data.portalId` taşır.
+
+### Değişiklik listesi {#degisiklik-listesi}
+
+Bir **Varlık** olayında Denetim ve Portal hatları, önceki ve yeni anlık görüntü arasındaki farkı da dört alanla taşır.
+
+**`data.changesStatus`** karşılaştırmanın hangi koşulda üretildiğini bildirir; her zaman gönderilir:
+
+| Değer | Anlamı |
+|---|---|
+| `DIFFED` | Fark başarıyla hesaplandı; `data.changes` ve `data.changedPaths` doludur. |
+| `NO_PREVIOUS_SNAPSHOT` | Karşılaştırılacak önceki bir kayıt yok — genellikle ilk oluşturma. |
+| `SECRET_FIELDS_MAY_HAVE_CHANGED` | Gizli alanlar karşılaştırma dışı tutulduğu için fark eksik olabilir. |
+| `TOO_MANY_CHANGES` | Değişiklik sayısı 200 kaydı aştı; `data.changes` kesildi, `data.changedPaths` yine de eksiksizdir. |
+
+**`data.changeKinds`**, değişikliğin etkilediği alanları sabit bir sözlüğe indirger ve her zaman gönderilir: `ENDPOINT_ADDED`, `ENDPOINT_REMOVED`, `ENDPOINT_METHOD_CHANGED`, `ENDPOINT_PATH_CHANGED`, `RELATIVE_PATH_CHANGED`, `POLICY_ADDED`, `POLICY_REMOVED`, `POLICY_CHANGED`, `ROUTING_CHANGED`, `CREDENTIAL_ACL_CHANGED`, `ROLE_PERMISSION_CHANGED`, `USER_ROLE_CHANGED`, `SETTING_CHANGED`, `LICENSE_CHANGED` — örneğin bir endpoint eklenmesi, bir endpoint'in yolunun veya metodunun değişmesi, bir politikanın eklenip kaldırılması ya da değişmesi, yönlendirmenin değişmesi, bir kimlik bilgisinin erişim izinlerinin (ACL) değişmesi, bir rolün izinlerinin veya bir kullanıcının rolünün değişmesi ya da bir ayarın değişmesi gibi. `RELATIVE_PATH_CHANGED` API Proxy'nin İstemci Rotası (Client Route) göreli yolunu ifade eder. `LICENSE_CHANGED` lisans anahtarının değiştirildiğini bildirir; anahtarın kendisi hiçbir zaman gönderilmez (eski/yeni değeri her zaman `"[REDACTED]"` olur).
+
+**`data.changedPaths`**, değişen her alanın yolunu listeler (örn. `/apiMethodList/getPetById`) ve her zaman gönderilir; liste elemanları kendi kimliği veya adıyla adreslenir, böylece aynı endpoint art arda gelen olaylarda hep aynı yolu taşır.
+
+**`data.changes`**, her biri tek bir alan değişikliğini tanımlayan kayıtların listesidir: `op` (`add`, `remove`, `replace` veya `move`), `path`, eşleşen liste elemanının kimliği/adı olan `key` (varsa), `old`, `new` ve yalnızca `move` işleminde kaynak yolu belirten `from`. **Yalnızca** *Değişiklik listesini yüke ekle* açıkken gönderilir — varsayılan **açık**; kapatıldığında `data.changesStatus` ve `data.changeKinds` yine de gönderilmeye devam eder, yalnızca `data.changes` ve `data.changedPaths` düşer.
+
+:::warning
+
+`old` ve `new` gizli bir alanı hiçbir zaman taşımaz — gizli olduğu bilinen bir alan (örneğin adında parola, token veya secret geçen bir ayar ya da lisans anahtarı) `"[REDACTED]"` değeriyle gönderilir; girişin kendisi, `op` ve `path` yine gider, yani böyle bir alanın eklendiği, silindiği veya değiştiği bilgisi SIEM'e her zaman ulaşır. 512 karakterden uzun değerler kırpılır.
+
+:::
+
+Nesnenin önceki hâlinin ayrı bir kopyası hâlâ hiçbir zaman gönderilmez — bu dört alanın oluşturduğu fark, tam olarak o kopyaya duyulan ihtiyacın yerini almak için vardır.
+
+Aşağıda bir endpoint eklenmesi ve bir Genel Ayarlar değişikliği için üretilen olaylar örneklenmiştir (zarfın geri kalanı yukarıdaki [Zarf](#sema-v2) örneğiyle aynı yapıdadır):
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68c1a2b380f5de2a3c29d001",
+  "timestamp": "2026-09-10T09:12:44.512Z",
+  "event": { "category": "AUDIT", "action": "ENTITY.UPDATED", "outcome": "SUCCESS", "severity": 3 },
+  "actor": { "user": "admin", "ip": "10.0.0.7", "userAgent": "Mozilla/5.0", "sessionId": null },
+  "target": {
+    "type": "ApiProxy",
+    "id": "68493bb680f5de2a3c29c609",
+    "name": "Swagger Petstore Documentation",
+    "projectId": "68493b6e80f5de2a3c29c5ee",
+    "projectName": "Petstore"
+  },
+  "correlationId": "b1a2c3d4-5e6f-4a1b-9c2d-3e4f5a6b7c8d",
+  "source": { "component": "MANAGER", "host": "manager-0", "environmentId": null },
+  "apinizer": { "version": "2026.09.3", "configRevision": 18, "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60", "synthetic": false, "truncated": false },
+  "data": {
+    "id": "68493bb680f5de2a3c29c609",
+    "state": "UPDATED",
+    "origin": "MANAGER",
+    "changesStatus": "DIFFED",
+    "changeKinds": ["ENDPOINT_ADDED"],
+    "changedPaths": ["/apiMethodList/getPetById"],
+    "changes": [
+      { "op": "add", "path": "/apiMethodList/getPetById", "key": "getPetById", "new": { "relativePath": "/pet/{id}", "httpMethod": "GET" } }
+    ]
+  }
+}
+```
+
+```json
+{
+  "logType": "AUDIT",
+  "schemaVersion": 2,
+  "eventId": "68c1a2b380f5de2a3c29d044",
+  "timestamp": "2026-09-10T09:20:01.884Z",
+  "event": { "category": "AUDIT", "action": "ENTITY.UPDATED", "outcome": "SUCCESS", "severity": 3 },
+  "actor": { "user": "admin", "ip": "10.0.0.7", "userAgent": "Mozilla/5.0", "sessionId": null },
+  "target": {
+    "type": "GeneralSettings",
+    "id": "5f2c9a1e-0000-4a9b-9f0e-1b2c3d4e5f00",
+    "name": "GeneralSettings",
+    "projectId": null,
+    "projectName": null
+  },
+  "correlationId": "c2b3d4e5-6f7a-4b1c-8d3e-4f5a6b7c8d9e",
+  "source": { "component": "MANAGER", "host": "manager-0", "environmentId": null },
+  "apinizer": { "version": "2026.09.3", "configRevision": 19, "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60", "synthetic": false, "truncated": false },
+  "data": {
+    "id": "5f2c9a1e-0000-4a9b-9f0e-1b2c3d4e5f00",
+    "state": "UPDATED",
+    "origin": "MANAGER",
+    "changesStatus": "DIFFED",
+    "changeKinds": ["SETTING_CHANGED"],
+    "changedPaths": ["/enableManagerRequestAudit"],
+    "changes": [
+      { "op": "replace", "path": "/enableManagerRequestAudit", "old": false, "new": true }
+    ]
+  }
+}
+```
+
+## CEF ve LEEF {#cef-leef}
+
+**CEF 0** ve **LEEF 2.0** profilleri, olayı JSON yerine tek satırlık bir SIEM biçiminde üretir. İkisi de yalnızca Syslog konnektörü kullanan hedeflerde seçilebilir: satır, syslog çerçevesinin mesaj gövdesine yerleşir.
+
+**Üretim sırası.** Satır, zarfın kendisinden değil **işlenmiş** zarftan üretilir:
+
+1. Olaydan [Şema v2](#sema-v2) zarfı oluşturulur.
+2. Hedefin **gizlilik profili** uygulanır — maskelenen, hash'lenen veya silinen alanlar bu adımda değişir.
+3. Hedefin **boyut politikası** uygulanır.
+4. Sonuç, seçilen profile göre CEF ya da LEEF satırına çevrilir.
+
+Bunun iki pratik sonucu vardır: gizlilik profiliyle maskelenmiş bir alan CEF/LEEF satırına **maskeli değeriyle** girer, ve boş kalan alanlar satıra hiç yazılmaz — ayrıştırıcınız her anahtarın bulunacağını varsaymamalıdır.
+
+### CEF 0
+
+Başlık, boru ayraçlı yedi alandan ve ardından gelen uzantıdan oluşur:
+
+```
+CEF:0|Apinizer|API Gateway|<sürüm>|<olay tipi>|<hat>:<olay tipi>|<önem 0-10>|<uzantı>
+```
+
+Sürüm bilinemiyorsa `unknown` yazılır. Uzantı anahtarları:
+
+| Anahtar | İçerik |
+|---|---|
+| `rt` | Olay zamanı, epoch milisaniye |
+| `cat` | Hat — `AUDIT`, `SESSION`, `TOKEN` veya `APPLICATION` |
+| `act` | Olay tipi |
+| `outcome` | Sonuç — `SUCCESS`, `FAILURE` veya `DENIED` |
+| `suser` | Olaya sebep olan kullanıcı |
+| `src` | Aktörün IP adresi |
+| `requestClientApplication` | Aktörün istemci bilgisi |
+| `dvchost` | Olayı üreten düğüm adı |
+| `sourceServiceName` | Olayı üreten Apinizer bileşeni |
+| `externalId` | Olay kimliği |
+| `cs1` + `cs1Label=correlationId` | Korelasyon kimliği |
+| `cs2` + `cs2Label=targetType` | Hedef nesnenin tipi |
+| `cs3` + `cs3Label=targetId` | Hedef nesnenin kimliği |
+| `cs4` + `cs4Label=targetName` | Hedef nesnenin adı |
+| `cs5` + `cs5Label=projectId` | Proje kimliği |
+| `cs6` + `cs6Label=sessionId` | Oturum kimliği |
+| `cn1` + `cn1Label=severity` | Önem derecesi |
+| `flexString1` + `flexString1Label=environmentId` | Ortam kimliği |
+| `flexString2` + `flexString2Label=projectName` | Proje adı |
+| `msg` | Hattın `data` alanlarının kompakt JSON'u |
+
+Kaçış kuralları:
+
+- Başlık alanlarında ters bölü iki katına çıkarılır, boru işareti ters bölü ile kaçılır.
+- Uzantı değerlerinde ters bölü iki katına çıkarılır, eşittir işareti ters bölü ile kaçılır, satır başı ve satır sonu karakterleri `\r` ve `\n` dizilerine çevrilir. Böylece satır her zaman tek satır kalır.
+- `data` boşsa `msg` anahtarı hiç yazılmaz. CEF'te özel anahtar sayısı sınırlı olduğu için hat başına değişen alanlar ayrı anahtarlara dağıtılmaz, tamamı `msg` içindeki JSON'da taşınır.
+
+### LEEF 2.0
+
+Başlık, boru ayraçlı beş alan ve ardından ayraç bildirimi taşır; öznitelikler sekme (`x09`) ile ayrılır:
+
+```
+LEEF:2.0|Apinizer|API Gateway|<sürüm>|<olay tipi>|x09|
+```
+
+Öznitelik anahtarları:
+
+| Anahtar | İçerik |
+|---|---|
+| `devTime`, `devTimeFormat` | Olay zamanı ve onu okumak için gereken desen |
+| `sev` | Önem derecesi, 1–10 ölçeğinde |
+| `cat` | Hat |
+| `action` | Olay tipi |
+| `outcome` | Sonuç |
+| `usrName` | Olaya sebep olan kullanıcı |
+| `src` | Aktörün IP adresi |
+| `userAgent` | Aktörün istemci bilgisi |
+| `sessionId` | Oturum kimliği |
+| `resource`, `resourceType`, `resourceId` | Hedef nesnenin adı, tipi ve kimliği |
+| `projectId` | Proje kimliği |
+| `projectName` | Proje adı |
+| `correlationId` | Korelasyon kimliği |
+| `eventId` | Olay kimliği |
+| `srcNode` | Olayı üreten düğüm adı |
+| `component` | Olayı üreten Apinizer bileşeni |
+| `environmentId` | Ortam kimliği |
+| `data_<anahtar>` | Hattın `data` alanları; her biri ayrı bir öznitelik |
+
+Kaçış kuralları:
+
+- LEEF değer kaçışı tanımlamaz; bu yüzden değerlerdeki sekme, satır başı ve satır sonu karakterleri boşluğa çevrilir.
+- Öznitelik adında eşittir işareti bulunamayacağı için `data` anahtarlarındaki eşittir işareti alt çizgiye çevrilir.
+- Önem derecesi ölçeği zarfta 0–10, LEEF'te 1–10'dur; `0` değeri `1` olarak yazılır.
+
+**Ortak sınırlar.**
+
+- Satır oluşturulduktan sonra hedefin en büyük olay boyutunu aşıyorsa **ikinci kez kırpılmaz, düşürülür**. Bu düşüş `dropped_oversize_formatted` sonucuyla sayılır; biçimlendirme öncesindeki `dropped_oversize` sayacından ayrıdır.
+- Her iki biçim de tek satırdır: değerlerdeki satır sonları temizlendiği için bir olay hiçbir zaman birden çok syslog çerçevesine bölünmez.
+- Gerçek örnek satırları **Şema ve Örnekler** sekmesinden alabilirsiniz; sekme, çalışan platformun ürettiği satırı gösterir.
+
+## Test Olayı
+
+Kaydedilmiş bir hedefteki **Test olayı gönder** işlemi, seçtiğiniz hat için tek bir sentetik olay üretir ve onu o hedefin tüm gönderim yolundan geçirir.
+
+- Kurallar **atlanır** — buton "bu hedef çalışıyor mu" sorusunu yanıtlar, "bu olay filtremden geçer mi" sorusunu değil.
+- Yük profili, gizlilik profili ve boyut politikası **uygulanır**; böylece test, hedefin gerçekte ne ürettiğini gösterir.
+- v2 hedefinde olay `apinizer.synthetic: true` ve `SYNTHETIC_TEST` eylemiyle gelir. CEF hedefinde aynı işaret `msg` içindeki JSON'a `_synthetic` anahtarı olarak, LEEF hedefinde `data__synthetic` özniteliği olarak girer.
+- Legacy Raw hedefinde, sınıf adı `SYNTHETIC_TEST` olan bir denetim kaydı olarak ulaşır. Bu kayıt Apinizer veritabanına hiçbir zaman yazılmaz; yalnızca SIEM tarafında görünür.
+- Test olayı gönderim **sayaçlarına ve teslim sağlığı kartına yazılmaz**; üretim göstergelerini kirletmez.
+- Sonuç **Kuyruğa alındı**, **Gönderildi** veya **Başarısız** olur. Syslog hedefleri **Kuyruğa alındı** bildirir: olay konnektörün kuyruğuna kabul edilmiştir, ancak syslog teslim onayı vermediği için daha güçlü bir iddiada bulunulamaz.
+
+Yöneticinin bağlantı denetimlerinin alarm üretmemesi için SIEM korelasyon kurallarınızda `SYNTHETIC_TEST` olaylarını hariç tutmayı değerlendiriniz.
+
+## Teslim Sağlığı {#teslim-sagligi}
+
+**Hedefler** sekmesinin üst kısmında, kaydedilmiş her hedef için bir sağlık kartı bulunur. Kart, "bu hedefe olay gidiyor mu" sorusunu sayfadan ayrılmadan yanıtlar.
+
+**Durumlar.**
+
+| Durum | Ne zaman gösterilir |
+|---|---|
+| **Sağlıklı (HEALTHY)** | Bu düğümden gönderim yapılmış, ardışık başarısızlık yok, gönderici sorunsuz. |
+| **Bozulmuş (DEGRADED)** | Ardışık bir ya da iki başarısızlık var; ya da Syslog göndericisinde kuyrukta bekleyen, kaybedilen veya reddedilen kayıt bulunuyor. |
+| **Başarısız (FAILING)** | Syslog göndericisi çalışmıyor; ya da üst üste üç veya daha fazla başarısızlık oluşmuş. |
+| **Boşta (IDLE)** | Bu düğümde bu hedef için henüz hiç gönderim denemesi yok. |
+
+**Kartta ne var.**
+
+- **Son başarı** ve **son başarısızlık** zamanları. Başarılı bir gönderim ardışık başarısızlık sayacını sıfırlar ancak son başarısızlık bilgisi kartta görünmeye devam eder.
+- **Son hata** — hatanın türü ve kısaltılmış mesajı. Mesaj gösterilmeden önce gizli bilgi taraması uygulanır ve kırpılır; parola, anahtar deposu içeriği ve bağlantıdaki mesaj ana bilgisayar adı hiçbir zaman görünmez.
+- **Ardışık başarısızlık** sayısı.
+- Syslog hedeflerinde bir **gönderici** bölümü: göndericinin çalışıp çalışmadığı, kuyrukta bekleyen kayıt sayısı, kaybedilen ve reddedilen kayıt sayıları ve yazma zaman aşımından uzun süredir bloke bir soket olup olmadığı.
+- Gönderim **sayaçları**: kabul edilen, gönderilemeyen, elenen, hız sınırına takılan ve düşürülen kayıtlar — düşme nedenine göre ayrılmış olarak.
+
+Kartlar sekme açıkken 10 saniyede bir yenilenir, sekmeden çıkıldığında durur; **Yenile** butonuyla elle de tazelenebilir. Yenileme başarısız olursa toast gösterilmez: son bilinen değerler kalır ve kartın üstünde güncellenemediği not edilir.
+
+**Sayıları okurken.**
+
+- Kuyruk sayısı o anki değerdir; **kaybedilen ve reddedilen sayıları ise göndericinin başlangıcından beri kümülatiftir**. Günler önce kaybedilen tek bir kayıt, gönderici değişene kadar (bağlantı ayarı kaydedilene ya da ortam yeniden dağıtılana kadar) durumu **Bozulmuş** tutar.
+- Yoğun ama sağlıklı bir Syslog hedefi, kuyruğun dolu yakalandığı yenilemede **Bozulmuş** görünebilir. Rozetin yük altında dalgalanması beklenen davranıştır; kalıcı durum için son başarı zamanına ve ardışık başarısızlık sayısına bakınız.
+- **Legacy Raw** profilinde "başarı", konnektör çağrısının hata vermeden dönmesi demektir. Bu yolda taşıma hataları konnektörün içinde yutulabildiği için, sessizce başarısız olan bir hedef kartta sağlıklı görünebilir.
+
+**Kapsam.** Kart yalnızca **bu Yönetim Konsolu düğümünün** gönderdiklerini gösterir; kartın başlığındaki etiket bunu belirtir. Ağ geçidi ortamlarının kendi gönderimleri ayrı sayılır ve [Environment Diagnostics](/tr/admin/server-management/environment-diagnostics) çıktısındaki `siem` bloğunun `destinations` dizisinde raporlanır. İki küme toplanmaz.
+
+## Gözlenebilirlik
+
+Yönetim Konsolu'nda Prometheus metrik dışa aktarımı etkinken, Prometheus uç noktası (`/management/prometheus`) aşağıdaki SIEM sayaçlarını yayınlar:
+
+| Metrik | Etiketler | Neyi sayar |
+|---|---|---|
+| `siem_events_total` | `destination`, `stream`, `result` | Her gönderim denemesini. `result` değerleri: `accepted`, `filtered`, `throttled`, `dropped_oversize`, `dropped_oversize_formatted`, `dropped_secret`, `privacy_failed`, `send_failed`. `dropped_oversize_formatted`, CEF ya da LEEF satırı biçimlendirildikten sonra boyut sınırını aşıp düşürülen olayları sayar. |
+| `siem_events_filtered_total` | `destination`, `stream`, `reason` | Filtrelenen olayları, onları eleyen kural adımına göre. |
+| `siem_dispatch_duration_seconds` | `stream` | Gönderimin üretici akış üzerinde ne kadar sürdüğünü. |
+| `siem_config_revision` | — | Yürürlükteki yapılandırmanın sürümünü. Kaydedilen bir değişikliğin düğüme ulaşıp ulaşmadığını doğrulamak için kullanılır. |
+
+Ağ geçidi bir Prometheus uç noktası sunmaz; aynı sayaçlar, [Environment Diagnostics](/tr/admin/server-management/environment-diagnostics) sayfasından okuyabileceğiniz teşhis çıktısında `siem` bloğu altında yayınlanır:
+
+```json
+{
+  "siem": {
+    "configRevision": 17,
+    "events": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|accepted": 41822,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|filtered": 6103,
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|throttled": 55
+    },
+    "filteredReasons": {
+      "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60|TOKEN|threshold": 6103
+    },
+    "dispatchDuration": {
+      "count": 47980,
+      "totalNanos": 1583340000,
+      "averageNanos": 32999
+    },
+    "destinations": [
+      {
+        "destinationId": "5f2c9a1e-7c4d-4a9b-9f0e-1b2c3d4e5f60",
+        "lastSuccessAt": "2026-09-03T10:11:12.123Z",
+        "lastFailureAt": null,
+        "lastFailureClass": null,
+        "consecutiveFailures": 0,
+        "sentSinceStart": 41822,
+        "failedSinceStart": 0,
+        "sender": {
+          "healthy": true,
+          "queuedCount": 0,
+          "queuedBytes": 0,
+          "rejectedCount": 0,
+          "lossCount": 0,
+          "recoveredBatchCount": 0,
+          "idleReconnectCount": 0,
+          "reconnectCount": 1,
+          "peerClosedAtAcceptCount": 0
+        }
+      }
+    ]
+  }
+}
+```
+
+`destinations` dizisi, bu ağ geçidi düğümünün teslim durumunu hedef başına raporlar ve Yönetim Konsolu'ndaki sağlık kartından **ayrı** bir sayaç kümesidir. Dizide, düğüme ulaşmış yapılandırmadaki her hedef bulunur: yapılandırılmış ama henüz hiç olay göndermemiş bir hedef boş zaman damgaları ve sıfır sayaçlarla görünür, böylece "yapılandırma bu düğüme ulaşmadı" ile "ulaştı ama olay akmadı" ayırt edilebilir. `sender` bölümü yalnızca Syslog hedeflerinde doludur. Hata **mesajı** bu çıktıya hiçbir zaman yazılmaz; mesaj yalnızca Yönetim Konsolu'ndaki sağlık kartında görünür.
+
+`sender` sayaçlarından ikisi, "karşı taraf boştaki oturumları kapatıyor" durumunu "karşı taraf gerçekten yetişemiyor" durumundan ayırır: `idleReconnectCount`, bir süre hiçbir şey gönderilmediği için ağ geçidinin yazmadan önce yenilediği soket sayısıdır; `recoveredBatchCount` ise bir kez başarısız olup taze sokette başarılı olan gönderim kümesi sayısıdır. `lossCount` sıfırda kalırken artan bir `recoveredBatchCount`, kayıt kaybı olmadığı ve karşı tarafın oturumları ağ geçidinin kendi eşiğinden daha erken kapattığı anlamına gelir; ayrıntı için Syslog bağlantı sayfasındaki [Boşta Kalan Bağlantılar ve Yeniden Bağlanma](/tr/integrations/baglanti-yonetimi/syslog#bosta-kalan-baglantilar) bölümüne bakın. Artan bir `lossCount` veya `rejectedCount` ise bundan farklı, daha ciddi bir durumdur.
+
+Kalan iki `sender` sayacı ağ yoluna değil doğrudan karşı tarafa işaret eder: `reconnectCount`, bir hedefin soketlerinin pod başladığından bu yana açtığı taze TCP bağlantılarının toplamıdır — her soketin ilk bağlantısı da sayılır, yani hiç kopmamış bir gönderici bile soket başına bir gösterir; bunun üzerindeki her artış bir kopma ve yeniden bağlanmadır. `peerClosedAtAcceptCount` ise bu bağlantılardan kaçının, tek bir bayt bile alışverişi yapılmadan, alıcı tarafından kabul edilir edilmez tekrar kapatıldığını sayar. Sıfırdan büyük bir `peerClosedAtAcceptCount`, arızanın ağ yolunda veya ağ geçidinde değil karşı tarafta olduğu anlamına gelir — bir oturum sınırı, bir kaynak-IP reddi ya da aradaki bir yük dengeleyici. İki sayaç neredeyse her kümede birlikte artıyorsa, alıcı her denemede bir oturum açıp hemen düşürüyordur (bağlantı fırtınası): düşen her bağlantı yine de bir bağlantı hatası sayılır, bu yüzden art arda üç hata o hedefin trafiğini, tıpkı diğer bağlantı hatalarında olduğu gibi yedek (failover) connector'a taşır. Alıcı tarafın işareti ve ayar özellikleri için Syslog bağlantı sayfasındaki [Bağlantıyı Kabul Eder Etmez Kapatan Alıcılar](/tr/integrations/baglanti-yonetimi/syslog#baglanti-ani-canlilik) bölümüne bakın.
+
+Düğümler arasında farklılaşan bir `configRevision`, o düğümün son kaydı henüz almadığı anlamına gelir. Artan `send_failed` veya `throttled` sayacı ise bir hedefin yetişemediğinin en erken işaretidir.
+
+## Bilinen Sınırlar {#bilinen-sinirlar}
+
+- **Bir hedefi ekleyen kaydın kendi denetim kayıtları o hedefe gitmez.** O kaydın ürettiği denetim kayıtları alıcı önbelleği yenilenmeden gönderilir; yeni hedefe iletim bir sonraki olayla başlar (best-effort teslim).
+- **Teslim en iyi çaba ilkesine göredir.** Kalıcı kuyruk ve yeniden gönderim yoktur. SIEM'in kaçırdığı kayıt Apinizer veritabanında durur, ancak SIEM'e sonradan ulaşmaz.
+- **Teslim sağlığı görünümü düğüm yereldir ve kalıcı değildir.** Sayaçlar yalnızca ilgili düğümün açılışından itibaren birikir ve yeniden başlatmada sıfırlanır; Yönetim Konsolu ile ağ geçidi düğümlerinin sayaçları toplanmaz.
+- **CEF 0 ve LEEF 2.0 yalnızca Syslog konnektörü kullanan hedeflerde seçilebilir.** Karşılıklı TLS ve RFC 5424 yapılandırılmış veri de Syslog bağlantısının ayarlarıdır; başka konnektör tipleri bu biçimleri üretmez.
+- **Veritabanı konnektörleri Legacy Raw ile sınırlıdır**; dolayısıyla bugünkü alan listesiyle, gizlilik profili ve boyut politikası olmadan çalışır.
+- **Gizlilik profilleri ve boyut politikaları Legacy Raw dışındaki her profilde geçerlidir** — Apinizer JSON v2, CEF 0 ve LEEF 2.0. Legacy Raw hedefi bugünkü çıktısını değiştirmeden üretir.
+- **Önbellek ve entegrasyon modüllerinin uygulama logları** hâlâ eski alıcı listesi üzerinden yönlendirilir; kurallar, gizlilik profilleri ve boyut politikaları bunlara uygulanmaz. Yönetim Konsolu ve ağ geçidi uygulama logları bu sayfayı izler.
+- **Birden fazla hattın paylaştığı bir bağlantı yapılandırması tek bir kuyruğu paylaşır.** Uygulama logu dalgası, aynı syslog bağlantısındaki denetim olaylarını sıkıştırabilir. Yüksek hacimli hatta kendi bağlantı yapılandırmasını veriniz ya da en düşük seviye ve saniyedeki olay sınırıyla sınırlayınız.
+- **Bütün proje yapılandırması içe aktarımı, alıcı listelerini ve yerel saklama anahtarlarını hâlâ yok sayar** — bu sayfa onların sahibidir; bunun yerine Dışa/İçe Aktarma sihirbazındaki [SIEM Ayarları](/tr/admin/secrets-management/export-import#siem-ayarlari) tipini kullanın; bkz. yukarıdaki [Dışa/İçe Aktarma](#disa-ice-aktarma).
+- **Engellenen veya hata veren bir istek iki hat tarafından birden sayılır.** Hem bir API Güvenliği hem bir API Erişimi olayı üretir. İki hat aynı hedefe gidiyorsa API Erişimi kuralında **Sonuçlar** alanını `SUCCESS` yapınız — bkz. [Hatlar](#hatlar).
+- **API Erişimi kuralında örnekleme yalnızca yönlendirileni seyreltir**, saklananı değil. Yerel saklama açıkken `log_apiaccess` koleksiyonu yine her olayı alır; koleksiyonu örnekleme yüzdesiyle değil kısa bir saklama süresiyle sınırlayınız.
+- **API Erişimi yerel saklaması varsayılan olarak kapalıdır ve sürüm yükseltmesinden sonra da kapalı kalır.** Açılana kadar, hat bir SIEM hedefine yönlendiriliyor olsa bile Güvenlik Olayları ekranının API Erişimi sekmesi boş görünür.
+- **API Güvenliği ve API Erişimi hedefleri Şema v2, CEF veya LEEF kullanmalıdır — Legacy Raw bu iki hat için kullanılamaz.** Yeni bir hedef varsayılan olarak Legacy Raw ile başladığından, aksi hâlde bu hatların olayları sessizce düşerdi.
+- **Yeni eklenen bir Portal alan olayı tipi, önceden taşınmış bir hedefin dahil edilen olay tipleri listesine otomatik eklenmez** — Denetim, Oturum, Token ve Uygulama için zaten geçerli olan kuralla aynı (yukarıdaki "Sürüm yükseltmesinde ne oldu" bölümüne bakınız); **Dahil edilen olay tipleri** listesi boş bırakılmış bir kural bundan etkilenmez, yeni tipleri her zaman otomatik alır.
+- **Portal kaynaklı bir Oturum veya Portal olayındaki istemci IP'si ve User Agent, API Portal arka ucunun gerçek istemci adresini ilettiği bir ters proxy/ingress arkasında olmasına bağlıdır** (Portal arka ucundaki `server.forward-headers-strategy`, proxy'nizin gönderdiğine uygun şekilde). Bu yapılandırılmamışsa bu alanlar son kullanıcı yerine Portal arka ucunun kendi host adresine düşer.

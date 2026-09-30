@@ -71,13 +71,17 @@ Creates an unpublished product. Typical steps: General → APIs → API Spec →
 | **API Specification** | Product OpenAPI / endpoints |
 | **Documentation** | Portal documentation pages |
 | **Files** | Downloadable files |
-| **Plans** | Active/Retired plans; Duplicate; quota/rate limit/approval/pricing; on exceed Block 429 or Continue & charge |
+| **Plans** | Active/Retired plans; Duplicate; approval/pricing; **quota and rate limit are typed as numbers on the plan itself**, and the system derives the limit profile the gateway enforces from them. Picking a ready-made profile from the catalog is an advanced option — see [Limit Profiles](#limit-profiles) |
 | **Subscriptions (N)** | Read-only: org → app → plan + status + usage summary |
 | **Security** | Consistent ACL-managed auth across packaged proxies; publish blocked when not ready |
 | **Visibility** | Discoverability (access/approval stays on plans) |
 | **Danger Zone** | Unpublish / Delete |
 
 Manual plan approvals are not done on the product Subscriptions overview; they are under **API Product App Registers** / [Approval Requests](/en/api-portal/approval-requests).
+
+:::info
+The usage summary in this Subscriptions panel attributes traffic to an application whose identity is a typed API Client (client ID matching the traffic row's username/key), not only to one still carrying a legacy username/password credential.
+:::
 
 ### Plan types
 
@@ -89,6 +93,96 @@ Manual plan approvals are not done on the product Subscriptions overview; they a
 | **Tiered** | Tiered pricing |
 
 Consumers pick **exactly one plan** per subscription. Approval is per plan: **Auto approval** / **Approval Required**. Product-level auto-approve is deprecated and should not be taught.
+
+On a **Metered** or **Tiered** plan, every call is invoiced, so overage is never rejected — it is only counted (and, for Metered, billed as an overage fee per extra call). The plan's on-exceed setting reflects this: **Block (429)** cannot be selected for these two pricing models, and the screen shows only **Continue & charge**. **Free** and **Flat rate** plans keep the full choice between **Block (429)** and **Continue & charge**.
+
+### Authentication required for plan limits to apply {#plan-limit-authentication}
+
+Plan limits are counted **per consumer**, so every proxy in the product must be able to tell on whose behalf a request arrives. When a proxy cannot identify the consumer, the request is treated as anonymous, the plan's quota and rate limit are **never applied**, and no 429 is returned on overage.
+
+A proxy identifies the consumer in these cases. An authentication policy kept inside an **active** Policy Group counts exactly like one placed directly on the proxy; one kept inside an **inactive** group counts as no policy at all.
+
+| State on the proxy | Plan limit applied |
+|--------------------|--------------------|
+| **Active** Basic / Base64 / Digest / mTLS authentication policy | Yes |
+| **Active** JWT or OAuth2 policy whose token is issued by a third party (not delegated to an OIDC identity provider — see below) | Yes |
+| **Active** JWT or OAuth2 policy issued by Apinizer, **password** grant, provider **Secret Manager (ACL)** | Yes |
+| **Active** JWT or OAuth2 policy delegated to an OIDC identity provider (the token is validated at request time against that provider), whose **Require matching Consumer** setting is on | Yes |
+| **Active** JWT or OAuth2 policy delegated to an OIDC identity provider whose **Require matching Consumer** is off, or whose provider cannot be resolved | No — the provider validates the token but never confirms which consumer it belongs to |
+| **Active** JWT or OAuth2 policy issued by Apinizer, **password** grant, but provider LDAP / Database / API | No — only the signature is verified, no consumer is resolved |
+| **Active** JWT or OAuth2 policy issued by Apinizer with the **client_credentials** grant | No — only the signature is verified, no consumer is resolved |
+| An authentication policy exists but is **inactive** | No |
+| No authentication policy at all | No |
+| OIDC session authentication only | No |
+
+See [OIDC Provider](/en/admin/identity-management/identity-providers/oidc-provider) for what **Require matching Consumer** does on the identity provider side.
+
+Activating the policy is not enough on its own: the change does not reach the gateway until the proxy is **redeployed**.
+
+As of Apinizer 2026.09.4, the warning banner's wording matches the actual reason instead of always telling you to activate the policy:
+
+- When every affected proxy's authentication policy is simply **inactive**, the banner tells you to activate it and redeploy.
+- When the policy is already active but the scheme itself never resolves a consumer — a client_credentials-issued token, a session-only OIDC policy, or a delegated token whose identity provider has **Require matching Consumer** off — the banner points at the grant type or the identity provider instead. Redeploying alone would not fix it.
+- No authentication policy at all, or a mix of the reasons above across several proxies, shows a general wording.
+- A separate banner asks for a **redeploy** only once the saved configuration is already capable. It is never shown next to a banner that says the opposite.
+
+This is surfaced in three places:
+
+* **Manager > API Product > Plans** and **Subscriptions** tabs show the warning banner described above, naming the affected proxies.
+* The proxy table on the **Manager > API Product > Security** tab has a **Consumer identity** column: Identified / Not identified per proxy, with the reason underneath when it is not, and the redeploy notice next to it when relevant.
+* **Developer Portal product page > API Specification** labels the authentication type with **(inactive)** when it comes from an inactive policy, and shows a consumer-facing warning beneath it.
+
+### Limit Profiles {#limit-profiles}
+
+The **rate limit** and **quota** you type on the plan screen are the limits the gateway actually applies. On save, the system derives a **Request Rate limit profile** from those numbers, publishes it, and binds every approved subscription of the plan to it. Change the numbers and the profile gets a new revision; remove them altogether and the profile is retired, so the plan applies no ceiling.
+
+That profile also appears in the catalog, but it is **read-only** there and hidden from the listing by default — the plan screen is the single place these limits are edited. See [Limit Plans](/en/ai-gateway/limit-plans).
+
+Rate limit and quota must each permit **at least one call**. A plan saved with `0` (or a negative number) is rejected before it is stored, with a message naming the box to correct — a limit of zero permits no traffic at all and cannot be turned into a profile the gateway could apply. To leave a plan without a rate limit or without a quota, clear the matching checkbox instead of typing zero.
+
+A ticked box with an **empty** number is not a way to say "no limit" either: while Throttling or Quota is ticked, its number is required and Save stays disabled until you enter one, with a message under the box. Untick the box to leave that limit off.
+
+A plan that arrives through export/import — or with a cloned portal — gets its limit profile as part of the import, so it enforces its numbers immediately; see [Export/Import](/en/admin/secrets-management/export-import#api-product-subscription-plans).
+
+If a plan created on an older release still shows a rate limit or quota that no profile backs, the plan screen warns that **these limits are not being applied at the gateway**. Check the values and save the plan; the profile is created on save and the warning disappears.
+
+#### Advanced: use a profile from the catalog
+
+Under **Advanced — use a limit profile from the catalog** on the plan screen you can point the plan at an existing catalog profile instead of its own generated one. The choice is made per family:
+
+| Value | Meaning |
+|-------|---------|
+| **Off** | No catalog profile for this family (for Request Rate: the plan's own numbers apply). |
+| **Plan** | References a **published, platform-scope** profile from the [Limit Plans](/en/ai-gateway/limit-plans) catalog. |
+
+- Choosing a Request Rate profile **disables** the plan's rate-limit and quota boxes, and fills them in from the selected profile's windows after the save — so the portal, the usage reports and APIops all quote the ceiling that is actually enforced.
+- Only **platform-scope**, **published** profiles are selectable; project-scope profiles, drafts, and profiles owned by another subscription plan are not offered.
+- The selected profile's family must match the reference's own family (Request Rate / AI Token Budget).
+- The product plan's on-exceed setting (**Block 429** or **Continue & charge**) must agree with the selected profile's overflow posture: **Continue & charge** only pairs with a Count-Only (or alert-only) profile; **Block 429** only pairs with a blocking profile. A mismatched combination is refused with `400 Bad Request`.
+- A profile revision published later is not re-checked against the product plans already referencing it — this reverse-dependency check is not available yet.
+
+:::tip
+The generated profile's overflow posture is derived from the plan itself: **Continue & charge**, or **Metered** / **Tiered** pricing, means "do not block, count"; anything else blocks on overflow. So the mismatch error above never applies to a generated profile.
+:::
+
+#### Impact Preview on Change
+
+Changing a published plan's Limit Profile reference or on-exceed setting shows a confirmation, before the save goes through, with how many subscriptions and applications the change would affect. Declining the confirmation cancels the save.
+
+### Typed Limit Binding {#typed-limit-binding}
+
+When a subscription is approved, the plan's Limit Profile references materialize into one **application-wide** binding per family for the subscribing application — applying to all of that application's traffic, not just this product's.
+
+- A **plan change** moves the same binding to the new plan; its counter is not reset.
+- When a subscription **ends**, its binding is handed over to another still-active subscription of the same application, if one exists; otherwise the binding ends with it.
+- One application and one plan family always resolve to **one** binding. If two different subscriptions want different profiles for the same family, the existing binding is **kept** — the approval screen surfaces this as a warning, and an operator who wants the new profile makes that an explicit choice with **Switch the Profile** (see [Approval Requests](/en/api-portal/approval-requests)).
+- The binding of a portal application used across multiple projects is kept under the **admin** project.
+
+### Version Upgrade {#version-upgrade}
+
+The upgrade needs **no manual step**. Every product plan that carries quota/rate-limit numbers gets a **Request Rate** limit profile (a profile an earlier release already generated for that plan is adopted rather than duplicated), the plan is pointed at it, and the application-level bindings of the already-**approved** subscriptions are created in the same pass. Plans with no limit stay **Off**.
+
+The same steps run again every night, so a plan that loses its profile for any reason — an import, an environment promotion, a manual data fix — repairs itself by the next day at the latest. See [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode) on the Limit Plans page for what a binding does once it exists.
 
 ### Visibility {#visibility}
 
@@ -123,7 +217,7 @@ Subscriptions start on the consumer side (product page or [My Apps](/en/api-port
 1. Package APIs from Catalog  
 2. Upload OpenAPI  
 3. Define at least one Active plan (quota/rate/approval)  
-4. Ensure Security is ready  
+4. Ensure Security is ready — every connected proxy needs an **active** consumer-identifying authentication policy, otherwise plan limits are not applied ([details](#plan-limit-authentication))  
 5. Set Visibility  
 6. Publish  
 7. Optionally verify packaging on [API Catalog](/en/api-portal/api-catalog)  
@@ -131,6 +225,7 @@ Subscriptions start on the consumer side (product page or [My Apps](/en/api-port
 ## Related Pages
 
 * [API Catalog](/en/api-portal/api-catalog)
+* [Limit Plans](/en/ai-gateway/limit-plans)
 * [API Product Categories](/en/api-portal/api-product-categories)
 * [Approval Requests](/en/api-portal/approval-requests)
 * [API Product Application Registrations](/en/api-portal/api-product-application-registrations)

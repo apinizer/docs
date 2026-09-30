@@ -1,0 +1,160 @@
+---
+title: "Limit Plans, Assignments & Defaults API"
+description: "Endpoint reference for the manager REST surface behind Limit Plans: the Request Rate and AI Token Budget plan catalog (project- and platform-scope), per-subject limit assignments, owner-level default policies, and the portal subscription linking that materializes assignments from a Subscription Plan."
+---
+
+import {Card} from '@site/src/components/Card';
+
+:::caution This is the manager's own REST surface, not APIops
+Every endpoint on this page lives under `/api/**` — the same surface the manager's own Angular UI calls — not under `/apiops/**`. The plan catalog, Limit Assignments, and Bulk Assignment each have a portable Management API counterpart, linked from their own sections; Default Limit Policies does not. See [API Client Runtime Deployment (Manager REST API)](/api-reference/credentials#api-client-runtime-deployment-manager-rest-api) for a comparable manager-only surface documented for the same reason.
+:::
+
+For the concepts behind these endpoints — plan lifecycle, publishing a revision, the four assignment modes, target scope, and rule assignments — see [Limit Plans](/en/ai-gateway/limit-plans).
+
+<Card title="Limit Plans Management API" icon="layers" href="/api-reference/limit-plans-management-api">
+  The portable, name-based Management API counterpart of the plan catalog below — create, draft, publish, retire and delete a plan through APIops.
+</Card>
+
+## Endpoints
+
+### Limit Plans — `/api/limit-plans`
+
+The catalog: draft → publish → retire, plus the revision history under a plan. Every endpoint below takes an optional `projectId` query parameter with the same meaning: absent addresses the installation-wide **platform** catalog (`GET`/list still returns a project's own plans plus the platform ones; every other by-key endpoint addresses the platform row directly), present addresses one project's own catalog. Writing a platform-scope row (`POST`, `PUT`, `.../draft-revisions`, `.../publish`, `.../retire`, `DELETE`) is restricted to a system administrator; a project-scoped caller naming a platform plan's key is refused.
+
+- `GET /api/limit-plans` — list plans (`projectId` optional — absent addresses the platform-wide catalog; with a project id the answer is that project's own plans plus the platform catalog; `family` optional)
+- `GET /api/limit-plans/{planKey}` — one plan
+- `GET /api/limit-plans/{planKey}/revisions` — every revision, oldest first, without the rule body
+- `GET /api/limit-plans/{planKey}/revisions/{revision}` — one revision, full body
+- `GET /api/limit-plans/{planKey}/draft` — the open draft revision (`404` when there is none)
+- `GET /api/limit-plans/{planKey}/published` — the currently published revision (`404` when never published)
+- `POST /api/limit-plans` — create a plan, optionally with an initial draft rule body
+- `PUT /api/limit-plans/{planKey}` — update a plan's name, description, or labels (not its rule body)
+- `POST /api/limit-plans/{planKey}/draft-revisions` — open a new draft revision, or replace the current one
+- `PUT /api/limit-plans/{planKey}/draft-revisions/{revision}` — edit an open draft revision
+- `POST /api/limit-plans/{planKey}/revisions/{revision}/publish` — publish a draft revision (optional change reason)
+- `POST /api/limit-plans/{planKey}/retire` — retire the plan
+- `DELETE /api/limit-plans/{planKey}` — delete a plan that has never been published
+
+### Limit Assignments — `/api/limit-bindings`
+
+One subject's assignment lifecycle: `DRAFT` → `ACTIVE` → `ENDED`. There is no delete endpoint — removing an assignment is ending it, so the record of when a ceiling stopped applying is kept. A portable, name-based equivalent of this same single-assignment surface is also exposed on the Management API — see [Limit Assignments Management API](/api-reference/limit-assignments).
+
+- `GET /api/limit-bindings` — list assignments (`projectId`, `family`, `status` all optional; an absent `status` includes drafts and ended rows). Every list endpoint below returns summary rows that also carry read-only display names next to the ids — `subjectName` (consumer username, API client / application / organization / project / proxy name; absent for `PLATFORM`, `AUDIENCE_RULE`, or a deleted subject) and `target.targetName` (proxy / proxy group name for a narrowed target) — both ignored on write
+- `GET /api/limit-bindings/subject` — every assignment naming one subject (`subjectType` required; `activeOnly=true` returns only the live one, if any)
+- `GET /api/limit-bindings/covering-api-proxy?projectId=X&apiProxyId=Y` — every `ACTIVE` `REQUEST_RATE` assignment whose target covers this API proxy: explicit-subject and rule-based (`AUDIENCE_RULE`) assignments alike, installation-wide (`PLATFORM`) ones included. `apiProxyId` is required; `projectId` is optional and defaults to the proxy's own project. Returns the list-row (`LimitPolicyBindingSummaryDTO`) shape, same as every other list endpoint on this page — this is what backs the "Rate Limit" badge and its dialog on the proxy's Develop screen.
+- `GET /api/limit-bindings/{bindingKey}` — one assignment
+- `GET /api/limit-bindings/referencing-plan/{planId}` — impact analysis: every assignment that references a given plan
+- `POST /api/limit-bindings` — create an assignment (mode `PLAN`, `CUSTOM`, `INHERIT`, or `OFF`)
+- `PUT /api/limit-bindings/{bindingKey}` — edit an assignment's content: `mode`, `planIds`, `customRuleSpec`, `audienceRule`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, `customMessageTemplate`/`customMessageContentType`/`customMessageHttpStatusCode`, `validFrom`/`validUntil`, and the caller's observed `version` — its subject and scope (`subjectType`, `subjectId`, `actorScope`, `family`, `target` including the HTTP method axis) cannot be changed this way; every other field on the request body is silently ignored on update
+- `POST /api/limit-bindings/{bindingKey}/activate` — turn a draft assignment live
+- `POST /api/limit-bindings/{bindingKey}/end` — end a live assignment (optional reason)
+- `POST /api/limit-bindings/validate` — dry-run every save-time rule without writing anything
+
+#### Target — `target`
+
+`target.type` narrows what the assignment counts: `ALL` (the default, no narrowing), `API_PROXY`, `API_PROXY_ENV`, `API_PROXY_GROUP`, `API_PROXY_GROUP_ENV`, `API_ENDPOINT`, `AI_MODEL`, or `AI_PROVIDER`. `target.targetId` and `target.environmentId` are present or absent depending on the type (an `_ENV` type carries both; `ALL` carries neither; `API_ENDPOINT` carries `targetId` — the `ApiMethod` id — but no `environmentId` and no `httpMethods` axis, since it already narrows to a single method). `API_ENDPOINT` is written by the legacy limit migration at upgrade (see [Legacy Limits Migrated at Upgrade](/en/ai-gateway/limit-plans#legacy-limits-migrated-at-upgrade)); the manager UI does not yet offer it as a choice when creating a new assignment by hand.
+
+`target.httpMethods` — a list of HTTP methods, on an `API_PROXY`/`API_PROXY_ENV` target only — additionally narrows the assignment to those methods; empty or absent means every method. `target.methodSignature` is **response-only**: it is derived from `httpMethods` (`GET+POST`) and echoed back on every read, but a value sent for it on `POST`/`PUT` is ignored — the server always recomputes it. A `400` with errorKey `limit.binding.methodAxisNotAllowed` is returned for an `httpMethods` list on a target type that does not support one, or for a method token the server does not recognize.
+
+The target (the HTTP method axis included) is part of the assignment's identity and cannot be changed by `PUT` — change it by ending the assignment and creating a new one.
+
+#### Rule Assignments — `subjectType: "AUDIENCE_RULE"`
+
+An assignment whose subject is a condition rather than one fixed API client or credential. `subjectType` is `AUDIENCE_RULE`; `subjectId` is assigned by the server (it is the assignment's own `bindingKey`) and any value sent for it is overwritten. `actorScope` may be omitted: it is then derived from `audienceRule.identitySource` — `AUTH_RESOLVED` → `AUTHENTICATED`, `VARIABLE` → `ANY` (an explicit value is kept). `family` must be `REQUEST_RATE` — there is no rule-based assignment for the AI Token Budget family, since an AI ceiling always has one fixed subject, never an identity condition; `family: AI_TOKEN_BUDGET` on an `AUDIENCE_RULE` subject is refused with `400`, errorKey `limit.binding.audienceRuleFamily`.
+
+The condition itself is `audienceRule`, required for this subject type and forbidden for every other one (`400`, errorKey `limit.binding.audienceRuleShape`):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `identitySource` | enum | `AUTH_RESOLVED` (default) or `VARIABLE` |
+| `variableId` | string | The global `Variable`'s id — required when `identitySource` is `VARIABLE` |
+| `operator` | enum | A comparison operator (`EQ`, `CONTAINS`, `STARTS_WITH`, `IN`, …) — required |
+| `value` | string | Required |
+| `outOfTargetAction` | enum | `BLOCK` (default), `GENERAL_QUOTA`, or `NONE` — `NONE` leaves identities outside the audience untouched: neither blocked nor counted. Omitting the field still means `BLOCK`, so an existing client keeps its behaviour. |
+| `generalQuotaMode` | enum | `TOTAL` (default) or `PER_IDENTITY` — read only when `outOfTargetAction` is `GENERAL_QUOTA` |
+| `generalQuotaWindows` | array | At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA`, ignored for `BLOCK` and `NONE` |
+
+`audienceRule` is content, not scope: unlike `target`, it **can** be changed by `PUT`.
+
+#### Enforcement Posture and Custom Message
+
+These fields exist on every assignment regardless of family, and are acted on for `REQUEST_RATE` assignments only; an `AI_TOKEN_BUDGET` assignment is enforced through the Token Rate Limit policy instead, which has its own cache-behavior settings and applies the plan's own overflow action — see [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode):
+
+| Field | Type | Meaning | Default when absent |
+|---|---|---|---|
+| `cacheErrorHandlingType` | enum | `FAIL` rejects the request when the counter service is unreachable; `CONTINUE` lets it through uncounted | `FAIL` |
+| `cacheConnectionTimeoutInSeconds` | integer | Per-reservation timeout to the counter service | Platform default |
+| `showRateLimitStatisticsInResponseHeader` | boolean | Adds `RateLimit-Remaining`/`RateLimit-Limit`/`RateLimit-Reset`/`X-RateLimit-Identity`/`X-RateLimit-Type` to the response | `false` |
+| `customMessageTemplate` | string | Replaces the standard message on a limit-exceeded block for this assignment only; same variable syntax as the platform's [Error Messages](/en/admin/system-settings/error-messages) screen | None (standard message applies) |
+| `customMessageContentType` | string | Content type of the custom message | `application/json;charset=utf-8` when a template is set |
+| `customMessageHttpStatusCode` | integer | HTTP status of the custom message | `429` |
+
+The custom message applies to a **limit-exceeded** block only (`THROTTLING_STOP`/`QUOTA_STOP`). It is not applied to a rule assignment's out-of-target block (`ENDPOINT_RATELIMIT_IDENTITY_NOT_ALLOWED`/`ENDPOINT_RATELIMIT_IDENTITY_NOT_RESOLVED`), which always uses the platform's standard error-message customization for those types.
+
+### Bulk Assignment — `/api/limit-assignment-*` {#bulk-assignment}
+
+Attaches one assignment — a plan or a custom value — to a large, filtered population of subjects in a single run, instead of one `POST /api/limit-bindings` per subject. See [Limit Plans → Bulk Assignment](/en/ai-gateway/limit-plans#bulk-assignment) for the concepts (selection, conflict policy, run lifecycle, node-failure recovery). A portable, name-based equivalent of this same engine is also exposed on the Management API — see [Bulk Limit Assignment API](/api-reference/limit-assignment-runs).
+
+- `POST /api/limit-assignment-previews` — classify a selector + content + conflict policy without writing anything: expected subject count (`estimated` above 5,000), how many would be created / skipped / replaced, how many are license-blocked, and a small sample of rows. Returns a `selectorFingerprint` a run must repeat.
+- `POST /api/limit-assignment-runs` — queue a run over the selected population (`202`, `Location` header). The body repeats the preview's `selector`/`content`/`conflictPolicy` plus its `previewFingerprint` and `expectedCount`. Only one active run per project is allowed: a second call while one is queued or running is refused with `409` (`error.limit.bulk.runAlreadyActive`); a selector that no longer hashes to `previewFingerprint` is `409` (`error.limit.bulk.fingerprintMismatch`). `selector.includeIds`/`excludeIds` above 5,000 entries is `400` (`error.limit.bulk.includeListTooLarge`).
+- `GET /api/limit-assignment-runs?projectId&page&size` — the project's runs, newest first.
+- `GET /api/limit-assignment-runs/{runId}?projectId` — one run's progress and outcome: status, phase, counters (created/replaced/skipped/failed/license-skipped), and deployment state.
+- `GET /api/limit-assignment-runs/{runId}/issues?projectId&page&size` — the FAILED/SKIPPED subjects the run recorded (at most 1,000 kept per run; beyond that, `issuesTruncated`).
+- `POST /api/limit-assignment-runs/{runId}/actions/cancel` — ask a queued or running run to stop at its next chunk boundary (`200`); everything already written stays written.
+- `POST /api/limit-assignment-runs/{runId}/actions/rollback` — only on a finished Assign or Retry run: queue a **new** run that ends every assignment the source run created and re-opens what it replaced as new rows, counters restarting (`202`, a new run).
+- `POST /api/limit-assignment-runs/{runId}/actions/retry-failed` — queue a **new** run over only the subjects the source run failed on, with **Keep existing** as its conflict policy (`202`, a new run).
+- `POST /api/limit-assignment-subjects/search?page&size&sort` — the server-paged subject table behind the Assign tab.
+- `GET /api/limit-assignment-subjects/organizations?projectId&parentId` — the lazily loaded organization tree.
+
+### Default Limit Policies — `/api/limit-defaults`
+
+An owner's standing offer of a limit to children it will have or already has. This surface has no dedicated manager UI screen in this version; it exists for direct integration use.
+
+- `GET /api/limit-defaults/{defaultKey}` — one default policy (`projectId` absent/blank addresses the platform-wide row)
+- `GET /api/limit-defaults` — every default policy one owner has written (`ownerType` required)
+- `POST /api/limit-defaults` — create
+- `PUT /api/limit-defaults/{defaultKey}` — update content (never the enabled/disabled state — see below)
+- `POST /api/limit-defaults/validate` — dry-run every save-time rule without writing anything
+- `POST /api/limit-defaults/{defaultKey}/activate` — enable the default
+- `POST /api/limit-defaults/{defaultKey}/disable` — disable it (existing assignments already materialized from it are unaffected)
+- `DELETE /api/limit-defaults/{defaultKey}` — delete (refused while the row is enabled — disable it first)
+
+### Portal Subscription Linking
+
+A portal API Product's Subscription Plan (`ApiPlan`) can reference a published, platform-scope Limit Plan per family instead of carrying its own numbers — see [API Product → Limit Profiles](/en/api-portal/api-product#limit-profiles) and [Limit Plans → Referenced by a Portal Subscription Plan](/en/ai-gateway/limit-plans#referenced-by-a-portal-subscription-plan) for the concepts. These two endpoints support that surface; the Subscription Plan CRUD endpoints themselves (`/api/api-products/**`, `/api/api-product-app-register`) are the manager's own portal-management REST API and are not otherwise catalogued on this page.
+
+- `GET /api/api-products/{productId}/plans/{planId}/limit-impact` — before saving a plan whose limit-profile references (or on-exceed setting) changed, returns how many approved subscriptions and distinct applications would start enforcing the new limits: `approvedSubscriptionCount`, `familiesWithProfile` (the families the plan carries an active reference for), `affectedApplicationCount`.
+- `POST /api/limit-bindings/portal-subscriptions/backfill?apply=false|true` — **system administrator only.** One-shot repair for subscriptions that were approved before this reference model existed. `apply=false` (the default) previews the sweep without writing anything; `apply=true` performs it, one subscription at a time, so a subscription whose profile cannot be resolved does not stop the rest of the backlog. Response: `apply`, `scanned` (subscriptions examined), `wouldCreateOrJoin`, `alreadyBound` (subscription × family counts), and — on an applied run only — `created`, `updated`, `shared`, `conflicts` (one `appId:family` string per family left on another subscription's profile), `failed` (one `appId:message` string per subscription the sweep could not sync, still pending).
+
+`PUT /api/api-product-app-register` — approving or updating a subscription — additionally accepts `acknowledgeLimitProfileSwitch: true` in the request body to move an application's shared limit assignment to *this* subscription's profile when another approved subscription's profile currently holds it; omitted or `false` keeps the existing assignment and the response's `limitProfileConflicts` field names the families where the request's own preference was not applied.
+
+## Authentication
+
+These are manager-application endpoints, authenticated the same way as the rest of the manager's own REST API — not by the Personal API Access Token that authenticates the `/apiops/**` surface documented elsewhere on this site.
+
+## Permissions
+
+- Reads require the **Identity** permission at **View**; every write — including Bulk Assignment's previews, runs, and actions — requires it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
+- The **AI Gateway** license module gates only the **AI Token Budget** family — an `AI_TOKEN_BUDGET` plan or assignment is refused (`403`) without it; a `REQUEST_RATE` plan or assignment needs no license module. A Bulk Assignment run over the AI Token Budget family is refused the same way.
+- `projectId` (query parameter on Limit Plans, Limit Assignments, Default Limit Policies, and Bulk Assignment) may be omitted to address the platform-wide scope instead of one project's own catalog. Reading platform rows is open to any caller with **View** in some project (they are what that project's picker also offers, badged **Platform**); writing one is reachable only by a system administrator, the same rule the rest of the manager's admin-scoped endpoints follow. Bulk Assignment has no platform-wide subject population — its `projectId` always addresses one project.
+
+## Notes
+
+- **Both families are usable.** `AI_TOKEN_BUDGET` and `REQUEST_RATE` plans can both be created, published, and referenced — see [Plan Families](/en/ai-gateway/limit-plans#plan-families) for what each carries, and its **Overflow Action** (`REQUEST_RATE`: `BLOCK`/`COUNT_ONLY`, `BLOCK` when absent).
+- **A published revision is immutable.** Correcting one means opening a new draft revision under the same plan and publishing that instead; the superseded revision is kept, not overwritten.
+- **A plan reference is never inlined.** A `PLAN`-mode assignment stores plan ids, not a copy of the plan's rule body — the plan's own published revision is what is resolved at request time.
+- **`OFF` narrows one subject; it does not widen anything above it.** Ancestor ceilings (organization, project, platform) still apply to a subject with an `OFF` assignment — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
+- **Both families enforce for real.** An `ACTIVE` `REQUEST_RATE` binding created through any endpoint on this page — including one sourced from a portal subscription — blocks traffic for real, evaluated at the authentication moment (`429` + `Retry-After` on an exhausted window). An `ACTIVE` `AI_TOKEN_BUDGET` binding enforces the same way, at every subject level the family supports; when it covers the same counter, window, and dimension (overall, or the same model/provider) as an entity-level AI budget (organization/proxy/project/platform default), the gateway reserves the request's cost once, against whichever ceiling is stricter — it never double-reserves. There is no rule-based (`AUDIENCE_RULE`) assignment for `AI_TOKEN_BUDGET` — see Rule Assignments above. See [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode).
+- **The active-scope key (`subjectType` + `subjectId` + `actorScope` + `family` + `target`, HTTP methods included) is immutable.** `PUT` reads only content off the body — see the [Target](/en/ai-gateway/limit-plans#target-what-the-ceiling-narrows-to) note above; changing it means ending the assignment and creating a new one.
+- **`AUDIENCE_RULE` is its own subject type.** `subjectId` is minted by the server; the caller only ever supplies `audienceRule`. See [Rule Assignments](/en/ai-gateway/limit-plans#rule-assignments-limiting-by-identity-condition) for the concept and the [Migrating from a Rate Limit Control List](/en/ai-gateway/limit-plans#migrating-from-a-rate-limit-control-list) mapping table.
+
+## Related Documentation
+
+- [Limit Plans](/en/ai-gateway/limit-plans) - The manager UI screens this surface backs
+- [Limit Plans Management API](/api-reference/limit-plans-management-api) - The portable, name-based Management API surface for the plan catalog above
+- [Limit Assignments Management API](/api-reference/limit-assignments) - The portable, name-based Management API surface for the single-assignment endpoints above
+- [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) - The portable, name-based Management API surface for the same bulk-assignment engine
+- [API Product](/en/api-portal/api-product#limit-profiles) - Referencing a platform Limit Plan from a portal Subscription Plan
+- [Token Quotas](/en/ai-gateway/token-quotas) - The scope- and window-based budget mechanism this one runs alongside
+- [AI Budgets / Quota API](/api-reference/ai-budgets) - The separate, APIops-exposed budget hierarchy surface
+- [Error Handling](/api-reference/getting-started/error-handling) - Error response formats

@@ -1,0 +1,126 @@
+---
+title: "Management API Error and Retry Behavior"
+description: "Learn how to read Management API error responses in your automation, tell licensing problems apart from permission problems, retry safely with an idempotency key, and recognize a configuration that was saved but did not reach every environment."
+---
+
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Which endpoints this covers
+
+Apinizer's Management API is used by CI/CD pipelines and automation scripts. Newer endpoints share one common behavior for errors, retries and deployment feedback. You can recognize them from the response: an error body that contains an `errorKey` field follows the behavior described here. Older endpoints return a plain message instead, and their behavior is unchanged.
+
+Both kinds are available at the same time, so a pipeline written some time ago keeps working.
+
+## Reading an error response
+
+An error response tells your automation three things:
+
+- **`errorKey`** — a short, fixed reason code. Your pipeline should branch on this value. It does not change between versions.
+- **`message`** — the reason in a form the Apinizer interface can translate. It is not a sentence to show to an end user as is.
+- **`correlationId`** — the identifier of that single request.
+
+Never make a decision by matching on error text. The wording can change with a new version; the reason code cannot.
+
+:::tip
+
+Log the `correlationId` next to every failed call. When you open a support request, that value lets the Apinizer team find the exact request in the server logs immediately, instead of searching by time range.
+
+:::
+
+## Licensing, permission and visibility
+
+Three refusals look similar in a pipeline log but need completely different responses:
+
+| What you see | What it means | What to do |
+|--------------|---------------|------------|
+| Payment Required, `licenseInvalidOrExpired` | The installation has no valid license, or the license expired | Contact your Apinizer representative. Retrying will not help, and no configuration change will clear it. |
+| Forbidden, `licenseModuleNotEnabled` | The license is valid, but does not include the module this operation belongs to | The module must be added to the license |
+| Forbidden, `managementApiDisabled` | The Management API is switched off for this installation | An administrator enables it from the system settings |
+| Forbidden, `permissionDenied` | The user the token belongs to lacks the required permission | Grant that permission to the user, in that project |
+| Not Found, `resourceNotFound` | Nothing at that address is visible to this user | Check the name — and check whether the user has access to that project |
+
+:::warning
+
+A Not Found response does not prove that the object does not exist. Apinizer answers "it is not there" and "you may not see it" in exactly the same way, so that an unauthorized caller cannot use the API to discover what exists. If you are certain the object is there, check the project access of the user whose token you are using.
+
+:::
+
+## Retrying safely
+
+Retry these:
+
+- A network timeout or a broken connection, where you never saw a response
+- Service Unavailable with `temporarilyUnavailable`
+
+Do not retry these — the request will be refused the same way every time:
+
+- Any Bad Request. The request itself needs fixing.
+- Any Unauthorized. Create a new token.
+- Any Payment Required or Forbidden. Someone has to change the license or the permission.
+- Any Conflict. The current state refuses the request; read the object and decide.
+
+## Repeating an operation without creating it twice
+
+Operations that create something, and operations that produce credentials, require an idempotency key: a value you generate, send with the request, and reuse when you retry that same operation.
+
+This is what makes a pipeline safe against its own retries. If a create request times out and you have no way of knowing whether it succeeded, sending it again with the same key cannot produce a second object.
+
+<Steps>
+<Step title="Generate one value per operation">
+Generate a fresh value — a random identifier is ideal — for each distinct operation. Store it alongside the pipeline step, not per attempt.
+</Step>
+
+<Step title="Send the same value on every attempt">
+A retry of the same operation must carry the same value. A different value means "a new operation" and will create a second object.
+</Step>
+
+<Step title="Handle the conflict answers">
+If the first attempt is still running, you get a conflict telling you so — wait, then read the object. If it already finished, you also get a conflict: the work was done, so read the object rather than repeating it. If you accidentally reused a key for a different request, that is reported separately and you should use a new key.
+</Step>
+</Steps>
+
+:::warning
+
+The original response is never sent a second time. When you retry a completed operation, Apinizer tells you it already completed — it does not repeat the first answer. This matters most for operations that generate a secret: the generated value is shown once, on the first successful call. Store it there, because it cannot be retrieved again.
+
+:::
+
+Keys are remembered for 24 hours, which is the window a retry is meaningful in.
+
+## Avoiding a lost update
+
+When two pipelines edit the same object, the second one silently overwrites the first unless you ask for protection.
+
+Objects that support this report a version when you read them. Send that version back with your change, and Apinizer refuses the write if someone modified the object in the meantime. You then read the object again, re-apply your change on top of the current state, and write again.
+
+If you do not send the version, the last write wins.
+
+## Saved, but not on every environment
+
+A configuration change is two separate things: storing it, and delivering it to the running gateways. They can have different outcomes.
+
+When a write succeeds, the response reports the deployment state as well:
+
+- **In sync** — every environment acknowledged the change.
+- **Degraded** — the change is stored, but at least one environment did not acknowledge it. The response names the environments and why.
+- **Pending** — delivery is still in progress.
+
+:::warning
+
+A degraded result arrives as a **successful** response, because the change really was saved. Repeating the write will not fix it — you would just save the same thing again. Look at which environment did not acknowledge it, resolve the cause (an unreachable gateway is the usual one), and redeploy.
+
+A pipeline that must not continue on a partially applied change should check the deployment state explicitly, not only whether the call succeeded.
+
+:::
+
+## Behavior that changed
+
+On a small number of endpoints, two failures used to be reported as a server error: a project that could not be found, and a token that could not be validated. These are now reported as ordinary client errors instead — Bad Request, Unauthorized, Forbidden or Not Found, as appropriate.
+
+:::note
+
+If your pipeline retries on server errors, review it. These two cases will no longer be retried automatically, which is the correct behavior — neither one succeeds on a second attempt — but a pipeline that relied on the retry to mask a wrong project name will now fail immediately and visibly.
+
+:::
+
+For the field-level details, request headers and status codes, see the Management API reference documentation.

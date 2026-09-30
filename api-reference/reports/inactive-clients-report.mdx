@@ -1,0 +1,146 @@
+---
+title: "Clients With No Requests Report"
+description: "Lists the consumers and API client keys of a project that produced no traffic in a period, with their creation date, last request and status, so dead credentials can be found and revoked."
+---
+
+## Endpoint
+
+```
+GET /apiops/projects/{projectName}/reports/inactive-clients
+```
+
+Unlike the other two report endpoints on this API, this one is **project-scoped**: the project is part of the path and is authorized before the report is built. It lists a project's authenticating identities, so it is gated on that project rather than on a platform-wide role.
+
+## Authentication
+
+Requires a Personal API Access Token whose user holds **Analytics / View** permission in the project named in the path. A project the caller cannot see answers `404` — the same answer as a project that does not exist, so the endpoint cannot be used to discover project names.
+
+A platform-scoped (administration) token has no project to read and is refused with `400 malformedRequest`.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Name of the project whose identities are reported |
+
+### Query Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| environmentName | string | Yes | Name of the environment whose traffic log is read |
+| from | string | No | Range start, ISO-8601 or Elasticsearch date math. Default `now-30d` |
+| to | string | No | Range end, ISO-8601 or Elasticsearch date math. Default `now` |
+| organizationCode | string | No | Consumer organization code. Repeat the parameter to pass more than one |
+| status | string | No | `ALL` (default), `ENABLED` or `DISABLED` |
+| includeApiClients | boolean | No | Whether API client (key) rows are listed. Default `true` |
+| identityType | string | No | Restricts the answer to one row kind: `CONSUMER` or `API_CLIENT` |
+| minUsage | integer | No | Lowest request count a row may have. Default `0` |
+| maxUsage | integer | No | Highest request count a row may have |
+| page | integer | No | Zero-based page index |
+| size | integer | No | Rows per page |
+| sort | string | No | `field[,asc\|desc]` over `lastUsedAt`, `createdAt`, `consumer`, `apiClientKey`, `status`, `identityType`, `total` |
+
+### Notes
+
+- References travel as names: a consumer as its `username`, an organization as its `code`, an API client as its `apiClientKey`. No internal identifier appears in the response.
+- A consumer's traffic is resolved from three sources and merged: requests made under its username, requests attributed to its credential record, and requests made by the API clients it owns. A consumer that only ever calls through its API client is therefore **not** reported as unused; it carries `usedViaApiClient: true` instead.
+- An organization code outside the caller's project scope matches nothing and answers `404`.
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [
+    {
+      "identityType": "API_CLIENT",
+      "consumer": {
+        "username": "billing-service",
+        "fullName": "Billing Service"
+      },
+      "organization": {
+        "code": "FIN",
+        "name": "Finance"
+      },
+      "apiClient": {
+        "key": "ak_7f2c91d4",
+        "name": "Billing nightly job",
+        "clientId": "billing-nightly"
+      },
+      "createdAt": "2025-03-11T09:12:44Z",
+      "lastUsedAt": null,
+      "status": "ACTIVE",
+      "counts": {
+        "success": 0,
+        "blocked": 0,
+        "error": 0,
+        "total": 0
+      }
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 1,
+  "totalPages": 1,
+  "sort": ["identity,asc"],
+  "coverage": {
+    "dataAvailableFrom": "2026-06-01T00:00:00Z",
+    "warning": "apinizerManagerApp.inactiveClients.coverageWarning",
+    "retentionDays": 90
+  }
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| identityType | string | `CONSUMER` for a consumer identity, `API_CLIENT` for a key owned by one |
+| consumer.username | string | Owning consumer's username |
+| organization.code | string | Consumer organization code |
+| apiClient.key | string | API client key; present on `API_CLIENT` rows only |
+| apiClient.clientId | string | OAuth `client_id` of the API client, when it has one |
+| createdAt | string | When the identity was created. For an API client this is derived from its record |
+| lastUsedAt | string | Most recent request inside the retained traffic log; `null` when there is none |
+| status | string | `enabled`, `disabled` or `expired` for a consumer; `ACTIVE` or `SUSPENDED` for an API client |
+| usedViaApiClient | boolean | Present and `true` when the consumer itself is idle but one of its API clients is not |
+| counts | object | Request counts inside the requested range |
+| coverage.dataAvailableFrom | string | Oldest traffic-log record inside this scope |
+| coverage.warning | string | Set when the requested range is not fully covered by the traffic log |
+| coverage.retentionDays | integer | Traffic-log retention in days, when the connector deletes old indices |
+
+:::warning
+`lastUsedAt: null` means **no request inside the retained traffic log**, not "never used". Read `coverage.dataAvailableFrom` before acting on it: a pipeline that revokes every key with a null `lastUsedAt` would revoke keys that were simply last used before the retention window began.
+:::
+
+### Error Responses
+
+| Status | errorKey | When |
+|--------|----------|------|
+| 400 | malformedRequest | A platform-scoped token, or an unreadable `status`, `identityType` or `page` value |
+| 404 | resourceNotFound | Unknown project, unknown `environmentName`, or an organization code outside the project scope |
+| 503 | temporarilyUnavailable | The environment's Elasticsearch connector is disabled, unconfigured or unreachable |
+
+## Example
+
+```bash
+curl -X GET \
+  "https://apinizer.example.com/apiops/projects/MyProject/reports/inactive-clients?environmentName=Production&from=now-90d&to=now&sort=lastUsedAt,asc" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+## Related Documentation
+
+- [Reports API](/api-reference/reports) - Report endpoint overview
+- [Authentication Guide](/api-reference/getting-started/authentication) - How to obtain and use API tokens
+- [Error Handling](/api-reference/getting-started/error-handling) - Error response formats

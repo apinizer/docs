@@ -1,0 +1,117 @@
+---
+title: "2026.09.2 — Log Table ALTER Scripts"
+description: "ALTER TABLE scripts for existing SQL/JDBC traffic-log and token-log installations upgrading to Apinizer 2026.09.2."
+slug: /release-notes/2026-09-2-log-table-alter
+unlisted: true
+---
+
+This page is unlisted — it is not linked from the sidebar or search, and is intended to be reached only via a direct link from the 2026.09.2 release notes.
+
+## Who needs this
+
+This script is only relevant if your Apinizer installation writes logs to a **relational database via the SQL/JDBC connector** (Oracle, MySQL, PostgreSQL, or SQL Server) — for API proxy traffic, for token issuance, or for both.
+
+**If you use the Elasticsearch or MongoDB connector, skip this page entirely** — those targets carry the new data without any manual step. On Elasticsearch the index template is updated and the index is rolled over automatically during the upgrade.
+
+## What changed
+
+Apinizer 2026.09.2 adds columns that let a traffic or token record be attributed to the specific API Client that authenticated the request, not only to the resolved username.
+
+**`log_ApiProxyTraffic` gains four columns:**
+
+- `api_client_key` — the key of the API Client that authenticated the request.
+- `client_owner_type` — the kind of subject the API Client belongs to, `CONSUMER` (a directly defined Credential) or `APPLICATION` (a Portal Application).
+- `client_owner_id` — the id of that owning Consumer (Credential) or Portal Application.
+- `client_organization_id` — the organization id of the authenticated identity.
+
+For a request authenticated through an API Client, all four columns are filled. For a request authenticated the traditional way, through a Credential that predates the API Client model, `client_owner_type` is always `CONSUMER` and `client_owner_id` holds the Credential's id, but `api_client_key` stays empty because there is no API Client key to record. For a request with no resolved identity, all four columns stay `NULL`.
+
+**`log_TokenTraffic` gains two columns:** `api_client_key` and `client_organization_id`, with the same meaning as above, so a token issuance record can be attributed to the client and organization it was issued to. A token issued from a legacy credential without an organization leaves both columns `NULL`.
+
+All six columns are nullable and sparse. The gateway write path is fail-soft: if a column is missing, that one field is skipped rather than failing the log write, so running the script late costs you attribution data but never traffic or token logging.
+
+## When to run it
+
+Run this **once**, against each configured SQL/JDBC log database, any time before or during the 2026.09.2 upgrade — it does not need to be run inside a maintenance window. Because the columns are nullable, older gateway workers still writing pre-upgrade log rows are unaffected. This script is independent of the 2026.09.0 and 2026.09.1 scripts — run it once regardless of which of those you already ran. Test in a non-production environment first if you use a change-control process for DDL.
+
+If your installation only ever writes token traffic to Elasticsearch or MongoDB but writes API proxy traffic through the SQL/JDBC connector (or vice versa), run only the `ALTER` statement for the table you actually use.
+
+## Oracle
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD (
+    api_client_key VARCHAR2(255),
+    client_owner_type VARCHAR2(16),
+    client_owner_id VARCHAR2(64),
+    client_organization_id VARCHAR2(64)
+);
+
+ALTER TABLE log_TokenTraffic ADD (
+    api_client_key VARCHAR2(255),
+    client_organization_id VARCHAR2(64)
+);
+```
+
+## PostgreSQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_owner_type VARCHAR(16),
+    ADD COLUMN client_owner_id VARCHAR(64),
+    ADD COLUMN client_organization_id VARCHAR(64);
+
+ALTER TABLE log_TokenTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_organization_id VARCHAR(64);
+```
+
+## MySQL
+
+```sql
+ALTER TABLE log_ApiProxyTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_owner_type VARCHAR(16),
+    ADD COLUMN client_owner_id VARCHAR(64),
+    ADD COLUMN client_organization_id VARCHAR(64);
+
+ALTER TABLE log_TokenTraffic
+    ADD COLUMN api_client_key VARCHAR(255),
+    ADD COLUMN client_organization_id VARCHAR(64);
+```
+
+## SQL Server
+
+```sql
+ALTER TABLE log_ApiProxyTraffic ADD
+    api_client_key NVARCHAR(255),
+    client_owner_type NVARCHAR(16),
+    client_owner_id NVARCHAR(64),
+    client_organization_id NVARCHAR(64);
+
+ALTER TABLE log_TokenTraffic ADD
+    api_client_key NVARCHAR(255),
+    client_organization_id NVARCHAR(64);
+```
+
+## Verification
+
+After running the script, send a request through an API Proxy with authentication enabled and check that the traffic record carries the new columns:
+
+```sql
+SELECT correlation_id, api_client_key, client_owner_type, client_owner_id, client_organization_id
+FROM log_ApiProxyTraffic
+WHERE api_client_key IS NOT NULL OR client_owner_id IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+If you also log token issuance to the same database, request a token and check the token record:
+
+```sql
+SELECT correlation_id, api_client_key, client_organization_id
+FROM log_TokenTraffic
+WHERE api_client_key IS NOT NULL
+ORDER BY log_timestamp DESC;
+```
+
+For new installations no action is needed — the `CREATE TABLE` statements on the [Apinizer Log Table Creation Commands](/en/operations/administrator-guides/apinizer-log-table-creation-commands) page already include the columns.

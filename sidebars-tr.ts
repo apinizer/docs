@@ -45,6 +45,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/token-kotalari",
+        "ai-gateway/limit-planlari",
         "ai-gateway/maliyet-ayarlari"
       ]
     },
@@ -621,6 +622,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "admin/user-access-management/genel-bakis",
+        "admin/hesap-ayarlari",
         "admin/user-access-management/kullanicilar",
         "admin/user-access-management/takimlar",
         "admin/user-access-management/profilim",
@@ -650,7 +652,7 @@ const sidebars: SidebarsConfig = {
         "admin/identity-management/genel-bakis",
         {
           "type": "category",
-          "label": "Kimlik Bilgisi Yönetimi",
+          "label": "Tüketici Yönetimi",
           "collapsed": true,
           "collapsible": true,
           "items": [
@@ -663,7 +665,6 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/erisim-kontrolu",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-grup-acl",
-            "admin/identity-management/rate-limit-kontrol-listesi",
             "admin/identity-management/kota-kullanimi-ve-uyarilar"
           ]
         },
@@ -680,7 +681,9 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
-        "admin/identity-management/acl-raporu"
+        "admin/identity-management/token-yonetim-ayarlari",
+        "admin/identity-management/acl-raporu",
+        "admin/identity-management/yasal-saklama-ve-temizleme"
       ]
     },
     {
@@ -720,6 +723,7 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/genel-bakis",
         "admin/system-settings/sistem-ayarlari-ve-limitler",
         "admin/system-settings/global-yapilandirma",
+        "admin/system-settings/siem-log-yonlendirme",
         {
           "type": "category",
           "label": "Ön Tanımlı Değerler",
@@ -735,11 +739,9 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "admin/system-settings/ldap-ile-giris-ayarlari",
-        "admin/system-settings/login-log-konnektor-yapilandirmasi",
         "admin/system-settings/lisans-yonetimi",
         "admin/system-settings/hata-mesajlari",
-        "admin/system-settings/ip-geolocation-ayari",
-        "admin/system-settings/token-yonetim-ayarlari"
+        "admin/system-settings/ip-geolocation-ayari"
       ]
     },
     {
@@ -753,6 +755,8 @@ const sidebars: SidebarsConfig = {
         "admin/audit-compliance/acl-denetim-kayitlari",
         "admin/audit-compliance/token-istekleri",
         "admin/audit-compliance/giris-kayitlari",
+        "admin/audit-compliance/guvenlik-olaylari",
+        "admin/audit-compliance/test-konsol-denetim-kayitlari",
         "admin/audit-compliance/audit-records",
         "admin/audit-compliance/application-logs",
         "admin/audit-compliance/uygulama-logu-temizleme-gorevleri"
@@ -828,15 +832,6 @@ const sidebars: SidebarsConfig = {
         "integrations/konnektorler/logback-konnektor",
         "integrations/konnektorler/linux-script-konnektor"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analitik Raporları",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-trafigi-(zaman-metrikleri)"
-      ]
     }
   ],
   "analitik-ve-i-zleme": [
@@ -880,6 +875,7 @@ const sidebars: SidebarsConfig = {
         "analytic/analytics-reports/endpoint-boyut-metrikleri",
         "analytic/analytics-reports/istemci-trafigi-ve-zaman-metrikleri",
         "analytic/analytics-reports/ip-trafigi-ve-zaman-metrikleri",
+        "analytic/analytics-reports/canary-ve-mirror-metrikleri",
         "analytic/analytics-reports/rapor-uretici",
         "analytic/analytics-reports/istek-almayan-endpoint'ler",
         "analytic/analytics-reports/istek-atmayan-client'lar",
@@ -1021,6 +1017,7 @@ const sidebars: SidebarsConfig = {
             "operations/yaygin-sorunlar-cozumleri/high-latency-slow-response-times",
             "operations/yaygin-sorunlar-cozumleri/authentication-failures",
             "operations/yaygin-sorunlar-cozumleri/database-connection-issues",
+            "operations/yaygin-sorunlar-cozumleri/Oracle-tns-timezone-error",
             "operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors",
             "operations/yaygin-sorunlar-cozumleri/policy-execution-failures",
             "operations/yaygin-sorunlar-cozumleri/routing-issues",
@@ -1066,6 +1063,7 @@ const sidebars: SidebarsConfig = {
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
             "operations/yonetici-kilavuzlari/elasticsearch-index-alan-temizleme",
+            "operations/yonetici-kilavuzlari/elasticsearch-boyutlandirma-ve-ayar-onerileri",
             "operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi",
             "operations/yonetici-kilavuzlari/coredns-host-alias-yapilandirmasi",
             "operations/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
@@ -1075,6 +1073,7 @@ const sidebars: SidebarsConfig = {
             "operations/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme",
             "operations/yonetici-kilavuzlari/jvm-garbage-collector-ayarlama",
             "operations/yonetici-kilavuzlari/multi-env-deployment-pipeline",
+            "operations/yonetici-kilavuzlari/management-api-ortak-kontrat",
             "operations/yonetici-kilavuzlari/gateway-performans-ayarlama",
             "operations/yonetici-kilavuzlari/geolocation-sehir-bazli-erisim-kontrolu",
             "operations/yonetici-kilavuzlari/kibana-maps-cografi-gorsellestirme",
@@ -1308,7 +1307,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-api-trafik-log-gorsellestirme",
-            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme"
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/kibana-8-17-10-api-trafik-log-gorsellestirme",
+            "tutorials/api-analitigi-ve-gozlemlenebilirlik-senaryolari/grafana-api-trafik-metrik-gorsellestirme"
           ]
         },
         {

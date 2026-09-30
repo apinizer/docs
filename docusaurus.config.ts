@@ -135,6 +135,16 @@ const config: Config = {
           {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
           {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
           {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
+          // APNZ-6804 — admin pages relocated to match where the setting now lives in the product.
+          // Token Management Settings moved under Identity; the API client secret storage default
+          // became a section of General Settings; the Login Log connector page was split into the
+          // SIEM & Log Forwarding page (Manager) and the API Portal login logs page (Portal).
+          {from: '/en/admin/system-settings/token-management-settings', to: '/en/admin/identity-management/token-management-settings'},
+          {from: '/tr/admin/system-settings/token-yonetim-ayarlari', to: '/tr/admin/identity-management/token-yonetim-ayarlari'},
+          {from: '/en/admin/system-settings/api-client-secret-settings', to: '/en/admin/system-settings/global-configuration'},
+          {from: '/tr/admin/system-settings/api-istemcisi-secret-saklama-ayarlari', to: '/tr/admin/system-settings/global-yapilandirma'},
+          {from: '/en/admin/system-settings/login-log-connector-configuration', to: '/en/admin/system-settings/siem-log-forwarding'},
+          {from: '/tr/admin/system-settings/login-log-konnektor-yapilandirmasi', to: '/tr/admin/system-settings/siem-log-yonlendirme'},
           // 2026.07.0 → 2026.09.0 release rename (ALTER script pages)
           {from: '/tr/release-notes/2026-07-0-log-tablosu-alter', to: '/tr/release-notes/2026-09-0-log-tablosu-alter'},
           {from: '/en/release-notes/2026-07-0-log-table-alter', to: '/en/release-notes/2026-09-0-log-table-alter'},
@@ -166,24 +176,24 @@ const config: Config = {
         {type: 'docSidebar', sidebarId: 'genel-bakis', docsPluginId: 'tr', label: 'Genel Bakış', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'surumler', docsPluginId: 'tr', label: 'Sürümler', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'kurulum-ve-guncelleme', docsPluginId: 'tr', label: 'Kurulum', position: 'left', className: 'navbar__item--tr'},
-        {type: 'docSidebar', sidebarId: 'api-leri-yonetme', docsPluginId: 'tr', label: 'Geliştirme', position: 'left', className: 'navbar__item--tr'},
+        {type: 'docSidebar', sidebarId: 'api-leri-yonetme', docsPluginId: 'tr', label: 'API Gateway', position: 'left', className: 'navbar__item--tr'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'tr', label: 'AI Gateway', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'yonetim', docsPluginId: 'tr', label: 'Yönetim', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'analitik-ve-i-zleme', docsPluginId: 'tr', label: 'Analitik', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'tr', label: 'API Portal', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'operasyon', docsPluginId: 'tr', label: 'Operasyon', position: 'left', className: 'navbar__item--tr'},
         {type: 'docSidebar', sidebarId: 'kilavuzlar', docsPluginId: 'tr', label: 'Kılavuzlar', position: 'left', className: 'navbar__item--tr'},
-        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'tr', label: 'AI Gateway', position: 'left', className: 'navbar__item--tr'},
         // English tabs.
         {type: 'docSidebar', sidebarId: 'overview', docsPluginId: 'en', label: 'Overview', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'versions', docsPluginId: 'en', label: 'Versions', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'installation-and-update', docsPluginId: 'en', label: 'Installation', position: 'left', className: 'navbar__item--en'},
-        {type: 'docSidebar', sidebarId: 'managing-apis', docsPluginId: 'en', label: 'Develop', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'managing-apis', docsPluginId: 'en', label: 'API Gateway', position: 'left', className: 'navbar__item--en'},
+        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'en', label: 'AI Gateway', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'management', docsPluginId: 'en', label: 'Administration', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'analytics-and-monitoring', docsPluginId: 'en', label: 'Analytics', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'api-portal', docsPluginId: 'en', label: 'API Portal', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'operations', docsPluginId: 'en', label: 'Operations', position: 'left', className: 'navbar__item--en'},
         {type: 'docSidebar', sidebarId: 'guides', docsPluginId: 'en', label: 'Guides', position: 'left', className: 'navbar__item--en'},
-        {type: 'docSidebar', sidebarId: 'ai-gateway', docsPluginId: 'en', label: 'AI Gateway', position: 'left', className: 'navbar__item--en'},
         // API Reference — shared between TR and EN contexts.
         {type: 'docSidebar', sidebarId: 'api-reference', docsPluginId: 'apiReference', label: 'API Reference', position: 'left', className: 'navbar__item--apiref'},
 

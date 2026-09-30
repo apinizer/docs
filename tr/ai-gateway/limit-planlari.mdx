@@ -1,0 +1,588 @@
+---
+title: "Limit Planları"
+description: "Yeniden kullanılabilir AI Token Bütçesi ya da İstek Hızı limit planlarını — proje kapsamlı ya da sistem yöneticisi olarak platform genelinde — oluşturabilir, taslak, yayın ve revizyon adımlarıyla yönetebilir; bu planları ya da özel değerleri doğrudan bir API istemcisine, bir kimlik bilgisine ya da bir portal Abonelik Planına atayabilir, atamayı aktifleştirip sonlandırabilir ve mevcut kota/bütçe yapılandırmanızla aynı sayaç üzerinde, ikisinin daha sıkı olanının uygulandığı şekilde birlikte kullanabilirsiniz."
+---
+
+import {Card, CardGroup} from '@site/src/components/Card';
+
+:::info Lisanslama ve İzinler
+Buradaki her ekran ve uç nokta — planlar, atamalar, varsayılan limit politikaları ve [Toplu Atama](#toplu-atama) dahil — **Kimlik ve Erişim Kontrolü** izin grubuyla erişilir (bkz. [Erişim Kontrolü ve Roller](/tr/ai-gateway/erisim-kontrolu-rbac)): okumak için **Görüntüle**, yazmak için **Yönet** yetkisi gerekir. **Bütçeler** izin grubu da Kimlik ve Erişim Kontrolü'nün yerine kabul edilmeye devam eder, böylece hâlâ eski Bütçeler modeli etrafında kurulu bir kurulum değişmeden çalışır.
+
+API tarafında hiçbir aile lisans modülüne bağlı değildir: lisansında **AI Gateway** bulunmayan bir kurulum da **AI Token Bütçesi** planlarını Management API ve APIops üzerinden lisanslı bir kurulumla aynı şekilde oluşturur, listeler ve atar. Modülün hâlâ belirlediği şey **menü ve ekrandaki aile seçimidir**: modül yoksa AI Gateway grubu gizlenir ve **Limit Planları** bunun yerine **Kimlik Yönetimi** altından açılır; ayrıca **AI Token Bütçesi** ailesi katalogda, plan düzenleme ekranında, [Toplu Atama](#toplu-atama) akışında ve bir tüketicinin **Limits** sekmesindeki aile seçicisinde sunulmaz. **Tüm aileler** seçiliyken de bu ailenin satırları modül lisanssız bir kurulumda listede görünmez — yani **Tüm aileler**, bu kısıtlamayı aşan bir arka kapı değildir. **İstek Hızı** planları bu ekranlarda her zamanki gibi oluşturulur, yayınlanır ve atanır — bu aile AI Gateway modülü gerektirmez. Modül lisanslıyken oluşturulmuş bir plan sonradan açıldığında kendi ailesini yine doğru gösterir; mevcut bir planın ailesi zaten salt okunurdur.
+:::
+
+## Kavramlar
+
+Bu ekranlar üç ayrı fikri birbirinden ayırır: bir **plan** neyin sınırlandığını tarif eder, bir **revizyon** o tarifin belirli bir yayınlanmış hâlidir, bir **atama** ise bu tarifin hangi özneye (API istemcisi ya da kimlik bilgisi) uygulandığını kaydeder.
+
+| Kavram | Anlamı |
+|--------|--------|
+| **Limit Planı** | Adlandırılmış, yeniden kullanılabilir bir bütçe tarifi. Bir kez tanımlanır, birden çok özneye atanabilir; plan üzerinde yapılan bir güncelleme, o plana atanmış tüm öznelere otomatik yansır. |
+| **Revizyon** | Bir planın belirli bir andaki içeriğinin kaydı. Yayınlanmış bir revizyon bir daha **değiştirilemez**; bir düzeltme her zaman yeni bir revizyon olarak yayınlanır, eskisi geçmişte kalır. |
+| **Atama** | Bir API istemcisinin ya da kimlik bilgisinin (Consumer) belirli bir plana ya da kendine özel bir değere bağlanması. Atama, planın içeriğini kopyalamaz — yalnızca planı işaret eder; plan güncellendiğinde atama da güncel içeriği kullanır. |
+
+### Plan Aileleri
+
+Bir plan, oluşturulduğu anda seçilen iki aileden birine aittir:
+
+**AI Token Bütçesi** — dakika/saat/gün/ay bazlı token limitleri, USD bütçesi, hard/soft cap eşikleri ve bir aşım davranışı (engelle, yalnızca uyar, daha ucuz modele düş, failover).
+
+**İstek Hızı** — plan gövdesi, plan formunun **İstek Hızı Pencereleri** bölümünde yapılandırılan bir **pencere listesidir**; her pencere şu alanları taşır:
+
+| Alan | Anlamı | Varsayılan |
+|------|--------|------------|
+| **İstek Sayısı** | Pencerede izin verilen istek sayısı (pozitif tam sayı). | — |
+| **Aralık** | Zaman biriminin temeli: 1 saniye, 1 dakika, 1 saat, 1 gün ya da 1 ay. | — |
+| **Periyot Uzunluğu** | Kaç aralığın bir pencere oluşturduğu — örn. "5 dakika"lık bir pencere, 1 Dakika aralığında 5 periyot uzunluğudur. | 1 |
+| **Pencere Tipi** | **Sabit**, her periyodun başında sayacı sıfırlar; **Kayan**, her istekten geriye doğru periyodu ölçer. | Sabit |
+| **Sayım Modu** | **Tüm istekler**, kabul edilen ya da reddedilen her isteği pencereye sayar; **Yalnızca kabul edilenler**, yalnızca geçmesine izin verilen istekleri sayar. | Tüm istekler |
+
+Bir plan en az bir pencere içermelidir; pencereler tek tek eklenir ve kaldırılır (**Pencere Ekle** / **Pencereyi Kaldır**). Aynı Aralık/Periyot Uzunluğu ikilisi aynı planda iki kez tanımlanamaz — sunucu bunu reddeder, ekran da kaydetmeden önce uyarır. "Saniyede 100 istek ve günde 10.000 istek" tanımı **tek** bir planın **iki** penceresidir, iki ayrı plan değildir.
+
+İstek Hızı ailesi ayrıca, pencerelerinden bağımsız tek bir **Aşım Eylemi** taşır:
+
+| Aşım Eylemi | Anlamı | Varsayılan |
+|-------------|--------|------------|
+| **Engelle** | Bir pencere dolduğunda sonraki istekler reddedilir (`Retry-After` başlıklı `429`). | Evet |
+| **Yalnızca Say** | Pencere dolduktan sonra istekler geçmeye ve sayılmaya devam eder — hiçbir şey reddedilmez. | — |
+
+Yalnızca Say, planın sert bir durdurma yerine **faturalanan** bir aşımı desteklediği durumlar içindir — bkz. aşağıda [Portal Abonelik Planından Referans](#portal-abonelik-plani).
+
+Bir planın ailesi, plan oluşturulduktan sonra **değiştirilemez** — düzenleme ekranındaki aile seçici bu noktadan sonra kilitlenir.
+
+Plan düzenleme ekranı artık ayrı bir Türkçe ad istemez: plan tek bir ada sahiptir. Portalda ve raporlarda gösterilen Türkçe etiket bu adın kendisidir. Bu değişiklikten önce ayrı bir Türkçe ad girilmiş planlar, yeniden kaydedilene kadar o adı korumaya devam eder.
+
+## Limit Planları Kataloğu
+
+**AI Gateway → Limit Planları** yolundan erişilen bu ekran, size görünen tüm planları aile ve serbest metin aramasıyla filtrelenebilir bir liste olarak gösterir. Her satırda planın adı, ailesi, yaşam döngüsü durumu ve — varsa — yayınlanmış revizyon numarası yer alır.
+
+<img
+  src="/images/2026-09-2/limit-plans-catalog.png"
+  alt="Limit Planları kataloğu — Project/Platform seçicisi, aile filtresi ve yaşam döngüsü rozetleri"
+  width="1000"
+  height="290"
+/>
+
+Ekran artık **Tüm aileler** filtresiyle açılır. Bir aile seçtiğinizde bu tercih tarayıcınızda hatırlanır ve bir sonraki ziyaretinizde otomatik uygulanır. Hatırlanan aile artık sunulmuyorsa (örneğin ilgili lisans modülü kaldırıldıysa) ya da tarayıcınız bu tercihi saklayamıyorsa ekran yeniden **Tüm aileler**e döner.
+
+Süzgeç eşleşen sonuç bulamadığında liste iki farklı boş durum gösterir: bu kapsamda hiç plan tanımlanmamışsa "Henüz limit planı tanımlanmamış." mesajını, süzgeçle hiçbir plan eşleşmiyorsa "Bu filtreyle eşleşen plan yok." mesajını — bu kapsamda kaç plan tanımlı olduğunu bildiren bir satırla birlikte — görürsünüz. Bu ikinci durumda beliren **Filtreyi temizle** düğmesi hem serbest metin aramasını hem aile süzgecini birlikte sıfırlar.
+
+### Plan Kapsamı: Proje ya da Platform
+
+Her plan, ya bir projenin kendi kataloğuna ya da kurulum genelindeki **Platform** kataloğuna aittir. Sistem yöneticisi, listenin üstündeki bir kapsam seçiciyle **Proje** ve **Platform** arasında geçiş yapar; sistem yöneticisi yetkisi olmayan bir proje üyesi yalnızca kendi projesinin kapsamını görür.
+
+- **Proje kapsamlı** planlar, kapsamdan bağımsız olarak aynı şekilde oluşturulur, düzenlenir ve öznelere atanır.
+- **Platform kapsamlı** planlar her projeye görünür — bir proje üyesi bunları salt okunur ve **Platform** rozetiyle görür, bir limit atarken referans verebilir — ama yalnızca sistem yöneticisi oluşturabilir, düzenleyebilir, yayınlayabilir ya da emekliye ayırabilir.
+
+Bir portal API Ürünündeki [Abonelik Planı](/tr/api-portal/api-urunu#abonelik-plani-limit-profilleri) yalnızca eşleşen aileden, **yayınlanmış ve platform kapsamlı** bir plana referans verebilir — Platform kataloğunu, ticari bir planın sattığı tavanların paylaşılan kaynağı yapan da budur.
+
+### Yönetim Modu: Tüm Projeler Tek Listede {#yonetim-modu}
+
+Sistem yöneticisi kataloğa **Yönetim → Kimlik Yönetimi → Limit Planları** yolundan da ulaşır. Bu görünüm tek bir projeye ait değildir: **bütün projelerin planlarını ve Platform kataloğunu birlikte** listeler; her satırın sahibini gösteren bir **Proje** sütunu vardır. Böylece bir plan, önce sahibi olan projeye geçmeden bulunup düzeltilebilir.
+
+- Listenin üstündeki **kapsam filtresi** listeyi **Tüm projeler**, **Platform** ya da tek bir projeyle daraltır. Planlar proje kapsamlı kalır — filtre yalnızca neyin gösterileceğine karar verir, bir planı projeler arasında taşımaz.
+- **Yeni plan** oluşturmak somut bir kapsam ister: önce filtreden **Platform** ya da bir proje seçilir, yeni plan o kapsamda doğar. **Tüm projeler** seçiliyken oluştur düğmesi devre dışıdır ve nedenini söyler.
+- Bir satırı **düzenlemek**, proje modundaki editörün aynısını açar; editör sahibi olan projeyi (ya da **Platform**) rozet olarak gösterir. Yayınlama ve emekliye ayırma orada nasıl çalışıyorsa burada da öyle çalışır; taslak bir planı bu listedeki satırından silersiniz.
+- **Kural atamaları** proje kapsamlıdır. **Planlar | Kural atamaları** seçicisi burada her zaman görünür; filtre **Tüm projeler** ya da **Platform** iken **Kural atamaları** seçildiğinde tablo yerine proje seçtiren kısa bir bilgi kartı gelir — kartta ya da üstteki filtrede bir proje seçildiğinde o projenin kuralları listelenir, **Yeni kural ataması** proje menüsündekiyle aynı şekilde çalışır. **Toplu atama** proje modunda kalır: aktif projenin tüketicileri, uygulamaları ve istemcileri üzerinde çalışır.
+
+### Abonelik Planına Ait Profiller {#abonelik-planina-ait-profiller}
+
+Bir portal abonelik planına hız limiti ya da kota girildiğinde, sistem o plana ait bir **İstek Hızı** profilini kendisi üretir ve plan sayıları her değiştiğinde yeniden yayınlar. Bu profiller de Platform kataloğunda durur ama sıradan katalog kalemi gibi davranmazlar:
+
+- Listede **varsayılan olarak görünmezler**. Görmek için listenin üstündeki **Abonelik planı profillerini göster** anahtarını açın; satır **Abonelik planı** rozetiyle ve sahibi planın adıyla işaretlenir.
+- **Düzenlenemez, yayınlanamaz, emekliye ayrılamaz ve silinemezler.** Bu işlemler denendiğinde ekran "bu limit profili bir portal abonelik planı tarafından yönetiliyor" uyarısını verir. Limitleri değiştirmenin tek yolu ilgili [abonelik planının](/tr/api-portal/api-urunu#abonelik-plani-limit-profilleri) hız limiti ve kota alanlarıdır.
+- Bir limit atarken (Limitler sekmesi, toplu atama, kural atamaları) bu profiller **seçeneklerde çıkmaz** — sahibi plan onları kendi sayılarından yeniden yazdığı için, başka bir özneyi böyle bir profile bağlamak o öznenin tavanını habersiz değiştirirdi.
+- Abonelik planı silinirse — ya da planın hız limiti ile kotası birlikte boşaltılırsa — profil **emekliye ayrılır**, silinmez: ona bağlı atamalar çözümlenmeye devam eder. Emekliye ayrılan profilin açıklaması, hangi plandan geldiğini ve bağın hangi tarihte kaldırıldığını yazacak şekilde yenilenir; böylece satır artık kendisini bir plan tarafından hâlâ yönetiliyormuş gibi tanıtmaz.
+
+### Yeni Plan Oluşturma {#yeni-plan-olusturma}
+
+**Yeni Limit Planı** düğmesi iki kartlı bir editör açar: planın bilgileri ve planın ilk kural gövdesi. **Plan Oluştur** düğmesi sayfanın sağ üstünde, **Geri** düğmesinin yanındadır. Plana bir ad girene kadar düğme pasiftir.
+
+- **Ad** ve **Aile** alanları zorunludur. **Başlangıç Kural Gövdesi** de zorunludur: gövdesi boş bir plan kaydedilmez. Gövde başlığı da zorunluluk işareti taşır ve seçilen ailenin ne istediğini tek satırda yazar. **AI Token Bütçesi** için en az bir token ya da USD limiti girin. **İstek Hızı** için en az bir pencere tanımlayın.
+- **Aile** yalnızca burada seçilir. Kayıtlı bir planın ailesi sonradan değiştirilemez.
+- Yeni plan her zaman **aktif** oluşur. AI Token Bütçesi planlarındaki **Aktif** anahtarı oluşturma ekranında yer almaz. Bu anahtar, kayıtlı bir planın açık taslak revizyonunda çıkar. Bir bütçeyi orada kapatmak, diğer değişiklikler gibi yayınlanan bir değişikliktir.
+
+Plan **Taslak** durumunda oluşur ve editörü hemen açılır. İlk revizyonu bu ekrandan yayınlarsınız.
+
+Bir planı editörden değil, katalog listesindeki satırından silersiniz. Editörde **Emekliye Ayır** kalır. Bu işlem, yayında olan bir planı katalogdan çeker ve yürürlükteki tavanlara dokunmaz.
+
+### Plan Durumu
+
+| Durum | Anlamı |
+|-------|--------|
+| **Taslak** | Plan oluşturuldu ama hiç yayınlanmadı. Serbestçe düzenlenebilir ve — hiçbir atama ya da dağıtım ona bağlı olmadığı sürece — **katalog listesindeki satırından silinebilir**. |
+| **Yayında** | En az bir revizyonu yayınlanmıştır ve atamalar bu plana bağlanabilir. Yayınlanmış bir plan bir daha **silinemez** — bir atama ona referans veriyor olabilir. |
+| **Emekli** | Katalogdan çekilmiştir: bu plana **yeni** bir atama yapılamaz, ancak plana zaten bağlı atamalar çözümlenmeye devam eder. Emekliye ayırma bir dağıtım işlemi **değildir** — plana bağlı öznelerin gateway üzerindeki mevcut tavanına dokunmaz, yalnızca katalogdaki görünürlüğünü kapatır. |
+
+Bir plan asla Taslak'a geri dönmez: yayınlanan bir revizyon değişmez olduğu için düzeltme, aynı plan altında **yeni bir taslak revizyon** açılarak yapılır.
+
+### Revizyon Akışı: Taslak → Yayınla → Geçmiş
+
+Bir plan üzerinde çalışırken kural gövdesi (token/USD limitleri, pencereler, aşım davranışı) her zaman açık bir taslak revizyon üzerinde düzenlenir:
+
+1. **Yeni Taslak Aç** — planın yayınlanmış son hâlinin bir kopyası üzerinde düzenlemeye başlar. Bir planın aynı anda en fazla bir açık taslağı olabilir.
+2. **Taslağı Kaydet** — değişiklikleri kalıcı hâle getirir, ama henüz hiçbir özneyi etkilemez: bir taslak revizyona hiçbir atama çözümlenmez.
+3. **Yayınla** — bir **değişiklik nedeni** girilmesini ister (isteğe bağlı bir not) ve taslağı planın güncel yayınlanmış revizyonu yapar. Bu andan sonra revizyonun kural gövdesi bir daha değiştirilemez; önceki yayınlanmış revizyon **geçmişe** düşer, silinmez.
+
+Revizyon geçmişi tablosu her revizyon için numarasını, durumunu (Taslak / Yayında / Yerini Aldı), değişiklik nedenini, yayın tarihini ve yayınlayan kullanıcıyı listeler — bir planın zaman içinde nasıl değiştiğinin tam kaydıdır.
+
+:::tip
+Emekliye ayrılmış bir planın artık açık bir taslağı olamaz; kural gövdesini değiştirmek isterseniz önce planı yeniden aktif bir plana taşımanız (yeni bir plan oluşturup atamaları ona geçirmeniz) gerekir.
+:::
+
+### Atamalar {#atamalar-sekmesi}
+
+Plan düzenleme ekranına, planın kendi bilgileri ve revizyon geçmişiyle birlikte yeni bir **Atamalar** bölümü eklendi. Bu bölüm iki liste gösterir:
+
+1. **Bu planı kullanan limit atamaları** — konu tipi, konu adı, hedef, durum ve kaynak sütunlarıyla; konusu silinmiş bir atama **Silinmiş konu** etiketiyle işaretlenir. Hiç atama yoksa "Bu planı kullanan atama yok." yazar.
+2. **Bu planı varsayılan yapan kurumlar** — [Kurumların Varsayılan Limit Planları](/tr/admin/identity-management/kurumlar#varsayilan-limit-planlari) özelliğiyle bu planı varsayılan seçmiş kurumların listesi, kurum ve aile sütunlarıyla. Bir varsayılan plan yalnızca yeni oluşturulan tüketicilere uygulanır, mevcut üyeleri değiştirmez. Hiç kurum yoksa "Bu planı varsayılan yapan kurum yok." yazar.
+
+Bölümdeki **Kuruma ata** ve **Tüketiciye ata** düğmeleri [Toplu Atama](#toplu-atama) sihirbazını bu plan ve seçilen konu tipi ön seçili biçimde açar. Düğmeler yalnızca plan **Yayında** durumundayken ve atama yetkiniz varken etkindir; **Platform** kapsamlı bir planda atama yalnızca bir proje kapsamı içinden yapılabilir — düğme devre dışı olduğunda sebebini bir ipucu olarak gösterir.
+
+**Platform** kapsamlı bir planın atama listesi de tek seferde tek bir proje kapsamı için gösterilir; aynı platform planını başka projeler de kullanıyor olabilir.
+
+## Bir Özneye Limit Atama: Limitler Sekmesi {#limitler-sekmesi}
+
+Bir planı — ya da plana bağlı olmayan özel bir değeri — belirli bir özneye uygulamak için **atama** kullanılır. Atama, iki ekranda aynı **Limitler** sekmesi üzerinden yönetilir:
+
+- Bir **API istemcisinin** detayında, [API İstemcileri](/tr/admin/identity-management/kimlik-bilgileri#api-istemcileri) sekmesinin altındaki **Limitler** alt sekmesi — o tek istemcinin tüketimini sınırlar.
+- Bir **kimlik bilgisinin** (Consumer) kendi düzenleme ekranındaki **Limitler** sekmesi — o kimlik bilgisine bağlı tüm istemcilerin ortak havuzunu sınırlar.
+
+Her iki yüzey de aynı bileşeni kullanır, bu yüzden davranış birebir aynıdır. Sekmenin üstündeki aile seçicisiyle **AI Token Bütçesi** ve **İstek Hızı** arasında geçiş yapılır; her aile kendi bağımsız atamasını taşır, bir özne aynı anda her iki aileden de bir atamaya sahip olabilir.
+
+:::info Atama yalnızca kendi öznesine uygulanır
+Limitler sekmesinden yapılan bir atama tek bir özneye bağlanır; ağ geçidi bu özneyi yalnızca kendi kimliği üzerinden arar ve onun için tek bir sayaç tutar. A tüketicisine yapılan bir atama — kapsamı **Tümü** olsun ya da tek bir API proxy'ye daraltılmış olsun — B tüketicisini hiçbir zaman sınırlamaz, engellemez ya da saymaz; kendi ataması olmayan bir özne yalnızca üzerindeki üst tavanlara tabidir. Öznenin üzerindeki tavanlar (kurum, API proxy, proje, platform) atamayla birlikte uygulanmaya devam eder: **İstek Hızı** ailesinde her seviye kendi bağımsız sayacını tutar ve herhangi biri dolduğunda istek reddedilir, **AI Token Bütçesi** ailesinde ise aynı sayaca düşen üst tavanla nasıl birlikte davranıldığı [Mevcut Limitlerinizle Birlikte Çalışma](#mevcut-limitlerle-birlikte-calisma) bölümünde anlatılmıştır. Bir tüketici atamasının **Tümü** kapsamı da sınırsız değildir — yalnızca o tüketicinin çağırabileceği ve üzerinde bir kimlik doğrulama politikası çalışan API proxy'lerini kapsar, bkz. [Limitlerin Uygulanması](#gölge-modu). Tek bir sabit özneyi değil, ona ait olmayan çağıranları sınırlamak, engellemek ya da ortak bir havuzda toplamak istediğinizde doğru araç [Kural Atamaları](#kural-atamaları)'dır — bir atamanın kendi öznesi dışındaki kimliklere ulaşmasının tek yolu oradaki hedef-dışı eylemdir (**Bu kuralı onlara uygulama** seçiliyken koşul dışındaki herkes dokunulmadan kalır).
+:::
+
+### Atama Modu
+
+Bir atama üç moddan birini taşır:
+
+| Mod | Anlamı |
+|-----|--------|
+| **Plan** | Öznenin tavanı, seçilen **yayınlanmış** bir planın güncel içeriğidir. Plan sonradan güncellenirse atama da yeni içeriği otomatik kullanır. |
+| **Özel** | Öznenin tavanı, katalogdaki hiçbir planla paylaşılmayan, doğrudan bu atama üzerinde girilen değerlerdir. |
+| **Kapalı** | Bu özne kendi adına yerel bir tavan **taşımaz**. |
+
+:::warning "Kapalı" sınırsız anlamına gelmez
+**Kapalı** bir atama, öznenin sınırsız olduğu anlamına **gelmez** — üzerindeki zincirdeki (kurum, proje, platform) tavanlar uygulanmaya devam eder; bu mod yalnızca öznenin kendi yerel tavanını devre dışı bırakır. **Hiç ataması olmayan** bir özne eski/yönetilmeyen kalır; ona sonradan kendiliğinden bir limit bağlanmaz.
+:::
+
+:::note "Devral" modu 2026.09.3'te kaldırıldı
+Önceki sürümlerde bir **Devral** modu da sunuluyordu. Ağ geçidi bu modu hiçbir zaman çözümlemiyordu — Devral ataması tam olarak Kapalı gibi davranıyordu — bu yüzden seçenek kaldırıldı ve mevcut Devral atamaları yükseltmede **Kapalı**'ya çevrildi. Ağ geçidinde hiçbir şey değişmedi. Bir kurumun tüketicilerine başlangıç limiti vermek için kurumun [Varsayılan Limit Planları](/tr/admin/identity-management/kurumlar#varsayilan-limit-planlari) özelliğini kullanın.
+:::
+
+### Kapsam {#kapsam}
+
+Plan ya da özel değerin yanında, bir atama isteğe bağlı olarak öznenin tavanını belirli bir kaynağa **daraltabilir** — daraltılmamış bir atama öznenin tüm tüketimini kapsar:
+
+| Daralt | Anlamı |
+|--------|--------|
+| **Tümü** | Daraltma yok — öznenin tüm tüketimi. |
+| **Tek API Proxy** | Belirli bir API proxy, dağıtıldığı her ortamda. |
+| **Tek API Proxy + Ortam** | Belirli bir API proxy, tek bir gateway ortamında. |
+| **Tek API Uç Noktası** | Belirli bir API uç noktası (yol + HTTP metodu ikilisi) — yalnızca yükseltme taşımasının ürettiği atamalarda görülür ve ekranda görüntülenir; bu sürümde bu ekrandan elle seçilemez (bkz. [Yükseltmede Taşınan Legacy Limitler](#yukseltmede-tasinan-legacy-limitler)). |
+| **Tek API Proxy Grubu** | Belirli bir API proxy grubu, dağıtıldığı her ortamda — grubun kendisine gelen istekleri kapsar, gruba dahil bir proxy'ye doğrudan gelen istekleri değil. |
+| **Tek API Proxy Grubu + Ortam** | Belirli bir API proxy grubu, tek bir gateway ortamında. |
+| **Tek AI Model** | Belirli bir LLM modeli (AI Token Bütçesi ailesi için anlamlıdır). |
+| **Tek AI Sağlayıcı** | Belirli bir LLM sağlayıcısı (AI Token Bütçesi ailesi için anlamlıdır). |
+
+**Tek API Proxy** ve **Tek API Proxy + Ortam** daraltmalarında, isteğe bağlı bir **HTTP metotları** alanıyla tavan belirli metotlara da sınırlanabilir (örn. yalnızca `POST`); boş bırakılırsa tüm HTTP metotları geçerlidir. Diğer daraltma tipleri (grup, AI model/sağlayıcı) HTTP metot ekseni taşımaz. **Tek API Uç Noktası** kapsamı kendi içinde zaten bir yol + HTTP metodu ikilisi taşıdığından ayrıca bir HTTP metotları alanı yoktur.
+
+:::note
+Kapsam, atama oluşturulduktan sonra **değiştirilemez** — düzenleme ekranında bu alanlar kilitlenir. Farklı bir kapsam gerekiyorsa mevcut atama sonlandırılıp yeni bir atama oluşturulur.
+:::
+
+Kapsamın altında **İstek Hızı** atamalarında iki alan grubu daha bulunur (AI Token Bütçesi atamasında bu blok gösterilmez; yerinde kısa bir bilgi notu bulunur — Limitler sekmesi ve Toplu Atama için aynı):
+
+- **Cache ve Yanıt** — cache bağlantı hatasında ne yapılacağını (**Fail**: istek reddedilir, varsayılan; **Continue**: istek sayılmadan geçmeye devam eder), cache bağlantı zaman aşımını (saniye; boş bırakılırsa platform genelindeki varsayılan geçerli olur) ve limit bilgilerinin yanıt başlıklarında gösterilip gösterilmeyeceğini (varsayılan: Kapalı) belirler. AI Token Bütçesi ataması [Token Kotaları](/tr/ai-gateway/token-kotalari) mekanizmasıyla uygulanır; kendi cache ayarları vardır ve yanıta `RateLimit-*` başlığı eklemez.
+- **Özel hata mesajı** — limit aşıldığında dönecek mesaj şablonunu, içerik tipini ve HTTP durum kodunu, [Hata Mesajları](/tr/admin/system-settings/hata-mesajlari) ekranındakiyle aynı değişken söz dizimiyle özelleştirir; boş bırakılırsa platform genelindeki varsayılan hata mesajı kullanılır.
+
+İstek Hızı atamalarında bu alanların bir isteğe nasıl yansıdığı aşağıdaki [Limitlerin Uygulanması](#gölge-modu) bölümünde anlatılmıştır.
+
+### Yaşam Döngüsü: Ata, Düzenle, Aktifleştir, Sonlandır
+
+Bir özne, bir aile için aynı anda **en fazla bir canlı ya da bekleyen atama** taşıyabilir; yeni bir atama oluşturma seçeneği, o aile için zaten aktif ya da taslak bir atama varken gizlenir — önce mevcut atamayı sonlandırmanız istenir.
+
+1. **Limit Ata** — modu, (Plan modunda) yayınlanmış bir planı ya da (Özel modunda) değerleri, kapsamı, isteğe bağlı bir geçerlilik penceresini (başlangıç/bitiş) ve **Hemen aktifleştir** seçeneğini içeren bir form açar.
+   - **Hemen aktifleştir** işaretliyse atama doğrudan **Aktif** olarak kaydedilir ve derhal geçerli tavan hâline gelir.
+   - İşaretli değilse atama **Taslak** olarak kaydedilir; öznenin tavanını henüz etkilemez.
+2. **Aktifleştir** — bekleyen bir taslak atamayı canlıya alır; onay penceresi bunun öznenin bu kapsam için geçerli canlı tavanı olacağını açıkça belirtir.
+3. **Düzenle** — yalnızca **Aktif** durumdaki bir atama için, **Sonlandır**'ın yanında kullanılabilir; aynı atamanın modunu, plan seçimini (ya da özel değerlerini) ya da geçerlilik penceresini yerinde değiştirir — **Limit Ata** ile aynı formu, **Hemen aktifleştir** seçeneği olmadan yeniden kullanır (atama zaten canlıdır). Bu yeni bir atama değildir: özne, kapsam ve kaydın kendisi aynı kalır, yalnızca içeriği değişir. Atama, siz düzenlerken başka biri tarafından değiştirilmiş ya da sonlandırılmışsa güncelleme reddedilir, iletişim kutusu kapanır ve panel güncel durumu göstermek üzere yeniden yüklenir.
+4. **Sonlandır** — aktif bir atamayı kapatır; isteğe bağlı bir **neden** girilebilir. Sonlandırma **geri alınamaz**: tavan hemen uygulanmaz hâle gelir ve aynı özne için yeni bir atama, ayrı ve yeni bir kayıt olarak açılır. Sonlandırılan atama **silinmez**, sekmenin altındaki **Geçmiş** tablosunda mod, atanma/sona erme zamanı ve nedeniyle birlikte kalır.
+5. **Özne silindiğinde atamaları kendiliğinden sonlanır.** Bir tüketici (Consumer), portal uygulaması ya da kurum silindiğinde onu adlandıran her atama — aktif olanlar da taslaklar da — aynı adımda sonlandırılır, nedeni *Öznesi silindi* olarak kaydedilir ve tavan gateway'lerden çekilir. Silme reddedilirse (özneye bağlı bir şey hâlâ duruyorsa) atamalar olduğu gibi bırakılır.
+
+:::note Taslak atamalar burada düzenlenmez
+Düzenle yalnızca güncel **Aktif** atama için geçerlidir. Bekleyen bir **Taslak** atamanın bu sürümde kendine ait bir Düzenle eylemi yoktur — üzerinde sunulan tek eylem **Aktifleştir**'dir; canlıya alındıktan sonra Düzenle, diğer her aktif atamada olduğu gibi kullanılabilir hâle gelir.
+:::
+
+### Limitler Sekmesinde Anlık Kullanım {#anlik-kullanim}
+
+Güncel **Aktif** atamanın kartının hemen altında, aynı Limitler sekmesi — göründüğü üç yüzeyde de (bir API istemcisinin detay panelinde, bir kimlik bilgisinin kendi düzenleme ekranında ve bir portal Uygulamasının görünümünde) — o atama için bir **Anlık kullanım** kutusu gösterir.
+
+Sayaç penceresi (saatlik/günlük/aylık) başına bir satır listelenir; atamanın kapsamı bir API proxy'ye ya da ortama daraltılmışsa veya bir [kural atamasının](#kural-atamaları) koşulu kimliğe göre daraltıyorsa, her daraltılmış kapsam ya da kimlik kendi satırını alır.
+
+| Sütun | Anlamı |
+|---|---|
+| **Pencere** | Satırın ölçtüğü sayaç penceresi — saatlik, günlük ya da aylık. |
+| **Kapsam** | Satırın sayacının daraltıldığı proxy/ortam ya da kimlik; daraltma yoksa atamanın tamamı. |
+| **Tüketilen** | Pencerede şu ana kadar tüketilen miktar. |
+| **Limit** | Bu pencere için uygulanan tavan. |
+| **Kullanım** | İlerleme çubuğu ve yüzde rozeti — %70 altı yeşil, %70-90 arası uyarı, %90 ve üzeri kritik; [Kota Kullanımı ve Uyarılar](/tr/admin/identity-management/kota-kullanimi-ve-uyarilar) raporuyla aynı eşikler. |
+| **Sıfırlanma** | Güncel pencerenin kapandığı ve sayacın yenilendiği zaman. |
+
+Bir **AI Token Bütçesi** atamasının **AI Cost** sayaçları ham sayı yerine USD olarak gösterilir.
+
+Kutudaki sayılar, gateway sayaçlarından her dakika tazelenen bir anlık görüntüden okunur; kutudaki **Yenile** düğmesi bu eşitlemeyi bir sonraki zamanlanmış döngüyü beklemeden hemen çalıştırır — [Kota Kullanımı ve Uyarılar](/tr/admin/identity-management/kota-kullanimi-ve-uyarilar) raporunun kendi yenileme kontrolünün tetiklediği eşitlemeyle aynıdır. Atamaya düşen ilk istek sayacı oluşturmadan önce kutuda "Henüz sayaç yok — bu atamaya düşen ilk istek sayacı oluşturur." notu görünür.
+
+:::note Taslak ya da sonlandırılmış atamada kullanım kutusu gösterilmez
+Kutu yalnızca **Aktif** bir atama için gösterilir. Bekleyen bir **Taslak** hiç uygulanmamıştır, sonlandırılmış bir atamanın sayaçları ise kendi ad alanıyla birlikte ortadan kalkar — aynı özne için açılan yeni bir atama sıfırdan yeni bir sayaçla başlar.
+:::
+
+Bu kutuyu okumak, Limitler sekmesinin geri kalanıyla aynı yetkiyi gerektirir: proje için **Kimlik ve Erişim Kontrolü** ya da **Bütçeler** izin gruplarından birinde **Görüntüle** yetkisi (sistem yöneticisi her zaman görür).
+
+## Toplu Atama {#toplu-atama}
+
+[Yukarıda anlatılan](#limitler-sekmesi) atama akışı, tek bir özneyi elle atamak içindir; bir projede bunlardan binlercesi olduğunda ölçeklenmez. **Toplu Atama**, bir planı ya da özel bir değeri — özneye tek tek atamak yerine — filtrelenmiş büyük bir özne popülasyonuna (tüketiciler, API istemcileri, uygulamalar ya da organizasyonlar) tek bir koşuda bağlar.
+
+**AI Gateway → Limit Planları** kataloğundaki **Toplu atama** düğmesiyle açılır; sol üstteki **Geri** düğmesi kataloğa döndürür. AI Gateway lisans modülü olmayan bir kurulumda **Limit Planları** kalemi ayrıca **Kimlik Yönetimi** grubu altında da listelenir, böylece İstek Hızı toplu ataması AI Gateway menü grubu olmadan da erişilebilir kalır. Sihirbaz ayrıca bir planın [Atamalar](#atamalar-sekmesi) bölümündeki **Kuruma ata** / **Tüketiciye ata** düğmesinden de açılabilir; bu durumda plan ve konu tipi ön seçilidir. Ekranın iki sekmesi vardır: **Ata** bir koşu kurar ve başlatır, **Koşular** ilerlemesini ve geçmişini izler.
+
+### Ata: Popülasyon Seçimi
+
+Sol panel, tembel yüklenen bir organizasyon ağacıdır — her düğümde ad ve tüketici sayısı gösterilir, bir **alt organizasyonlar dahil** anahtarı bütün bir alt ağacı seçime katar. Özne tablosunun üstündeki filtreler popülasyonu daha da daraltır: **özne türü** (**Tüketici** / **API İstemcisi** / **Uygulama** / **Organizasyon**), serbest metin arama, **yalnızca etkin olanlar** ve — en az bir organizasyon seçildikten sonra — **mevcut atama** (**Fark etmez** / **Mevcut ataması yok** / **Mevcut ataması var**).
+
+Sağ panel, eşleşen öznelerin sunucu-sayfalı bir tablosudur (ad, organizasyon ve varsa mevcut atama: plan, mod, hedef). İki seçim modu sunulur:
+
+- **Satır seçimi** — tek tek satırları işaretleyin, en fazla **5.000** özne.
+- **Filtreye uyan tümünü seç** — filtrelenmiş tüm popülasyonu, bir kimlik listesi tarayıcıya taşınmadan seçer. Binlerce özneli bir popülasyonu seçmenin pratikte tek yolu budur. Sonradan herhangi bir satırın işareti kaldırılırsa anahtar otomatik olarak **Kapalı** konuma döner: mevcut sayfada işaretli kalan satırlar açık bir satır seçimine dönüşür, diğer sayfalardaki "tüm eşleşenler" kapsamı sona erer (kaç satırın seçili kaldığı bir bilgi mesajıyla gösterilir). Anahtar yeniden açılırsa o anki filtrelere uyan her şey yeniden seçilir.
+
+### Ata: İçerik ve Çakışma Politikası
+
+**İçerik** diyaloğu, seçilen her öznenin alacağı tavanı tanımlar — tekil bir [atamanın](#limitler-sekmesi) taşıdığı aynı alanlar:
+
+- **Aile** — **İstek Hızı** ya da **AI Token Bütçesi**.
+- **Mod** — **Plan** (yayınlanmış bir plan seçin) ya da **Özel** (pencereleri/bütçeyi doğrudan girin).
+- **Kapsam** — tekil bir atamanın taşıdığı aynı [Kapsam](#kapsam) daraltması (API proxy, grup, ortam ya da metot).
+- **Cache ve Yanıt** duruşu ile **Özel hata mesajı** (yalnız İstek Hızı ailesinde), **geçerlilik penceresi** (başlangıç/bitiş) — tekil bir atamanın taşıdığı aynı alanlar.
+
+Bir **çakışma politikası**, aynı kapsamda zaten aktif bir ataması olan bir öznede ne olacağını belirler:
+
+| Çakışma Politikası | Anlamı | Varsayılan |
+|---|---|---|
+| **Mevcudu koru** | Aktif ataması olan özne olduğu gibi bırakılır ve **atlanır**; yalnızca hiç ataması olmayan özneler yeni atamayı alır. | Evet |
+| **Değiştir** | Öznenin mevcut ataması **sonlandırılır** ve yerine yeni bir satır açılır. | — |
+
+:::warning Değiştir'de sayaç sıfırdan başlar
+**Değiştir**, mevcut atamayı sonlandırıp yepyeni bir atama açar — sonlandırılan eski atamanın pencere içi tüketimini devralmaz. Yeni atamanın sayacı, yeni oluşturulan her atamada olduğu gibi sıfırdan başlar.
+:::
+
+### Önizleme ve Başlat
+
+**Önizleme**, hiçbir şey yazmadan seçilen popülasyonu sınıflandırır: beklenen özne sayısı, kaç atamanın oluşturulacağı/atlanacağı/değiştirileceği ve örnek satırlardan bir küme. **5.000** öznenin üzerinde bu sayılar **tahminidir** — koşunun kendisi işlerken gerçek sayıları raporlar.
+
+**Başlat**, koşuyu kuyruğa alır (`202`) ve **Koşular** sekmesine geçer.
+
+## Koşular Sekmesi {#toplu-atama-kosulari}
+
+Her satır bir koşudur: başlangıç zamanı, **tür** (**Ata** / **Geri al** / **Yeniden dene**), durumu, aşaması, ilerlemesi, sayaçları (oluşturulan/değiştirilen/atlanan/başarısız), dağıtım durumu, başlatan kullanıcı ve süresi.
+
+| Durum | Anlamı |
+|-------|--------|
+| **Sırada** | Koşu kuyruğa alındı, henüz başlamadı. |
+| **Çalışıyor** | Parçalar (chunk) hâlinde aktif olarak işleniyor. |
+| **Başarılı** | Popülasyondaki her özne hatasız işlendi. |
+| **Kısmi** | Tamamlandı, ama en az bir özne başarısız oldu. |
+| **Başarısız** | Koşu tamamlanamadı. |
+| **İptal edildi** | Operatörün **İptal et** eylemiyle durduruldu. |
+| **Yarıda kaldı** | Koşuyu yürüten düğüm koşu ortasında öldü — bkz. aşağıda [Kesinti](#kesinti). |
+
+Eski bir sürümde kaydedilmiş koşularda **Lisans iptal edildi** durumu görülebilir; bu sürüm artık bu durumu üretmez: AI Token Bütçesi atamaları bir lisans modülüne bağlı değildir.
+
+**Dağıtım durumu** — **Eşlendi**, **Bozuk** ya da **Beklemede** — koşunun gateway tarafındaki dağıtımının her ortama ulaşıp ulaşmadığını raporlar.
+
+Devam eden bir koşunun satırı **5 saniyede bir** kendiliğinden yenilenir. Bir projede aynı anda yalnızca **bir aktif koşu** çalışabilir — bir koşu sırada ya da çalışırken ikincisini başlatma girişimi reddedilir (`409`).
+
+### Aksiyonlar
+
+- **İptal et** — sırada bekleyen ya da çalışan bir koşuyu bir sonraki parça (chunk) sınırında durmasını ister; o ana kadar yazılmış olan her şey yazılı kalır.
+- **Geri al** — yalnızca tamamlanmış bir **Ata** ya da **Yeniden dene** koşusunda kullanılabilir: kaynak koşunun yarattığı her atamayı sonlandıran ve **Değiştir**'in değiştirdiği atamaları yepyeni satırlar olarak yeniden açan **yeni** bir koşu kuyruğa alır (sayaçları, her Değiştir'de olduğu gibi sıfırdan başlar). Önce onay ister.
+- **Başarısızları yeniden dene** — yalnızca kaynak koşunun **başarısız** olduğu özneler üzerinde, her zaman **Mevcudu koru** çakışma politikasıyla **yeni** bir koşu kuyruğa alır.
+
+Bir satırı genişletmek onun **bulgularını** gösterir — her biri için nedeniyle birlikte **Başarısız** ve **Atlandı** özneler. Yalnızca Başarısız ve Atlandı satırları saklanır, koşu başına en fazla **1.000**; bunun ötesinde liste **kesildi** olarak işaretlenir.
+
+### Kesinti {#kesinti}
+
+Koşuyu yürüten düğüm çalışırken bir heartbeat bildirir. Düğüm koşu ortasında ölürse heartbeat'i eskir; **10 dakika** sonra bir süpürücü (**5 dakikada** bir kontrol eder) koşuyu, sonsuza kadar Çalışıyor durumunda takılı bırakmak yerine **Yarıda kaldı** olarak işaretler. Operatör, yarıda kalan koşunun henüz ulaşmadığı özneleri kapatmak için **Başarısızları yeniden dene** ile devam eder.
+
+### Dağıtım Gecikmesi ve Telafi
+
+Koşu motoru, özneleri **200'lük parçalar (chunk)** hâlinde işler; her parçanın sonunda etkilenen gateway'lere **tek bir toplu dağıtım** gönderir. **Değiştir** ve **Geri al** için, yerini alınan atamanın kaldırılması ayrı, dakikalık bir dağıtım süpürücüsüyle taşınır — bu nedenle kısa bir süre eski ve yeni atama gateway üzerinde **birlikte** canlı olabilir; böyle bir çakışmada daha **sıkı** olan tavan geçerli olur.
+
+:::warning Yeni satır yazılamazsa özne limitsiz bırakılmaz
+**Değiştir** ya da **Geri al** adımının ortasında yeni atama yazılamazsa, motor eski atamayı **yeniden yürürlüğe alır** — özne asla limitsiz bırakılmaz. Bu telafi de başarısız olursa o özne için koşunun bulgusu **"unprotected"** olarak işaretlenir ve önerilen kurtarma yolu **Başarısızları yeniden dene**'dir.
+:::
+
+Bir toplu koşunun oluşturduğu ya da değiştirdiği her atama, kaynağı olarak koşunun kimliğini taşır, böylece her zaman onu yazan koşuya geri izlenebilir. Toplu atamayı programatik olarak tetiklemek, izlemek ve yönetmek için bkz. [Limit Assignment Runs API](/api-reference/limit-assignment-runs) referansı.
+
+## Kural Atamaları {#kural-atamaları}
+
+**AI Gateway → Limit Planları** ekranındaki **Planlar | Kural atamaları** görünüm seçicisiyle, proje kapsamında (yalnızca proje — platform kapsamında bu görünüm yoktur) ikinci bir atama biçimine geçilir: belirli bir özneyi değil, bir **kimlik koşulunu** hedefleyen İstek Hızı atamaları. Bu, [Rate Limit Kontrol Listesi](/tr/admin/identity-management/rate-limit-kontrol-listesi) politikasının kimlik/hedef kitle mantığının typed karşılığıdır ve tek tek API istemcisi/kimlik bilgisi ataması yapmak yerine "bu koşula uyan herkes" için bir tavan tanımlamak istediğinizde kullanılır.
+
+Kural atamaları yalnızca **İstek Hızı** ailesi içindir — **AI Token Bütçesi** ailesinde kural tabanlı (hedef kitle) atama desteklenmez; bu aileden bir kural ataması oluşturma girişimi — Yönetim API'si / APIops dahil — `400` hatasıyla reddedilir.
+
+Bir kural ataması şu parçalardan oluşur:
+
+| Alan | Anlamı |
+|------|--------|
+| **Kimlik kaynağı** | **Kimlik doğrulamadan gelen kullanıcı** seçildiğinde kimlik, kimlik doğrulama sonucundan alınır (bir kimlik bilgisinin kullanıcı adı ya da bir API istemcisinin client kimliği); **Değişken seçimi** seçildiğinde kimlik, seçilen bir değişkenin istek anındaki değerinden alınır. Bu seçim atamanın kimi kapsadığını da belirler — **Kimlik doğrulamadan gelen kullanıcı** kimliği doğrulanmış çağıranları, **Değişken seçimi** her çağıranı (değişken anonim trafikte de vardır) sayar; ekranda bunun için ayrı bir alan yoktur, bunu belirtmeden oluşturulan bir Yönetim API'si / APIops kural ataması da aynı varsayılanı alır. |
+| **Koşul** | Bir operatör (eşittir, içerir, listede vb.) ve bir değerden oluşur — kimlik bu koşulla eşleşiyorsa kural ataması bu kimliğe uygulanır. |
+| **Kapsam** | Yukarıdaki [Kapsam](#kapsam) ile aynı daraltma (Tümü / Tek API Proxy(+Ortam) / Tek API Proxy Grubu(+Ortam), HTTP metot ekseni dahil). |
+| **Hedef-dışı eylem** | Koşulla eşleşmeyen kimliklere ne olacağını belirler: **Akışı durdur** isteği reddeder; **Genel kota uygula** bu kimlikler için ayrı bir tavan uygular — **Tüm hedef-dışı için tek ortak kota** tüm eşleşmeyen kimliklerin paylaştığı tek bir pencere kümesi, **Her hedef-dışı kimlik için ayrı kota** her kimliğin kendi pencere kümesidir; **Bu kuralı onlara uygulama** ise bu kimlikleri tamamen serbest bırakır — ne engellenirler ne de sayılırlar. Yeni bir kural **Bu kuralı onlara uygulama** ile başlar; böylece tek bir tüketiciye kendi tavanını vermek için çizilen bir kural, geri kalan herkes için bir kara listeye dönüşmez. Eylemi kaydedilmemiş bir atama — ya da bu seçenek yokken yazılmış eski bir kayıt — yine **Akışı durdur** olarak okunur. |
+
+Kural ataması proje kapsamlıdır: hedef **Tümü** seçilse bile kural yalnızca kendi projesindeki API proxy'lerin trafiğine uygulanır — başka bir projedeki trafik bu kuralla ne engellenir ne de sayılır. Bütün projeleri kapsayan bir tavan gerekiyorsa kurulum-geneli (Platform kapsamlı) bir atama kullanılmalıdır; bu, her projede geçerli olur.
+
+Hedef-dışı eylem **Akışı durdur** olduğunda çağıran `403 Forbidden` ve **ERR-251** hata koduyla karşılaşır; mesaj, eşleşmeyen kimliği adıyla belirtir. Kimlik hiç okunamadığında — pratikte kimlik kaynağı **Değişken seçimi** iken ilgili değişken istekte bulunmadığında; **Kimlik doğrulamadan gelen kullanıcı** kaynağı, kimlik doğrulanmış bir çağrıda her zaman bir kimlik taşır — bunun yerine `400 Bad Request` ve **ERR-252** döner. Her iki mesaj da, diğer her hata tipi gibi, [Hata Mesajları](/tr/admin/system-settings/hata-mesajlari) ekranından özelleştirilebilir.
+
+Aynı kapsamda birden çok kural ataması tanımlanabilir; bunlar **VEYA** mantığıyla değerlendirilir — bir kimlik bu kuralların **herhangi biriyle** eşleşiyorsa o kuralın penceresinden sayılır ve komşu bir kural tarafından bloklanmaz. Aynı hedefteki tüm kural atamaları tek bir, paylaşılan hedef-dışı ayarını kullanır (bkz. aşağıda [Hedef Ayarı](#hedef-ayari)); bir kimlik hiçbir koşulla eşleşmiyorsa hedefin bu paylaşılan ayarı uygulanır. Aynı kapsamda ayrıca bir Limitler sekmesi ataması (belirli bir API istemcisine/kimlik bilgisine yapılmış açık bir atama) varsa, o kapsamdaki kural atamaları **tamamen devre dışı kalır** — açık atama her zaman kuralı geçersiz kılar.
+
+### Hedef Ayarı {#hedef-ayari}
+
+Hedef-dışı eylem artık tek tek kural ataması üzerinde değil, bir **hedef** üzerinde tutulan tek bir ayardır: aynı hedefteki (aynı API proxy, grup, ortam ve metot kombinasyonu) her kural ataması bu ayarı paylaşır.
+
+Bir hedefe eklenen **ilk** kural ataması bu ayarı sorar — yeni diyalogda ayrı bir bölüm olarak, varsayılan değeri **Bu kuralı onlara uygulama**dır. Aynı hedefe eklenen sonraki her kural ataması bu ayarı salt okunur gösterir ve "Ayarı hedefin grup başlığından değiştirin." notunu verir.
+
+Kural atamaları listesi artık hedefe göre gruplanır. Her grup başlığı o hedefin güncel hedef-dışı ayarını gösterir. Ayarın yanındaki **Değiştir** düğmesi ayarı düzenleme penceresinde açar. Pencere, değişikliğin kaç kural atamasını etkilediğini belirtir.
+
+:::note
+Bir hedefteki kural atamaları farklı hedef-dışı ayarları taşıyorsa (örneğin bu ayar paylaşılmadan önce oluşturulmuş eski kayıtlar) grup başlığında **Karışık ayar** rozeti görünür. **Birleştir** eylemi hepsini en kısıtlayıcı ayara eşitler — sıralama: **Akışı durdur** > **Genel kota uygula** > **Bu kuralı onlara uygulama**; onay penceresi hangi ayarın uygulanacağını önceden gösterir.
+
+Bilinen sınırlar: genel kota sayaçları birleştirmeden sonra da her kural ataması için ayrı ayrı tutulmaya devam eder; bir taslağı aktifleştirmek, içe aktarma ya da toplu atama yollarıyla oluşturulan kural atamaları hedefin ayarını otomatik kopyalamaz — böyle bir uyumsuzluk yine **Karışık ayar** rozetiyle görünür hâle gelir.
+:::
+
+### Rate Limit Kontrol Listesi ile Eşleme
+
+Kural atamaları, [Rate Limit Kontrol Listesi](/tr/admin/identity-management/rate-limit-kontrol-listesi) politikasının kimlik/hedef kitle mantığını aynı kavramlarla taşır; alan karşılıkları aşağıdaki gibidir:
+
+| Rate Limit Kontrol Listesi alanı | Kural atamasındaki karşılığı |
+|-----------------------------------|-------------------------------|
+| Kimlik Kaynağı | Kimlik kaynağı — aynı iki seçenek |
+| Uygulanan alan *(Apply by Variable)* | Kimlik kaynağı **Değişken seçimi** iken seçilen değişken |
+| Hedef Kitle (birden çok koşul, VEYA'lı) | Aynı kapsamda tanımlanmış birden çok kural ataması — her biri tek bir koşul taşır, aralarındaki VEYA doğal olarak sağlanır |
+| Hedef Tüketiciler (değer listesi) | **Koşul**'da **listede** operatörü, değer alanına `#` ile ayrılmış bir liste yazılarak |
+| Hedef-dışı Eylem | Hedef-dışı eylem — legacy'deki iki seçenek aynen taşınır. Üçüncü seçenek olan **Bu kuralı onlara uygulama** yenidir ve taşıma sırasında hiçbir zaman seçilmez. Legacy kayıtta bu ayar kural başınadır; typed tarafta ise artık [hedef başınadır](#hedef-ayari). |
+| Kota Modu ve Genel Kota Limitleri | Genel kota modu ve genel kota pencereleri — aynı iki seçenek |
+| Periyot Tipi | Pencerenin kendi Pencere Tipi alanı (Sabit / Kayan) |
+| Cache Bağlantısı Zaman Aşım Süresi, Cache Bağlantı Hatası Eylemi, Rate Limit İstatistiklerini Response Header'da Göster | Aynı üç alan, atamanın **Cache ve Yanıt** bölümünde |
+| Hata mesajı özelleştirme (şablon/içerik tipi/HTTP durum kodu) | Atamanın **Özel hata mesajı** bölümü, aynı değişken söz dizimiyle |
+| API'ler ve Endpoint'ler | Atamanın **Kapsam**ı — Tek API Proxy(+Ortam) / Tek API Proxy Grubu(+Ortam) ve HTTP metot ekseni |
+
+İki noktanın typed tarafında karşılığı yoktur:
+
+- **İşletme Sırası** — Rate Limit Kontrol Listesi altı konumdan birinde (proxy grubu/API proxy/API metodu politikalarının öncesi ya da sonrası) çalışacak şekilde ayarlanabilir. Typed kural ataması her zaman kimlik doğrulama politikasının bittiği anda çalışır — bu, listedeki "API metod politikalarından sonra" konumuna karşılık gelir; önceki konumların typed'ta bir karşılığı yoktur.
+- **Endpoint bazlı daraltma** — Rate Limit Kontrol Listesi belirli endpoint'leri tek tek seçtirir. Bu ekrandan **elle** oluşturulan typed Kapsam, bir API proxy'yi (isteğe bağlı HTTP metotlarıyla) ya da bir API proxy grubunu daraltır; tek bir endpoint'i yol bazında elle hedefleme bu sürümde bulunmaz. Yükseltme taşımasının kendisi bunun için ayrı bir **Tek API Uç Noktası** hedef tipi üretir — bkz. [Kapsam](#kapsam) ve aşağıda [Yükseltmede Taşınan Legacy Limitler](#yukseltmede-tasinan-legacy-limitler).
+
+Bir Rate Limit Kontrol Listesi kaydı, typed bir Kural Ataması'nın yanında çalışmaya devam etmek yerine bununla emekliye ayrılır — emekli durumu için bkz. [Rate Limit Kontrol Listesi](/tr/admin/identity-management/rate-limit-kontrol-listesi), kurallarına yükseltmede ne olduğu için ise bkz. aşağıda [Yükseltmede Taşınan Legacy Limitler](#yukseltmede-tasinan-legacy-limitler).
+
+## Mevcut Limitlerinizle Birlikte Çalışma {#mevcut-limitlerle-birlikte-calisma}
+
+**İstek Hızı** ailesi için durum bu sürümle değişti: bir API Proxy ACL / Group ACL satırındaki ortam bazlı Throttling/Quota değerleri ya da bir [Rate Limit Kontrol Listesi](/tr/admin/identity-management/rate-limit-kontrol-listesi) kaydı artık gateway tarafından **uygulanmaz** — bunlar birer ek tavan değil, yükseltme sırasında typed **İstek Hızı** planlarına ve atamalarına otomatik olarak taşınmış legacy tanımlardır (bkz. [Yükseltmede Taşınan Legacy Limitler](#yukseltmede-tasinan-legacy-limitler)). Bu tarihten sonra İstek Hızı için geçerli olan tek mekanizma bu sayfada anlatılan typed plan/atamalardır.
+
+**AI Token Bütçesi** ailesi için birlikte çalışma bu sürümle değişti: kuruluş, API proxy, proje ya da platform varsayılanı seviyesinde tanımlı bir [AI token bütçesi](/tr/ai-gateway/token-kotalari) ile aynı özneye ait bir typed atama, aynı sayaca ve aynı pencereye düştüğünde artık ayrı ayrı değerlendirilip üst üste düşülmez.
+
+:::info Aynı sayaç, tek rezervasyon, sıkı olan tavan kazanır
+Bir entity bütçesi (kuruluş / API proxy / proje / platform varsayılanı) ile aynı özneye ait bir typed atama aynı sayaca ve aynı pencereye düştüğünde, gateway **tek bir rezervasyon** yapar ve ikisinin **daha sıkı** olan tavanını uygular — aynı tüketim iki kez düşülmez. **Tümü**, **Tek API Proxy** ve **Tek API Proxy + Ortam** hedefleri öznenin tüm sayacını kapsar; **Tek AI Model** ve **Tek AI Sağlayıcı** hedefleri ise sayacın yalnızca o model/sağlayıcı boyutunu kapsar.
+:::
+
+Bu nedenle bir AI Token Bütçesi planı ya da özel atama tanımlamadan önce mevcut bütçe yapılandırmanızı kaldırmanız **gerekmez** — ikisi aynı tavanı iki kez uygulamaz, aralarında daha sıkı olan geçerli olur. İstek Hızı tarafında ise kaldırılacak ayrı bir yapılandırma yoktur — legacy tanımlar zaten typed tarafa taşınmıştır.
+
+## Limitlerin Uygulanması {#gölge-modu}
+
+**İstek Hızı** ailesindeki typed atamalar (Limitler sekmesindeki açık atamalar, Kural Atamaları ve abonelikten kaynaklanan atamalar) bu sürümle birlikte **gerçekten uygulanır**: gateway her istekte, isteği kapsayan atamaları ve pencerelerini sayaç servisine yansıtır ve bir pencere dolduğunda isteği reddeder — artık yalnızca karşılaştırma yapan bir gölge mekanizma değildir.
+
+:::warning Yalnızca kimlik doğrulama politikası olan API'lerde
+Typed İstek Hızı uygulaması, kimlik doğrulama politikasının (Basic/OAuth2/JWT/OIDC/mTLS vb.) tamamlandığı anda devreye girer — token isteklerinin kendisi hariç. Bir API proxy'sinde **hiç kimlik doğrulama politikası yoksa**, o proxy'ye gelen istekler için typed İstek Hızı ataması **uygulanmaz**, kapsıyor olsa bile.
+:::
+
+Uygulama sayaçları mevcut önbellek hizmetinde tutar ve Sabit/Kayan pencere davranışını mevcut (legacy) mekanizmayla bit-bit aynı şekilde hesaplar. Karar tablosu şöyledir:
+
+- Pencere dolmadıysa istek geçer; atama yanıt başlıklarında istatistik göstermeyi istiyorsa ilgili başlıklar eklenir.
+- Pencere dolduysa ve aşım eylemi **Engelle** ise istek `Retry-After` başlıklı `429 Too Many Requests` ile reddedilir. Hata tipi pencerenin biriminden türetilir — saniye/dakika pencereleri **hız sınırlama (throttling)**, saat/gün/ay pencereleri **kota (quota)** hatası olarak işaretlenir; bunlar [Hata Mesajları](/tr/admin/system-settings/hata-mesajlari) ekranındaki aynı hata kategorileridir. `Retry-After` değeri, pencerenin tamamını bildirmek yerine platform genelindeki bir tavanla sınırlıdır (varsayılan 1 gün; Worker üzerinde `apinizer.limit.retryAfterClampSeconds` JVM sistem özelliğiyle değiştirilebilir) — bu tavan hem İstek Hızı hem AI Token Bütçesi ailesinin engellemesinde aynı şekilde geçerlidir, çünkü ikisi de başlığı aynı mekanizma üzerinden damgalar.
+- Pencere dolduysa ama aşım eylemi **Yalnızca Say** ise istek reddedilmez, yalnızca sayılır.
+- Sayaç servisine bağlanırken hata oluşursa atamanın **Cache ve Yanıt** duruşu devreye girer: **Fail** (varsayılan) istek reddedilir, **Continue** hata loglanır ve istek işlenmeye devam eder.
+- Atamanın kendi **Özel hata mesajı** tanımlıysa, reddedilen istek için platform genelindeki varsayılan mesajın yerine geçer.
+
+Her karar `apinizer_limit_typed_decisions_total{family, outcome}` Prometheus sayacına yazılır (`outcome`: `granted` / `blocked` / `count_only` / `cache_error_continue` / `cache_error_fail` / `out_of_target_block`).
+
+Ayrıca bir gölge/parity karşılaştırması **yapılmaz** — karşılaştırılacak bir legacy uygulama yolu kalmadığından `apinizer_limit_shadow_comparisons_total` sayacı artık hiçbir aile için üretilmez; **AI Token Bütçesi** ailesi de dahil, gölge modu bu sürümde tamamen kaldırılmıştır (bkz. aşağıda).
+
+:::warning Yükseltme notu
+Bu sürümden önce (gölge modundayken) oluşturulmuş, hâlâ **Aktif** durumdaki İstek Hızı atamaları, bu sürüme yükseltildikten sonra otomatik olarak gerçek uygulamaya geçer — ayrıca bir işlem yapmanız gerekmez. Sayaçlar, önceki dönemde hiç rezervasyon yapılmadığı için **sıfırdan** başlar.
+:::
+
+:::warning Yükseltmede taşınan legacy limitler
+Yükseltme sonrasında Limit Planları kataloğunda `Migrated REQUEST_RATE #…` adlı planlar ve bunlara bağlı, kaynağı **Taşıma (Migration)** olan atamalar görebilirsiniz — bunlar, [Yükseltmede Taşınan Legacy Limitler](#yukseltmede-tasinan-legacy-limitler) bölümünde anlatıldığı gibi eski ACL/Rate Limit Kontrol Listesi tanımlarınızdan otomatik türetilmiştir. Bu planların ve atamaların sayaçları da, tüm typed İstek Hızı sayaçları gibi, **sıfırdan** başlar.
+:::
+
+### AI Token Bütçesi Ailesi Artık Gerçek Uygulanıyor
+
+**AI Token Bütçesi** ailesindeki typed atamalar bu sürümle birlikte **gerçekten uygulanır**: Consumer, API İstemcisi, Uygulama, Kuruluş, API Proxy, Proje ve Platform öznelerindeki bu aileden atamalar artık gerçek tavanlardır — önceki sürümde yalnızca gölge modundaydılar ve isteği tek başına reddetmiyorlardı.
+
+Bir entity bütçesi (kuruluş / API proxy / proje / platform varsayılanı) ile aynı özneye ait bir typed atama aynı sayaca ve aynı pencereye düştüğünde gateway **tek bir rezervasyon** yapar ve ikisinin **daha sıkı** olan tavanını uygular — aynı tüketim iki kez düşülmez (bkz. yukarıda "Mevcut Limitlerinizle Birlikte Çalışma"). **Tümü**, **Tek API Proxy** ve **Tek API Proxy + Ortam** hedefleri öznenin tüm sayacını kapsar; **Tek AI Model** ve **Tek AI Sağlayıcı** hedefleri ise sayacın yalnızca o model/sağlayıcı boyutunu kapsar.
+
+Bir atamanın çağıran kapsamı da tavanın kime uygulandığını belirler: yalnızca **Kimliksiz** (anonim) çağıranları hedefleyen bir atama sadece kimlik doğrulaması yapılmamış isteklere uygulanır ve proxy'nin kimlikli trafikten ayrı tutulan anonim sayacına (legacy anonim bucket) işlenir; yalnızca **Kimlikli** çağıranları hedefleyen bir atama sadece kimlik doğrulanmış isteklere, **Herhangi** ise her ikisine birden uygulanır — yalnızca-anonim bir tavan, kimlikli trafiğin paylaştığı proxy sayacına hiçbir zaman eklenmez. Aynı kural İstek Hızı atamaları için de geçerlidir.
+
+Bu ailede kural tabanlı (hedef kitle) atama **desteklenmez** — bkz. yukarıda [Kural Atamaları](#kural-atamaları). Her karar, İstek Hızı ailesiyle aynı `apinizer_limit_typed_decisions_total{family, outcome}` Prometheus sayacına yazılır; gölge modunu kapatan `apinizer.limit.shadow.enabled` JVM sistem özelliği ve `apinizer_limit_shadow_comparisons_total` sayacı bu sürümde kaldırılmıştır.
+
+### Develop Sekmesindeki Rozet
+
+Bir API proxy'sinin (ya da bir endpoint'inin) Develop sekmesinde, isteği kapsayan bir **typed İstek Hızı ataması** varsa **Rate Limit mevcut** rozeti görünür. Rate Limit Kontrol Listesi emekliye ayrıldığı için rozet artık yalnızca typed atamalardan hesaplanır — emekli bir Rate Limit Kontrol Listesi kaydı tek başına rozeti yakmaz. Politikaların metot sonrasında (After API Method) çalıştığı eski konuma karşılık gelen bir rozet durumu artık hiç yanmaz; typed atama her zaman kimlik doğrulama anında değerlendirilir. Rozete tıklandığında, o API'yi kapsayan atamaları özne, kapsam, plan/özel özet ve durumuyla listeleyen bir diyalog açılır. Her satırda özne adıyla (tüketici kullanıcı adı, API istemcisi / uygulama / organizasyon / proje adı) ve kapsam daraltılmışsa proxy ya da proxy grubu adıyla görünür. Develop sekmesi ve politika işletilme sırası için bkz. [Politika Yönetimi](/tr/develop/api-proxy-konfigurasyonu/politika-yonetimi).
+
+Öznesi artık mevcut olmayan bir satır, ham bir kimlik yerine **Silinmiş tüketici** (ya da uygulama, kurum, API istemcisi) etiketiyle işaretlenir ve o satır kendi **Sonlandır** eylemini taşır — böylece yükseltmeden önce silinmiş bir öznenin geride bıraktığı atama, öznenin kendi Limitler sekmesine gitmeye gerek kalmadan doğrudan bu diyalogdan kapatılabilir. **Sonlandır** eylemi burada, limitleri yönetme yetkisi olan herkese, her aktif satır için sunulur.
+
+:::note Önceki sürümden kalan atamalar
+Yükseltmede Apinizer, öznesi artık mevcut olmayan her atamayı sonlandırır ve nedenini *Öznesi artık mevcut değil* olarak kaydeder. Aynı denetim her gece yeniden koşar; böylece sonradan yetim kalan bir atama — bir kaydı değiştiren içe aktarma ya da elle yapılan bir veritabanı düzeltmesi yüzünden — yürürlükte kalmak yerine kendiliğinden kapanır.
+:::
+
+### Raporlar ve Uyarılar
+
+Bir kimlik bilgisine (Consumer) — ya da o kimlik bilgisinden taşınmış bir API istemcisine — ait typed İstek Hızı sayacı, o Consumer'ın mevcut sayaçlarına katılır ve [Kota Kullanımı](/tr/admin/identity-management/kota-kullanimi-ve-uyarilar) raporunda mevcut **Plan** tipi altında gösterilir; bu Consumer'ın Plan tipi sayaçlarını izleyen her uyarı tanımı bu sayaçları da otomatik yakalar — ayrı bir uyarı kuralı tanımlamanız gerekmez.
+
+Başka bir özneye (proje, kuruluş, API proxy, platform ya da bir kural ataması) ait typed sayaç ise kendi sayaç tipini korur; raporda **Diğer** etiketiyle gösterilir, ama yalnızca **Diğer sayaçları göster** açıldığında (varsayılan olarak kapalıdır) — tip filtresinde henüz adına özel bir seçenek yoktur. Bilinçli olarak, typed limitlerden önce yazılmış hiçbir uyarı tanımı bu sayaçları izlemeye başlamaz; bunu istiyorsanız ona özel bir uyarı tanımı oluşturmanız gerekir. Bu sayaçlara referans veren uyarı bildirim metni onu **Rate Limit** olarak etiketler.
+
+## Yükseltmede Taşınan Legacy Limitler {#yukseltmede-tasinan-legacy-limitler}
+
+Legacy İstek Hızı yolunun emekliye ayrıldığı bir sürüme yükseltildiğinde (bkz. yukarıda **Mevcut Limitlerinizle Birlikte Çalışma** ve [Limitlerin Uygulanması](#gölge-modu)), her legacy İstek Hızı limiti, Manager istekleri kabul etmeye başlamadan önce otomatik olarak typed bir Limit Planına ve atamasına dönüştürülür. Bu bölüm, bu dönüşümün tam olarak ne yaptığını anlatır.
+
+### Kaynaklar
+
+- Bir [API Proxy ACL](/tr/admin/identity-management/api-proxy-acl) ya da [API Proxy Grup ACL](/tr/admin/identity-management/api-proxy-grup-acl) satırının ortam bazlı her **Daraltma (throttling)** ve **Kota (quota)** ayarı.
+- Her [Rate Limit Kontrol Listesi](/tr/admin/identity-management/rate-limit-kontrol-listesi) kaydı.
+
+### Plan Oluşturma ve Tekilleştirme
+
+Tam olarak aynı kural gövdesini — aynı pencereleri ve aynı uygulama duruşunu — paylaşan satırlar, o gövdenin kanonik bir özet (checksum) değeriyle tanımlanan, proje başına **tek** bir planda toplanır; böylece binlerce legacy satır genellikle birkaç plana yakınsar:
+
+| Alan | Değer |
+|---|---|
+| Ad | `Migrated REQUEST_RATE #<özet>` (özetin ilk 8 onaltılık karakteri) |
+| Etiketler | `migrated`, `checksum:<özet>` |
+| Açıklama | "Migrated from legacy access-row / rate-limit-list limits: …" |
+| Aile | İstek Hızı |
+| Durum | **Yayında**, 1. revizyon |
+
+### Pencere Eşleme
+
+| Legacy alan | Typed pencere |
+|---|---|
+| Daraltma, 1 Saniye / 1 Dakika aralığı | Saniye / Dakika penceresi |
+| Kota, 1 Saat / 1 Gün / 1 Ay aralığı | Saat / Gün / Ay penceresi |
+| Aynı satırda hem daraltma hem kota | Aynı planda her iki pencere |
+
+Pencere Tipi (Sabit/Kayan) ve Sayım Modu her pencere için değiştirilmeden taşınır.
+
+### Uygulama Duruşu
+
+- **Cache bağlantı hatasında eylem**: legacy satırın daraltma ya da kota tarafından biri `FAIL` ise sonuç `FAIL` olur — daha sıkı olan duruş kazanır. İki taraf farklı bir duruş taşıyorsa bu birleştirme taşımanın denetim kaydına `CACHE_POSTURE_MERGED` olarak not düşülür.
+- **Cache bağlantı zaman aşımı**: iki legacy zaman aşımından büyük olanı kullanılır.
+- **Yanıt başlığında limit bilgisi göster**: legacy satırda ayarlıysa taşınır.
+- Bir Rate Limit Kontrol Listesi kaydının kendi özel hata mesajı, içerik tipi ve HTTP durum kodu, oluşan atamanın [özel hata mesajı](#kapsam) alanına taşınır.
+
+### Atama (Bağlama)
+
+Taşınan her satır bir atama olur: mod **Plan**, kaynak **Taşıma (Migration)**, durum **Aktif**; satırın bir son kullanma tarihi varsa atamanın bitiş tarihi de o tarihe ayarlanır.
+
+| Legacy satır | Özne | Kapsam |
+|---|---|---|
+| API Proxy ACL / API Proxy Grup ACL satırı | Kimlik bilgisinin (Consumer) kendisi — Consumer sonradan bir API istemcisine dönüştürülmüş ya da [**Yalnız Consumer**](/tr/admin/identity-management/kimlik-bilgileri#karar-degerleri) olarak kalmış olsun fark etmez; ikizi bir portal uygulamasına aitse özne bunun yerine **API istemcisi**dir (client kimliği) | Satırın ortamıyla eşleşen [Tek API Proxy + Ortam](#kapsam) / Tek API Proxy Grubu + Ortam |
+| Rate Limit Kontrol Listesi kuralı | Yukarıdaki satırla aynı özne kuralı | [Tek API Uç Noktası](#kapsam) (kuralın uç noktası) / [Tek API Proxy](#kapsam) (tüm uç noktalar için kural) / Tek API Proxy Grubu |
+
+Bir Rate Limit Kontrol Listesi kaydının **Hedef Tüketiciler** listesi legacy'de o kaydın **izin listesi**ydi: listede olmayan her kimlik hedef-dışı eylemle (Akışı durdur ya da genel kota) karşılaşırdı. Taşıma bu listeyi iki şekilde işler:
+
+- Listedeki her Consumer için, yukarıdaki satırda anlatıldığı gibi ayrı bir **açık atama** yazılır — bu Consumer kendi tavanını korur.
+- Listenin tamamı için ayrıca **tek bir kural ataması** yazılır: [Koşul](#kural-atamaları) **listede (`IN`)** operatörüyle, değer olarak listedeki kimliklerin çözümlenmiş hâlleri (kullanıcı adı ya da API istemcisinin client kimliği); hedef-dışı eylem ve genel kotanın kendisi bu kuralın üzerindedir.
+
+Sonuç olarak listede olan bir tüketici her zaman kendi açık atamasını kullanmaya devam eder (açık atama kuralı geçersiz kılar — bkz. yukarıda [Kural Atamaları](#kural-atamaları)); listede olmayan bir tüketici ise legacy'deki gibi hedef-dışı eyleme düşer.
+
+Kaydın **Hedef Kitle** koşulları ve (Hedef Tüketiciler listesinde henüz kapsanmayan) eşitlik bazlı hedef kimlik değerleri de aynı şekilde [kural atamalarına](#kural-atamaları) dönüşür: kimlik kaynağı (kimlik doğrulamadan gelen ya da değişken), hedef-dışı eylem (Akışı durdur ya da genel kota) ve genel kotanın kendisi (Tüm hedef-dışı için tek ortak kota/Her hedef-dışı kimlik için ayrı kota, kendi penceresiyle) kurala aynen taşınır.
+
+Hedef-dışı eylemi **Genel kota uygula** olan ama genel kota alanları boş bırakılmış bir kayıtta, legacy çalışma zamanının yaptığı gibi genel kota olarak **kuralın kendi endpoint limiti** kullanılır (ledger: `GENERAL_QUOTA_FALLBACK`). Ne bir tüketici listesi ne de eşleşen bir kimlik/kural taşıyan bir kayıtta (boş hedef kitle) hiçbir şey taşınmaz (ledger: `EMPTY_AUDIENCE_SKIPPED`).
+
+### AI Bütçeleri {#ai-butceleri}
+
+Bir [API Proxy ACL](/tr/admin/identity-management/api-proxy-acl) satırının ortam bazlı **AI token bütçesi** alanı da — etkinse — aynı yükseltmede, Request Rate ile aynı akışın bir parçası olarak ama kendi ailesinde, typed bir Limit Planına ve atamasına dönüştürülür:
+
+| Alan | Değer |
+|---|---|
+| Ad | `Migrated AI_TOKEN_BUDGET #<özet>` (özetin ilk 8 onaltılık karakteri) |
+| Etiketler | `migrated`, `checksum:<özet>` |
+| Aile | AI Token Bütçesi |
+| Durum | **Yayında**, 1. revizyon |
+
+Oluşan atama: mod **Plan**, kaynak **Taşıma (Migration)**, durum **Aktif**, kapsam satırın proxy'si ve ortamıyla eşleşen [Tek API Proxy + Ortam](#kapsam); özne satırın kimlik bilgisinin (Consumer) kendisi — ikizi bir portal uygulamasına aitse özne bunun yerine **API istemcisi**dir; satırın bir son kullanma tarihi varsa atamanın bitiş tarihi de o tarihe ayarlanır.
+
+Sayaç **sıfırlanmaz**: atama, legacy satırın kullandığı aynı sayaç havuzuna yazar, bu yüzden pencere içindeki mevcut tüketim aynen devam eder — Request Rate'in aksine burada sıfırdan başlama yoktur. Taşınmış bir API istemcisi de eski kimlik bilgisinin sayaç havuzunda kalmaya devam eder.
+
+### Taşınmayan (Yalnızca Raporlanan)
+
+Aşağıdakilerin typed tarafta bir karşılığı yoktur, bilinçli olarak atlanır ya da farklı bir değerle taşınır; her biri taşımanın denetim kaydına adıyla düşülür — sessizce atlanan hiçbir satır kalmaz:
+
+| Legacy öğe | Sonuç |
+|---|---|
+| Kota/Daraltma **Limit Değişim Eylemi** (Kırp / Sıfırla) | Düşer — typed karşılığı yok |
+| Bir Rate Limit Kontrol Listesi kaydının **koşulu** | Düşer; kuralın geri kalanı yine de taşınır |
+| Bir Rate Limit Kontrol Listesi kaydının **İşletme Sırası**'nın "API metod politikalarından sonra" (`LAST`) olarak ayarlanması | Düşer; typed bir atama her zaman kimlik doğrulama anında değerlendirilir — bkz. [Limitlerin Uygulanması](#gölge-modu) |
+| **Devre dışı** bir Rate Limit Kontrol Listesi kaydı | Taşınmaz |
+| Bir ortamda **devre dışı bırakılmış** bir satır | Atlanır; ledger: `ENV_DISABLED_SKIPPED` |
+| Süresi dolmuş bir satır | Atlanır |
+| Silinmiş bir API/gruba/uç noktaya işaret eden bir kural | Atlanır; ledger: `RULE_TARGET_MISSING` |
+| Limit alanları eksik ya da boş bırakılmış bir satır | Atlanır; ledger: `LIMIT_INCOMPLETE_SKIPPED` |
+| Kendi limiti (penceresi) hiç tanımlanmamış bir Rate Limit Kontrol Listesi kuralı | Atlanır; ledger: `RULE_WITHOUT_LIMIT` |
+| Aynı satırda daraltma ve kota için farklı cache-hata duruşları | Taşınır — ikisi için de daha sıkı olan (**Fail**) duruş kullanılır; ledger: `CACHE_POSTURE_MERGED` |
+| Hedef-dışı eylemi **Genel kota uygula** olan ama genel kota alanları boş bırakılmış bir kural | Taşınır — genel kota olarak kuralın kendi endpoint limiti kullanılır; ledger: `GENERAL_QUOTA_FALLBACK` |
+| Ne bir tüketici listesi ne de eşleşen bir kimlik/kural taşıyan bir kayıt (boş hedef kitle) | Hiçbir şey taşınmaz; ledger: `EMPTY_AUDIENCE_SKIPPED` |
+| **Portal kaynaklı** (abonelik/ürün) bir satır | Atlanır — bunun yerine Abonelik Planı ataması geriye dönük doldurmasıyla taşınır; bkz. aşağıdaki **Mevcut Abonelik Planlarının Yükseltilmesi** bölümü |
+| Bir erişim satırının **AI Bütçe Kaynağı**'nın **Kuruluş** olması | Satırın kendi AI token bütçesi zaten hiç uygulanmıyordu (yalnızca kuruluş zinciri geçerliydi) — taşınmaz; ledger: `AI_LEAF_EXCLUDED_BY_SOURCE` |
+| AI token bütçesi etkin ama bütçenin kendisi devre dışı ya da hiçbir tavan tanımlamıyor | Atlanır; ledger: `AI_BUDGET_INCOMPLETE_SKIPPED` |
+| AI token bütçesi etkin ama satır hiçbir API proxy belirtmiyor | Atlanır; ledger: `AI_BUDGET_TARGET_MISSING` |
+
+Taşımayı yeniden çalıştırmak idempotenttir: önceki bir çalıştırmadan zaten aktif bir ataması olan bir özne/hedef çifti olduğu gibi bırakılır, tekrar yazılmaz.
+
+## Portal Abonelik Planından Referans {#portal-abonelik-plani}
+
+Yayınlanmış, platform kapsamlı bir plana, Limitler sekmesinden elle atamanın yanı sıra (ya da onun yerine) bir portal API Ürününün **Abonelik Planı**ndan — bir geliştiricinin abone olduğu ticari plandan — da referans verilebilir. Bunun ürün tarafında nasıl yapılandırıldığı ve somutlaştığı için bkz. [API Ürünü → Abonelik Planı Limit Profilleri](/tr/api-portal/api-urunu#abonelik-plani-limit-profilleri) ve [→ Tipli Limit Bağlama](/tr/api-portal/api-urunu#tipli-limit-baglama); bu bölüm limit tarafında olanı anlatır.
+
+Bir Abonelik Planı en fazla bir İstek Hızı planına ve bir AI Token Bütçesi planına referans verebilir; her biri **Kapalı** ya da yayınlanmış belirli bir plandır. Referans verilen planın aşım davranışı, Abonelik Planının kendi aşım ayarıyla tutarlı olmalıdır — **Engelle** yalnızca engelleyen bir planla, **Devam et & faturalandır** yalnızca sayan bir planla (İstek Hızı için Yalnızca Say, AI Token Bütçesi için Yalnızca Uyar) eşleşebilir; uyumsuzluk, Abonelik Planı kaydedilirken reddedilir.
+
+O plana ait bir abonelik **onaylandığında**, referans verilen her aile için, abone olan uygulama için otomatik olarak bir **Aktif** atama oluşturulur — [yukarıda anlatılan](#limitler-sekmesi) atamayla aynı türden, ama elle girilmek yerine abonelikten kaynaklanan, tek bir API'ye değil uygulama geneline bağlı bir atamadır ve aynı uygulama durumunu taşır: her iki aile için de **gerçek uygulama**.
+
+Bir uygulamanın aile başına yalnızca bir böyle ataması olabilir. Aynı uygulamanın ikinci, farklı bir aboneliği de o aile için bir plana referans veriyorsa mevcut atama **korunur** ve ikinci aboneliği onaylayan operatöre bunu koruyup korumayacağı ya da yeni plana geçip geçmeyeceği sorulur. Atamaya sahip abonelik sona erdiğinde atama, aynı uygulamanın aynı aileye referans veren başka bir onaylı aboneliğine devredilir (varsa) — kapsam ve birikmiş kullanım kaybolmaz; yoksa atama da onunla birlikte sona erer.
+
+### Mevcut Abonelik Planlarının Yükseltilmesi
+
+Yükseltme sırasında, hâlihazırda kota ya da hız sınırı sayıları taşıyan Abonelik Planları otomatik olarak dönüştürülür: eşleşen bir platform kapsamlı İstek Hızı planı oluşturulur ve Abonelik Planı ona işaret eder — mevcut abonelikler için hiçbir şey değişmez. Yükseltmeden önce zaten **onaylanmış** olan abonelikler atamalarını otomatik almaz — sistem yöneticisi, mevcut birikimi için bunu oluşturan tek seferlik bir geriye dönük doldurma işlemi çalıştırır (varsayılan olarak önizlenir, istek üzerine uygulanır). Portal tarafındaki özet için bkz. [API Ürünü → Sürüm Yükseltmesi](/tr/api-portal/api-urunu#surum-yukseltmesi); geriye dönük doldurma uç noktası için bkz. [Limit Planları, Atamalar ve Varsayılanlar API](/api-reference/limit-plans) referansı.
+
+## Sonraki Adımlar
+
+<CardGroup cols={2}>
+  <Card title="Token Kotaları ve Hız Sınırlaması" icon="dollar-sign" href="/tr/ai-gateway/token-kotalari">
+    Kuruluş/proje/uygulama seviyesindeki mevcut kota ve bütçe katmanlarını inceleyin
+  </Card>
+  <Card title="Kimlik Bilgileri" icon="key" href="/tr/admin/identity-management/kimlik-bilgileri">
+    API istemcisi yaşam döngüsünü ve API İstemcileri sekmesini inceleyin
+  </Card>
+  <Card title="Erişim Kontrolü ve Roller" icon="shield" href="/tr/ai-gateway/erisim-kontrolu-rbac">
+    Limit Planları ekranlarını kimlerin görebileceğini/yönetebileceğini yapılandırın
+  </Card>
+  <Card title="API Ürünü" icon="package" href="/tr/api-portal/api-urunu#abonelik-plani-limit-profilleri">
+    Bir Abonelik Planından platform Limit Profiline referans verin
+  </Card>
+  <Card title="Limit Assignment Runs API" icon="layers" href="/api-reference/limit-assignment-runs">
+    Toplu atamayı APIops ile önizleyin, başlatın ve izleyin
+  </Card>
+  <Card title="Limit Plans Management API" icon="server" href="/api-reference/limit-plans-management-api">
+    Management API üzerinden Limit Planı oluşturun, güncelleyin ve silin
+  </Card>
+  <Card title="Limit Assignments API" icon="link" href="/api-reference/limit-assignments">
+    Management API üzerinden tekil Limit Planı atamalarını yapın, değiştirin ve kaldırın
+  </Card>
+</CardGroup>

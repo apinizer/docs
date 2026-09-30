@@ -1,0 +1,126 @@
+---
+title: "Management API Hata ve Yeniden Deneme Davranışı"
+description: "Management API hata yanıtlarını otomasyonunuzda nasıl okuyabileceğinizi, lisans sorunlarını yetki sorunlarından nasıl ayırabileceğinizi, idempotency anahtarı ile güvenle yeniden deneme yapabileceğinizi ve kaydedildiği hâlde her ortama ulaşmamış bir yapılandırmayı nasıl fark edebileceğinizi öğrenin."
+---
+
+import {Steps, Step} from '@site/src/components/Steps';
+
+## Bu davranış hangi uçlar için geçerli
+
+Apinizer Management API'si CI/CD hatları ve otomasyon betikleri tarafından kullanılır. Yeni uçlar; hata, yeniden deneme ve dağıtım geri bildirimi konusunda ortak bir davranışı paylaşır. Bu uçları yanıttan tanıyabilirsiniz: içinde `errorKey` alanı bulunan bir hata gövdesi burada anlatılan davranışı izler. Eski uçlar bunun yerine düz bir mesaj döndürür ve davranışları değişmemiştir.
+
+İki biçim aynı anda kullanılabilir durumdadır; bu nedenle bir süre önce yazılmış bir hat çalışmaya devam eder.
+
+## Hata yanıtını okuma
+
+Bir hata yanıtı otomasyonunuza üç şey söyler:
+
+- **`errorKey`** — kısa ve sabit bir neden kodu. Hattınız bu değere göre dallanmalıdır. Sürümler arasında değişmez.
+- **`message`** — nedenin, Apinizer arayüzünün çevirebileceği biçimi. Son kullanıcıya olduğu gibi gösterilecek bir cümle değildir.
+- **`correlationId`** — o tek isteğin kimliği.
+
+Kararınızı asla hata metnini eşleştirerek vermeyin. Metin yeni bir sürümde değişebilir, neden kodu değişmez.
+
+:::tip
+
+Başarısız olan her çağrının yanında `correlationId` değerini de kaydedin. Bir destek talebi açtığınızda bu değer, Apinizer ekibinin ilgili isteği zaman aralığı tarayarak aramak yerine sunucu günlüklerinde doğrudan bulmasını sağlar.
+
+:::
+
+## Lisans, yetki ve görünürlük
+
+Bir hat günlüğünde birbirine benzeyen üç ret, tamamen farklı müdahaleler gerektirir:
+
+| Gördüğünüz | Anlamı | Yapılması gereken |
+|------------|--------|-------------------|
+| Payment Required, `licenseInvalidOrExpired` | Kurulumda geçerli bir lisans yok veya lisansın süresi dolmuş | Apinizer temsilcinizle iletişime geçin. Yeniden denemek işe yaramaz, yapılandırma değişikliği de bu durumu gidermez. |
+| Forbidden, `licenseModuleNotEnabled` | Lisans geçerli, ancak bu işlemin ait olduğu modülü kapsamıyor | Modülün lisansa eklenmesi gerekir |
+| Forbidden, `managementApiDisabled` | Bu kurulumda Management API kapalı | Yönetici sistem ayarlarından açar |
+| Forbidden, `permissionDenied` | Token'ın ait olduğu kullanıcıda gerekli yetki yok | O yetkiyi, ilgili projede kullanıcıya verin |
+| Not Found, `resourceNotFound` | O adreste bu kullanıcıya görünen bir şey yok | Adı kontrol edin — ayrıca kullanıcının o projeye erişimi olup olmadığını da kontrol edin |
+
+:::warning
+
+Not Found yanıtı, nesnenin var olmadığını kanıtlamaz. Apinizer "orada yok" ile "görmenize izin yok" durumlarını tam olarak aynı şekilde yanıtlar; böylece yetkisiz bir çağıran, API'yi neyin var olduğunu keşfetmek için kullanamaz. Nesnenin orada olduğundan eminseniz, token'ını kullandığınız kullanıcının proje erişimini kontrol edin.
+
+:::
+
+## Güvenli yeniden deneme
+
+Şunları yeniden deneyin:
+
+- Yanıtı hiç görmediğiniz bir ağ zaman aşımı veya kopan bağlantı
+- `temporarilyUnavailable` ile gelen Service Unavailable
+
+Şunları yeniden denemeyin — istek her seferinde aynı şekilde reddedilir:
+
+- Bad Request yanıtlarının tamamı. Düzeltilmesi gereken şey isteğin kendisidir.
+- Unauthorized yanıtlarının tamamı. Yeni bir token üretin.
+- Payment Required ve Forbidden yanıtlarının tamamı. Lisansın veya yetkinin değişmesi gerekir.
+- Conflict yanıtlarının tamamı. Mevcut durum isteği reddediyor; nesneyi okuyup karar verin.
+
+## Bir işlemi ikinci kez oluşturmadan tekrarlama
+
+Bir şey oluşturan ve kimlik bilgisi üreten işlemler bir idempotency anahtarı ister: sizin ürettiğiniz, istekle birlikte gönderdiğiniz ve aynı işlemi yeniden denerken tekrar kullandığınız bir değer.
+
+Bir hattı kendi yeniden denemelerine karşı güvenli kılan şey budur. Bir oluşturma isteği zaman aşımına uğradıysa ve başarılı olup olmadığını bilmenizin bir yolu yoksa, isteği aynı anahtarla tekrar göndermek ikinci bir nesne üretemez.
+
+<Steps>
+<Step title="Her işlem için bir değer üretin">
+Birbirinden farklı her işlem için yeni bir değer üretin; rastgele bir kimlik idealdir. Bu değeri her deneme için değil, hat adımının yanında saklayın.
+</Step>
+
+<Step title="Her denemede aynı değeri gönderin">
+Aynı işlemin yeniden denemesi aynı değeri taşımalıdır. Farklı bir değer "yeni bir işlem" demektir ve ikinci bir nesne oluşturur.
+</Step>
+
+<Step title="Çakışma yanıtlarını ele alın">
+İlk deneme hâlâ sürüyorsa bunu bildiren bir çakışma yanıtı alırsınız; bekleyip nesneyi okuyun. İşlem zaten tamamlandıysa yine bir çakışma alırsınız: iş yapılmıştır, tekrarlamak yerine nesneyi okuyun. Bir anahtarı yanlışlıkla farklı bir istek için yeniden kullandıysanız bu ayrıca bildirilir; yeni bir anahtar kullanmalısınız.
+</Step>
+</Steps>
+
+:::warning
+
+İlk yanıt ikinci kez gönderilmez. Tamamlanmış bir işlemi yeniden denediğinizde Apinizer size işlemin zaten tamamlandığını söyler; ilk yanıtı tekrarlamaz. Bu, en çok gizli bir değer üreten işlemlerde önemlidir: üretilen değer yalnızca bir kez, ilk başarılı çağrıda gösterilir. Değeri o anda saklayın, çünkü sonradan geri alınamaz.
+
+:::
+
+Anahtarlar 24 saat boyunca hatırlanır; yeniden denemenin anlamlı olduğu pencere budur.
+
+## Kaybolan güncellemeyi önleme
+
+İki hat aynı nesneyi düzenlediğinde, koruma istemediğiniz sürece ikincisi birincisinin yazdığını sessizce ezer.
+
+Bunu destekleyen nesneler, siz onları okuduğunuzda bir sürüm bilgisi bildirir. Bu sürümü değişikliğinizle birlikte geri gönderirsiniz; bu arada nesneyi bir başkası değiştirdiyse Apinizer yazmayı reddeder. Bu durumda nesneyi yeniden okur, değişikliğinizi güncel durumun üzerine uygular ve tekrar yazarsınız.
+
+Sürümü göndermezseniz son yazan kazanır.
+
+## Kaydedildi, ancak her ortama gitmedi
+
+Bir yapılandırma değişikliği iki ayrı iştir: değişikliği saklamak ve çalışan gateway'lere ulaştırmak. Bu ikisinin sonucu farklı olabilir.
+
+Bir yazma işlemi başarılı olduğunda yanıt, dağıtım durumunu da bildirir:
+
+- **Eşitlendi** — tüm ortamlar değişikliği onayladı.
+- **Kısmi (degraded)** — değişiklik saklandı, ancak en az bir ortam onaylamadı. Yanıt, hangi ortamların onaylamadığını ve nedenini belirtir.
+- **Beklemede** — dağıtım hâlâ sürüyor.
+
+:::warning
+
+Kısmi sonuç **başarılı** bir yanıt olarak gelir, çünkü değişiklik gerçekten kaydedilmiştir. Yazmayı tekrarlamak bunu düzeltmez; yalnızca aynı şeyi yeniden kaydetmiş olursunuz. Hangi ortamın onaylamadığına bakın, nedenini giderin (genellikle erişilemeyen bir gateway olur) ve yeniden dağıtın.
+
+Kısmen uygulanmış bir değişiklikle devam etmemesi gereken bir hat, yalnızca çağrının başarılı olup olmadığına değil, dağıtım durumuna da açıkça bakmalıdır.
+
+:::
+
+## Değişen davranış
+
+Az sayıda uçta, iki hata daha önce sunucu hatası olarak bildiriliyordu: bulunamayan bir proje ve doğrulanamayan bir token. Bunlar artık duruma göre Bad Request, Unauthorized, Forbidden veya Not Found olarak, yani sıradan istemci hataları olarak bildirilir.
+
+:::note
+
+Hattınız sunucu hatalarında yeniden deneme yapıyorsa gözden geçirin. Bu iki durum artık otomatik olarak yeniden denenmeyecektir; doğru davranış budur, çünkü ikisi de ikinci denemede başarılı olmaz. Ancak yanlış bir proje adını yeniden denemeyle gizleyen bir hat, bundan sonra anında ve görünür biçimde hata verecektir.
+
+:::
+
+Alan düzeyindeki ayrıntılar, istek başlıkları ve durum kodları için Management API referans dokümantasyonuna bakın.

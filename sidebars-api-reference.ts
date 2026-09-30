@@ -18,6 +18,7 @@ const sidebars: SidebarsConfig = {
         "getting-started/authentication",
         "getting-started/base-url",
         "getting-started/error-handling",
+        "apiops-common-contract",
         "overview",
         "auth",
         {
@@ -60,6 +61,7 @@ const sidebars: SidebarsConfig = {
                 "api-proxies/crud/create-api-proxy-from-file",
                 "api-proxies/crud/create-ai-api-proxy",
                 "api-proxies/crud/create-mcp-api-proxy",
+                "api-proxies/crud/create-mcp-gateway-from-api-proxy",
                 "api-proxies/crud/create-a2a-api-proxy",
                 "api-proxies/crud/update-api-proxy",
                 "api-proxies/crud/update-api-proxy-from-url",
@@ -188,7 +190,8 @@ const sidebars: SidebarsConfig = {
             "export-import/list-supported-types",
             "export-import/list-objects",
             "export-import/export-objects",
-            "export-import/import-objects"
+            "export-import/import-objects",
+            "transfer-v2"
           ]
         },
         {
@@ -758,12 +761,20 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "ai-gateway",
-            { "type": "category", "label": "LLM Provider Definitions", "collapsed": true, "collapsible": true, "items": ["llm-provider-definitions", "llm-provider-definitions/list-llm-provider-definitions", "llm-provider-definitions/get-llm-provider-definition", "llm-provider-definitions/create-llm-provider-definition", "llm-provider-definitions/update-llm-provider-definition", "llm-provider-definitions/delete-llm-provider-definition"] },
             { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/test-llm-provider-connection"] },
             { "type": "category", "label": "Model Catalog", "collapsed": true, "collapsible": true, "items": ["llm-models", "llm-models/list-llm-models", "llm-models/get-llm-model", "llm-models/create-llm-model", "llm-models/update-llm-model", "llm-models/delete-llm-model"] },
             { "type": "category", "label": "VectorDB Connections", "collapsed": true, "collapsible": true, "items": ["vector-dbs", "vector-dbs/list-vector-dbs", "vector-dbs/get-vector-db", "vector-dbs/create-vector-db", "vector-dbs/update-vector-db", "vector-dbs/delete-vector-db", "vector-dbs/test-vector-db-connection"] },
             { "type": "category", "label": "Knowledge Bases", "collapsed": true, "collapsible": true, "items": ["knowledge-bases", "knowledge-bases/list-knowledge-bases", "knowledge-bases/get-knowledge-base", "knowledge-bases/create-knowledge-base", "knowledge-bases/update-knowledge-base", "knowledge-bases/delete-knowledge-base", "knowledge-bases/reindex-knowledge-base", { "type": "category", "label": "Documents", "collapsed": true, "collapsible": true, "items": ["knowledge-bases/documents/upload-document", "knowledge-bases/documents/list-documents", "knowledge-bases/documents/get-document", "knowledge-bases/documents/delete-document", "knowledge-bases/reindex-knowledge-document"] }] },
             { "type": "category", "label": "AI Budgets", "collapsed": true, "collapsible": true, "items": ["ai-budgets", "ai-budgets/get-budget-scope-rules", "ai-budgets/get-budget-hierarchy", "ai-budgets/get-effective-limit", "ai-budgets/update-budget"] },
+            "limit-plans",
+            "limit-assignment-runs",
+            "limit-plans-management-api",
+            "limit-assignments",
+            "api-clients",
+            "consumers-and-applications",
+            "usage-reports",
+            "identity-sync-runs",
+            "lifecycle-purge-runs",
             { "type": "category", "label": "AI Privacy Presets", "collapsed": true, "collapsible": true, "items": ["ai-privacy-presets", "ai-privacy-presets/list-ai-privacy-presets", "ai-privacy-presets/get-ai-privacy-preset", "ai-privacy-presets/create-ai-privacy-preset", "ai-privacy-presets/update-ai-privacy-preset", "ai-privacy-presets/delete-ai-privacy-preset"] },
             { "type": "category", "label": "AI Prompt-Guard Presets", "collapsed": true, "collapsible": true, "items": ["ai-prompt-guard-presets", "ai-prompt-guard-presets/list-ai-prompt-guard-presets", "ai-prompt-guard-presets/get-ai-prompt-guard-preset", "ai-prompt-guard-presets/create-ai-prompt-guard-preset", "ai-prompt-guard-presets/update-ai-prompt-guard-preset", "ai-prompt-guard-presets/delete-ai-prompt-guard-preset"] },
             { "type": "category", "label": "AI DLP Presets", "collapsed": true, "collapsible": true, "items": ["ai-dlp-presets", "ai-dlp-presets/list-ai-dlp-presets", "ai-dlp-presets/get-ai-dlp-preset", "ai-dlp-presets/create-ai-dlp-preset", "ai-dlp-presets/update-ai-dlp-preset", "ai-dlp-presets/delete-ai-dlp-preset"] },
@@ -781,7 +792,9 @@ const sidebars: SidebarsConfig = {
           "items": [
             "reports",
             "reports/api-report",
-            "reports/organization-api-data-model-access-report"
+            "reports/organization-api-data-model-access-report",
+            "reports/inactive-clients-report",
+            "reports/inactive-endpoints-report"
           ]
         },
         {
@@ -807,6 +820,15 @@ const sidebars: SidebarsConfig = {
             "token-service/introspection",
             "token-service/revocation",
             "token-service/discovery"
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Integration Task Flow Endpoint",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "integration-task-flow-endpoint"
           ]
         },
         {

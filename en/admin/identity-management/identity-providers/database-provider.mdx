@@ -46,5 +46,135 @@ select role_name from t_user_role where email=:username
 
 ## Synchronization
 
-Using the **Identity Synchronization Profile** tab on the Database Provider edit screen, you can synchronize users from this source into [Credential](/en/admin/identity-management/credentials) records. For field descriptions, scheduling, and monitoring, see [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync).
+Using the **Identity Synchronization Profile** tab on the Database Provider edit screen, you can synchronize users from this source into [Credential](/en/admin/identity-management/credentials) records. For the fields shared with every source — enable/cron, deactivation mode, synchronization scope, and the reconciliation safety net — see [Credential Sync](/en/admin/identity-management/identity-providers/credential-sync). The tab's **Synchronize Now** button becomes available only after the provider has been saved once; it does not appear yet on the create screen.
+
+### User Query Columns
+
+The **User List Query** is a parameterless SELECT statement. Apinizer reads its result by column alias, case-insensitively, so the query can name its own columns however the source needs and use `AS` to line them up with the aliases below.
+
+| Alias | Required | Meaning |
+|---|---|---|
+| `username` | Yes | Login name. If no `username` alias is present in the query result, the first column is used instead. A row with neither a username nor an e-mail is skipped. |
+| `email` | No | E-mail address. |
+| `full_name` (or `fullname`) | No | Full name. |
+| `external_id` | No | Stable identity at the source. Destructive operations stay off while it is empty — see [Reconciliation Safety Net](/en/admin/identity-management/identity-providers/credential-sync#reconciliation-safety-net). |
+| `enabled` | No | Account state at the source. Recognized values (case-insensitive): `true`, `1`, `y`, `yes`, `t`, `active`, `enabled` mean active; `false`, `0`, `n`, `no`, `f`, `inactive`, `disabled` mean inactive. Anything else is taken as active and recorded as an issue — see [Preview Issues](#preview-issues) below. |
+| `organization_path` | No | Organization path of the user, for example `/Head Office/IT`. |
+| `organization_external_id` | No | Stable identity of that organization. |
+
+### Organization List Query
+
+An optional second query, **Organization List Query**, returns the organization tree to reconcile against. Leaving it empty is valid — the tree is then derived entirely from the `organization_path` values on the user rows.
+
+| Alias | Required | Meaning |
+|---|---|---|
+| `path` | Yes, once this query is configured | Full organization path. |
+| `name` | No | Display name. The last path segment is used when it is empty. |
+| `external_id` | No | Stable identity of the organization. |
+| `parent_path` | No | Path of the parent organization. It is derived from `path` when empty. |
+
+:::note
+
+The examples below use PostgreSQL syntax — only the column aliases matter, not the SQL dialect.
+
+:::
+
+```sql
+SELECT login AS username, mail AS email, display_name AS full_name,
+       emp_no AS external_id, status AS enabled, dept_path AS organization_path
+FROM users;
+
+SELECT unit_path AS path, unit_name AS name, unit_code AS external_id, parent_unit_path AS parent_path
+FROM units;
+```
+
+### What Can Go Wrong
+
+| Situation | Result |
+|---|---|
+| `organization_path` is not one of the query's columns | The field is never read; a synchronized user keeps the organization it already has. |
+| `organization_path` is present but blank on a row | That user is linked to no organization, and the run records a diagnostic. |
+| `external_id` is present but blank on some rows | For those rows the stable identity is treated as missing; the run falls back to matching by user name for them, so renaming a user in the source looks like a removal. |
+| An `enabled` value is not recognized | The account is taken as active, and the run records a diagnostic. |
+| `organization_path` uses a backslash instead of a forward slash, or is malformed otherwise | The path is treated as malformed; write it with `/` as the separator. |
+
+## Connection Test and Source Preview
+
+Alongside the existing **Test Connection** button (above, using **Test Username**/**Test Password**/**Environment**), the provider's edit screen offers three more diagnostic tools. All three work against the query and connection currently entered in the form, and none of them writes anything.
+
+| Action | What it does |
+|---|---|
+| **Test connection (step by step)** | Measures the connection in 9 separate steps and shows each one on its own row — see [Connection Test Step Matrix](#connection-test-step-matrix). |
+| **Preview** | Reads the first rows the User List Query (and, if configured, the Organization List Query) would return — see [Source Preview](#source-preview). |
+| **Explain** | Walks a single username through the same steps synchronization itself takes, and shows the outcome of each — see [Explain User](#explain-user). |
+
+:::info
+
+All three send requests, from the Manager, using the connection and queries currently entered in the form — they therefore require the "Manage Authentication Services" permission, the same as saving the provider.
+
+:::
+
+### Connection Test Step Matrix
+
+**Test connection (step by step)** opens a **Connection Test** dialog. Each step is measured separately, so you can see exactly where the connection breaks. If a step fails, every step after it is reported as **Not applicable**.
+
+| # | Step |
+|---|---|
+| 1 | Configuration Check |
+| 2 | Connection Pool |
+| 3 | Database Connection |
+| 4 | User Query |
+| 5 | Column Contract |
+| 6 | Account State Values |
+| 7 | Organization Path |
+| 8 | Organization List Query |
+| 9 | Sample Rows |
+
+The result table shows, for each step, its status (**Succeeded**, **Failed**, **Not applicable**, or **Unsupported**), duration, an explanation, and — when relevant — the HTTP status, a provider code, a suggestion, and a technical detail.
+
+### Source Preview
+
+**Preview** opens a **Source Preview** dialog. This preview runs the user query and reads the first rows; it creates, updates, and deactivates nothing.
+
+- The number of rows read is capped at 200.
+- Turning on **Dry run** reads every page and reports what a synchronization run would change, still without writing anything.
+- Results are shown on three tabs: **Users**, **Organizations**, **Issues**.
+- The **Users** tab shows, per row: User Name, Full Name, E-mail, Stable Identity, Account State, Organization Path, and Resolved Organization.
+- The **Organizations** tab shows, per row: Path, Name, Source Code, Source (**From list** or **Derived**), and Users.
+
+With **Dry run** on, a **Dry Run Difference** box also reports Users read/Organizations read, and how many records would be created, updated, deactivated, unlinked, reactivated, or **would skip** (a row whose user name is already registered under another project — see DB-I11 below). If the list was read only in part, the would-deactivate counts are reported as zero rather than the real number, to avoid suggesting a mass deactivation that has not actually been checked.
+
+#### Preview Issues
+
+The **Issues** tab lists one row per rule the preview's data raised, with a code, a severity, and a finding; some rows also carry a one-click **Apply** fix.
+
+| Code | Severity | Finding |
+|---|---|---|
+| DB-I00 | Error | The source could not be read at all — see the step-by-step connection test. |
+| DB-I01 | Warning | Row(s) with a blank username/email were skipped. |
+| DB-I02 | Warning | The same username is used by more than one row; only the first was created. |
+| DB-I03 | Error | A configured column alias is not in the query result. |
+| DB-I04 | Warning | Organization path(s) could not be read, for example because of a wrong separator. |
+| DB-I05 | Warning | An organization path is not in the configured organization list; it was derived from the user row instead. |
+| DB-I06 | Warning | An account state value was not recognized; the account was taken as active. |
+| DB-I07 | Warning | The stable identity is blank on some rows. |
+| DB-I09 | Info | An organization path matches a manually created organization; it was adopted and stays under manual management. |
+| DB-I10 | Info | No organization contract is configured at all; only users are synchronized. |
+| DB-I11 | Warning | The user name is already registered in another project, so no credential is created for that row. Rename the user in the source, or move the existing credential to this project. |
+
+### Explain User
+
+**Explain** opens an **Explain User** dialog: enter a username to see step by step why a user is synchronized or not, across 7 steps.
+
+| # | Step |
+|---|---|
+| 1 | Row Lookup |
+| 2 | Raw Values |
+| 3 | Organization Path |
+| 4 | Organization Resolution |
+| 5 | Account State |
+| 6 | Stable Identity |
+| 7 | Result |
+
+Each step reports **Success**, **Warning**, **Failed**, **Not applicable**, or **Skipped**, together with an explanation and, where relevant, the values it read.
 

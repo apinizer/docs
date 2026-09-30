@@ -35,6 +35,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/token-quotas",
+        "ai-gateway/limit-plans",
         "ai-gateway/cost-settings"
       ]
     },
@@ -624,6 +625,7 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "admin/user-access-management/overview",
+        "admin/account-settings",
         "admin/user-access-management/roles",
         "admin/user-access-management/users",
         "admin/user-access-management/teams",
@@ -653,7 +655,7 @@ const sidebars: SidebarsConfig = {
         "admin/identity-management/overview",
         {
           "type": "category",
-          "label": "Credential Management",
+          "label": "Consumer Management",
           "collapsed": true,
           "collapsible": true,
           "items": [
@@ -666,7 +668,6 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/access-control",
             "admin/identity-management/api-proxy-acl",
             "admin/identity-management/api-proxy-group-acl",
-            "admin/identity-management/rate-limit-control-list",
             "admin/identity-management/quota-usage-and-alerts"
           ]
         },
@@ -683,7 +684,9 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/identity-providers/credential-sync"
           ]
         },
-        "admin/identity-management/acl-report"
+        "admin/identity-management/token-management-settings",
+        "admin/identity-management/acl-report",
+        "admin/identity-management/legal-holds-and-purge"
       ]
     },
     {
@@ -723,6 +726,7 @@ const sidebars: SidebarsConfig = {
         "admin/system-settings/overview",
         "admin/system-settings/system-settings-and-limits",
         "admin/system-settings/global-configuration",
+        "admin/system-settings/siem-log-forwarding",
         {
           "type": "category",
           "label": "Predefined Values",
@@ -738,11 +742,9 @@ const sidebars: SidebarsConfig = {
           ]
         },
         "admin/system-settings/ldap-login-settings",
-        "admin/system-settings/login-log-connector-configuration",
         "admin/system-settings/license-management",
         "admin/system-settings/error-messages",
-        "admin/system-settings/ip-geolocation-setting",
-        "admin/system-settings/token-management-settings"
+        "admin/system-settings/ip-geolocation-setting"
       ]
     },
     {
@@ -756,6 +758,8 @@ const sidebars: SidebarsConfig = {
         "admin/audit-compliance/acl-audit-records",
         "admin/audit-compliance/token-requests",
         "admin/audit-compliance/login-records",
+        "admin/audit-compliance/security-events",
+        "admin/audit-compliance/test-console-audit-records",
         "admin/audit-compliance/application-log-cleanup-tasks",
         "admin/audit-compliance/application-logs"
       ]
@@ -830,15 +834,6 @@ const sidebars: SidebarsConfig = {
         "integrations/connectors/logback-connector",
         "integrations/connectors/linux-script-connector"
       ]
-    },
-    {
-      "type": "category",
-      "label": "Analytics Reports",
-      "collapsed": false,
-      "collapsible": true,
-      "items": [
-        "admin/analytics-reports/api-traffic-time-metrics"
-      ]
     }
   ],
   "analytics-and-monitoring": [
@@ -882,6 +877,7 @@ const sidebars: SidebarsConfig = {
         "analytic/analytics-reports/endpoint-size-metrics",
         "analytic/analytics-reports/client-traffic-and-time-metrics",
         "analytic/analytics-reports/ip-traffic-and-time-metrics",
+        "analytic/analytics-reports/canary-and-mirror-metrics",
         "analytic/analytics-reports/report-generator",
         "analytic/analytics-reports/endpoints-not-receiving-requests",
         "analytic/analytics-reports/clients-not-making-requests",
@@ -1023,6 +1019,7 @@ const sidebars: SidebarsConfig = {
             "operations/common-problems-solutions/high-latency-slow-response-times",
             "operations/common-problems-solutions/authentication-failures",
             "operations/common-problems-solutions/database-connection-issues",
+            "operations/common-problems-solutions/Oracle-tns-timezone-error",
             "operations/common-problems-solutions/memory-leaks-oom-errors",
             "operations/common-problems-solutions/policy-execution-failures",
             "operations/common-problems-solutions/routing-issues",
@@ -1075,12 +1072,14 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/pod-thread-count-periodic-monitoring",
             "operations/administrator-guides/jvm-garbage-collector-tuning",
             "operations/administrator-guides/multi-env-deployment-pipeline",
+            "operations/administrator-guides/management-api-common-contract",
             "operations/administrator-guides/gateway-performance-tuning",
             "operations/administrator-guides/geolocation-city-based-access-control",
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
             "operations/administrator-guides/clear-elasticsearch-index-data",
+            "operations/administrator-guides/elasticsearch-sizing-and-tuning-recommendations",
             "operations/administrator-guides/prometheus-zabbix-integration",
             {
               "type": "category",
@@ -1298,7 +1297,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/api-analytics-and-observability-scenarios/kibana-api-traffic-log-visualization",
-            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization"
+            "tutorials/api-analytics-and-observability-scenarios/kibana-8-17-10-api-traffic-log-visualization",
+            "tutorials/api-analytics-and-observability-scenarios/grafana-api-traffic-metric-visualization"
           ]
         },
         {

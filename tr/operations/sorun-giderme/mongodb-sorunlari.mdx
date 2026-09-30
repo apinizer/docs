@@ -200,3 +200,54 @@ rs.add("<NODES_NEW_HOSTNAME>")
 # Veri senkronizasyonunun tamamlanması beklenilir
 rs.status()
 ```
+
+---
+
+## Yarıda Kesilen Bir Silme İşleminin Kilitlediği Kaydın Kurtarılması
+
+### Sebep/Neden
+
+Kimlik Bilgisi, Kurum ya da Portal Uygulaması gibi bağlı bir kaydı silerken Apinizer, aynı kayda ait iki silme işleminin çakışmasını önlemek için kısa süreli bir kilit tutar (bkz. [Eş Zamanlı Silme](/tr/concepts/temel-kavramlar/varlik-yasam-dongusu#eş-zamanlı-silme)). Kilidi tutan sunucu süreci silme işlemi tamamlanmadan (ör. beklenmedik bir sunucu yeniden başlatması) sonlanırsa kilit **kendiliğinden açılmaz**: kayıt kalıcı olarak "silme sürüyor" durumunda kalır ve sonraki her silme denemesi de aynı şekilde reddedilir. Bu bilinçli bir davranıştır — kaydın gerçek durumu (silme işleminin ne kadarının tamamlandığı) bilinmediği için kilidin kendiliğinden açılmasına izin vermek, yarım kalmış bir işlemin üzerine ikinci bir silme denemesinin binmesi riskini taşırdı.
+
+### Teşhis
+
+Kilit `lifecycle_deletion_barrier` koleksiyonunda tutulur. Etkilenen kayda ait belge önce bulunur:
+
+```javascript
+use apinizerdb
+
+// <SUBJECT_TYPE> => CONSUMER (kimlik bilgisi) | ORGANIZATION (kurum) | APPLICATION (portal uygulaması)
+// <SUBJECT_ID>   => ilgili kaydın Mongo _id değeri
+db.lifecycle_deletion_barrier.findOne({ _id: "<SUBJECT_TYPE>:<SUBJECT_ID>" })
+```
+
+Belgedeki alanlar durumu netleştirir:
+
+| Alan | Anlamı |
+|------|--------|
+| `state` | `HELD` ise kilit hâlâ tutuluyor demektir; `RELEASED` ise zaten serbesttir — bu durumda 409 yanıtının başka bir nedeni vardır. |
+| `operationId` | Kilidi tutan işlemin kimliğidir. |
+| `acquiredAt` | Kilidin alındığı zamandır — üzerinden geçen süre, işlemin gerçekten yarıda kalıp kalmadığını değerlendirmede kullanılır. |
+| `acquiredBy` | Kilidi alan kullanıcı/hesaptır. |
+| `projectId` | Kaydın ait olduğu projedir (varsa). |
+
+`acquiredAt` üzerinden makul bir süre (ör. birkaç dakika) geçtiği ve o sırada sunucuda ilgili bir yeniden başlatma/kesinti yaşandığı doğrulandıysa işlem yarıda kalmış demektir.
+
+### Çözüm
+
+İşlemin gerçekten sonlandığından emin olduktan sonra kilit elle serbest bırakılır:
+
+```javascript
+db.lifecycle_deletion_barrier.updateOne(
+    { _id: "<SUBJECT_TYPE>:<SUBJECT_ID>" },
+    { $set: { state: "RELEASED", releasedAt: new Date() } }
+)
+```
+
+Bu işlem yalnızca kilidi açar; kaydın kendisine dokunmaz. Kilit açıldıktan sonra silme isteği normal şekilde tekrar denenebilir ve o anki [silme engelleri](/tr/concepts/temel-kavramlar/varlik-yasam-dongusu#silme-engelleri) yeniden baştan değerlendirilir.
+
+:::warning
+
+Bu işlem veritabanına doğrudan müdahaledir ve yalnızca yetkili bir Apinizer yöneticisi tarafından, işlemin gerçekten sonlandığından emin olunduktan sonra uygulanmalıdır. Emin olunmadan uygulanması, hâlâ süren bir silme işlemiyle yeni bir silme denemesinin çakışmasına yol açabilir.
+
+:::
