@@ -627,6 +627,7 @@ const sidebars: SidebarsConfig = {
         "admin/user-access-management/roles",
         "admin/user-access-management/users",
         "admin/user-access-management/teams",
+        "admin/user-access-management/my-profile",
         "admin/user-access-management/role-permission-details",
         "admin/user-access-management/authorization-matrix"
       ]

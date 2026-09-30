@@ -15,6 +15,16 @@ import {Steps, Step} from '@site/src/components/Steps';
 
 The **MCP Gateway** menu item takes you to a card-based list of your MCP Gateways, the same layout used for AI Gateways — open a card to reach that proxy's routing, policies, and trace/traffic/analytics tabs.
 
+### Proxy Information Fields
+
+Each MCP Gateway's own **Overview** tab shows the proxy information panel every proxy type has, plus three MCP-specific fields:
+
+| Field | Description |
+|---|---|
+| **Routing Mode** | Shows **Expose Tools** or **Passthrough**; for Expose Tools it also shows how many tools are published and which source API proxy they come from. |
+| **MCP Protocol Version** | The negotiated protocol version that applies on the next redeploy — see [Protocol Versions](#protocol-versions). |
+| **Client Authentication** | **None** or **Required** — shows **Required** automatically once any request policy is attached to the proxy. |
+
 :::info
 **Coming from an older release?** MCP used to be configured on a separate "Inbound Server" screen with its own authentication settings, reachable at a dedicated path. That model has been replaced entirely — see [Migrating from the Previous Model](#migrating-from-the-previous-model). New to the MCP protocol itself? See [AI Fundamentals](/en/concepts/core-concepts/ai-fundamentals) for a primer.
 :::
@@ -27,7 +37,7 @@ The **MCP Gateway** menu item takes you to a card-based list of your MCP Gateway
   </Step>
 
   <Step title="Choose a Routing Mode">
-    Open the proxy's **MCP Routing** tab and pick **Expose Tools** or **Passthrough**.
+    Open the proxy's **MCP Routing** tab. Select **Configure** on the **Routing Mode** panel, pick **Expose Tools** or **Passthrough** in the drawer, then select **Save**. The tab shows the sections for the saved mode.
   </Step>
 
   <Step title="Configure the Mode">
@@ -43,9 +53,21 @@ The **MCP Gateway** menu item takes you to a card-based list of your MCP Gateway
   </Step>
 
   <Step title="Connect a Client">
-    Point an MCP-compatible client at the proxy's path — it discovers the manifest and tool catalog through the standard handshake, then calls tools over that same path.
+    Open the proxy's **Overview** tab and use the **Client Endpoints** section to copy the MCP endpoint plus a ready-to-run snippet for your client — see [Client Endpoints (Overview)](#client-endpoints-overview).
   </Step>
 </Steps>
+
+:::note The MCP Routing tab saves as you go
+The **MCP Routing** tab has no Save button at the bottom and no "unsaved changes" warning. Every change is written to the server the moment you make it.
+
+- Every section that holds settings — **Routing Mode**, **Tool Output Filter**, and **Discovery — server.json** — is shown read-only, with a **Configure** button that opens a right-side drawer. Change the setting in the drawer, then select **Save**; **Cancel** discards the edit.
+- Each drawer — **Add / Edit Tool**, **Add / Edit Server**, and **Configure** for Routing Mode, the Tool Output Filter and `server.json` — has its own **Save** button. It writes the change and closes only after the server accepted it. A rejected change leaves the drawer open with your text intact.
+- The few controls still shown directly on the tab are saved as soon as they change: forwarding the client token, the allowed-tool-names list, the **Generate automatically / Custom** selection in **Discovery — server.json**, and deleting a row.
+- Deleting an exposed tool or a backend server row asks for confirmation first. Select **Delete** to remove the row — the removal is saved immediately; **Cancel** leaves everything as it was.
+- The tab's controls are disabled for the moment a save is in flight.
+- If a save is rejected, the tab returns to the last saved state. What you see is always what the server has.
+- A saved change still needs a deploy to reach the gateway.
+:::
 
 ## Modes
 
@@ -61,6 +83,9 @@ Forwards MCP calls to one or more external MCP servers, defined directly on the 
   <Card title="Automatic Tool Discovery" icon="search">
     Once a server's endpoint is saved, a **Discover / Reparse Tools** action fetches its tool catalog and pins it as the approved baseline.
   </Card>
+  <Card title="Fetch Tools Before Saving" icon="list-checks">
+    **Fetch tools** in the server drawer lists what the server offers right now, without saving the row — see [Checking a Server Before You Save It](#checking-a-server-before-you-save-it).
+  </Card>
   <Card title="Tool Allow-List" icon="shield-check">
     Leave the allow-list empty to pass every discovered tool through, or select specific tools to restrict what's reachable through this proxy.
   </Card>
@@ -72,6 +97,40 @@ Forwards MCP calls to one or more external MCP servers, defined directly on the 
   </Card>
 </CardGroup>
 
+#### Backend Failure Responses
+
+When the MCP server fails during a Passthrough call, the gateway returns a JSON-RPC error with code `-32603`. The `error.message` field keeps the error message defined for this error type, `ERR-262` (default: `Tool execution failed.`). The `error.data` field tells the client why the call failed:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Tool execution failed.",
+    "data": { "reason": "BACKEND_AUTH_FAILED", "phase": "discovery", "httpStatus": 401 }
+  }
+}
+```
+
+- `phase` is `discovery` when the gateway could not get the tool list from the server. It is `call` when the tool call itself failed.
+- `httpStatus` appears only when the server sent an HTTP error status.
+- `backendErrorCode` appears only when the server sent a JSON-RPC error. It holds the server's error code.
+
+| `reason` | Meaning | What to check |
+|---|---|---|
+| `CONNECTION_CONFIGURATION_ERROR` | The connection definition blocks the call. | Egress protection (private address), mTLS key store, catalog drift block. |
+| `BACKEND_UNREACHABLE` | The worker cannot reach the server. | Server address, DNS, firewall. Do not use `localhost` — it points to the worker pod. |
+| `BACKEND_TIMEOUT` | The server did not answer in time. | Server load and network latency. |
+| `BACKEND_TLS_ERROR` | The TLS handshake failed. | Server certificate and trust store. |
+| `BACKEND_AUTH_FAILED` | The server or its OAuth2 token endpoint rejected the credential. | Authentication settings of the server row. If token passthrough is on, the client token. |
+| `BACKEND_HTTP_ERROR` | The server sent another HTTP error status. | `httpStatus` and the server logs. |
+| `BACKEND_TOOL_ERROR` | The server sent a JSON-RPC error. The tool itself failed. | `backendErrorCode` and the server logs. |
+| `BACKEND_PROTOCOL_ERROR` | The response is not a valid MCP response, or the protocol version does not match. | The **MCP Protocol Version** of the server row. Make sure the address is an MCP endpoint. |
+| `BACKEND_CONNECTION_ERROR` | Another transport error occurred. | Worker log. |
+
+The response never contains the server address, the exception text, or the server's error body. The worker log keeps the full detail in a `MCP PASSTHROUGH` warning line.
+
 Both modes' tool results pass through the same output filtering used elsewhere in the gateway: a deny-pattern match blocks the whole response (not just the matched portion), and PII masking covers the platform's built-in personal-data types.
 
 ### MCP Servers Are Configured Inline
@@ -82,6 +141,137 @@ There's no standalone "MCP connection" screen to visit first — an MCP server i
 - Inside the **MCP Call (LLM)** / **MCP Call (Fixed)** policy, as a single server a model calls as part of any AI Gateway's own [tool-call loop](/en/ai-gateway/routing-and-failover#tool-call-loop-agentic-requests) — no MCP Gateway required for that path at all.
 
 Each definition carries its own endpoint, transport, authentication, discovered-tool catalog, health status, and approved-catalog fingerprint — nothing is shared by reference between proxies or policies, so there's no separate object to look up, and no cross-proxy blast radius when one server's credentials change.
+
+### Checking a Server Before You Save It
+
+The **Add / Edit Server** drawer has a **Fetch tools** button next to the save row. It asks the server for its tool list there and then, using exactly the address, credential and mTLS settings currently typed in the drawer, and lists what came back — tool name and description — with a count badge.
+
+- Nothing is saved by this. In Passthrough mode the gateway resolves the backends' catalogs at request time anyway, so the list is a confidence check ("the address and the credential work, and this is what the server offers"), not a catalog the proxy then depends on.
+- When you're editing a server that's already saved, you don't have to retype its token: leave the masked field untouched and Apinizer uses the stored credential for the check.
+- The button stays disabled until an endpoint is entered. If the call fails, the drawer keeps your text and states the reason the server gave — an HTTP status (`MCP server returned HTTP 404`), a refused connection, a blocked egress target, or a reply that is not an MCP `tools/list` result. Fix the address, the credential or the network path and select it again.
+- The check runs from the Manager, not from a gateway worker, so the address has to be reachable from there. Loopback addresses (`127.0.0.1`, `localhost`), link-local and cloud-metadata addresses are refused even with **Allow private-network egress** on; that switch only opens RFC1918 and in-cluster targets. An MCP server that is only reachable on your own machine cannot be checked this way.
+- A common mistake is entering the address of a non-MCP proxy (an AI Gateway proxy, for example). Such an address answers, but not with an MCP handshake, so the check fails with a protocol error rather than a connection error.
+
+### The Backend MCP Server List
+
+The **Backend MCP Server** section lists every server on its own card: the name, the endpoint, and badges for the protocol version, the authentication scheme, private-network egress and the capability cache. **Configure** opens that server's drawer; the bin icon removes it.
+
+Under each card sits that server's own tool panel. Select **Fetch tools** on the card and Apinizer asks that one server — with its saved address and credential, so there is no token to retype — what it offers right now, then lists every tool it answered with, name and description.
+
+- The list is never saved. It is live discovery, exactly like the drawer's check: the gateway asks the backend again on every request, so what you see is the answer of the moment, not a catalog the proxy keeps.
+- Every tool carries an **allowed** or **blocked** badge, read from the **Allowed Tool Names** list in the **Client Access & Forwarding** section above the server list. An empty allow-list means every discovered tool is allowed. A tool the allow-list keeps out stays visible and is badged **blocked** on purpose — otherwise you could not tell a tool missing from the server apart from a tool merely missing from your allow-list.
+- A caller-specific identity rule (see [Security and Governance](#security-and-governance)) can still hide an **allowed** tool from an individual caller. The badge reports the proxy-wide decision, not a per-caller one.
+- When the server can't be reached, the panel says so and prints the reason the server gave — an HTTP status, a refused connection, a blocked egress target — so you can correct the address or the credential without leaving the page.
+
+### Routing Mode Panel
+
+The **Routing Mode** panel at the top of the **MCP Routing** tab is a read-only summary: the active mode's card is highlighted, the other is dimmed, and the advertised [protocol version](#protocol-versions) is shown next to the panel title.
+
+Select **Configure** to change either of them in a right-side drawer — pick the mode, pick the protocol version, then select **Save**; **Cancel** discards the edit. The mode decides which sections the tab shows (**Exposed Tools** for Expose Tools, **Backend MCP Server** for Passthrough), and those sections move only once the save succeeds, so browsing the two descriptions in the drawer never rearranges the page underneath you. Each mode keeps its own settings when you switch, so you can move back and forth without losing what you already entered.
+
+Picking **Passthrough** in the drawer also shows a **Backend MCP Server** list right below the two mode cards, because Passthrough is only a valid configuration once at least one backend server exists. Select **Add Backend MCP Server** to open the server drawer on top of the mode drawer and fill it in there; the server is saved as soon as you select **Save** in it, and you're returned to the mode drawer with your selection intact. Existing servers are listed with **Edit** and **Delete** next to each one. While the list is empty, the mode drawer's own **Save** stays disabled and a warning explains why — so you can no longer save Passthrough first and meet the "Passthrough needs at least one backend MCP server" refusal afterwards.
+
+### Tool Output Filter
+
+The **Tool Output Filter** panel is read-only in the same way: a badge shows whether the filter is **Active** or **Disabled**, a second badge shows whether PII masking is on, and the deny patterns are listed below (a dash means there are none).
+
+Select **Configure** to open the drawer, where you switch the filter on or off, switch **Mask PII** on or off, and add or remove deny patterns; **Save** writes all of it in one step and **Cancel** discards it. A deny-pattern match blocks the whole response, so a pattern that is too broad also blocks legitimate ones — prefer specific patterns.
+
+### Discovery Document
+
+By default, an MCP Gateway's `server.json` document — described in [Protocol Versions](#protocol-versions) and in [Client Endpoints](#client-endpoints-overview) below — is generated automatically from the proxy's own settings and its request-authentication policy chain, and stays in sync with them across saves and redeploys.
+
+On the **MCP Routing** tab's **Discovery — server.json** panel, switch to **Custom** to take the document over completely:
+
+- The panel shows the published document **read-only**. Select **Configure** to open it in a right-side drawer, edit it there, then select **Save** — **Cancel** discards the edit, and **Save** stays disabled while the text is not valid JSON.
+- The drawer is seeded with the document the gateway generates today, so switching over doesn't mean starting from a blank file — you only edit what you actually want to change.
+- The drawer's **Save** writes the document straight to the server and closes only once it was accepted — there is no second Save button to press afterwards. A rejected document leaves the drawer open with your text intact.
+- The text must still be valid JSON to save; a syntax error is flagged inline and blocks saving. A document missing a required MCP Registry member (`name`, `description`, `version`, or `remotes`) only produces a non-blocking warning — it's your document, and Apinizer won't reject it on your behalf.
+- `${VARIABLE_NAME}` [environment variables](/en/develop/environment-variables) inside the custom text are resolved when the document is served, so the same hand-written text can still carry a different `remotes[].url` per environment.
+- To give the document back to the gateway, switch the same select button to **Generate automatically**. That discards the custom text and saves the change immediately; the gateway resumes generating the document from the next deploy on. There is no separate "back to automatic" link.
+
+Because `server.json` is served completely unauthenticated, whatever you type is exactly what an anonymous caller receives — keep it free of secrets, and keeping it accurate afterward is entirely your own responsibility.
+
+## Client Endpoints (Overview)
+
+The Overview tab's **Client Endpoints** section is where you copy the exact addresses and ready-to-run requests a client needs, scoped to an environment you pick from a selector at the top of the section. Every credential shown here — in the address list, the samples, and the numbered steps below them — is derived from the proxy's own request-authentication policy chain, not a fixed template: the section shows exactly what a caller has to send for the policies you've actually attached, nothing more and nothing assumed.
+
+1. **MCP Endpoint** — the single `POST` JSON-RPC address every MCP client calls for `initialize`, `tools/list`, and `tools/call`, shown with a copy button.
+2. **server.json** — the unauthenticated `GET` address described in [Protocol Versions](#protocol-versions), shown with a copy button, an **Open** link that loads it directly in a new browser tab, and a badge showing whether the document is **Generated** or **Custom** (see [Discovery Document](#discovery-document)).
+3. **Token Endpoint** — shown only when the attached policy chain actually issues a token (JWT or OAuth2 managed by this gateway): the `POST` address to call first to obtain one, with its own copy button.
+4. **Legacy SSE Stream** — shown only when the proxy's negotiated [protocol version](#protocol-versions) is `2024-11-05`; the `GET` address for that transport's push channel, with its own copy button.
+5. **Ready-to-run snippets** — a tabbed set covering `tools/list`, `tools/call` (with a tool picker so you can generate a call for any exposed tool without typing its name or arguments by hand), `initialize`, `server.json`, and a **Client config** tab with drop-in `.mcp.json` and Claude Desktop configuration blocks. Each sample carries whichever credential the attached policy chain actually needs — a Basic policy produces `-u "<username>:<password>"`, an API key policy sends the configured header or query parameter, and a JWT/OAuth2/OIDC policy prefixes the sample with the token request described below.
+
+Below the addresses, whenever the proxy has at least one request-authentication policy attached, an **Authentication** panel spells out the exact numbered steps for that chain — several policies stacked together (for example mTLS plus Basic) each contribute their own step, because the caller has to satisfy all of them:
+
+- **Basic** — send the consumer's username and password as HTTP Basic (`-u "<username>:<password>"`, or an `Authorization: Basic <base64(username:password)>` header).
+- **API key** — send the key in the configured request header, or as a query-string parameter if that's how the policy is set up.
+- **JWT / OAuth2 issued by this gateway** — first `POST` the **Token Endpoint** above (`grant_type=client_credentials` or `grant_type=password`, depending on the policy), then call the MCP endpoint with `Authorization: Bearer <access_token>`.
+- **OIDC** — obtain an access token from the external identity provider configured on the policy, then send it the same way as a bearer token; Claude.ai / Claude Desktop "Custom connectors" can drive this automatically when the provider supports OAuth 2.0 Dynamic Client Registration.
+- **mTLS** — present the client certificate on the TLS handshake (`--cert client.crt --key client.key`); there's no header to copy.
+
+Three cases can't be fully expressed in a static client configuration file, and the panel warns instead of showing a sample that would not work:
+
+- **HTTP Digest** needs a challenge/response round-trip that MCP clients such as Claude Desktop and Cursor can't perform — prefer Basic or a token policy for MCP.
+- **An API key sent as a query parameter** is appended to the URL in curl samples, but `.mcp.json` / Claude Desktop configuration has no field for it.
+- **mTLS** can't be presented by `mcp-remote` or Claude Desktop — terminate mTLS on a local bridge/proxy, or pair it with a token policy.
+
+If the attached policy has no client-side recipe at all (for example JOSE message-level validation, or SAML), the panel says so directly instead of guessing — check the **Policies** tab and use a policy an MCP client can actually satisfy.
+
+For example, given an MCP Endpoint of `https://api.apinizer.com/apigateway/aigw/petstore-mcp/` protected by an OAuth2 policy (client-credentials grant, managed by this gateway), its `server.json` is published at `https://api.apinizer.com/apigateway/aigw/petstore-mcp/.well-known/mcp/server.json`, following the MCP Registry's `server.json` schema:
+
+```json
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "com.apinizer/aigw-petstore-mcp",
+  "description": "Apinizer MCP Gateway: Petstore MCP",
+  "version": "1.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.apinizer.com/apigateway/aigw/petstore-mcp/",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <access_token> obtained from https://api.apinizer.com/apigateway/auth/token",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "com.apinizer": {
+      "protocolVersion": "2025-06-18",
+      "authRequired": true,
+      "auth": [
+        {
+          "scheme": "bearer",
+          "tokenEndpoint": "https://api.apinizer.com/apigateway/auth/token",
+          "grantType": "client_credentials"
+        }
+      ]
+    }
+  }
+}
+```
+
+The `remotes[]` array is what makes the document actionable — it carries the transport, the URL, and the header(s) a caller must actually send, derived from every active policy in the request-authentication chain; the `_meta["com.apinizer"]` block underneath repeats the same recipe machine-readably as `auth` (one entry per policy, in chain order), next to the negotiated `protocolVersion` and a boolean `authRequired` flag. Nothing about the proxy's internal id, name, or routing mode is published to this unauthenticated endpoint.
+
+The `tools/list` snippet looks like:
+
+```bash
+curl -X POST https://api.apinizer.com/apigateway/aigw/petstore-mcp/ \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Below the snippets, a collapsible **Exposed tools** table lists every tool the proxy currently publishes — its name, description, source API proxy, and whether it has an input schema — for a quick check before you copy a snippet.
+
+:::warning
+If the source API proxy behind an exposed tool isn't deployed to the environment you've selected, that tool's input schema shows empty and a `tools/call` against it returns `Tool backend proxy unavailable`. Deploy the source proxy to the selected environment to resolve it.
+:::
 
 ## Outbound Tool Call
 
@@ -108,7 +298,7 @@ This policy can also be added and updated through the APIops REST API — see [A
 
 ## Protocol Versions
 
-An MCP Gateway negotiates one of three protocol behaviors, set per proxy and applied on the next redeploy:
+An MCP Gateway negotiates one of three protocol behaviors, set per proxy on the **MCP Routing** tab (**Routing Mode** panel → **Configure** → **MCP Protocol Version** → **Save**) and applied on the next redeploy:
 
 | Version | Behavior |
 |---|---|
@@ -118,7 +308,18 @@ An MCP Gateway negotiates one of three protocol behaviors, set per proxy and app
 
 If a connecting client requests a version Apinizer doesn't recognize during `initialize`, the proxy falls back to the nearest earlier version it does support and logs a warning, rather than rejecting the request outright.
 
-The discovery manifest is published, unauthenticated, at the proxy's client path plus `/.well-known/mcp/manifest.json` — required so a client can see what's on offer before it has credentials to authenticate. The manifest is a best-effort discovery aid: it advertises a generic "authentication required" hint whenever the proxy has any request policy attached, but the actual scheme enforced is whatever policy chain you've configured (see [Authentication](#authentication)).
+The `server.json` document is published, unauthenticated, at the proxy's client path plus `/.well-known/mcp/server.json`, following the MCP Registry's `server.json` schema — required so a client can see not just that the gateway exists but where to connect and with which transport, before it has credentials to authenticate. By default it's generated from the proxy's own settings and its request-authentication policy chain; you can hand-write it entirely instead — see [Discovery Document](#discovery-document). It's a best-effort discovery aid: whenever the proxy has any request policy attached, each entry in the document's `remotes[]` array carries the header(s) that chain actually requires, and the same recipe is repeated machine-readably as `_meta["com.apinizer"].auth`, next to a boolean `_meta["com.apinizer"].authRequired` — but the actual scheme enforced is whatever policy chain you've configured (see [Authentication](#authentication)). The Overview tab's [Client Endpoints](#client-endpoints-overview) section surfaces this same address with a copy button and an **Open** link, and — for a `2024-11-05` proxy — the legacy SSE address as well, so you don't have to build either address by hand.
+
+## Deployment Information
+
+An MCP Gateway's Deployment Information table (see [Deployment and Specification Information](/en/develop/api-proxy-configuration/deployment-and-specification-information)) carries two MCP-specific columns in addition to the fields every proxy type shows:
+
+| Column | Description |
+|---|---|
+| **server.json** | A link to the `server.json` document published for that environment. |
+| **Protocol** | The MCP protocol version negotiated for that environment's deployment. |
+
+Clicking **Show** in the **Specs** column opens a dialog with four read-only tabs for that environment — `tools/list`, `initialize`, `server.json`, and **Client config** — instead of an OpenAPI document. An MCP Gateway has no REST/SOAP contract to display, so the dialog shows the same catalog, handshake, and `server.json` document a connecting client would actually see, plus a ready-to-use client configuration block.
 
 ## Multi-Target Aggregation
 
@@ -128,7 +329,7 @@ A Passthrough proxy isn't limited to a single backend: define up to **10** MCP s
 
 ### Authentication
 
-Authentication for an MCP Gateway is whatever policy chain you attach to it — API Key, JWT, OAuth2, Basic, and so on — the same policies every other proxy type uses. There's no separate per-server auth-mode selector anymore; the proxy's own policy chain runs before a request ever reaches MCP handling. The one deliberate exception is the discovery manifest itself, which stays reachable without authentication.
+Authentication for an MCP Gateway is whatever policy chain you attach to it — API Key, JWT, OAuth2, Basic, and so on — the same policies every other proxy type uses. There's no separate per-server auth-mode selector anymore; the proxy's own policy chain runs before a request ever reaches MCP handling. The one deliberate exception is `server.json` itself, which stays reachable without authentication — it only advertises the requirement (through `remotes[].headers` and `_meta["com.apinizer"].auth`/`authRequired`), it never enforces it; enforcement is always the policy chain's job. The exact client-side recipe — which header, which token endpoint, which curl flag — is derived per policy type and spelled out step by step in the [Client Endpoints](#client-endpoints-overview) section.
 
 ### Identity-Based Access Control
 
@@ -181,7 +382,44 @@ Each inline MCP server remembers a fingerprint of its tool catalog captured at t
 
 ### Token Passthrough
 
-By default, Apinizer never forwards a caller's own token to a backend MCP server — the server's own configured credential is always used instead. You can opt in per server: the caller's bearer token is relayed as-is, optionally restricted to an allow-list of accepted JWT audiences, with the server's own credential resolution skipped once a forward succeeds. This is off everywhere by default — an operator has to enable it deliberately.
+By default, Apinizer never forwards a caller's own token to a backend MCP server. The gateway credential on the server row is used instead. In a zero-trust setup, the backend MCP server must authorize the real caller. For this, turn on caller forwarding in Passthrough mode.
+
+**Forward client token to backend server** (MCP Routing tab → Backend MCP Server → Client Access & Forwarding → **Configure**):
+
+- When on, the caller's `Authorization: Bearer` token goes to the backend MCP server on every call: `initialize`, `tools/list` and `tools/call`. The gateway credential of the server row is not sent.
+- **Accepted token audiences** is optional. When filled, only a JWT whose `aud` claim matches an entry is forwarded. We recommend it: it makes sure a token issued for this MCP server reaches only this MCP server (RFC 8707 resource indicators).
+- When no token can be forwarded (the caller sent none, or the audience did not match), the gateway credential of the server row is used. The call is never sent without authentication.
+
+**Forwarded client headers** (MCP Routing tab → Backend MCP Server → Client Access & Forwarding → **Configure**):
+
+- The gateway copies the listed headers from the client request to the backend MCP server on every call, for example `app-identifier` or `x-tenant-id`. Names are case-insensitive.
+- A header the client does not send is not forwarded. Header forwarding works with or without token forwarding.
+- These headers cannot be forwarded: `Authorization`, `Proxy-Authorization`, `Host`, `Connection`, `Keep-Alive`, `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Content-Length`, `Content-Type`, `Content-Encoding`, `Accept`, `Accept-Encoding`, `Mcp-Session-Id`, `MCP-Protocol-Version`. Use token forwarding for the caller token. The list can hold at most 20 headers.
+- A header value with a line break, or longer than 8 KB, is not forwarded.
+
+**Required headers.** Select **Required** on a header row to make the header mandatory:
+
+- The gateway checks every JSON-RPC request in Passthrough mode: `initialize`, `tools/list`, `tools/call` and other methods. The discovery document and the SSE endpoint are not checked.
+- When a required header is missing, the gateway does not call the backend MCP server. It returns HTTP 400 with `Content-Type: application/json`. A blank header value counts as missing. When more than one required header is missing, the first one in the table is reported.
+- The traffic log shows the request as **Blocked**.
+- The check works with or without token forwarding. A present header is still forwarded.
+
+The **Error message** column shows **Default** or **Custom**. Select the edit icon to change the response body. The body must be valid JSON. **Reset to default** restores the default body:
+
+```json
+{"jsonrpc":"2.0","id":{{jsonRpcId}},"error":{"code":-32600,"message":"Missing required header: {{headerName}}"}}
+```
+
+You can use two placeholders in the body:
+
+- `{{headerName}}` — the header name as configured.
+- `{{jsonRpcId}}` — the `id` of the JSON-RPC request, written as JSON. A number stays a number, a string gets quotes, and a missing `id` becomes `null`. Do not put this placeholder in quotes.
+
+With forwarding on, the tool list cache is kept per caller. One caller's tool list is never returned to another caller.
+
+:::note
+**Fetch tools** on the server row uses the gateway credential of the row. When client token forwarding is on and the row has no credential (Authentication Scheme = None), the row shows **Client token required** instead of fetching: the tool list appears when a client calls the gateway with its own token. Test such a server with a real client call.
+:::
 
 ### Guardrail Policies
 
@@ -224,6 +462,12 @@ Tool detection patterns and output deny-patterns do **not** accept variables. Th
 Every MCP call is recorded in your traffic logs with the request's correlation ID, so a single agent turn can be followed end to end; an inbound gateway request additionally records the tool name and JSON-RPC id. Full per-call detail for an outbound tool call — which server it resolved to, every tool invoked in a batch, and each call's duration and outcome — is captured in the request's trace execution detail rather than as flat log columns, so a multi-turn agentic exchange doesn't collapse into "whatever the last turn did." These calls also appear in [trace groups](/en/ai-gateway/tracing-and-replay) alongside the rest of a request's chain, and roll up into your usage [reports](/en/ai-gateway/reports).
 
 An MCP Gateway's own detail page carries this same trace/traffic/analytics view under its **Trace**, **Traffic**, and **Analytics** tabs — so you don't have to leave the proxy to inspect its recent calls or trends.
+
+On the **Traffic** tab — and the general API Traffic list — selecting **Detailed View** for an MCP call opens the same right-side drawer used for AI Gateway calls, instead of a separate dialog. The drawer's last tab is named for whatever the call actually carries: when the record includes AI usage data, that tab appears as **LLM Insights**; otherwise it takes the name **MCP Details** (or **A2A Details** for A2A traffic) and shows the tool name, the JSON-RPC id, and the outbound tool names/call count recorded for that request. If a call carries neither AI usage data nor any of these audit fields — a discovery request, for example — this last tab doesn't appear at all. REST, SOAP, and every other proxy type keep opening their call detail in the original dialog.
+
+An inbound MCP `tools/call` row now carries the address it was routed to in the **Routing** column — the source API Proxy path reached through the gateway in Expose Tools mode, or the MCP server host:port in Passthrough mode — tagged with a **tool call** badge in place of the generic **direct** badge. Every JSON-RPC refusal the gateway returns for a call (HTTP 200 with a JSON-RPC error body, as the MCP spec requires) is also classified for the traffic list: client/policy refusals — an unknown tool, an insufficient scope, a call quota, an argument-rule violation, or an output-filter block — are recorded as **Blocked**, while gateway/backend faults — an unavailable tool backend proxy, a failed tool execution, or a session limit — are recorded as **Error**, with the error type kept alongside. The row's Routing badge reads **refused at gateway** or **gateway error** to match. This means a refused call shows up under the traffic list's Blocked/Error filters and in analytics like any other refused request, even though the HTTP status code returned to the client stays 200. See [Routing Status Badges](/en/analytic/api-traffic#routing-status-badges) for the full badge list.
+
+The same rule now extends to every MCP call the gateway answers itself, not just `tools/call`: an `initialize`, `tools/list`, or `ping` handled in Expose Tools mode shows the proxy's own MCP endpoint URL in the Routing column instead of an empty address. In Passthrough mode, `tools/list` is a real call to the backend MCP server — live discovery, not a cached list — so its row shows the target MCP server's endpoint URL (with any query string and embedded credentials stripped before logging), the same way a Passthrough `tools/call` does.
 
 ### Outbound Tool Names: an Audit Trail Independent of Trace
 

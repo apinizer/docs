@@ -1,6 +1,6 @@
 ---
 title: "Update MCP Routing"
-description: "Replaces the McpRouting configuration of an MCP-type API proxy — routing mode (TOOL_EXPOSE / PASSTHROUGH), exposed tools, one or more inline backend MCP servers, governance (identity ACL, argument constraints, call quota) and token-forward settings."
+description: "Replaces the McpRouting configuration of an MCP-type API proxy — routing mode (TOOL_EXPOSE / PASSTHROUGH), exposed tools, one or more inline backend MCP servers, a custom server.json discovery document override, governance (identity ACL, argument constraints, call quota) and token-forward settings."
 ---
 
 ## Endpoint
@@ -51,6 +51,7 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 {
   "routingMode": "TOOL_EXPOSE",
   "protocolVersion": "2025-06-18",
+  "serverJsonOverride": "{\"name\":\"com.example/petstore-mcp\",\"description\":\"Petstore MCP server\",\"version\":\"1.0.0\",\"remotes\":[{\"type\":\"streamable-http\",\"url\":\"${GATEWAY_URL}/petstore-mcp/\"}]}",
   "exposedTools": [
     {
       "proxyId": "665f1c2e8b3a4d0012ab34cd",
@@ -85,6 +86,20 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
     }
   ],
   "allowedToolNames": ["search", "fetch_document"],
+  "tokenForwardSettings": {
+    "enabled": true,
+    "source": "CLIENT_AUTHORIZATION_HEADER",
+    "audienceAllowList": ["https://mcp.example.com"],
+    "stripGatewayCredential": true
+  },
+  "forwardedHeaders": [
+    {
+      "name": "app-identifier",
+      "required": true,
+      "errorMessage": "{\"jsonrpc\":\"2.0\",\"id\":{{jsonRpcId}},\"error\":{\"code\":-32600,\"message\":\"Send the {{headerName}} header\"}}"
+    },
+    { "name": "x-tenant-id", "required": false, "errorMessage": null }
+  ],
   "toolOutputFilter": null,
   "identityAcl": [],
   "callQuota": null
@@ -97,6 +112,7 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 |-------|------|-------------|
 | routingMode | string | `TOOL_EXPOSE` (expose selected Apinizer proxies as MCP tools) or `PASSTHROUGH` (proxy one or more external backend MCP servers) |
 | protocolVersion | string | MCP protocol version: `2024-11-05`, `2025-06-18` (default) or `2026-07-28` |
+| serverJsonOverride | string | Optional. A hand-written replacement for the generated `.well-known/mcp/server.json` discovery document — see [Discovery Document](/en/ai-gateway/mcp-gateway#discovery-document). Empty/omitted (the default) keeps the auto-generated document. The value is a JSON document encoded as a string; it must be valid JSON, but its schema completeness is **not** checked here — a document missing `name`/`description`/`version`/`remotes` saves successfully and only surfaces as a warning on the MCP Gateway console. `${VAR}` placeholders inside the string are resolved to environment variables when the document is served, so the same document can be promoted across environments while advertising each one's own host. Once set, the document is served exactly as written — unauthenticated — at `{relativePath}/.well-known/mcp/server.json`; never put a credential in it |
 | exposedTools | array | **TOOL_EXPOSE only.** Tool definitions — `proxyId` (target ApiProxy id), `toolName`, `toolDescription`, optional `overrideSchema`, `apiMethodHttpMethod`/`apiMethodPath` (pin to a specific method), `requiredScopes`, per-tool `argumentConstraints` |
 | backendServers | array | **PASSTHROUGH only.** The only way to configure a backend target — there is no reference-based alternative. Inline MCP server definitions — up to 10. Each entry is a full connection object: `name`, `endpoint`, `transport` (`HTTP_SSE`), `authScheme` (`BEARER` \| `OAUTH2_CLIENT_CREDENTIALS` \| `MTLS` \| `NONE`) plus the matching credential fields (`bearerToken`, or `credentialRef`/`tokenEndpoint`/`clientId`/`clientSecret`/`scope`, or `mTLSSettings`), `driftPolicy` (`WARN_ONLY` \| `FAIL_CLOSED`), `allowPrivateNetworkEgress`. Server-managed fields (`id`, `discoveredTools`, `toolsParsedAt`, `healthStatus`, `lastHealthCheckAt`, `pinnedCatalogHash`, `driftDetected`) are always read from the server's own persisted state — a client-supplied value for any of them is ignored, never trusted. Multiple entries aggregate behind one endpoint (see [Multi-Target Aggregation](/en/ai-gateway/mcp-gateway#multi-target-aggregation)). PASSTHROUGH mode requires at least one entry |
 | allowedToolNames | array | PASSTHROUGH tool filter — only listed backend tools are exposed |
@@ -104,11 +120,13 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 | identityAcl | array | Per-principal allow rules (`principalType`: `CREDENTIAL` \| `ROLE` \| `ORGANIZATION`). Enforced on the PASSTHROUGH dispatch path |
 | argumentConstraints | array | Routing-level tool argument constraint rules |
 | callQuota | object | Call quota config (scoped counters) |
-| tokenForwardSettings | object | Explicit opt-in client-token forwarding. The legacy `forwardClientToken` boolean is a **no-op** (logged with WARN) — forwarding happens only through these settings |
+| tokenForwardSettings | object | **PASSTHROUGH.** Caller-token forwarding; `null` = off. `enabled` (boolean), `source` (`CLIENT_AUTHORIZATION_HEADER`), `audienceAllowList` (optional JWT `aud` allow-list, `${VAR}` supported; empty = any Bearer token), `stripGatewayCredential` (default `true`). When enabled, the caller's Bearer token is sent to the backend on every hop — `initialize`, `tools/list` and `tools/call`. When no token can be forwarded, the server row's own credential is used |
+| forwardedHeaders | array | **PASSTHROUGH.** Caller request headers relayed to the backend MCP server on every hop (at most 20). Each entry: `name` (string, case-insensitive, unique), `required` (boolean, default `false`), `errorMessage` (string, optional). A header the caller does not send is skipped, unless `required` is `true`. Independent of `tokenForwardSettings`. `Authorization`, `Proxy-Authorization`, `Host`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `Transfer-Encoding`, `TE`, `Trailer`, `Upgrade`, `Content-Length`, `Content-Type`, `Content-Encoding`, `Accept`, `Accept-Encoding`, `Mcp-Session-Id` and `MCP-Protocol-Version` are rejected with HTTP 400 (`error.mcpRouting.forwardedHeaderNotAllowed`). More than 20 entries return `error.mcpRouting.tooManyForwardedHeaders`. A duplicate name returns `error.mcpRouting.duplicateForwardedHeader`. A non-blank `errorMessage` that is not valid JSON (placeholders filled with sample values) returns `error.mcpRouting.forwardedHeaderErrorMessageInvalidJson` |
 
 ## Behavior
 
 - The configuration is validated (`McpA2aRoutingValidator`) before save; invalid mode/field combinations return HTTP 400.
+- **Required forwarded headers**: in PASSTHROUGH mode, the gateway checks every JSON-RPC request for each `forwardedHeaders` entry with `required: true`. A missing or blank header stops the request before the backend call. The gateway returns HTTP 400 with `Content-Type: application/json`. The body is the header's `errorMessage`, or this default when it is blank: `{"jsonrpc":"2.0","id":{{jsonRpcId}},"error":{"code":-32600,"message":"Missing required header: {{headerName}}"}}`. `{{headerName}}` is replaced with the header name. `{{jsonRpcId}}` is replaced with the request `id` as JSON (a number stays a number, a string is quoted, a missing id is `null`). The traffic log records the request as blocked.
 - **Updating an existing `backendServers` entry**: to update rather than replace a server, send back the `id` from a prior read (`GET`/`getApiProxy`) unchanged — a matching `id` is treated as an update and its server-managed fields (discovered catalog, health, drift) are preserved. An entry whose `id` is blank, or doesn't match anything currently persisted, is always treated as brand-new: a fresh id is minted server-side and any client-supplied `id` is discarded.
 - **Secret fields on `backendServers` entries** (`bearerToken`, `clientSecret`) follow the platform's standard blank-preserves-existing convention: omit the field (or send it unset) to keep the currently stored secret, send a non-blank value to replace it. There is no separate boolean presence flag on this write path — unlike a read, which never returns the secret's plaintext.
 - Every environment the proxy is currently deployed to is marked **redeploy required** — redeploy to activate the new configuration.
@@ -129,7 +147,7 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 
 | Status | Condition |
 |--------|-----------|
-| 400 | Blank `apiProxyName`, empty body, proxy not found, proxy is not an MCP proxy, `backendServers` exceeds 10 entries, or validation failure |
+| 400 | Blank `apiProxyName`, empty body, proxy not found, proxy is not an MCP proxy, `backendServers` exceeds 10 entries, `serverJsonOverride` is not valid JSON, or another validation failure |
 | 401 | Invalid or missing token |
 | 500 | Unexpected server error |
 

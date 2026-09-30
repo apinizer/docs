@@ -623,6 +623,7 @@ const sidebars: SidebarsConfig = {
         "admin/user-access-management/genel-bakis",
         "admin/user-access-management/kullanicilar",
         "admin/user-access-management/takimlar",
+        "admin/user-access-management/profilim",
         "admin/user-access-management/rol-yetki-detaylari",
         "admin/user-access-management/yetkilendirme-matrisi",
         "admin/user-access-management/rol"

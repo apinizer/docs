@@ -602,6 +602,27 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Mock APIs",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "mock-apis",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "mock-apis/crud",
+                "mock-apis/crud/list-mock-apis",
+                "mock-apis/crud/get-mock-api",
+                "mock-apis/crud/save-mock-api"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
           "label": "Environment Variables",
           "collapsed": true,
           "collapsible": true,
