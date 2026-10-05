@@ -272,7 +272,19 @@ const sidebars: SidebarsConfig = {
       "items": [
         "upgrade/apinizer-surum-yukseltme",
         "upgrade/kubernetes-surum-yukseltme",
-        "upgrade/mongodb-surum-yukseltme",
+        {
+          "type": "category",
+          "label": "MongoDB Sürüm Yükseltme",
+          "link": {
+            "type": "doc",
+            "id": "upgrade/mongodb-surum-yukseltme"
+          },
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "upgrade/internetsiz-ortamda-mongodb-surum-yukseltme"
+          ]
+        },
         "upgrade/elasticsearch-surum-yukseltme"
       ]
     },

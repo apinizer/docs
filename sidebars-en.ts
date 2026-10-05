@@ -275,7 +275,19 @@ const sidebars: SidebarsConfig = {
       "items": [
         "upgrade/apinizer-version-upgrade",
         "upgrade/kubernetes-version-upgrade",
-        "upgrade/mongodb-version-upgrade",
+        {
+          "type": "category",
+          "label": "MongoDB Version Upgrade",
+          "link": {
+            "type": "doc",
+            "id": "upgrade/mongodb-version-upgrade"
+          },
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "upgrade/offline-mongodb-version-upgrade"
+          ]
+        },
         "upgrade/elasticsearch-version-upgrade"
       ]
     },
