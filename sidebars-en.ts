@@ -1063,6 +1063,7 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/administrator-guides/kubernetes-ingress-apinizer-access",
+            "operations/administrator-guides/kubernetes-gateway-api-apinizer-access",
             "operations/administrator-guides/coredns-host-alias-configuration",
             "operations/administrator-guides/apinizer-pod-auto-scaling",
             "operations/administrator-guides/mongodb-automatic-backup",

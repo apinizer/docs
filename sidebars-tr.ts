@@ -1061,6 +1061,7 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
+            "operations/yonetici-kilavuzlari/kubernetes-gateway-api-apinizer-erisimi",
             "operations/yonetici-kilavuzlari/elasticsearch-index-alan-temizleme",
             "operations/yonetici-kilavuzlari/elasticsearch-boyutlandirma-ve-ayar-onerileri",
             "operations/yonetici-kilavuzlari/api-trafik-logu-hacim-yonetimi",
