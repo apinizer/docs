@@ -20,11 +20,11 @@ An **LLM Provider Connection** is a secure, encrypted link to an external LLM se
     vLLM, Ollama — models running on infrastructure you operate.
   </Card>
   <Card title="Custom" icon="plug">
-    Any OpenAI-compatible API endpoint, for providers not in the built-in list.
+    Any endpoint Apinizer doesn't have a built-in profile for — pick the [adapter family](/en/ai-gateway/llm-providers#custom-provider) it speaks and define your own paths.
   </Card>
 </CardGroup>
 
-**Code** is the value the [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog) definition's `code` field carries — you'll see it on the **Definitions** tab and in APIops. The **APNZ-6550 catalog refresh** added nine of the cloud providers below (Google AI Studio, plus the xAI through NVIDIA NIM rows) — all speak an OpenAI-compatible wire format, so no new adapter family was needed:
+**Code** is the value the [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog) definition's `code` field carries — the internal identifier a connection's provider type resolves against. The **APNZ-6550 catalog refresh** added nine of the cloud providers below (Google AI Studio, plus the xAI through NVIDIA NIM rows) — all speak an OpenAI-compatible wire format, so no new adapter family was needed:
 
 | Provider | Code | Deployment (default) | Notes |
 |----------|------|----------------------|-------|
@@ -66,6 +66,52 @@ Each connection declares whether the LLM runs in the cloud or on-premise:
 ## Credentials
 
 All API keys and secrets are **encrypted at rest** and **never logged**. Connections are managed through Apinizer's [credential system](/en/admin/identity-management/credentials), the same system used to secure API Proxy access.
+
+### Who Holds the Credential: Gateway or Client {#credential-source}
+
+Every connection answers one question up front — who supplies the upstream provider's credential on a request:
+
+| Credential Source | Behavior |
+|---|---|
+| **Provided by AI gateway** (default) | Apinizer stores the key and signs every request with it — the behavior every connection had before this setting existed. |
+| **Provided by client** | Apinizer stores **no credential at all**. Every request must already carry the provider's own header; the gateway forwards that header untouched instead of injecting a stored value. Budget, cost, and rate limits still attach to the Apinizer credential that made the call — only the **upstream** key belongs to the client. |
+
+**Provided by client** is for installations that don't want the provider's raw key stored inside Apinizer at all — the caller (or a proxy in front of it) supplies its own key on every request. Because nothing is stored, **Test Connection** asks for a temporary credential just for that one probe, and that value is never saved.
+
+### Where the Key Travels: Header or Query Parameter {#api-key-location}
+
+For the API-key family of authentication (Bearer token, an API key in a named header, or a custom header — see [Credential Type Label](#credential-type) below), a second setting decides where the key is placed on the outbound request:
+
+| API Key Location | Shape | Notes |
+|---|---|---|
+| **Header** (default) | `<header name>: <prefix><key>` | Every mainstream provider. |
+| **Query parameter** | `?<parameter name>=<key>` | Appended to the URL — Gemini's native endpoint accepts `?key=`. Discouraged when a header alternative exists, since a key placed in the URL can end up in access logs. |
+
+Basic auth, AWS Signature V4, and the Google service-account (OAuth2) flow each have a fixed transport of their own and are unaffected by this setting.
+
+### Key Prefix
+
+The text placed in front of the key value on the wire. Left blank, it defaults to the credential type's own prefix (`Bearer ` for a Bearer token, nothing for a raw API key). Set it explicitly to an empty value for a provider that wants the raw key with **no** prefix (Anthropic's `x-api-key` style), or to something like `Token ` for a provider that expects `Authorization: Token <key>`.
+
+### Allowing a Client to Override the Stored Key
+
+On a **gateway-held** connection, **Allow clients to override with their own key** lets an individual request bypass the stored credential: if the incoming request already carries the connection's own auth header, that value is forwarded instead of the stored key — the same pattern Kong calls `allow_override`. Left off (the default), any such header on the incoming request is dropped before the call is signed, so the stored key can never leak by a client simply guessing the header name.
+
+### Credential Type Label {#credential-type}
+
+The **Credential Type** shown in the form (Bearer token, API key in a header, API key as a query parameter, Basic — username + password, AWS Signature V4, Google service account, or No authentication) is not a separate stored field — it's a label derived from the underlying **Auth Scheme**, plus (for the API-key shapes) the **API Key Location** setting above:
+
+| Credential Type shown | Underlying Auth Scheme | API Key Location |
+|---|---|---|
+| Bearer token | `BEARER` | — |
+| API key in a header | `API_KEY_HEADER` or `CUSTOM` | Header |
+| API key as a query parameter | `API_KEY_HEADER` or `CUSTOM` | Query |
+| Basic — username + password | `BASIC` | — |
+| AWS Signature V4 | `AWS_SIGV4` | — |
+| Google service account (JSON) | `OAUTH2` | — |
+| No authentication | `NONE` | — |
+
+`API_KEY_HEADER` and `CUSTOM` share the same "API key" credential type on screen — both send one key as a header or query parameter, and only differ in whether the header name and prefix come from the catalog's defaults or from values you typed yourself.
 
 ## Request and Response Translation
 
@@ -179,18 +225,18 @@ The default model on these templates targets embedding generation (for example `
 
 <Steps>
   <Step title="Navigate to Connections">
-    In the Apinizer UI, go to **AI Gateway** → **LLM Providers**. The hub has three tabs — **Providers**, **Model Catalog**, and **Definitions** — make sure you're on the **Providers** tab.
+    In the Apinizer UI, go to **AI Gateway** → **LLM Providers**. The hub has two tabs — **Providers** and **Model Catalog** — make sure you're on the **Providers** tab.
   </Step>
 
   <Step title="Click Add Provider">
-    Click the **Add** button to open the provider form.
+    Click the **Add** button. The **Choose a provider** dialog opens.
   </Step>
 
   <Step title="Select Provider Type">
-    Choose the provider from the dropdown — any row in the [Provider Categories](#provider-categories) table above.
+    Pick a tile under **Managed cloud** or **Self-hosted** — any row in the [Provider Categories](#provider-categories) table above — or choose **Custom provider** if yours isn't listed. See [Choosing a Provider Type](#choosing-a-provider-type) below for what each pick fills in.
 
     Deployment type **auto-fills**:
-    - If the provider is vLLM, Ollama, or Custom OpenAI-Compatible → defaults to **On-Premise**
+    - If the provider is vLLM, Ollama, Custom OpenAI-Compatible, or a **Custom provider** → defaults to **On-Premise**
     - Every other provider (OpenAI, Anthropic, Azure, Vertex, Bedrock, and all the newer cloud providers) → defaults to **Cloud**
   </Step>
 
@@ -237,51 +283,41 @@ The default model on these templates targets embedding generation (for example `
   width="1000"
 />
 
-## Provider Definitions Tab
+## Choosing a Provider Type
 
-The same hub — **AI Gateway** → **LLM Providers** — has a third tab, **Definitions**, listing the provider type catalog: the built-in and custom definitions every connection above is created from (default endpoint, default auth scheme, and so on). Built-in definitions (OpenAI, Anthropic, Azure, etc.) are editable: change an endpoint or auth default and save, exactly as you would on a custom definition. **Your edits are durable — no upgrade overwrites them.** The shipped catalog only ever *seeds*: a definition is written when it is first created and is never written again, so a display name, default endpoint, default API version, default auth scheme, default auth header name, icon URL or documentation link you changed stays exactly as you left it across every future version. That is what makes it safe to point a built-in definition at your own gateway rather than the vendor's public endpoint.
+Creating or changing a connection's provider opens the **Choose a provider** dialog instead of a plain dropdown:
 
-Deletion behaves differently from editing. A routine version upgrade leaves a deleted definition deleted, but Apinizer periodically ships an **LLM catalog-refresh** migration — the provider landscape churns, so the shipped catalog is re-published from time to time (most recently APNZ-6550) — and because a refresh seeds whatever is missing, a built-in definition you deleted comes back with its shipped defaults. If you want a shipped provider out of circulation for good, leave its definition in place and remove or disable the connections that use it. **Duplicate** is still the way to keep a shipped definition *and* a variant of it side by side: copy it and edit the copy, which is a custom definition. Once a custom definition exists, you can view its details, export it, or delete it from here.
+- A **search box** filters the list as you type.
+- **Managed cloud** and **Self-hosted** groups list every built-in provider type — any row in the [Provider Categories](#provider-categories) table above. This catalog is **fixed, read-only reference data** shipped with Apinizer: nothing in it can be created, edited, or deleted, from the UI or through APIops. See [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog) for how it's maintained across upgrades.
+- Picking a tile copies that provider's default endpoint, credential type and header, adapter, request paths, and deployment type onto the connection (see [How a Connection's Defaults Are Resolved](/en/ai-gateway/model-catalog#provider-type-catalog)); an empty **Name** field is also suggested from the provider's code.
+- At the bottom, **Not listed?** opens **Custom provider** — see below.
 
-For the underlying concept, see [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog).
+The **Change** button next to the provider chip on the connection form reopens this dialog. Re-picking overwrites the type-derived fields (endpoint, credential scheme, adapter, paths, deployment type) with the new choice's values, but keeps the connection's name, description, stored credential, and model list untouched.
 
-### Adding a Custom Provider Definition
+### Custom Provider {#custom-provider}
 
-A custom provider definition can be created directly from this tab's own form — as well as, still, by importing a **Provider Definition** package through the [Export/Import Wizard](/en/admin/secrets-management/export-import) or through the APIops REST API. Importing one also adds a shortcut on the import completion screen straight to this tab.
+Pick **Custom provider** when your vendor isn't in the built-in list. Apinizer has no catalog entry for it, so nothing is pre-filled and nothing is hidden:
 
-<Steps>
-  <Step title="General Information">
-    Give the definition a **Name** and a **Code** — the code is what a connection's provider type resolves against, and it cannot be changed after the definition is saved. Display name, icon URL, and a documentation link are optional.
-  </Step>
+- **Deployment Type** defaults to **On-Premise** — override it if the endpoint is actually a cloud service.
+- **Credential Type** — pick the authentication your provider expects (Bearer token, an API key in a header or query parameter, Basic, and so on; see [Credential Type Label](#credential-type) above).
+- **Adapter family** — which wire format the provider speaks: OpenAI-compatible, Anthropic, Gemini, Bedrock, or vLLM. This is optional; left empty, requests silently fall back to the OpenAI-compatible format.
+- **Chat Completion Path** comes pre-filled with `/chat/completions` and can be edited — it's the one path a custom provider needs to be reachable at all. The other paths (embedding, Responses, transcription, speech, image generation) start empty; fill in only the ones you actually route traffic to.
+- The **Advanced** section shows every field with nothing hidden, since only you know which endpoints your provider serves.
 
-  <Step title="Connection Defaults">
-    Optionally fill in a default endpoint, default API version, default auth scheme, and default auth header name — these pre-fill a new connection's form when someone picks this provider, the same way the built-in definitions do; the connection's own form still lets a user override any of them.
-  </Step>
-
-  <Step title="Adapter">
-    Choose the **Wire Protocol** the provider actually speaks — one of five supported families: OpenAI-compatible, Anthropic, Gemini, Bedrock, or vLLM. This is a constrained choice, not free text: only a wire protocol Apinizer has a real adapter for can be selected, and it is **required**. So is the **Chat Completion Path** (for example `/chat/completions` or `/messages`, depending on the wire protocol). Turn on **Supports Embedding** if the provider has an embedding endpoint — doing so makes the **Embedding Path** field required as well, since a provider that claims embedding support with no path to reach it would resolve to nothing at request time. **Supports Responses**, and the transcription/speech/image paths further down, are optional and only needed if you actually route that traffic through this provider.
-  </Step>
-
-  <Step title="Save">
-    Click **Save**. The definition becomes available in the provider-type dropdown the next time someone creates an LLM Provider connection.
-  </Step>
-</Steps>
-
-:::note Why the path fields are required
-Unlike a built-in provider, a custom code doesn't resolve against Apinizer's own list of known provider types — so there's no fallback layer to fill in a missing path behind the scenes for it. Leaving the wire protocol or chat path blank on a genuinely custom provider would resolve to nothing at runtime; the form requires them up front instead of failing silently later.
-:::
+A custom provider isn't a catalog entry — its adapter and paths are ordinary fields stored directly on the connection, so it moves with the connection everywhere a connection moves: export and import it as an **LLM Provider** package through the [Export/Import Wizard](/en/admin/secrets-management/export-import), or manage it through the APIops [LLM Providers](/api-reference/llm-providers) endpoint, where it appears with `providerType: "OTHER"` plus its own adapter and path fields.
 
 ## Effective Endpoint Paths {#effective-endpoint-paths}
 
-When you attach a connection to a provider definition, the definition's wire protocol and endpoint
-paths (chat completion, embedding, Responses, transcription, speech, image generation) are **copied
-onto the connection**. The Advanced section of the connection form shows those values **read-only** —
-they tell you the path a request will actually take.
+When you [pick a provider type](#choosing-a-provider-type), its wire protocol and endpoint paths
+(chat completion, embedding, Responses, transcription, speech, image generation) are **copied onto
+the connection**. The Advanced section of the connection form shows those values under **Edit
+paths**, where they're editable — useful when a provider changed a path, or your deployment needs a
+different one than the shipped default.
 
-Why read-only: the catalog owns them. To change a path, use the
-[Provider Definition](#adding-a-custom-provider-definition) screen; the change is copied to
-connections attached to that definition **from then on** — connections already attached keep their
-own copy, so editing a definition never silently changes the behaviour of a running connection.
+Editing a path here only affects this connection; the built-in catalog itself is fixed and cannot be
+edited (see [Provider Type Catalog](/en/ai-gateway/model-catalog#provider-type-catalog)), so a later
+Apinizer upgrade can never silently overwrite the change, and it never affects any other connection
+using the same provider type.
 
 A path that isn't listed means the catalog says nothing about that modality, and the provider type's
 default applies. On older connections created before this shipped the section doesn't appear at all,

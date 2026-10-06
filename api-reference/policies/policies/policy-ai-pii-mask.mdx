@@ -1,0 +1,528 @@
+---
+title: "AI PII Mask Policy"
+description: "AI PII Mask policies detect and mask personal data in LLM traffic using an embedded list of privacy definitions (element-name, regex or built-in PII type matching), with optional reversible unmasking and an external adapter as a second opinion."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-pii-mask
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Privacy Definitions
+
+`privacyDefinitions` carries the embedded masking rules. Each entry picks **what** to match (`patternType`) and **what** to do with a match (`operation`), and — for a `MASK` operation — **how** to render the masked value (`maskMode`).
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| presetId | string | No | Back-reference to the `ai_privacy_preset` catalog row this definition was copied from. A provenance marker only, not an APIops name-based reference — it is config-time and never read at request time. |
+| elementName | string | Conditional | Field/header/param name to match. Required when `patternType` is `ELEMENT_NAME` (the default). |
+| operation | string | Yes | `MASK`, `DELETE`, `ENCRYPT`, `HASH` or `DETECT`. `DETECT` counts occurrences without mutating content. |
+| enabled | boolean | No | Whether this definition is active. Default `true`. |
+| patternType | string | No | `ELEMENT_NAME` (default, matches by field name), `REGEX` (matches `regexPattern`) or `BUILTIN` (matches `builtInPiiType`). |
+| regexPattern | string | Conditional | Custom regex. Required when `patternType` is `REGEX`. |
+| builtInPiiType | string | Conditional | `TCKN`, `IBAN_TR`, `PHONE_TR`, `EMAIL`, `CREDIT_CARD`, `IP_ADDRESS`, `URL`, `PASSPORT`, `SSN_US`, `DRIVER_LICENSE_TR`, `BANK_ACCOUNT_IBAN` or `CRYPTO_WALLET`. Required when `patternType` is `BUILTIN`. |
+| maskMode | string | No | `FIXED` (default), `KEEP_FIRST`, `KEEP_LAST`, `MASK_FIRST`, `PLACEHOLDER_SEQUENCE` or `SYNTHETIC`. Only meaningful when `operation` is `MASK`. |
+| maskPattern | string | No | `FIXED`: the literal replacement text (default `***`). `KEEP_FIRST`/`KEEP_LAST`/`MASK_FIRST`: its first character is the mask character (default `*`). `PLACEHOLDER_SEQUENCE`: a `{TYPE}`/`{N}` template (default `<{TYPE}_{N}>`). Unused by `SYNTHETIC`. |
+| maskVisibleCharCount | integer | No | Characters kept/masked under `KEEP_FIRST`/`KEEP_LAST`/`MASK_FIRST`. Default `4`. Unused by other modes. |
+
+:::note PLACEHOLDER_SEQUENCE and SYNTHETIC never round-trip
+Both modes replace the matched value with a deterministic but non-reversible substitute (a type-tagged placeholder, or a fake value that still passes its own format's checksum). The original value is not recoverable from the masked output by either mode — see `unmaskMode` below for the platform's actual reversible-unmask mechanism.
+:::
+
+---
+
+## External Guardrail
+
+`engine` decides which decision sources feed the policy's verdict.
+
+| Value | Behaviour |
+|-------|-----------|
+| `BUILTIN` (default) | Only `privacyDefinitions` is evaluated — matches are masked/deleted/encrypted/hashed as configured. |
+| `BUILTIN_PLUS_EXTERNAL` | `privacyDefinitions` masking runs as usual, and the external adapter also evaluates the traffic; an external `UNSAFE` verdict blocks the request. |
+| `EXTERNAL_ONLY` | **`privacyDefinitions` is ignored entirely — no masking happens.** Only the external adapter's block-only verdict applies. |
+
+`failMode` governs what happens when the external adapter call itself errors or times out:
+
+| Value | Behaviour |
+|-------|-----------|
+| `FAIL_CLOSED` (default) | The request is blocked. |
+| `FAIL_OPEN` | The request continues; a `FAIL_OPEN` signal is recorded so the bypass is visible. |
+
+:::warning EXTERNAL_ONLY turns off masking
+This policy's normal job is masking traffic. Setting `engine` to `EXTERNAL_ONLY` does not add a stricter check on top of masking — it **replaces** masking with a block-only external verdict. Use `BUILTIN_PLUS_EXTERNAL` if you want both.
+:::
+
+### `externalGuardrail` Fields
+
+Either `llm-judge` or `http-dlp` is accepted on this policy.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | `llm-judge` or `http-dlp`. |
+| llmProviderName | string | Conditional | Required when `type` is `llm-judge`. Name of the LLM provider connection config. |
+| webhookConnectionName | string | Conditional | Required when `type` is `http-dlp`. Name of the webhook connection config the adapter calls. |
+| modelId | string | No | Judge model identifier. `llm-judge` only. |
+| promptTemplate | string | No | Judge prompt template. `llm-judge` only. |
+| jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. `llm-judge` only. |
+| maxOutputTokens | integer | No | Judge max output tokens. `llm-judge` only. |
+| timeoutMs | integer | No | HTTP call timeout in milliseconds. Must be positive if set. Shared by both adapter types. |
+| maxInputChars | integer | No | Max input characters sent to the adapter. Must be positive if set. Shared by both adapter types. |
+
+---
+
+## Other Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| carryBufferSize | integer | No | Sliding-window carry buffer size (characters) used to catch a match that straddles a streaming chunk boundary. |
+| decodeEncodedContent | boolean | No | Decodes base64/hex/URL/unicode segments before scanning. Default `false`. |
+| unmaskMode | string | No | `NONE` (default), `RESPONSE_INLINE` or `UNMASK_API`. See [Reversible Unmasking](#reversible-unmasking). |
+| unmaskAllowedRoles | array of strings | No | Gateway-caller roles authorized for automatic `RESPONSE_INLINE` restoration. Only meaningful when `unmaskMode` is `RESPONSE_INLINE`. Empty/null means deny-by-default — nobody is restored, even with `RESPONSE_INLINE` selected. |
+
+### Reversible Unmasking
+
+`unmaskMode` is independent of `maskMode` — `maskMode` controls what the masked value *looks like*; `unmaskMode` controls whether the original value can be recovered later, and only makes sense together with `maskMode: PLACEHOLDER_SEQUENCE` or `SYNTHETIC`.
+
+| Value | Behaviour |
+|-------|-----------|
+| `NONE` (default) | No reverse mapping is ever persisted. Today's behaviour. |
+| `RESPONSE_INLINE` | The mapping is persisted (TTL-bound), and the gateway response is rewritten in place, restoring the original values — only for a caller whose role is in `unmaskAllowedRoles`. Unary responses only; a streaming response is skipped, visibly. |
+| `UNMASK_API` | The mapping is persisted (TTL-bound); an authorized caller resolves a token back to its original value later through the Manager Unmask REST API, with an audit event on every resolution. |
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-pii-mask",
+            "name": "customer-pii-mask",
+            "description": "Masks TCKN and email in prompts",
+            "active": true,
+            "privacyDefinitions": [
+              {
+                "operation": "MASK",
+                "patternType": "BUILTIN",
+                "builtInPiiType": "TCKN",
+                "maskMode": "PLACEHOLDER_SEQUENCE",
+                "enabled": true
+              },
+              {
+                "operation": "MASK",
+                "patternType": "BUILTIN",
+                "builtInPiiType": "EMAIL",
+                "maskMode": "KEEP_LAST",
+                "maskVisibleCharCount": 4,
+                "enabled": true
+              }
+            ],
+            "unmaskMode": "NONE",
+            "engine": "BUILTIN"
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Builtin Masking with Reversible Unmask
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-pii-mask",
+    "description": "Masks TCKN and email in prompts, restores for the support role",
+    "active": true,
+    "privacyDefinitions": [
+      {
+        "operation": "MASK",
+        "patternType": "BUILTIN",
+        "builtInPiiType": "TCKN",
+        "maskMode": "PLACEHOLDER_SEQUENCE",
+        "enabled": true
+      },
+      {
+        "operation": "MASK",
+        "patternType": "REGEX",
+        "regexPattern": "\\b[\\w.%-]+@[\\w.-]+\\.[A-Za-z]{2,}\\b",
+        "maskMode": "SYNTHETIC",
+        "enabled": true
+      }
+    ],
+    "carryBufferSize": 64,
+    "decodeEncodedContent": true,
+    "unmaskMode": "RESPONSE_INLINE",
+    "unmaskAllowedRoles": ["support-agent"]
+  }
+}
+```
+
+##### Full JSON Body Example — With an External DLP Webhook
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-pii-mask",
+    "description": "Builtin masking plus an external DLP check",
+    "active": true,
+    "privacyDefinitions": [
+      {
+        "operation": "MASK",
+        "patternType": "BUILTIN",
+        "builtInPiiType": "CREDIT_CARD",
+        "maskMode": "SYNTHETIC",
+        "enabled": true
+      }
+    ],
+    "engine": "BUILTIN_PLUS_EXTERNAL",
+    "failMode": "FAIL_CLOSED",
+    "externalGuardrail": {
+      "type": "http-dlp",
+      "webhookConnectionName": "corp-dlp-webhook",
+      "timeoutMs": 3000,
+      "maxInputChars": 8000
+    }
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Privacy Definitions](#privacy-definitions), [External Guardrail](#external-guardrail) and [Other Fields](#other-fields) above. `type` (`ai-pii-mask`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `engine` is not `BUILTIN` but `externalGuardrail` is missing; `externalGuardrail.type` blank or unsupported; `llmProviderName` blank for `llm-judge`; `webhookConnectionName` blank for `http-dlp`; `timeoutMs`/`maxInputChars` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/customer-pii-mask/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-pii-mask",
+      "description": "Masks TCKN in prompts",
+      "active": true,
+      "privacyDefinitions": [
+        {
+          "operation": "MASK",
+          "patternType": "BUILTIN",
+          "builtInPiiType": "TCKN",
+          "maskMode": "PLACEHOLDER_SEQUENCE"
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep — including every entry in `privacyDefinitions` and `unmaskAllowedRoles`.
+
+##### Full JSON Body Example — Widening the Unmask Role List
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-pii-mask",
+    "description": "Masks TCKN and email in prompts, restores for support and compliance",
+    "active": true,
+    "privacyDefinitions": [
+      {
+        "operation": "MASK",
+        "patternType": "BUILTIN",
+        "builtInPiiType": "TCKN",
+        "maskMode": "PLACEHOLDER_SEQUENCE"
+      }
+    ],
+    "unmaskMode": "RESPONSE_INLINE",
+    "unmaskAllowedRoles": ["support-agent", "compliance-officer"]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/customer-pii-mask/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-pii-mask",
+      "active": true,
+      "privacyDefinitions": [
+        {
+          "operation": "MASK",
+          "patternType": "BUILTIN",
+          "builtInPiiType": "TCKN",
+          "maskMode": "PLACEHOLDER_SEQUENCE"
+        }
+      ],
+      "unmaskAllowedRoles": ["support-agent", "compliance-officer"]
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/customer-pii-mask/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **`EXTERNAL_ONLY` turns masking off entirely** — see the warning under [External Guardrail](#external-guardrail). This is the one engine value where the policy's usual job (masking) does not run.
+- **`unmaskAllowedRoles` is deny-by-default.** An empty or missing list means nobody is restored, even with `unmaskMode: RESPONSE_INLINE` selected — this is not a "restore for everyone" fallback.
+- **`RESPONSE_INLINE` is unary-response-only.** A streaming response is skipped visibly (not silently) in v1; use `UNMASK_API` if the traffic streams.
+- **`PLACEHOLDER_SEQUENCE`/`SYNTHETIC` never leak the original value in the masked output itself** — recovering it requires `unmaskMode` and, for `UNMASK_API`, an explicit authorized call. `KEEP_FIRST`/`KEEP_LAST` deliberately leave partial plaintext in the output; choose how many characters stay visible with care — a phone number's last four digits alone can be identifying.
+- **`decodeEncodedContent` widens what is scanned, it never narrows it** — when nothing decodes, or the flag is off, masking sees the byte-identical original text.
+
+## Related Documentation
+
+- [Advanced Guardrails](/en/ai-gateway/advanced-guardrails)
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [Prompt Guard Policy](/api-reference/policies/policies/policy-ai-prompt-guard)
+- [DLP Guard Policy](/api-reference/policies/policies/policy-ai-dlp-guard)

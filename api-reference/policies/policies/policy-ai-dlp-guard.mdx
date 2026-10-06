@@ -1,0 +1,525 @@
+---
+title: "AI DLP Guard Policy"
+description: "AI DLP Guard policies detect secrets and credentials (API keys, tokens, private keys) in LLM traffic using an embedded list of regex rules, an optional magic-byte file-signature scan, and an external adapter as a second opinion."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-dlp-guard
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Guard Definitions
+
+`policyAiDlpGuardDefList` carries the embedded secret/credential-detection rules.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| id | integer | No | Set by the platform once the rule is saved; ignored on write. |
+| presetId | string | No | Back-reference to the catalog rule this definition was copied from. A provenance marker only, not an APIops name-based reference — import clears it and the copy stays fully functional, just localized. |
+| name | string | Yes | Rule name. Used as the anonymous label reported in logs and traffic data instead of the raw regex. |
+| ruleValue | string | Yes | Regex pattern matched against the resolved scan text. |
+| action | string | No | `BLOCK` (default), `FLAG` or `MASK`. `MASK` redacts the matched region in place and lets the (redacted) traffic through. |
+| category | string | No | Category label (e.g. `aws`, `openai`, `github`, `pem`, `jwt`, `generic`). |
+| enabled | boolean | No | Whether this definition is active. Default `true`. |
+| description | string | No | Free-text description for UI display. |
+| literalAnchors | array of strings | No | Literal substrings that must appear verbatim in **every** possible match of `ruleValue`. Used as a fast pre-filter before the regex runs. An anchor that isn't a true substring of every match is rejected at save time (`400`) — a loose anchor would silently defeat the gate and let a real match through unscanned. Leave empty/null if you're not sure; the rule is simply always regex-scanned, just without the pre-filter speedup. |
+
+---
+
+## File Signature Detection
+
+`fileSignatureDetectionEnabled` adds a second, independent check: a magic-byte scan for binary document/archive/executable content smuggled into a prompt or echoed back in a response — something a text regex cannot catch reliably.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| fileSignatureDetectionEnabled | boolean | No | Turns the magic-byte scan on. Default `false`. |
+| fileSignatureAction | string | No | `BLOCK` (default) or `FLAG` only. `MASK` is rejected at save time (`400`) — a magic-byte match has no well-defined redaction span. |
+| fileSignatureTypes | array of strings | No | Allow-list narrowing which signatures count as a match: `PDF`, `ZIP_OOXML`, `PNG`, `JPEG`, `GIF`, `GZIP`, `RAR`, `SEVEN_ZIP`, `ELF`, `PE_EXE`, `OLE2`, `RTF`, `JAVA_CLASS`. Null/empty means all of them. |
+
+---
+
+## External Guardrail
+
+`engine` decides which decision sources feed the policy's verdict.
+
+| Value | Behaviour |
+|-------|-----------|
+| `BUILTIN` (default) | Only `policyAiDlpGuardDefList` (and, if enabled, the file-signature scan) is evaluated. |
+| `BUILTIN_PLUS_EXTERNAL` | The regex/file-signature checks and the external adapter both run. Either one can trigger a block. |
+| `EXTERNAL_ONLY` | **`policyAiDlpGuardDefList` is ignored entirely** — no `BLOCK`/`MASK`/`FLAG` rule runs. Only the external adapter's verdict applies. The file-signature scan is unaffected by `engine` — it runs whenever `fileSignatureDetectionEnabled` is `true`, regardless of engine. |
+
+`failMode` governs what happens when the external adapter call itself errors or times out:
+
+| Value | Behaviour |
+|-------|-----------|
+| `FAIL_CLOSED` (default) | The request is blocked. |
+| `FAIL_OPEN` | The request continues; a `FAIL_OPEN` signal is recorded so the bypass is visible. |
+
+### `externalGuardrail` Fields
+
+Either `llm-judge` or `http-dlp` is accepted on this policy.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| type | string | Yes | `llm-judge` or `http-dlp`. |
+| llmProviderName | string | Conditional | Required when `type` is `llm-judge`. Name of the LLM provider connection config. |
+| webhookConnectionName | string | Conditional | Required when `type` is `http-dlp`. Name of the webhook connection config the adapter calls. |
+| modelId | string | No | Judge model identifier. `llm-judge` only. |
+| promptTemplate | string | No | Judge prompt template. `llm-judge` only. |
+| jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. `llm-judge` only. |
+| maxOutputTokens | integer | No | Judge max output tokens. `llm-judge` only. |
+| timeoutMs | integer | No | HTTP call timeout in milliseconds. Must be positive if set. Shared by both adapter types. |
+| maxInputChars | integer | No | Max input characters sent to the adapter. Must be positive if set. Shared by both adapter types. |
+
+---
+
+## Other Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | boolean | No | Whether the guard runs at all. Default `true`. |
+| carryBufferSize | integer | No | Streaming carry buffer size in characters, for a chunk-boundary `MASK`. |
+| decodeEncodedContent | boolean | No | Decodes base64/hex/URL/unicode segments before scanning. Default `false`. |
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-dlp-guard",
+            "name": "secret-leak-guard",
+            "description": "Blocks AWS keys and PEM private keys",
+            "active": true,
+            "enabled": true,
+            "policyAiDlpGuardDefList": [
+              {
+                "name": "aws-access-key",
+                "ruleValue": "AKIA[0-9A-Z]{16}",
+                "action": "BLOCK",
+                "category": "aws",
+                "literalAnchors": ["AKIA"],
+                "enabled": true
+              }
+            ],
+            "fileSignatureDetectionEnabled": true,
+            "fileSignatureAction": "BLOCK",
+            "fileSignatureTypes": ["PDF", "ZIP_OOXML"],
+            "engine": "BUILTIN",
+            "failMode": "FAIL_CLOSED"
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Regex Rules Plus File-Signature Scan
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-dlp-guard",
+    "description": "Blocks AWS keys and PEM private keys, redacts generic tokens",
+    "active": true,
+    "enabled": true,
+    "policyAiDlpGuardDefList": [
+      {
+        "name": "aws-access-key",
+        "ruleValue": "AKIA[0-9A-Z]{16}",
+        "action": "BLOCK",
+        "category": "aws",
+        "literalAnchors": ["AKIA"]
+      },
+      {
+        "name": "pem-private-key",
+        "ruleValue": "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+        "action": "BLOCK",
+        "category": "pem",
+        "literalAnchors": ["PRIVATE KEY-----"]
+      },
+      {
+        "name": "generic-bearer-token",
+        "ruleValue": "(?i)bearer [a-z0-9._-]{20,}",
+        "action": "MASK",
+        "category": "generic"
+      }
+    ],
+    "carryBufferSize": 64,
+    "decodeEncodedContent": true,
+    "fileSignatureDetectionEnabled": true,
+    "fileSignatureAction": "BLOCK",
+    "fileSignatureTypes": ["PDF", "ZIP_OOXML", "PE_EXE"]
+  }
+}
+```
+
+##### Full JSON Body Example — With an External LLM-Judge
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-dlp-guard",
+    "description": "Regex rules plus a judge model as a second opinion",
+    "active": true,
+    "enabled": true,
+    "policyAiDlpGuardDefList": [
+      {
+        "name": "aws-access-key",
+        "ruleValue": "AKIA[0-9A-Z]{16}",
+        "action": "BLOCK",
+        "category": "aws"
+      }
+    ],
+    "engine": "BUILTIN_PLUS_EXTERNAL",
+    "failMode": "FAIL_CLOSED",
+    "externalGuardrail": {
+      "type": "llm-judge",
+      "llmProviderName": "internal-guard-model",
+      "timeoutMs": 2000
+    }
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Guard Definitions](#guard-definitions), [File Signature Detection](#file-signature-detection), [External Guardrail](#external-guardrail) and [Other Fields](#other-fields) above. `type` (`ai-dlp-guard`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `fileSignatureAction` is `MASK`; a `literalAnchors` entry that isn't a verbatim substring of every match of its rule's `ruleValue`; `engine` is not `BUILTIN` but `externalGuardrail` is missing; `externalGuardrail.type` blank or unsupported; `llmProviderName` blank for `llm-judge`; `webhookConnectionName` blank for `http-dlp`; `timeoutMs`/`maxInputChars` not positive; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/secret-leak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-dlp-guard",
+      "description": "Blocks AWS keys",
+      "active": true,
+      "policyAiDlpGuardDefList": [
+        {
+          "name": "aws-access-key",
+          "ruleValue": "AKIA[0-9A-Z]{16}",
+          "action": "BLOCK",
+          "category": "aws"
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep — including every rule in `policyAiDlpGuardDefList`.
+
+##### Full JSON Body Example — Turning On File-Signature Detection
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-dlp-guard",
+    "description": "Blocks AWS keys, now also blocks smuggled PDFs and archives",
+    "active": true,
+    "policyAiDlpGuardDefList": [
+      {
+        "name": "aws-access-key",
+        "ruleValue": "AKIA[0-9A-Z]{16}",
+        "action": "BLOCK",
+        "category": "aws"
+      }
+    ],
+    "fileSignatureDetectionEnabled": true,
+    "fileSignatureAction": "BLOCK",
+    "fileSignatureTypes": ["PDF", "ZIP_OOXML"]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/secret-leak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-dlp-guard",
+      "active": true,
+      "policyAiDlpGuardDefList": [
+        {
+          "name": "aws-access-key",
+          "ruleValue": "AKIA[0-9A-Z]{16}",
+          "action": "BLOCK",
+          "category": "aws"
+        }
+      ],
+      "fileSignatureDetectionEnabled": true
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/secret-leak-guard/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **`EXTERNAL_ONLY` turns off every embedded rule, but not file-signature detection.** `fileSignatureDetectionEnabled` runs independently of `engine` — set it explicitly if you want the magic-byte scan under `EXTERNAL_ONLY`.
+- **`fileSignatureAction` never accepts `MASK`.** A magic-byte match has no well-defined redaction span, so only `BLOCK`/`FLAG` are valid; sending `MASK` is rejected at save time.
+- **A `literalAnchors` entry must be a true substring of every possible match, not just a likely one.** A loose anchor would silently defeat the pre-filter and let a real match through unscanned — the platform rejects the save rather than accept a rule that looks safe but isn't.
+- **`MASK` on a guard def redacts and lets the (redacted) traffic through** — unlike `BLOCK`, the request or response is not rejected, only the matched span is replaced.
+- **`decodeEncodedContent` widens what is scanned, it never narrows it** — when nothing decodes, or the flag is off, the guard sees the byte-identical original text.
+
+## Related Documentation
+
+- [Advanced Guardrails](/en/ai-gateway/advanced-guardrails)
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [PII Mask Policy](/api-reference/policies/policies/policy-ai-pii-mask)
+- [Prompt Guard Policy](/api-reference/policies/policies/policy-ai-prompt-guard)
