@@ -107,58 +107,9 @@ const config: Config = {
         showLastUpdateTime: true,
       },
     ],
-    [
-      '@docusaurus/plugin-client-redirects',
-      {
-        redirects: [
-          {from: '/tr/upgrade/docker-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
-          {from: '/tr/upgrade/linux-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
-          {from: '/tr/upgrade/internetsiz-ortamda-mongodb-surum-yukseltme', to: '/tr/upgrade/cevrimdisi-ortamda-mongodb-surum-yukseltme'},
-          {from: '/en/upgrade/offline-mongodb-version-upgrade', to: '/en/upgrade/air-gapped-mongodb-version-upgrade'},
-          {from: '/en/upgrade/upgrading-on-docker', to: '/en/upgrade/apinizer-version-upgrade'},
-          {from: '/en/upgrade/upgrading-on-linux', to: '/en/upgrade/apinizer-version-upgrade'},
-          // MCP/A2A outbound connections retired as a standalone resource — servers/agents are now
-          // configured inline (Passthrough proxy routing, or the owning policy). Point old API
-          // Reference URLs at the closest living equivalent instead of a dead link.
-          {from: '/api-reference/mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
-          {from: '/api-reference/mcp-connections/list-mcp-connections', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
-          {from: '/api-reference/mcp-connections/get-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
-          {from: '/api-reference/mcp-connections/create-mcp-connection', to: '/api-reference/api-proxies/crud/create-mcp-api-proxy'},
-          {from: '/api-reference/mcp-connections/update-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
-          {from: '/api-reference/mcp-connections/delete-mcp-connection', to: '/api-reference/api-proxies/settings/update-mcp-routing'},
-          {from: '/api-reference/mcp-connections/test-mcp-connection', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
-          {from: '/api-reference/mcp-connections/parse-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
-          {from: '/api-reference/mcp-connections/list-mcp-tools', to: '/api-reference/policies/crud/discover-mcp-policy-tools'},
-          {from: '/api-reference/a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
-          {from: '/api-reference/a2a-connections/list-a2a-connections', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
-          {from: '/api-reference/a2a-connections/get-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
-          {from: '/api-reference/a2a-connections/create-a2a-connection', to: '/api-reference/api-proxies/crud/create-a2a-api-proxy'},
-          {from: '/api-reference/a2a-connections/update-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
-          {from: '/api-reference/a2a-connections/delete-a2a-connection', to: '/api-reference/api-proxies/settings/update-a2a-routing'},
-          {from: '/api-reference/a2a-connections/test-a2a-connection', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
-          {from: '/api-reference/a2a-connections/parse-a2a-skills', to: '/api-reference/policies/crud/discover-a2a-policy-skills'},
-          // APNZ-6804 — admin pages relocated to match where the setting now lives in the product.
-          // Token Management Settings moved under Identity; the API client secret storage default
-          // became a section of General Settings; the Login Log connector page was split into the
-          // SIEM & Log Forwarding page (Manager) and the API Portal login logs page (Portal).
-          {from: '/en/admin/system-settings/token-management-settings', to: '/en/admin/identity-management/token-management-settings'},
-          {from: '/tr/admin/system-settings/token-yonetim-ayarlari', to: '/tr/admin/identity-management/token-yonetim-ayarlari'},
-          {from: '/en/admin/system-settings/api-client-secret-settings', to: '/en/admin/system-settings/global-configuration'},
-          {from: '/tr/admin/system-settings/api-istemcisi-secret-saklama-ayarlari', to: '/tr/admin/system-settings/global-yapilandirma'},
-          {from: '/en/admin/system-settings/login-log-connector-configuration', to: '/en/admin/system-settings/siem-log-forwarding'},
-          {from: '/tr/admin/system-settings/login-log-konnektor-yapilandirmasi', to: '/tr/admin/system-settings/siem-log-yonlendirme'},
-          // 2026.07.0 → 2026.09.0 release rename (ALTER script pages)
-          {from: '/tr/release-notes/2026-07-0-log-tablosu-alter', to: '/tr/release-notes/2026-09-0-log-tablosu-alter'},
-          {from: '/en/release-notes/2026-07-0-log-table-alter', to: '/en/release-notes/2026-09-0-log-table-alter'},
-        ],
-        createRedirects(existingPath) {
-          if (existingPath === '/tr') {
-            return ['/'];
-          }
-          return undefined;
-        },
-      },
-    ],
+    // Redirects are real HTTP 301s served by Cloudflare Pages from static/_redirects, generated by
+    // scripts/gen-legacy-redirects.mjs from scripts/legacy-redirects.tsv (this includes the former
+    // plugin-client-redirects rules and `/` → `/tr`). Add future renames to the TSV, not here.
   ],
 
   themeConfig: {
