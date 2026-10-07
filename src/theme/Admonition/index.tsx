@@ -2,6 +2,7 @@ import React from 'react';
 import {processAdmonitionProps} from '@docusaurus/theme-common';
 import {useLocation} from '@docusaurus/router';
 import AdmonitionTypes from '@theme/Admonition/Types';
+import type {Props} from '@theme/Admonition';
 
 const EN_LABELS: Record<string, string> = {
   info: 'Info',
@@ -28,17 +29,17 @@ function getAdmonitionTypeComponent(type: string) {
   return AdmonitionTypes.info;
 }
 
-export default function Admonition(unprocessedProps: Record<string, unknown>) {
+export default function Admonition(unprocessedProps: Props) {
   let props = processAdmonitionProps(unprocessedProps);
   const englishLabels = useEnglishAdmonitionLabels();
 
   if (englishLabels && !props.title) {
     props = {
       ...props,
-      title: EN_LABELS[props.type as string] ?? EN_LABELS.info,
+      title: EN_LABELS[props.type] ?? EN_LABELS.info,
     };
   }
 
-  const AdmonitionTypeComponent = getAdmonitionTypeComponent(props.type as string);
+  const AdmonitionTypeComponent = getAdmonitionTypeComponent(props.type);
   return <AdmonitionTypeComponent {...props} />;
 }
