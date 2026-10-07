@@ -3,7 +3,8 @@ import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
-  title: 'Apinizer Dokümantasyonu',
+  // Language-neutral: appended to every page title (TR, EN and API reference).
+  title: 'Apinizer Docs',
   tagline: 'Full Lifecycle API Management Platform',
   favicon: 'img/favicon.ico',
   url: 'https://docs.apinizer.com',
@@ -19,7 +20,8 @@ const config: Config = {
     defaultLocale: 'tr',
     locales: ['tr'],
     localeConfigs: {
-      tr: {label: 'Türkçe', direction: 'ltr', htmlLang: 'tr-TR'},
+      // <html lang>, hreflang and og:locale are set per path (tr / en) in src/theme/SiteMetadata.
+      tr: {label: 'Türkçe', direction: 'ltr', htmlLang: 'tr'},
     },
   },
 
