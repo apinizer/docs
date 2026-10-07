@@ -285,7 +285,7 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "upgrade/offline-mongodb-version-upgrade"
+            "upgrade/air-gapped-mongodb-version-upgrade"
           ]
         },
         "upgrade/elasticsearch-version-upgrade"

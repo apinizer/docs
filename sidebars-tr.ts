@@ -282,7 +282,7 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "upgrade/internetsiz-ortamda-mongodb-surum-yukseltme"
+            "upgrade/cevrimdisi-ortamda-mongodb-surum-yukseltme"
           ]
         },
         "upgrade/elasticsearch-surum-yukseltme"
