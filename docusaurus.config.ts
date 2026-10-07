@@ -113,6 +113,8 @@ const config: Config = {
         redirects: [
           {from: '/tr/upgrade/docker-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
           {from: '/tr/upgrade/linux-uzerinde-guncelleme', to: '/tr/upgrade/apinizer-surum-yukseltme'},
+          {from: '/tr/upgrade/internetsiz-ortamda-mongodb-surum-yukseltme', to: '/tr/upgrade/cevrimdisi-ortamda-mongodb-surum-yukseltme'},
+          {from: '/en/upgrade/offline-mongodb-version-upgrade', to: '/en/upgrade/air-gapped-mongodb-version-upgrade'},
           {from: '/en/upgrade/upgrading-on-docker', to: '/en/upgrade/apinizer-version-upgrade'},
           {from: '/en/upgrade/upgrading-on-linux', to: '/en/upgrade/apinizer-version-upgrade'},
           // MCP/A2A outbound connections retired as a standalone resource — servers/agents are now

@@ -55,10 +55,14 @@ None
   "pricePerMillionInput": 0.25,
   "pricePerMillionOutput": 2.00,
   "pricePerMillionCached": 0.025,
+  "pricePerMillionCacheWrite": null,
+  "cacheWritePricesByTtl": [],
+  "contextTierPrices": [],
+  "serviceTierPrices": [],
   "pricePerImage": null,
   "pricePerAudioMinute": null,
   "pricePerCharacterTts": null,
-  "capabilities": ["chat", "function_calling", "json_mode"],
+  "capabilities": ["function_calling", "structured_output"],
   "modality": "TEXT",
   "isDeprecated": false,
   "deprecatedAt": null,
@@ -81,15 +85,95 @@ None
 | pricePerMillionInput | number | No | - | USD per 1M input tokens |
 | pricePerMillionOutput | number | No | - | USD per 1M output tokens |
 | pricePerMillionCached | number | No | - | USD per 1M cached input tokens |
+| pricePerMillionCacheWrite | number | No | - | USD per 1M cache-write tokens (flat rate). A matching row in `cacheWritePricesByTtl` overrides this for its TTL |
+| cacheWritePricesByTtl | array | No | - | Cache-write price per TTL — see [Cache-Write Price (`cacheWritePricesByTtl`) Fields](#cache-write-price-cachewritepricesbyttl-fields) |
+| contextTierPrices | array | No | - | Long-context price tiers — see [Context-Tier Price (`contextTierPrices`) Fields](#context-tier-price-contexttierprices-fields) |
+| serviceTierPrices | array | No | - | Provider service-tier price multipliers — see [Service-Tier Price (`serviceTierPrices`) Fields](#service-tier-price-servicetierprices-fields) |
 | pricePerImage | number | No | - | USD per generated image |
 | pricePerAudioMinute | number | No | - | USD per minute of audio (STT) |
 | pricePerCharacterTts | number | No | - | USD per input character (TTS) |
-| capabilities | array[string] | No | - | Capability tags (e.g. `chat`, `function_calling`, `vision`, `embedding`, `json_mode`, `reasoning`) |
+| capabilities | array[string] | No | - | Capability tags. Normalized on every save — see [Capabilities Normalization](#capabilities-normalization) |
 | modality | string | No | - | Model modality: `TEXT`, `VISION`, `AUDIO`, `EMBEDDING`, `RERANK`, `MULTIMODAL`, `IMAGE` |
 | isDeprecated | boolean | No | false | Whether the model is deprecated |
 | deprecatedAt | string | No | - | Deprecation announcement time (ISO-8601) |
 | sunsetAt | string | No | - | Planned removal time (ISO-8601) |
 | builtIn | boolean | No | false | Leave `false` for custom entries. See the built-in note below. |
+
+#### Cache-Write Price (`cacheWritePricesByTtl`) Fields
+
+One row per cache TTL the provider bills separately for (e.g. Anthropic prices a 5-minute cache
+write at 1.25× input and a 1-hour cache write at 2× input). A row overrides
+`pricePerMillionCacheWrite` for usage that reports that TTL.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| ttl | string | Yes | Short TTL label as the provider reports it — typically `"5m"` or `"1h"` |
+| pricePerMillion | number | Yes | USD per 1M cache-write tokens at this TTL |
+
+```json
+"cacheWritePricesByTtl": [
+  { "ttl": "5m", "pricePerMillion": 3.75 },
+  { "ttl": "1h", "pricePerMillion": 6.00 }
+]
+```
+
+#### Context-Tier Price (`contextTierPrices`) Fields
+
+Long-context pricing: above `aboveTokens` prompt tokens, the **whole request** is priced at
+`inputFactor` × the input price and `outputFactor` × the output price. When several tiers match,
+the one with the highest `aboveTokens` threshold wins.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| aboveTokens | integer | Yes | Prompt-token threshold (input + cached + cache-write). The tier applies strictly **above** this value |
+| inputFactor | number | Yes | Multiplier applied to the input price for the whole request |
+| outputFactor | number | Yes | Multiplier applied to the output price for the whole request |
+
+```json
+"contextTierPrices": [
+  { "aboveTokens": 200000, "inputFactor": 2.0, "outputFactor": 1.5 }
+]
+```
+
+#### Service-Tier Price (`serviceTierPrices`) Fields
+
+The gateway applies the row whose `tier` matches the `service_tier` value the provider echoed in
+the response usage (e.g. OpenAI's `flex` / `priority`, or a request routed through a Batch API).
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| tier | string | Yes | Service tier enum constant: `BATCH`, `PRIORITY`, `FLEX` or `CUSTOM` |
+| name | string | No | Provider-reported tier value to match, used only when `tier` is `CUSTOM` (e.g. `"scale"`); ignored for the fixed tiers |
+| inputFactor | number | Yes | Multiplier applied to the input price when the provider echoes this tier |
+| outputFactor | number | Yes | Multiplier applied to the output price when the provider echoes this tier |
+
+```json
+"serviceTierPrices": [
+  { "tier": "BATCH", "name": null, "inputFactor": 0.5, "outputFactor": 0.5 },
+  { "tier": "PRIORITY", "name": null, "inputFactor": 2.0, "outputFactor": 2.0 }
+]
+```
+
+#### Capabilities Normalization
+
+`capabilities` is normalized on every save — create, update, and when a model is registered from
+an LLM provider's `supportedModels`. The stored value never contains a legacy spelling.
+
+**Known keys** (the values `capabilities` normalizes to): `function_calling`, `vision`,
+`prompt_caching`, `reasoning`, `structured_output`, `streaming`, `web_search`.
+
+**Aliases collapsed to a known key**: `tools`, `tool_use`, `tool_calling`, `function-calling` →
+`function_calling`; `image_input`, `multimodal_input` → `vision`; `caching` → `prompt_caching`;
+`json_mode`, `json_schema`, `response_schema` → `structured_output`; `search` → `web_search`.
+
+**Dropped as modality noise** (already implied by the `modality` field, so it carries no extra
+information): `chat`, `completion`, `text`, `embedding`, `embeddings`, `code`.
+
+**Unknown values** are lower-cased, converted to `snake_case`, and kept as a custom tag.
+
+For example, a request body sending `"capabilities": ["chat", "tool_use", "json_mode"]` is stored
+as `["function_calling", "structured_output"]` — `chat` is dropped and both remaining values
+collapse to their canonical key.
 
 ### Notes
 
@@ -190,6 +274,9 @@ curl -X POST \
   `%2F` in the path.
 - **No secret fields**: The catalog carries no `@SecretData` fields and no `_class` discriminator —
   nothing is masked, and there is no secret-preservation-on-blank behaviour to consider.
+- **Capabilities are rewritten on save**: whatever `capabilities` values are sent, the stored value
+  is the [normalized](#capabilities-normalization) form — legacy spellings and modality noise never
+  round-trip unchanged.
 
 ## Related Documentation
 

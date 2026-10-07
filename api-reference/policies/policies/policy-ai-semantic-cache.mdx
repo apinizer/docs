@@ -1,0 +1,444 @@
+---
+title: "AI Semantic Cache Policy"
+description: "AI Semantic Cache policies cache LLM responses so a repeated (or, with the vector layer enabled, a similar) request is served without a new call to the model. An exact-match layer is always on; an opt-in vector-similarity layer adds near-duplicate matching on top of it."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-semantic-cache
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## How Caching Works
+
+1. **Exact match (always on when `enabled`).** The request is hashed (model + credential + optionally the proxy + the full request body) and looked up in the cache. A hit short-circuits the call to the model.
+2. **Vector match (opt-in via `vectorEnabled`).** On an exact miss, if the vector layer is configured, the prompt is embedded and matched against previously cached prompts by similarity. A match at or above `similarityThreshold` counts as a hit.
+3. **Write.** On any miss, the response is written to both layers (the vector write is asynchronous and best-effort). Responses larger than `maxCacheableBytes` are never cached.
+
+The cache fails open: any cache-layer error is logged and the request proceeds as an uncached call, it is never turned into an error response.
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| enabled | boolean | No | true | Master switch for the entire policy, both layers. |
+| ttlSeconds | integer | No | 3600 | Exact-match cache entry lifetime in seconds. `0` disables the cache entirely (bypass). |
+| cacheKeyStrategy | string | No | `PROXY_ISOLATED` | `PROXY_ISOLATED` includes the API proxy in the cache key; a `GLOBAL`-style key shares entries across proxies for the same model/credential. |
+| anonymousHandling | string | No | `SKIP` | Behaviour when the caller's identity cannot be resolved. `SKIP` bypasses the cache for that request. `SHARED_POOL` caches anonymous traffic in one shared bucket (no per-caller isolation). `DENY` rejects the request with HTTP 401. |
+| cacheConnectionTimeoutInSeconds | integer | No | 3 | HTTP timeout, in seconds, for calls to the cache service. |
+| maxCacheableBytes | integer | No | 262144 (256 KB) | Responses larger than this are not written to cache. `0` means no limit. |
+| vectorEnabled | boolean | No | false | Master switch for the vector-similarity layer. `false` is exact-match only. |
+| vectorDbName | string | Conditional | - | Name of a configured VectorDB connection. Required (together with `embeddingProviderName` and `vectorCollectionName`) for the vector layer to activate. Resolved server-side to the connection's id; the raw id is never exposed over APIops. |
+| embeddingProviderName | string | Conditional | - | Name of a configured LLM connection used to generate embeddings. Resolved server-side the same way as `vectorDbName`. |
+| embeddingModelId | string | No | `text-embedding-3-small` | Embedding model identifier passed to the embedding provider. |
+| embeddingDimension | integer | No | 1536 | Embedding vector dimension. Must match the target VectorDB collection's dimension. |
+| similarityThreshold | number | No | 0.95 | Minimum similarity score for a vector match to count as a hit. |
+| vectorTopK | integer | No | 1 | Number of nearest-neighbour candidates requested from the VectorDB per lookup. |
+| vectorCollectionName | string | Conditional | - | VectorDB collection/table name, used for both the query and the upsert. Required for the vector layer to activate. |
+| messageCountback | integer | No | 1 | Vector-layer embedding input only: how many trailing messages (matching the role filters below) are collected from `messages[]`, scanning from the end. `null` or `<=1` embeds only the last user message. Does **not** affect the exact-match cache key. |
+| includeSystemPrompts | boolean | No | false | Vector-layer embedding input only: also collect trailing `system`-role messages. |
+| includeAssistantPrompts | boolean | No | false | Vector-layer embedding input only: also collect trailing `assistant`-role messages. |
+| includeToolPrompts | boolean | No | false | Vector-layer embedding input only: also collect trailing `tool`-role messages. |
+| respectCacheControl | boolean | No | false | Honour the client's `Cache-Control` request header. `no-store` skips both read and write; `no-cache` skips only the read. `false` (default) ignores the header entirely. |
+
+:::note vectorDbName / embeddingProviderName are name-based references
+Like every APIops entity reference, these fields carry the connection's **name**, not its internal id. Export/import between environments works as long as a connection with the same name exists in the target environment.
+:::
+
+:::info Vector layer requires all three fields
+The vector layer activates only when `vectorDbName`, `embeddingProviderName` and `vectorCollectionName` are all non-blank. Leaving any one of them out keeps the policy on exact-match only, even with `vectorEnabled: true`.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-semantic-cache",
+            "name": "support-response-cache",
+            "description": "Cache repeated support assistant answers",
+            "active": true,
+            "enabled": true,
+            "ttlSeconds": 3600,
+            "cacheKeyStrategy": "PROXY_ISOLATED",
+            "anonymousHandling": "SKIP",
+            "cacheConnectionTimeoutInSeconds": 3,
+            "maxCacheableBytes": 262144,
+            "vectorEnabled": true,
+            "vectorDbName": "prod-pgvector",
+            "embeddingProviderName": "openai-embeddings",
+            "embeddingModelId": "text-embedding-3-small",
+            "embeddingDimension": 1536,
+            "similarityThreshold": 0.95,
+            "vectorTopK": 1,
+            "vectorCollectionName": "support_cache",
+            "respectCacheControl": true
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example — Exact-Match Only
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-semantic-cache",
+    "description": "Cache repeated support assistant answers",
+    "active": true,
+    "enabled": true,
+    "ttlSeconds": 3600,
+    "cacheKeyStrategy": "PROXY_ISOLATED",
+    "anonymousHandling": "SKIP",
+    "maxCacheableBytes": 262144
+  }
+}
+```
+
+##### Full JSON Body Example — With the Vector Layer
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 2
+  },
+  "policy": {
+    "type": "ai-semantic-cache",
+    "description": "Cache near-duplicate support assistant answers",
+    "active": true,
+    "enabled": true,
+    "ttlSeconds": 3600,
+    "vectorEnabled": true,
+    "vectorDbName": "prod-pgvector",
+    "embeddingProviderName": "openai-embeddings",
+    "embeddingModelId": "text-embedding-3-small",
+    "embeddingDimension": 1536,
+    "similarityThreshold": 0.95,
+    "vectorTopK": 1,
+    "vectorCollectionName": "support_cache",
+    "messageCountback": 3,
+    "includeSystemPrompts": false,
+    "includeAssistantPrompts": true,
+    "respectCacheControl": true
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Fields](#fields) above. `type` (`ai-semantic-cache`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; proxy not found. |
+| 400 | `vectorDbName` or `embeddingProviderName` set but no connection with that name exists in the project. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-response-cache/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-semantic-cache",
+      "description": "Cache repeated support assistant answers",
+      "active": true,
+      "ttlSeconds": 3600
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+##### Full JSON Body Example — Enabling the Vector Layer
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-semantic-cache",
+    "description": "Cache repeated support assistant answers",
+    "active": true,
+    "ttlSeconds": 3600,
+    "vectorEnabled": true,
+    "vectorDbName": "prod-pgvector",
+    "embeddingProviderName": "openai-embeddings",
+    "vectorCollectionName": "support_cache",
+    "similarityThreshold": 0.9
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-response-cache/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-semantic-cache",
+      "active": true,
+      "ttlSeconds": 1800
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-response-cache/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **Fail-open by design.** Any cache-service error (lookup or write) is logged and the request continues as an uncached call — the client never sees a 502 caused by the cache being unavailable.
+- **Anonymous traffic is skipped by default.** With `anonymousHandling: SKIP`, requests whose identity cannot be resolved bypass the cache silently. If this policy sits before the authentication policy in the pipeline, every request can look anonymous here — put authentication policies first.
+- **`SHARED_POOL` gives up per-caller isolation.** All anonymous callers share one cache bucket; a cached answer from one caller can be served to another.
+- **`respectCacheControl` only takes effect when `true`.** With the default `false`, the client's `Cache-Control` header is ignored entirely — the cache is neither bypassed nor forced fresh by header alone.
+- **The vector layer needs all three reference fields.** `vectorDbName`, `embeddingProviderName` and `vectorCollectionName` must all be set; missing any one keeps the policy on exact-match only even with `vectorEnabled: true`.
+- **`messageCountback` and the `include*Prompts` flags only shape the vector layer's embedding input.** They never change what the exact-match layer hashes — the exact-match key always covers the full request body.
+
+## Related Documentation
+
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [AI Token Rate Limit Policy](/api-reference/policies/policies/policy-ai-token-rate-limit)

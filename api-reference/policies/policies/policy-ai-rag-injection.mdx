@@ -1,0 +1,414 @@
+---
+title: "RAG Injection Policy"
+description: "The RAG Injection policy retrieves relevant context chunks from a VectorDB and injects them into the request prompt before it reaches the LLM provider — Retrieval-Augmented Generation on the gateway."
+---
+
+## General Information
+
+### Policy Types
+
+```plaintext
+ai-rag-injection
+```
+
+This is a request-phase-only policy: it augments the outgoing prompt, it never touches the response.
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Retrieval Sources
+
+The policy needs a VectorDB to query and an embedding provider to embed the incoming prompt, both referenced **by name** — the same name-based-reference rule every APIops resource follows. An optional Knowledge Base name narrows retrieval further.
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | boolean | No | Whether this policy runs at all. Default `true`. |
+| vectorDbName | string | No* | Name of the VectorDB connection to query. Resolved server-side; an unknown name is rejected with `400`. *Required in practice — without it the policy blocks every request at runtime (see [Notes](#notes-and-warnings)). |
+| embeddingProviderName | string | No* | Name of the LLM connection used to embed the query text. Resolved server-side; an unknown name is rejected with `400`. *Required in practice, same reason as `vectorDbName`. |
+| collectionName | string | No | VectorDB collection/index name to query. |
+| topK | integer | No | Maximum number of chunks to retrieve. Default `4`. |
+| similarityThreshold | number | No | Minimum cosine similarity a chunk must reach to be included. Default `0.7`. |
+| embeddingModelId | string | No | Embedding model identifier, e.g. `text-embedding-3-small`. Default `text-embedding-3-small`. |
+| embeddingDimension | integer | No | Vector dimension — must match the VectorDB collection's own dimension. Default `1536`. |
+| knowledgeBaseName | string | No | Name of a Knowledge Base this policy is scoped to. Resolved server-side; when set, retrieval is additionally filtered to chunks indexed under this Knowledge Base. Unset means collection-only scope. |
+| injectionMode | string | No | `PREPEND_SYSTEM`, `PREPEND_USER`, `TEMPLATE` or `SYSTEM_SUFFIX`. Default `PREPEND_USER`. See [Injection modes](#injection-modes). |
+| injectionTemplate | string | No | Template used when `injectionMode=TEMPLATE`, with `{{context}}` and `{{prompt}}` placeholders. Default `"<CONTEXT>\n{{context}}\n</CONTEXT>\n\n{{prompt}}"`. |
+| maxContextChars | integer | No | Character budget for the injected context (greedy cap, highest-similarity chunks first). Default `4096`. |
+| noMatchBehavior | string | No | `PASS_THROUGH` (forward the request unaugmented) or `BLOCK` (reject with `403`). Default `PASS_THROUGH`. |
+| injectionTargetVariable | object | No | Optional variable that receives the augmented prompt string, in addition to it being written into the request body. |
+| requireResolvedProjectId | boolean | No | Fail-closed switch for multi-tenant isolation. Default `true` — see [Notes](#notes-and-warnings). |
+
+### Injection modes
+
+| Mode | Behaviour |
+|------|-----------|
+| PREPEND_USER | Prepends the retrieved context to the last `user` message. If none exists, appends a new `user` message rather than discarding the context. |
+| PREPEND_SYSTEM | Inserts a new `system` message at index 0, ahead of everything else. |
+| SYSTEM_SUFFIX | Inserts a new `system` message immediately after the last existing `system` message, leaving an admin-authored static system prompt untouched. Preferred when the LLM provider caches on the leading bytes of the message list — `PREPEND_SYSTEM` invalidates that cache on every call. |
+| TEMPLATE | Fills `injectionTemplate`'s `{{context}}`/`{{prompt}}` placeholders and injects the result the same way `PREPEND_USER` does. |
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-rag-injection",
+            "name": "support-kb-rag",
+            "description": "Augments support chat prompts with KB context",
+            "active": true,
+            "enabled": true,
+            "vectorDbName": "support-qdrant",
+            "embeddingProviderName": "openai-embeddings",
+            "collectionName": "support_articles",
+            "topK": 4,
+            "similarityThreshold": 0.7,
+            "knowledgeBaseName": "support-kb",
+            "injectionMode": "SYSTEM_SUFFIX",
+            "maxContextChars": 4096,
+            "noMatchBehavior": "PASS_THROUGH",
+            "requireResolvedProjectId": true
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-rag-injection",
+    "description": "Augments support chat prompts with KB context",
+    "active": true,
+    "enabled": true,
+    "vectorDbName": "support-qdrant",
+    "embeddingProviderName": "openai-embeddings",
+    "collectionName": "support_articles",
+    "topK": 4,
+    "similarityThreshold": 0.7,
+    "embeddingModelId": "text-embedding-3-small",
+    "embeddingDimension": 1536,
+    "knowledgeBaseName": "support-kb",
+    "injectionMode": "SYSTEM_SUFFIX",
+    "maxContextChars": 4096,
+    "noMatchBehavior": "PASS_THROUGH",
+    "requireResolvedProjectId": true
+  }
+}
+```
+
+#### Body Fields
+
+See [Fields](#fields) above.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `vectorDbName` or `embeddingProviderName` or `knowledgeBaseName` does not resolve to an existing connection/knowledge base in the project; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-kb-rag/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-rag-injection",
+      "description": "Augments support chat prompts with KB context",
+      "active": true,
+      "vectorDbName": "support-qdrant",
+      "embeddingProviderName": "openai-embeddings",
+      "collectionName": "support_articles",
+      "knowledgeBaseName": "support-kb",
+      "injectionMode": "SYSTEM_SUFFIX"
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+##### Full JSON Body Example — Widening the Retrieval Budget
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-rag-injection",
+    "description": "Augments support chat prompts with KB context",
+    "active": true,
+    "vectorDbName": "support-qdrant",
+    "embeddingProviderName": "openai-embeddings",
+    "collectionName": "support_articles",
+    "topK": 8,
+    "maxContextChars": 6000,
+    "knowledgeBaseName": "support-kb",
+    "injectionMode": "SYSTEM_SUFFIX"
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-kb-rag/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-rag-injection",
+      "active": true,
+      "vectorDbName": "support-qdrant",
+      "embeddingProviderName": "openai-embeddings",
+      "topK": 8,
+      "maxContextChars": 6000
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-kb-rag/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **No `vectorDbName` means every request is blocked.** The policy does not treat a missing VectorDB reference as pass-through — the request is rejected as a retrieval error. Set `vectorDbName` and `embeddingProviderName` before activating the policy.
+- **Run RAG Injection before Semantic Cache.** This policy mutates the request body; the Semantic Cache policy keys its cache on that body. If both are present in the same request pipeline, the platform automatically reorders them so RAG Injection runs first, regardless of the order you set — but keep them in that order in your own configuration to avoid surprises when reading it back.
+- **Multi-tenant isolation defaults to fail-closed.** When `requireResolvedProjectId=true` (the default) and the request's project cannot be resolved, the policy skips retrieval entirely rather than running an unfiltered cross-tenant query. Set it to `false` only for a single-tenant deployment.
+- **An empty match set defers to `noMatchBehavior`.** `PASS_THROUGH` (default) forwards the request unaugmented; `BLOCK` rejects it with `403`.
+- **`knowledgeBaseName` unset means collection-only scope.** Without it, retrieval is not filtered by Knowledge Base and can blend chunks from sibling Knowledge Bases that share the same `collectionName`.
+
+## Related Documentation
+
+- [Retrieval-Augmented Generation (RAG)](/en/ai-gateway/rag-injection)
+- [MCP Call Policy](/api-reference/policies/policies/policy-ai-mcp-call)
+- [A2A Call Policy](/api-reference/policies/policies/policy-ai-a2a-call)

@@ -1,0 +1,386 @@
+---
+title: "AI Token Rate Limit Policy"
+description: "AI Token Rate Limit policies cap LLM traffic by estimated or actual token usage across a time-windowed budget hierarchy (credential, organization, app, tenant), and add two additive per-request guards: a hard cap on a single request's size and a context-window overflow strategy."
+---
+
+## General Information
+
+### Policy Type
+
+```plaintext
+ai-token-rate-limit
+```
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Scope
+
+This policy configures two things that are independent of each other:
+
+1. **The oversized-request guard** — `maxTokensPerRequest` and `maxPromptChars` reject or truncate a single request that is too large, regardless of any time-windowed budget.
+2. **Cache behaviour for the time-windowed budget reservation** — `defaultReservationTtlSeconds`, `cacheConnectionTimeoutInSeconds` and `failOpenOnCacheError` govern how the policy talks to the shared token-bucket cache. The budget hierarchy itself (credential, organization, app, tenant caps) is configured elsewhere (credential rate limits, project and API proxy budgets) and is not part of this policy's request body.
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| defaultReservationTtlSeconds | integer | No | 600 | How long a reserved-but-not-yet-reconciled token/USD reservation stays valid in the cache. |
+| cacheConnectionTimeoutInSeconds | integer | No | 3 | HTTP timeout, in seconds, for calls to the token-bucket cache. |
+| failOpenOnCacheError | boolean | No | false | When the cache is unreachable: `true` lets the request pass unmetered; `false` rejects the request. |
+| maxTokensPerRequest | integer | No | Unlimited | Per-request cap on estimated tokens. `null` means no cap; this is independent of any time-windowed quota. |
+| maxPromptChars | integer | No | Unlimited | Per-request cap on the raw prompt character count (the actual `system` + `messages[].content` text, not the full JSON envelope). `null` means no cap. |
+| overflowAction | string | No | `BLOCK` | What happens when the effective token limit is exceeded. `BLOCK` rejects the request. `TRUNCATE_OLDEST` drops the oldest non-protected messages (the `system` messages and the last `user` message are always kept) until the request fits; if it still doesn't fit, the request is blocked. |
+| contextWindowSource | string | No | `EXPLICIT` | Where the effective token limit comes from. `EXPLICIT` uses `maxTokensPerRequest`. `MODEL_CATALOG` derives the limit from the resolved model's context window (`contextWindow - maxOutputTokens`, minus a fixed safety margin); if the model's context window is unknown, the token-size check is skipped for that request rather than silently blocking it. |
+
+:::note overflowAction only applies to the token dimension
+`maxPromptChars` always rejects an oversized request outright; `overflowAction: TRUNCATE_OLDEST` only applies to the `maxTokensPerRequest` / `contextWindowSource` dimension.
+:::
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-token-rate-limit",
+            "name": "tenant-token-cap",
+            "description": "Per-request oversized guard for the support assistant",
+            "active": true,
+            "defaultReservationTtlSeconds": 600,
+            "cacheConnectionTimeoutInSeconds": 3,
+            "failOpenOnCacheError": false,
+            "maxTokensPerRequest": 8000,
+            "maxPromptChars": 32000,
+            "overflowAction": "TRUNCATE_OLDEST",
+            "contextWindowSource": "EXPLICIT"
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-token-rate-limit",
+    "description": "Per-request oversized guard for the support assistant",
+    "active": true,
+    "defaultReservationTtlSeconds": 600,
+    "cacheConnectionTimeoutInSeconds": 3,
+    "failOpenOnCacheError": false,
+    "maxTokensPerRequest": 8000,
+    "maxPromptChars": 32000,
+    "overflowAction": "TRUNCATE_OLDEST",
+    "contextWindowSource": "MODEL_CATALOG"
+  }
+}
+```
+
+#### Request Body Fields
+
+See [Fields](#fields) above. `type` (`ai-token-rate-limit`), `description` and `active` follow the common policy contract; `name` comes from the path parameter.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/tenant-token-cap/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-token-rate-limit",
+      "description": "Per-request oversized guard",
+      "active": true,
+      "maxTokensPerRequest": 8000,
+      "overflowAction": "TRUNCATE_OLDEST"
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send the fields you want to keep.
+
+##### Full JSON Body Example — Raising the Per-Request Cap
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-token-rate-limit",
+    "description": "Per-request oversized guard for the support assistant",
+    "active": true,
+    "maxTokensPerRequest": 16000,
+    "maxPromptChars": 64000,
+    "overflowAction": "TRUNCATE_OLDEST",
+    "contextWindowSource": "MODEL_CATALOG"
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/tenant-token-cap/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-token-rate-limit",
+      "active": true,
+      "maxTokensPerRequest": 16000,
+      "overflowAction": "TRUNCATE_OLDEST"
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/tenant-token-cap/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **The oversized-request guard is additive to any time-windowed budget.** A request can pass every minute/hour/day/month budget tier and still be rejected here if it alone is larger than `maxTokensPerRequest` or `maxPromptChars`.
+- **`maxPromptChars` counts prompt text only**, not the JSON envelope (model name, `stream`, tool definitions, and so on) — a short user message is never blocked by the surrounding envelope size.
+- **`TRUNCATE_OLDEST` never silently forwards an oversized request.** If the protected messages (all `system` turns plus the last `user` turn) alone exceed the limit, or the body isn't parseable `messages[]` JSON, the request falls back to `BLOCK`.
+- **`contextWindowSource: MODEL_CATALOG` fails open on missing catalog data.** If the resolved model has no known context window, the token-size dimension of the guard is skipped for that request rather than blocking it — enable this only when the models routed through this policy have accurate catalog entries.
+- **`failOpenOnCacheError: false` (the default) rejects requests when the token-bucket cache is unreachable.** Set it to `true` only if uninterrupted traffic matters more than enforcement during a cache outage.
+
+## Related Documentation
+
+- [List Policies](/api-reference/policies/crud/list-policies)
+- [Add Policy](/api-reference/policies/crud/add-policy)
+- [Update Policy](/api-reference/policies/crud/update-policy)
+- [Delete Policy](/api-reference/policies/crud/delete-policy)
+- [Semantic Cache Policy](/api-reference/policies/policies/policy-ai-semantic-cache)

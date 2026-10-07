@@ -275,7 +275,19 @@ const sidebars: SidebarsConfig = {
       "items": [
         "upgrade/apinizer-version-upgrade",
         "upgrade/kubernetes-version-upgrade",
-        "upgrade/mongodb-version-upgrade",
+        {
+          "type": "category",
+          "label": "MongoDB Version Upgrade",
+          "link": {
+            "type": "doc",
+            "id": "upgrade/mongodb-version-upgrade"
+          },
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "upgrade/air-gapped-mongodb-version-upgrade"
+          ]
+        },
         "upgrade/elasticsearch-version-upgrade"
       ]
     },
@@ -1064,6 +1076,7 @@ const sidebars: SidebarsConfig = {
               ]
             },
             "operations/administrator-guides/kubernetes-ingress-apinizer-access",
+            "operations/administrator-guides/kubernetes-gateway-api-apinizer-access",
             "operations/administrator-guides/coredns-host-alias-configuration",
             "operations/administrator-guides/apinizer-pod-auto-scaling",
             "operations/administrator-guides/mongodb-automatic-backup",

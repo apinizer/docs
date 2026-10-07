@@ -1,0 +1,471 @@
+---
+title: "Prompt Template Policy"
+description: "The Prompt Template policy lets a client reference a named, reusable prompt by a short alias instead of sending the full messages array on every request — the gateway expands the alias and the client's parameters into the actual prompt before it reaches the LLM provider."
+---
+
+## General Information
+
+### Policy Types
+
+```plaintext
+ai-prompt-template
+```
+
+Request-phase only. Bindings are configured on the policy; the client only ever sends an alias and, optionally, parameter values.
+
+### Endpoints
+
+#### List Policies
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+#### Add Policy
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Update Policy
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+#### Delete Policy
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+---
+
+## Template Bindings
+
+`templates` is a list of bindings, each keyed by a client-facing `alias`. When the request body carries `requestTemplateField` (default `template`) with a value matching a binding's `alias`, the gateway expands that binding's messages — substituting any `{{param}}` placeholder from the request's `requestParamsField` object (default `template_params`) — into the request's `messages[]`, then removes both fields from the body before forwarding it.
+
+:::info Bound vs. localized bindings
+A binding copied from the built-in Prompt Template catalog carries that catalog row's id in `templateId`. While bound, editing the catalog row propagates the new messages/parameters into every policy that references it — `AiPromptTemplatePropagationService` pushes the update and flags active deployments for redeploy. Deleting the catalog row does not break the binding; it simply becomes localized (`templateId` null) and keeps serving its last-known content, now editable directly on the policy.
+
+`templateId` never travels across installations — export/import always clears it, and the binding's `messages`/`parameters` snapshot is preserved in full either way.
+:::
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| enabled | boolean | No | Whether template expansion runs at all. Default `true`. |
+| templates | array | No | List of bindings. See [Binding fields](#binding-fields). Empty/absent means no-op. |
+| requestTemplateField | string | No | Request body field the client sets to the binding's `alias`. Default `template`. |
+| requestParamsField | string | No | Request body field carrying the client's `{{param}}` values as an object. Default `template_params`. |
+| onUnknownTemplate | string | No | `PASS_THROUGH` (leave the body untouched) or `BLOCK` (reject with `400`) when the client's alias matches no binding. Default `PASS_THROUGH`. |
+| onMissingParam | string | No | `BLOCK`, `EMPTY` or `DEFAULT` — behaviour when a `{{param}}` the template references has no client-supplied value and is declared `required`. Default `BLOCK`. |
+| mergeMode | string | No | `REPLACE`, `PREPEND` or `APPEND` — how the expanded messages combine with the client's own `messages[]`. Default `REPLACE`. Falls back to `REPLACE` regardless of the configured mode when the client sent no `messages[]` at all. |
+| stripTemplateFields | boolean | No | Removes `requestTemplateField`/`requestParamsField` from the body after expansion. Default `true` — most LLM providers reject an unrecognised top-level field. |
+| maxExpandedChars | integer | No | Fail-closed budget (chars) for the SUM of every expanded message's content, checked before the body is mutated. Default `32768`. |
+
+### Binding fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| alias | string | Yes | The client-facing key. Must be unique within the policy's `templates` list. |
+| messages | array | No | Message list, each with `role` (`system`/`user`/`assistant`/`developer`/`tool`) and `content` (may contain `{{paramName}}` placeholders, and resolves `${env}`/`#{context}` variables — resolved BEFORE `{{param}}` substitution, never after). |
+| parameters | array | No | Declared parameters, each with `name`, `required` (boolean, default `false`) and `defaultValue` (used when the client omits the param and `onMissingParam=DEFAULT`; also resolves `${env}`/`#{context}`). A parameter declared `required=false` always resolves to its default (or empty), independent of `onMissingParam`. |
+| templateId | string | No | Id of the built-in Prompt Template catalog row this binding is bound to, if any. Provenance marker, not a lookup key — installation-local, cleared on import. See the note above. |
+| description | string | No | Free-text note for this binding, independent of the catalog entity's own description. |
+
+---
+
+## List Policies
+
+### Endpoint
+
+```plaintext
+GET /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "resultList": [
+    {
+      "apiProxy": {
+        "name": "MyAiProxy",
+        "requestPolicyList": [
+          {
+            "type": "ai-prompt-template",
+            "name": "support-templates",
+            "description": "Reusable support-chat prompts",
+            "active": true,
+            "enabled": true,
+            "requestTemplateField": "template",
+            "requestParamsField": "template_params",
+            "onUnknownTemplate": "PASS_THROUGH",
+            "onMissingParam": "BLOCK",
+            "mergeMode": "REPLACE",
+            "stripTemplateFields": true,
+            "maxExpandedChars": 32768,
+            "templates": [
+              {
+                "alias": "order-status",
+                "templateId": null,
+                "description": "Order status lookup prompt",
+                "messages": [
+                  {
+                    "role": "system",
+                    "content": "You are a support assistant. Answer using the order data provided."
+                  },
+                  {
+                    "role": "user",
+                    "content": "What is the status of order {{orderId}}?"
+                  }
+                ],
+                "parameters": [
+                  {
+                    "name": "orderId",
+                    "required": true,
+                    "defaultValue": null
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "responsePolicyList": [],
+        "errorPolicyList": []
+      }
+    }
+  ],
+  "resultCount": 1
+}
+```
+
+### cURL Example
+
+```bash
+curl -X GET \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Add Policy
+
+### Endpoint
+
+```plaintext
+POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+| Content-Type  | application/json |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+#### Request Body
+
+##### Full JSON Body Example
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-prompt-template",
+    "description": "Reusable support-chat prompts",
+    "active": true,
+    "enabled": true,
+    "requestTemplateField": "template",
+    "requestParamsField": "template_params",
+    "onUnknownTemplate": "PASS_THROUGH",
+    "onMissingParam": "BLOCK",
+    "mergeMode": "REPLACE",
+    "stripTemplateFields": true,
+    "maxExpandedChars": 32768,
+    "templates": [
+      {
+        "alias": "order-status",
+        "description": "Order status lookup prompt",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a support assistant. Answer using the order data provided."
+          },
+          {
+            "role": "user",
+            "content": "What is the status of order {{orderId}}?"
+          }
+        ],
+        "parameters": [
+          {
+            "name": "orderId",
+            "required": true
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Body Fields
+
+See [Fields](#fields) and [Binding fields](#binding-fields) above.
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+#### Error Responses
+
+| Code | Reason |
+|------|--------|
+| 400 | Blank `name`; `maxExpandedChars` not positive; `onUnknownTemplate` not `PASS_THROUGH`/`BLOCK`; `onMissingParam` not `BLOCK`/`EMPTY`/`DEFAULT`; `mergeMode` not `REPLACE`/`PREPEND`/`APPEND`; a binding's `alias` is blank; two bindings share the same `alias`; proxy not found. |
+| 401 | Missing or invalid token. |
+| 403 | The token's account lacks permission on the project. |
+
+### cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-templates/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"],
+      "order": 1
+    },
+    "policy": {
+      "type": "ai-prompt-template",
+      "description": "Reusable support-chat prompts",
+      "active": true,
+      "templates": [
+        {
+          "alias": "order-status",
+          "messages": [
+            {"role": "system", "content": "You are a support assistant."},
+            {"role": "user", "content": "What is the status of order {{orderId}}?"}
+          ],
+          "parameters": [
+            {"name": "orderId", "required": true}
+          ]
+        }
+      ]
+    }
+  }'
+```
+
+---
+
+## Update Policy
+
+### Endpoint
+
+```plaintext
+PUT /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+The body is the same shape as Add Policy. The update **replaces** the policy, so send every binding you want to keep — the `templates` list you send is not merged with the stored one.
+
+##### Full JSON Body Example — Adding a Second Binding
+
+```json
+{
+  "operationMetadata": {
+    "targetScope": "ALL",
+    "targetPipeline": "REQUEST",
+    "deploy": true,
+    "deployTargetEnvironmentNameList": ["production"],
+    "order": 1
+  },
+  "policy": {
+    "type": "ai-prompt-template",
+    "active": true,
+    "templates": [
+      {
+        "alias": "order-status",
+        "messages": [
+          {"role": "system", "content": "You are a support assistant."},
+          {"role": "user", "content": "What is the status of order {{orderId}}?"}
+        ],
+        "parameters": [
+          {"name": "orderId", "required": true}
+        ]
+      },
+      {
+        "alias": "return-policy",
+        "messages": [
+          {"role": "system", "content": "You are a support assistant."},
+          {"role": "user", "content": "Explain the return policy for {{productCategory}}."}
+        ],
+        "parameters": [
+          {"name": "productCategory", "required": false, "defaultValue": "general merchandise"}
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "deploymentResult": {
+    "success": true,
+    "deploymentResults": [
+      {
+        "environmentName": "production",
+        "success": true,
+        "message": "Deployment successful"
+      }
+    ]
+  }
+}
+```
+
+### cURL Example
+
+```bash
+curl -X PUT \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-templates/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operationMetadata": {
+      "targetScope": "ALL",
+      "targetPipeline": "REQUEST",
+      "deploy": true,
+      "deployTargetEnvironmentNameList": ["production"]
+    },
+    "policy": {
+      "type": "ai-prompt-template",
+      "active": true,
+      "onMissingParam": "DEFAULT"
+    }
+  }'
+```
+
+---
+
+## Delete Policy
+
+### Endpoint
+
+```plaintext
+DELETE /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyName}/
+```
+
+### Request
+
+#### Headers
+
+| Header        | Value           |
+|---------------|-----------------|
+| Authorization | Bearer `{token}`  |
+
+#### Path Parameters
+
+| Parameter    | Type   | Required | Description    |
+|--------------|--------|----------|----------------|
+| projectName  | string | Yes      | Project name   |
+| apiProxyName | string | Yes      | API Proxy name |
+| policyName   | string | Yes      | Policy name    |
+
+### Response
+
+#### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS"
+}
+```
+
+### cURL Example
+
+```bash
+curl -X DELETE \
+  "https://demo.apinizer.com/apiops/projects/MyProject/apiProxies/MyAiProxy/policies/support-templates/" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+---
+
+## Notes and Warnings
+
+- **Template expansion runs before Prompt Decorator, and both run before the guardrails.** Expansion turns a bare alias into the full `messages[]` array first, so Prompt Decorator's PREPEND/APPEND blocks operate on the expanded array, not the bare `template`/`template_params` pair. Every guardrail, the semantic cache key and the token count then see the fully-assembled prompt.
+- **A client-supplied parameter value is never variable-resolved.** Only a binding's own `defaultValue` resolves `${env}`/`#{context}` — resolving a client-supplied value would let a caller read a gateway environment secret back out through the prompt.
+- **Parameter substitution is single-pass.** A substituted value's own `{{...}}` sequences are never re-expanded, so a parameter value cannot smuggle in another placeholder reference.
+- **Exceeding `maxExpandedChars` blocks the request before any mutation happens.** Fail-closed, same discipline as the Prompt Decorator policy's `maxTotalChars`.
+- **A bound binding is refreshed by catalog edits automatically.** `AiPromptTemplatePropagationService` pushes an edited catalog template's messages/parameters into every policy binding that still references it (`templateId` set), and flags the affected deployment for redeploy. A localized binding (`templateId` null) is never touched.
+- **`templateId` does not travel across installations.** Export/import always clears it; the binding's message/parameter snapshot is preserved, it just becomes a detached local copy.
+
+## Related Documentation
+
+- [Prompt Templates](/en/ai-gateway/prompt-templates)
+- [Prompt Decorator Policy](/api-reference/policies/policies/policy-ai-prompt-decorator)
