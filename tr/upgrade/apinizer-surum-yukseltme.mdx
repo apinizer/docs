@@ -59,7 +59,35 @@ Token özet (digest) taşıması, çok büyük bir token geçmişine sahip kurul
 
 Bu sürümde ayrıca, deploy edilmiş bir kimlik bilgisinin IP listesinin her istekte büyüyüp global ve ortam listelerinin birleşiminin kalıcı hâle gelmesine yol açan bir davranış düzeltildi. **IP kısıtlaması kullanan müşteriler yükseltme sonrasında listelerini gözden geçirsin** — daha önce kabul edilen bir IP artık reddedilebilir.
 
-Hangi dizinden geldiği hesabında kayıtlı olmayan bir LDAP kullanıcısı, yapılandırmada **devre dışı bırakılmış bir LDAP bağlantısı bulunduğu sürece** artık içeri alınmıyor. Bu sürümden önce böyle bir hesap yalnızca açık bağlantılarda aranıyordu; bu, hesabın kalıcı olarak yanlış dizine bağlanmasına ve bilerek kapattığınız bir dizinin kullanıcılarının girmeye devam etmesine yol açabiliyordu. **Yapılandırmanızda kapalı bir LDAP bağlantısı duruyorsa onu açın ya da silin** — kurulumun tamamı için tek işlem — veya etkilenen kullanıcıları bir kez açıp kaydedin; böylece hesap kendi bağlantısını kaydeder. Bağlantısı zaten kayıtlı olan hesaplar etkilenmez, reddedilen girişler ise gerekçesiyle birlikte [Giriş Kayıtları](/tr/admin/audit-compliance/giris-kayitlari)'na yazılır.
+Hangi dizinden geldiği hesabında kayıtlı olmayan bir LDAP kullanıcısı, yapılandırmada **devre dışı bırakılmış bir LDAP bağlantısı bulunduğu sürece** artık içeri alınmıyor. Bu sürümden önce böyle bir hesap yalnızca açık bağlantılarda aranıyordu; bu, hesabın kalıcı olarak yanlış dizine bağlanmasına ve bilerek kapattığınız bir dizinin kullanıcılarının girmeye devam etmesine yol açabiliyordu. **Yapılandırmanızda kapalı bir LDAP bağlantısı duruyorsa onu açın ya da silin** — kurulumun tamamı için tek işlem — veya etkilenen her kullanıcıyı **LDAP'da ara** ile doğrulayıp kaydedin; böylece hesap kanıtlanmış bağlantısını kaydeder. Bağlantısı zaten kayıtlı olan hesaplar etkilenmez, reddedilen girişler ise gerekçesiyle birlikte [Giriş Kayıtları](/tr/admin/audit-compliance/giris-kayitlari)'na yazılır.
+
+Yükseltmeden önce Apinizer veritabanında aşağıdaki salt-okunur Mongo ön kontrollerini çalıştırın ve sonuçları kaydedin:
+
+```javascript
+db.user.countDocuments({
+  enumUserLoginType: "LDAP",
+  $or: [{ldapSourceId: {$exists: false}}, {ldapSourceId: null}, {ldapSourceId: ""}]
+})
+db.ldap_setting.countDocuments({ldapConfig: {$ne: true}})
+db.user.aggregate([
+  {$match: {login: {$type: "string"}}},
+  {$group: {_id: "$login", count: {$sum: 1}}},
+  {$match: {count: {$gt: 1}}},
+  {$count: "caseInsensitiveDuplicateLoginGroups"}
+], {collation: {locale: "en", strength: 2}})
+```
+
+Önce devre dışı/eski realm'leri çözün ve LDAP ayarları ekranındaki bağlantı testiyle **yapılandırılmış bütün realm'lerin** erişilebilir olduğunu kanıtlayın. Etkilenen her eski hesap için **Kullanıcılar** ekranını açın, **LDAP'da ara** ile dönen dizin kaydını doğrulayın ve kaydedin. Bilinçli olarak toplu atama yoktur: her `{LDAP bağlantısı, Ayırt Edici Ad}` çifti dizinden kanıtlanmalıdır. Manager yükseltmesi ve migration sonrasında ilk sorguyu yeniden çalıştırın ve LDAP girişini hazır saymadan önce sonucun `0` olduğunu doğrulayın. Sıfırdan büyük sonuç Manager migration loguna uygulanabilir bir `WARN` olarak da yazılır; bu hesaplar düzeltilene kadar fail-closed kalır.
+
+Son sorgu, daha önce görülmemiş bir LDAP kullanıcısı oluşturulmadan önce yinelenen grup döndürmemelidir. Büyük/küçük harf duyarsız bir tekrar bulursa (örneğin `Alice` ve `alice`) gerçek hesabı seçin, çakışan kaydı yeniden adlandırın veya kaldırın ve Manager'ı yeniden başlatın. Manager bu durumda bilinçli olarak açılmaya devam eder: saklanan tam kullanıcı adıyla seçilebilen mevcut kullanıcı kendi giriş yolunu kullanmaya devam eder; belirsiz harf kullanımı ve **yeni LDAP kullanıcısı oluşturma** ise fail-closed kalır. İlk temiz yeniden başlatmada `202609-006722` migration'ı index'i tekrar dener. Şu sorguyla doğrulayın:
+
+```javascript
+db.user.getIndexes().filter(i => i.name === "uk_user_login_ci")
+```
+
+`key: {login: 1}`, `unique: true`, İngilizce strength-2 `collation` ve string-login `partialFilterExpression` taşıyan tam bir sonuç bekleyin. Ayrıca yapılandırılmış her realm için LDAP bağlantı testini yeniden çalıştırın. İlk provizyon parola denenmeden önce tüm realm'leri arar ve parolayı yalnız tek eşleşmenin bulunduğu realm'de dener; bu nedenle devre dışı veya erişilemeyen bir realm yalnız yeni LDAP kullanıcı oluşturmayı durdurur. Doğrulanmış bir realm'e bağlı mevcut LDAP kullanıcıları o realm'i kullanmaya devam eder.
+
+Bu yükseltme Manager JWT kimlik bağını da güçlendirir. 2026.09.2 öncesinde üretilmiş JWT'ler zorunlu değişmez kullanıcı kimliğini taşımaz ve reddedilir; açık oturumu olan her kullanıcı bir kez yeniden giriş yapmalıdır. Veritabanı HTTP Basic özelliği korunur, ancak LDAP için kullanılan herkese açık `DUMMY` yer tutucusu hiçbir zaman parola olarak kabul edilmez. Otomatik parola kilidi yeni giriş/token üretimini ve yenilemeyi engeller, daha önce üretilmiş JWT/PAT otomasyonunu kesmez; acil kesme için hesabı pasifleştirin veya token/oturumu açıkça iptal edin.
 
 :::
 

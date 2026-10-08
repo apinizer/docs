@@ -1,0 +1,506 @@
+---
+title: "SIEM Hedefleri için Elasticsearch Index Şablonları"
+description: "SIEM ve Log Yönlendirme hedeflerinde Elasticsearch konnektörünü kullanırken gereken bağlantı ayarlarını belirleyebilir, ingest pipeline, ILM politikası, index şablonları ve data stream'leri hazır komutlarla oluşturabilir ve hedefi test olayıyla doğrulayabilirsiniz."
+---
+
+:::info
+
+Bu sayfa **Yönetim → Sistem Ayarları → SIEM ve Log Yönlendirme** hedeflerinde konnektör olarak **Elasticsearch** seçildiğinde gerekir. Apinizer bu index'lerin şablonunu oluşturmaz; Elasticsearch kümesinin sahibi kurum oluşturur ve yönetir. Hedef ayarları için [SIEM ve Log Yönlendirme](/tr/admin/system-settings/siem-log-yonlendirme) sayfasına bakabilirsiniz.
+
+:::
+
+## Bağlantı Tanımı
+
+SIEM hedefinin Elasticsearch bağlantısı için aşağıdaki kuralları uygulayın.
+
+:::warning
+
+**Cluster Yönetimi** anahtarı açık bırakılırsa Apinizer bu bağlantıya API trafik logunun ILM politikasını, index şablonunu ve data stream'ini kurar. SIEM dokümanları `@timestamp` taşımadığı için o data stream HER kaydı reddeder. Legacy Raw hedefte kayıp sessizdir; v2 hedefte kayıt `send_failed` olarak sayılır. Şablonu, ILM politikasını ve data stream'i bu sayfadaki komutlarla kurum oluşturur ve yönetir.
+
+:::
+
+- **Tür**: `ReadWrite` seçin. `Read` seçilirse yazma yapılmaz. Legacy Raw hedefte kayıp SESSİZDİR: Teslim Sağlığı yeşil kalır, hata yalnızca uygulama logunda görünür. v2 hedefte kayıt `send_failed` olarak sayılır.
+- **Cluster Yönetimi**: "Kümeyi (cluster) yönetmek için etkinleştiriniz" anahtarını KAPALI bırakın.
+- **Indeks Adı**: Aşağıda oluşturduğunuz data stream adını girin (örneğin `apinizer-siem-v2`). API trafik logunun index adı (`apinizer-log-apiproxy-...`) KULLANILMAMALIDIR; aksi hâlde trafik ve SIEM kayıtları aynı index'te karışır.
+- Bir bağlantı tek index'e yazar. Legacy Raw'da her hat için ayrı bağlantı ve ayrı hedef açın (aşağıdaki tabloya bakın). Şema v2'de tüm hatlar tek zarfı paylaşır; tek bağlantı ve tek index yeterlidir.
+- Aynı bağlantı birden fazla hedef tarafından kullanılabilir. Legacy Raw hedefinin bağlantısı v2 hedefine VERİLMEMELİDİR, çünkü mapping farklıdır.
+
+## Yük Profiline Göre Index
+
+| Yük profili | Hat | Index şablonu | Data stream (Indeks Adı) |
+|---|---|---|---|
+| Apinizer JSON v2 | Tüm hatlar (Denetim, Oturum, Token, Uygulama, API Güvenliği, API Erişimi, Portal) | `apinizer-siem-v2-template` | `apinizer-siem-v2` |
+| Legacy Raw | Denetim | `apinizer-siem-audit-template` | `apinizer-siem-audit` |
+| Legacy Raw | Oturum | `apinizer-siem-session-template` | `apinizer-siem-session` |
+| Legacy Raw | Token | `apinizer-siem-token-template` | `apinizer-siem-token` |
+| Legacy Raw | Uygulama | `apinizer-siem-application-template` | `apinizer-siem-application` |
+
+:::info
+
+API Güvenliği, API Erişimi ve Portal hatları Legacy Raw ile gönderilemez; bu hatlar için v2 şablonunu kullanın. Legacy Raw alan listesi dondurulmuştur. v2 zarfına sonraki sürümlerde `schemaVersion` artmadan alan eklenebilir. Şablonlar bu yüzden `dynamic_templates` ile bilinmeyen metin alanlarını `keyword` olarak kabul eder.
+
+:::
+
+## Adım 1: Ingest Pipeline
+
+:::warning
+
+Bu pipeline ZORUNLUDUR. SIEM dokümanları `@timestamp` taşımaz ve data stream, `@timestamp` olmayan her kaydı reddeder. Pipeline olay zamanını `@timestamp` alanına kopyalar; olay zamanı yoksa alınma zamanını yazar. Tek pipeline, beş şablonun hepsinde `index.default_pipeline` olarak kullanılır.
+
+:::
+
+```bash
+PUT _ingest/pipeline/apinizer-siem-timestamp
+{
+  "description": "Apinizer SIEM: copy the event time into @timestamp",
+  "processors": [
+    { "set": { "field": "@timestamp", "value": "{{timestamp}}", "override": false, "if": "ctx.timestamp != null" } },
+    { "set": { "field": "@timestamp", "value": "{{auditEventDate}}", "override": false, "if": "ctx.auditEventDate != null" } },
+    { "set": { "field": "@timestamp", "value": "{{eventDate}}", "override": false, "if": "ctx.eventDate != null" } },
+    { "set": { "field": "@timestamp", "value": "{{date}}", "override": false, "if": "ctx.date != null" } },
+    { "set": { "field": "@timestamp", "value": "{{_ingest.timestamp}}", "override": false } }
+  ]
+}
+```
+
+## Adım 2: ILM Politikası
+
+Aşağıdaki örnek politika 30 GB veya 1 gün dolunca rollover yapar ve 90 gün sonra veriyi siler. Değerleri kurumunuzun saklama gereksinimine göre belirleyin.
+
+```bash
+PUT _ilm/policy/apinizer-siem-ilm
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "30gb",
+            "max_age": "1d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "90d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+## Adım 3: Index Şablonları
+
+Hedefinizin yük profiline ve hattına uygun şablonu oluşturun. Her şablon aynı pipeline'ı ve aynı ILM politikasını kullanır.
+
+:::warning
+
+Alan tiplerini DEĞİŞTİRMEYİN. `data.changes` ve `data.reference` serbest yapıdadır ve `flattened` olarak eşlenir. `referenceObjectJson`, `changesJson`, `toClientBody` ve `stackTrace` gibi büyük metin alanları aranamaz (`index: false`). Sorgulanması gereken bir alanı `text` yaparak genişletebilirsiniz.
+
+:::
+
+### 3.1 Şema v2
+
+Bu şablon Apinizer JSON v2 profilindeki tüm hatlar içindir. Alan listesi, SIEM sayfasındaki [Şema v2](/tr/admin/system-settings/siem-log-yonlendirme#sema-v2) bölümüyle aynıdır.
+
+```bash
+PUT _index_template/apinizer-siem-v2-template
+{
+  "index_patterns": ["apinizer-siem-v2*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "logType": { "type": "keyword" },
+        "schemaVersion": { "type": "integer" },
+        "eventId": { "type": "keyword" },
+        "timestamp": { "type": "date" },
+        "correlationId": { "type": "keyword" },
+        "event": {
+          "properties": {
+            "category": { "type": "keyword" },
+            "action": { "type": "keyword" },
+            "outcome": { "type": "keyword" },
+            "severity": { "type": "byte" }
+          }
+        },
+        "actor": {
+          "properties": {
+            "user": { "type": "keyword" },
+            "ip": { "type": "ip", "ignore_malformed": true },
+            "userAgent": { "type": "keyword", "ignore_above": 1024 },
+            "sessionId": { "type": "keyword" }
+          }
+        },
+        "target": {
+          "properties": {
+            "type": { "type": "keyword" },
+            "id": { "type": "keyword" },
+            "name": { "type": "keyword" },
+            "projectId": { "type": "keyword" },
+            "projectName": { "type": "keyword" }
+          }
+        },
+        "source": {
+          "properties": {
+            "component": { "type": "keyword" },
+            "host": { "type": "keyword" },
+            "environmentId": { "type": "keyword" }
+          }
+        },
+        "apinizer": {
+          "properties": {
+            "version": { "type": "keyword" },
+            "configRevision": { "type": "long" },
+            "destinationId": { "type": "keyword" },
+            "synthetic": { "type": "boolean" },
+            "truncated": { "type": "boolean" }
+          }
+        },
+        "data": {
+          "properties": {
+            "id": { "type": "keyword" },
+            "state": { "type": "keyword" },
+            "origin": { "type": "keyword" },
+            "changesStatus": { "type": "keyword" },
+            "changeKinds": { "type": "keyword" },
+            "changedPaths": { "type": "keyword" },
+            "changes": { "type": "flattened" },
+            "reference": { "type": "flattened" },
+            "reasonCode": { "type": "keyword" },
+            "errorType": { "type": "keyword" },
+            "parentErrorType": { "type": "keyword" },
+            "resultType": { "type": "keyword" },
+            "message": { "type": "text" },
+            "loginSource": { "type": "keyword" },
+            "portalId": { "type": "keyword" },
+            "accountId": { "type": "keyword" },
+            "targetAccountId": { "type": "keyword" },
+            "email": { "type": "keyword" },
+            "displayName": { "type": "keyword" },
+            "applicationId": { "type": "keyword" },
+            "applicationName": { "type": "keyword" },
+            "httpRequestHttpMethod": { "type": "keyword" },
+            "httpRequestContentType": { "type": "keyword" },
+            "xForwardedFor": { "type": "keyword" },
+            "authTokenType": { "type": "keyword" },
+            "audience": { "type": "keyword" },
+            "scope": { "type": "keyword" },
+            "tokenNeverExpires": { "type": "boolean" },
+            "issuedAt": { "type": "date" },
+            "expiresAt": { "type": "date" },
+            "expiresIn": { "type": "long" },
+            "refreshTokenIssuedAt": { "type": "date" },
+            "refreshTokenExpiresAt": { "type": "date" },
+            "refreshTokenExpiresIn": { "type": "long" },
+            "refreshCount": { "type": "integer" },
+            "maxRefreshCount": { "type": "integer" },
+            "level": { "type": "keyword" },
+            "stackTrace": { "type": "text", "index": false },
+            "totalDuration": { "type": "integer" },
+            "date": { "type": "date" },
+            "statusCode": { "type": "short" },
+            "protocol": { "type": "keyword" },
+            "httpMethod": { "type": "keyword" },
+            "path": { "type": "keyword" },
+            "latencyMs": { "type": "long" },
+            "authStatus": { "type": "keyword" },
+            "authTrustLevel": { "type": "keyword" },
+            "authFailureCategory": { "type": "keyword" },
+            "verifiedIssuer": { "type": "keyword" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 3.2 Denetim (Legacy Raw)
+
+Bu şablon, Legacy Raw profiliyle gönderilen denetim hattı içindir. Alanlar denetim kaydının bugünkü çıktısından gelir.
+
+```bash
+PUT _index_template/apinizer-siem-audit-template
+{
+  "index_patterns": ["apinizer-siem-audit*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "principal": { "type": "keyword" },
+        "auditEventDate": { "type": "date" },
+        "state": { "type": "keyword" },
+        "objectId": { "type": "keyword" },
+        "objectName": { "type": "keyword" },
+        "referenceObjectJson": { "type": "text", "index": false },
+        "lastReferenceObjectJson": { "type": "text", "index": false },
+        "projectId": { "type": "keyword" },
+        "projectName": { "type": "keyword" },
+        "className": { "type": "keyword" },
+        "eventType": { "type": "keyword" },
+        "outcome": { "type": "keyword" },
+        "clientIp": { "type": "ip", "ignore_malformed": true },
+        "userAgent": { "type": "keyword", "ignore_above": 1024 },
+        "correlationId": { "type": "keyword" },
+        "source": { "type": "keyword" },
+        "changesJson": { "type": "text", "index": false },
+        "changedPaths": { "type": "keyword" },
+        "changeKinds": { "type": "keyword" },
+        "changesStatus": { "type": "keyword" }
+      }
+    }
+  }
+}
+```
+
+### 3.3 Oturum (Legacy Raw)
+
+Bu şablon, Legacy Raw profiliyle gönderilen oturum hattı içindir. Alanlar oturum kaydının bugünkü çıktısından gelir.
+
+```bash
+PUT _index_template/apinizer-siem-session-template
+{
+  "index_patterns": ["apinizer-siem-session*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "source": { "type": "keyword" },
+        "principal": { "type": "keyword" },
+        "email": { "type": "keyword" },
+        "displayName": { "type": "keyword" },
+        "eventDate": { "type": "date" },
+        "eventType": { "type": "keyword" },
+        "remoteAddress": { "type": "ip", "ignore_malformed": true },
+        "message": { "type": "text" },
+        "errorType": { "type": "keyword" },
+        "portalId": { "type": "keyword" },
+        "accountId": { "type": "keyword" },
+        "userAgent": { "type": "keyword", "ignore_above": 1024 },
+        "reasonCode": { "type": "keyword" },
+        "targetProjectId": { "type": "keyword" }
+      }
+    }
+  }
+}
+```
+
+### 3.4 Token (Legacy Raw)
+
+Bu şablon, Legacy Raw profiliyle gönderilen token hattı içindir. Alanlar token trafik kaydının bugünkü çıktısından gelir.
+
+```bash
+PUT _index_template/apinizer-siem-token-template
+{
+  "index_patterns": ["apinizer-siem-token*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "timestamp": { "type": "date" },
+        "apinizerCorrelationId": { "type": "keyword" },
+        "environmentId": { "type": "keyword" },
+        "projectId": { "type": "keyword" },
+        "applicationId": { "type": "keyword" },
+        "applicationName": { "type": "keyword" },
+        "apiProxyId": { "type": "keyword" },
+        "apiProxyName": { "type": "keyword" },
+        "xForwardedFor": { "type": "keyword" },
+        "httpRequestRemoteAddress": { "type": "ip", "ignore_malformed": true },
+        "httpRequestHttpMethod": { "type": "keyword" },
+        "httpRequestContentType": { "type": "keyword" },
+        "usernameOrKey": { "type": "keyword" },
+        "apiClientKey": { "type": "keyword" },
+        "clientOrganizationId": { "type": "keyword" },
+        "timeTotal": { "type": "integer" },
+        "statusCode": { "type": "short" },
+        "errorType": { "type": "keyword" },
+        "parentErrorType": { "type": "keyword" },
+        "resultType": { "type": "keyword" },
+        "toClientHeader": { "type": "text", "index": false },
+        "toClientBody": { "type": "text", "index": false },
+        "authTokenType": { "type": "keyword" },
+        "audience": { "type": "keyword" },
+        "clientInfo": { "type": "keyword", "ignore_above": 1024 },
+        "tokenNeverExpires": { "type": "boolean" },
+        "issuedAt": { "type": "date" },
+        "expiresAt": { "type": "date" },
+        "expiresIn": { "type": "long" },
+        "scope": { "type": "keyword" },
+        "refreshTokenAllowed": { "type": "boolean" },
+        "refreshTokenIssuedAt": { "type": "date" },
+        "refreshTokenExpiresAt": { "type": "date" },
+        "refreshTokenExpiresIn": { "type": "long" },
+        "refreshCount": { "type": "integer" },
+        "maxRefreshCount": { "type": "integer" }
+      }
+    }
+  }
+}
+```
+
+### 3.5 Uygulama (Legacy Raw)
+
+Bu şablon, Legacy Raw profiliyle gönderilen uygulama hattı içindir. Alanlar uygulama logunun bugünkü çıktısından gelir.
+
+```bash
+PUT _index_template/apinizer-siem-application-template
+{
+  "index_patterns": ["apinizer-siem-application*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "envName": { "type": "keyword" },
+        "apiProxyId": { "type": "keyword" },
+        "apiProxyName": { "type": "keyword" },
+        "correlationId": { "type": "keyword" },
+        "date": { "type": "date" },
+        "level": { "type": "keyword" },
+        "message": { "type": "text" },
+        "stackTrace": { "type": "text", "index": false },
+        "hostName": { "type": "keyword" },
+        "enumApplicationLog": { "type": "keyword" },
+        "totalDuration": { "type": "integer" }
+      }
+    }
+  }
+}
+```
+
+## Adım 4: Data Stream
+
+Data stream ilk kayıtla otomatik oluşur. İsterseniz aşağıdaki komutlarla manuel olarak da oluşturabilirsiniz. Yalnızca kullandığınız hatların data stream'ini oluşturun.
+
+```bash
+PUT _data_stream/apinizer-siem-v2
+PUT _data_stream/apinizer-siem-audit
+PUT _data_stream/apinizer-siem-session
+PUT _data_stream/apinizer-siem-token
+PUT _data_stream/apinizer-siem-application
+```
+
+## Adım 5: Doğrulama
+
+1. SIEM hedefini kaydedin.
+2. **Test olayı gönder** düğmesine basın.
+3. Aşağıdaki sorguyla kaydı görün. `apinizer.synthetic` alanı `true` olmalıdır.
+4. Legacy Raw hedefte aynı sorguyu ilgili data stream adıyla çalıştırın.
+
+```bash
+GET apinizer-siem-v2/_search?size=1&sort=@timestamp:desc
+```
+
+## Veritabanı Hedefleri
+
+Veritabanı konnektörü yalnızca Legacy Raw profilini destekler. Apinizer bu tabloları oluşturmaz; tabloları kurum oluşturur.
+
+| Hat | Tablo |
+|---|---|
+| Denetim | `log_AuditEvent` |
+| Oturum | `log_LoginLog` |
+| Token | `log_TokenTraffic` |
+| Uygulama | `log_Application` |
+
+Her tablonun CREATE TABLE komutları [Apinizer Logları için Tablo Oluşturma Komutları](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari) sayfasındadır: [Denetim Olayı](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari#denetim-olayı), [Login Log](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari#login-log), [Token Trafik Logu](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari#token-trafik-logu) ve [Uygulama Logu](/tr/operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari#uygulama-logu).

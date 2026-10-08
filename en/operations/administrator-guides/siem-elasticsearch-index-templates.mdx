@@ -1,0 +1,505 @@
+---
+title: "Elasticsearch Index Templates for SIEM Destinations"
+description: "You can create the ingest pipeline, ILM policy, index templates and data streams that an Elasticsearch connector needs when you forward Apinizer audit, session, token, application and API events to a SIEM destination."
+---
+
+:::info
+
+You need this page when you select **Elasticsearch** as the connector of a destination under **Administration → System Settings → SIEM & Log Forwarding**. Apinizer does not create the template for these indexes. The organization that owns the Elasticsearch cluster creates and manages it. See [SIEM & Log Forwarding](/en/admin/system-settings/siem-log-forwarding) for the destination settings.
+
+:::
+
+## Connection Definition
+
+Follow these rules for the Elasticsearch connection of a SIEM destination.
+
+:::warning
+
+If you leave **Cluster Administration** turned on, Apinizer creates the ILM policy, the index template and the data stream of the API traffic log on this connection. SIEM documents do not contain `@timestamp`, so that data stream rejects every record. On a Legacy Raw destination, the loss is silent. On a v2 destination, the event counts as `send_failed`. Create the template, the ILM policy and the data stream with the commands on this page.
+
+:::
+
+- **Type**: Select `ReadWrite`. If you select `Read`, Apinizer does not write. On a Legacy Raw destination, the loss is silent: Delivery Health stays green, and the error appears only in the application log. On a v2 destination, the event counts as `send_failed`.
+- **Cluster Administration**: Turn the switch **Enable to administrate cluster** off.
+- **Index Name**: Enter the name of the data stream that you create below, for example `apinizer-siem-v2`. A connection writes to one index only. Do not use the API traffic log index name (`apinizer-log-apiproxy-...`). Traffic records and SIEM records would mix.
+- **One connection, one index**: For Legacy Raw, create one connection and one destination for each stream (see the table below). For Schema v2, all streams share one envelope. One connection and one index are enough.
+- **Shared connections**: Several destinations can use the same connection. Do not give the connection of a Legacy Raw destination to a v2 destination, because the mappings differ.
+
+## Index per Payload Profile
+
+| Payload profile | Stream | Index template | Data stream (Index Name) |
+|---|---|---|---|
+| Apinizer JSON v2 | All streams (Audit, Session, Token, Application, API Security, API Access, Portal) | `apinizer-siem-v2-template` | `apinizer-siem-v2` |
+| Legacy Raw | Audit | `apinizer-siem-audit-template` | `apinizer-siem-audit` |
+| Legacy Raw | Session | `apinizer-siem-session-template` | `apinizer-siem-session` |
+| Legacy Raw | Token | `apinizer-siem-token-template` | `apinizer-siem-token` |
+| Legacy Raw | Application | `apinizer-siem-application-template` | `apinizer-siem-application` |
+
+:::info
+
+You cannot send the API Security, API Access and Portal streams with Legacy Raw. Use the v2 template for these streams. The Legacy Raw field list is frozen. New fields can be added to the v2 envelope in later versions without a higher `schemaVersion`. For this reason, the templates accept unknown text fields as `keyword` through `dynamic_templates`.
+
+:::
+
+## Step 1: Ingest Pipeline
+
+:::warning
+
+This pipeline is mandatory. SIEM documents do not contain `@timestamp`. A data stream rejects every record that has no `@timestamp`. The pipeline copies the event time into `@timestamp`. If a record has no event time, the pipeline writes the ingest time. All five templates use this one pipeline as `index.default_pipeline`.
+
+:::
+
+```bash
+PUT _ingest/pipeline/apinizer-siem-timestamp
+{
+  "description": "Apinizer SIEM: copy the event time into @timestamp",
+  "processors": [
+    { "set": { "field": "@timestamp", "value": "{{timestamp}}", "override": false, "if": "ctx.timestamp != null" } },
+    { "set": { "field": "@timestamp", "value": "{{auditEventDate}}", "override": false, "if": "ctx.auditEventDate != null" } },
+    { "set": { "field": "@timestamp", "value": "{{eventDate}}", "override": false, "if": "ctx.eventDate != null" } },
+    { "set": { "field": "@timestamp", "value": "{{date}}", "override": false, "if": "ctx.date != null" } },
+    { "set": { "field": "@timestamp", "value": "{{_ingest.timestamp}}", "override": false } }
+  ]
+}
+```
+
+## Step 2: ILM Policy
+
+The example below rolls over at 30 GB or after 1 day, and deletes data after 90 days. Set the values to match your retention rules.
+
+```bash
+PUT _ilm/policy/apinizer-siem-ilm
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_size": "30gb",
+            "max_age": "1d"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "90d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+## Step 3: Index Templates
+
+:::warning
+
+Do not change the field types. The `data.changes` and `data.reference` fields have a free structure, so they are mapped as `flattened`. Large text fields such as `referenceObjectJson`, `changesJson`, `toClientBody` and `stackTrace` cannot be searched (`index: false`). To search such a field, change its type to `text`.
+
+:::
+
+### 3.1 Schema v2
+
+Use this template for the Apinizer JSON v2 profile on all streams. The field list is the same as in the [Schema v2](/en/admin/system-settings/siem-log-forwarding#schema-v2) section of the SIEM page.
+
+```bash
+PUT _index_template/apinizer-siem-v2-template
+{
+  "index_patterns": ["apinizer-siem-v2*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "logType": { "type": "keyword" },
+        "schemaVersion": { "type": "integer" },
+        "eventId": { "type": "keyword" },
+        "timestamp": { "type": "date" },
+        "correlationId": { "type": "keyword" },
+        "event": {
+          "properties": {
+            "category": { "type": "keyword" },
+            "action": { "type": "keyword" },
+            "outcome": { "type": "keyword" },
+            "severity": { "type": "byte" }
+          }
+        },
+        "actor": {
+          "properties": {
+            "user": { "type": "keyword" },
+            "ip": { "type": "ip", "ignore_malformed": true },
+            "userAgent": { "type": "keyword", "ignore_above": 1024 },
+            "sessionId": { "type": "keyword" }
+          }
+        },
+        "target": {
+          "properties": {
+            "type": { "type": "keyword" },
+            "id": { "type": "keyword" },
+            "name": { "type": "keyword" },
+            "projectId": { "type": "keyword" },
+            "projectName": { "type": "keyword" }
+          }
+        },
+        "source": {
+          "properties": {
+            "component": { "type": "keyword" },
+            "host": { "type": "keyword" },
+            "environmentId": { "type": "keyword" }
+          }
+        },
+        "apinizer": {
+          "properties": {
+            "version": { "type": "keyword" },
+            "configRevision": { "type": "long" },
+            "destinationId": { "type": "keyword" },
+            "synthetic": { "type": "boolean" },
+            "truncated": { "type": "boolean" }
+          }
+        },
+        "data": {
+          "properties": {
+            "id": { "type": "keyword" },
+            "state": { "type": "keyword" },
+            "origin": { "type": "keyword" },
+            "changesStatus": { "type": "keyword" },
+            "changeKinds": { "type": "keyword" },
+            "changedPaths": { "type": "keyword" },
+            "changes": { "type": "flattened" },
+            "reference": { "type": "flattened" },
+            "reasonCode": { "type": "keyword" },
+            "errorType": { "type": "keyword" },
+            "parentErrorType": { "type": "keyword" },
+            "resultType": { "type": "keyword" },
+            "message": { "type": "text" },
+            "loginSource": { "type": "keyword" },
+            "portalId": { "type": "keyword" },
+            "accountId": { "type": "keyword" },
+            "targetAccountId": { "type": "keyword" },
+            "email": { "type": "keyword" },
+            "displayName": { "type": "keyword" },
+            "applicationId": { "type": "keyword" },
+            "applicationName": { "type": "keyword" },
+            "httpRequestHttpMethod": { "type": "keyword" },
+            "httpRequestContentType": { "type": "keyword" },
+            "xForwardedFor": { "type": "keyword" },
+            "authTokenType": { "type": "keyword" },
+            "audience": { "type": "keyword" },
+            "scope": { "type": "keyword" },
+            "tokenNeverExpires": { "type": "boolean" },
+            "issuedAt": { "type": "date" },
+            "expiresAt": { "type": "date" },
+            "expiresIn": { "type": "long" },
+            "refreshTokenIssuedAt": { "type": "date" },
+            "refreshTokenExpiresAt": { "type": "date" },
+            "refreshTokenExpiresIn": { "type": "long" },
+            "refreshCount": { "type": "integer" },
+            "maxRefreshCount": { "type": "integer" },
+            "level": { "type": "keyword" },
+            "stackTrace": { "type": "text", "index": false },
+            "totalDuration": { "type": "integer" },
+            "date": { "type": "date" },
+            "statusCode": { "type": "short" },
+            "protocol": { "type": "keyword" },
+            "httpMethod": { "type": "keyword" },
+            "path": { "type": "keyword" },
+            "latencyMs": { "type": "long" },
+            "authStatus": { "type": "keyword" },
+            "authTrustLevel": { "type": "keyword" },
+            "authFailureCategory": { "type": "keyword" },
+            "verifiedIssuer": { "type": "keyword" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 3.2 Audit (Legacy Raw)
+
+Use this template for the Audit stream. The fields come from the legacy audit record. The pipeline derives `@timestamp` from `auditEventDate`.
+
+```bash
+PUT _index_template/apinizer-siem-audit-template
+{
+  "index_patterns": ["apinizer-siem-audit*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "principal": { "type": "keyword" },
+        "auditEventDate": { "type": "date" },
+        "state": { "type": "keyword" },
+        "objectId": { "type": "keyword" },
+        "objectName": { "type": "keyword" },
+        "referenceObjectJson": { "type": "text", "index": false },
+        "lastReferenceObjectJson": { "type": "text", "index": false },
+        "projectId": { "type": "keyword" },
+        "projectName": { "type": "keyword" },
+        "className": { "type": "keyword" },
+        "eventType": { "type": "keyword" },
+        "outcome": { "type": "keyword" },
+        "clientIp": { "type": "ip", "ignore_malformed": true },
+        "userAgent": { "type": "keyword", "ignore_above": 1024 },
+        "correlationId": { "type": "keyword" },
+        "source": { "type": "keyword" },
+        "changesJson": { "type": "text", "index": false },
+        "changedPaths": { "type": "keyword" },
+        "changeKinds": { "type": "keyword" },
+        "changesStatus": { "type": "keyword" }
+      }
+    }
+  }
+}
+```
+
+### 3.3 Session (Legacy Raw)
+
+Use this template for the Session stream. The fields come from the legacy login record. The pipeline derives `@timestamp` from `eventDate`.
+
+```bash
+PUT _index_template/apinizer-siem-session-template
+{
+  "index_patterns": ["apinizer-siem-session*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "source": { "type": "keyword" },
+        "principal": { "type": "keyword" },
+        "email": { "type": "keyword" },
+        "displayName": { "type": "keyword" },
+        "eventDate": { "type": "date" },
+        "eventType": { "type": "keyword" },
+        "remoteAddress": { "type": "ip", "ignore_malformed": true },
+        "message": { "type": "text" },
+        "errorType": { "type": "keyword" },
+        "portalId": { "type": "keyword" },
+        "accountId": { "type": "keyword" },
+        "userAgent": { "type": "keyword", "ignore_above": 1024 },
+        "reasonCode": { "type": "keyword" },
+        "targetProjectId": { "type": "keyword" }
+      }
+    }
+  }
+}
+```
+
+### 3.4 Token (Legacy Raw)
+
+Use this template for the Token stream. The fields come from the legacy token record. The pipeline derives `@timestamp` from `timestamp`.
+
+```bash
+PUT _index_template/apinizer-siem-token-template
+{
+  "index_patterns": ["apinizer-siem-token*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "timestamp": { "type": "date" },
+        "apinizerCorrelationId": { "type": "keyword" },
+        "environmentId": { "type": "keyword" },
+        "projectId": { "type": "keyword" },
+        "applicationId": { "type": "keyword" },
+        "applicationName": { "type": "keyword" },
+        "apiProxyId": { "type": "keyword" },
+        "apiProxyName": { "type": "keyword" },
+        "xForwardedFor": { "type": "keyword" },
+        "httpRequestRemoteAddress": { "type": "ip", "ignore_malformed": true },
+        "httpRequestHttpMethod": { "type": "keyword" },
+        "httpRequestContentType": { "type": "keyword" },
+        "usernameOrKey": { "type": "keyword" },
+        "apiClientKey": { "type": "keyword" },
+        "clientOrganizationId": { "type": "keyword" },
+        "timeTotal": { "type": "integer" },
+        "statusCode": { "type": "short" },
+        "errorType": { "type": "keyword" },
+        "parentErrorType": { "type": "keyword" },
+        "resultType": { "type": "keyword" },
+        "toClientHeader": { "type": "text", "index": false },
+        "toClientBody": { "type": "text", "index": false },
+        "authTokenType": { "type": "keyword" },
+        "audience": { "type": "keyword" },
+        "clientInfo": { "type": "keyword", "ignore_above": 1024 },
+        "tokenNeverExpires": { "type": "boolean" },
+        "issuedAt": { "type": "date" },
+        "expiresAt": { "type": "date" },
+        "expiresIn": { "type": "long" },
+        "scope": { "type": "keyword" },
+        "refreshTokenAllowed": { "type": "boolean" },
+        "refreshTokenIssuedAt": { "type": "date" },
+        "refreshTokenExpiresAt": { "type": "date" },
+        "refreshTokenExpiresIn": { "type": "long" },
+        "refreshCount": { "type": "integer" },
+        "maxRefreshCount": { "type": "integer" }
+      }
+    }
+  }
+}
+```
+
+### 3.5 Application (Legacy Raw)
+
+Use this template for the Application stream. The fields come from the legacy application log. The pipeline derives `@timestamp` from `date`.
+
+```bash
+PUT _index_template/apinizer-siem-application-template
+{
+  "index_patterns": ["apinizer-siem-application*"],
+  "data_stream": {},
+  "priority": 200,
+  "template": {
+    "settings": {
+      "index": {
+        "lifecycle": { "name": "apinizer-siem-ilm" },
+        "default_pipeline": "apinizer-siem-timestamp",
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s"
+      }
+    },
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "strings_as_keyword": {
+            "match_mapping_type": "string",
+            "mapping": { "type": "keyword", "ignore_above": 1024 }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "id": { "type": "keyword" },
+        "envName": { "type": "keyword" },
+        "apiProxyId": { "type": "keyword" },
+        "apiProxyName": { "type": "keyword" },
+        "correlationId": { "type": "keyword" },
+        "date": { "type": "date" },
+        "level": { "type": "keyword" },
+        "message": { "type": "text" },
+        "stackTrace": { "type": "text", "index": false },
+        "hostName": { "type": "keyword" },
+        "enumApplicationLog": { "type": "keyword" },
+        "totalDuration": { "type": "integer" }
+      }
+    }
+  }
+}
+```
+
+## Step 4: Data Streams
+
+Elasticsearch creates a data stream when the first record arrives. You can also create the data streams manually with the commands below.
+
+```bash
+PUT _data_stream/apinizer-siem-v2
+PUT _data_stream/apinizer-siem-audit
+PUT _data_stream/apinizer-siem-session
+PUT _data_stream/apinizer-siem-token
+PUT _data_stream/apinizer-siem-application
+```
+
+## Step 5: Verification
+
+1. Save the destination.
+2. Click **Send test event**.
+3. Run the query below to see the record.
+
+```bash
+GET apinizer-siem-v2/_search?size=1&sort=@timestamp:desc
+```
+
+For a v2 destination, the field `apinizer.synthetic` must be `true`. For a Legacy Raw destination, query the data stream of the related stream.
+
+## Database Destinations
+
+A **Database** connector supports only the Legacy Raw profile. Apinizer does not create the tables. The organization creates them.
+
+| Stream | Table |
+|---|---|
+| Audit | `log_AuditEvent` |
+| Session | `log_LoginLog` |
+| Token | `log_TokenTraffic` |
+| Application | `log_Application` |
+
+Find the DDL commands for each database on [Table Creation Commands for Apinizer Logs](/en/operations/administrator-guides/apinizer-log-table-creation-commands): [Audit Event](/en/operations/administrator-guides/apinizer-log-table-creation-commands#audit-event), [Login Log](/en/operations/administrator-guides/apinizer-log-table-creation-commands#login-log), [Token Traffic Log](/en/operations/administrator-guides/apinizer-log-table-creation-commands#token-traffic-log) and [Application Log](/en/operations/administrator-guides/apinizer-log-table-creation-commands#application-log).

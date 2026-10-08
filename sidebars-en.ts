@@ -1090,6 +1090,7 @@ const sidebars: SidebarsConfig = {
             "operations/administrator-guides/geolocation-city-based-access-control",
             "operations/administrator-guides/kibana-maps-geographic-visualization",
             "operations/administrator-guides/apinizer-log-table-creation-commands",
+            "operations/administrator-guides/siem-elasticsearch-index-templates",
             "operations/administrator-guides/apinizer-reverse-proxy-kubectl-connection-windows",
             "operations/administrator-guides/clear-elasticsearch-index-data",
             "operations/administrator-guides/elasticsearch-sizing-and-tuning-recommendations",

@@ -1091,6 +1091,7 @@ const sidebars: SidebarsConfig = {
             "operations/yonetici-kilavuzlari/geolocation-sehir-bazli-erisim-kontrolu",
             "operations/yonetici-kilavuzlari/kibana-maps-cografi-gorsellestirme",
             "operations/yonetici-kilavuzlari/apinizer-log-tablolari-olusturma-komutlari",
+            "operations/yonetici-kilavuzlari/siem-elasticsearch-index-sablonlari",
             "operations/yonetici-kilavuzlari/apinizer-reverse-proxy-ile-kubectl-baglantisi-windows",
             "operations/yonetici-kilavuzlari/prometheus-zabbix-entegrasyonu",
             {
