@@ -139,10 +139,12 @@ The proxy-level classifier settings are fields of `aiRouting` itself:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| classifierProviderRef | string | Classifier LLM provider connection id. The provider must use the OpenAI chat-completions protocol (OpenAI, Azure OpenAI, vLLM, Ollama, or a custom provider declared OpenAI-compatible) |
+| classifierProviderRef | string | Classifier LLM provider connection id. The provider must be able to make decision calls: an OpenAI-compatible chat provider (OpenAI, Azure OpenAI, DeepSeek, Moonshot, Zhipu, Mistral, Groq, Ollama, vLLM, xAI, Google AI Studio, Together, Fireworks, Cerebras, Hugging Face, OpenRouter, Perplexity, NVIDIA NIM, or a custom provider whose adapter family is `OPENAI_COMPATIBLE` or `VLLM`), Anthropic, or TypeSafe Jev. AWS Bedrock, Google Vertex AI, Cohere, the native Gemini wire format, embedding-only providers, TEI, and custom providers without an adapter family are rejected. The provider must use credentials held by the AI gateway (`Provided by AI gateway`) |
 | classifierProviderRefName | string | Name-based sidecar for `classifierProviderRef`. Resolved to an id within the project when present |
 | classifierModelId | string | Catalog model id of the classifier. Required when at least one classifier route exists |
-| classifierTimeoutMs | integer | Classifier timeout in milliseconds. Default `1000`. Range `100` to `10000` |
+| classifierDecisionMode | string | Optional. `STANDARD` or `REASONING`. Unset is `STANDARD`. `STANDARD` sends temperature `0` and a small output limit. `REASONING` is for thinking models: no temperature is sent and `classifierReasoningBudget` is the output limit. Does not apply to TypeSafe Jev |
+| classifierReasoningBudget | integer | Optional. Used only when `classifierDecisionMode` is `REASONING`. Upper limit for thinking plus answer, in tokens. Range `256` to `8192`. Default `1024`. A value outside the range is set to the nearest limit |
+| classifierTimeoutMs | integer | Classifier timeout in milliseconds. `STANDARD`: default `1000`, range `100` to `10000`. `REASONING`: default `15000`, up to `60000`. A value that you set always wins over the default |
 | classifierMaxInputChars | integer | Maximum characters of the last user message sent to the classifier. Default `2000`. Range `200` to `20000` |
 | classifierInstructions | string | Optional extra instructions for the classifier. `${env}` environment variables are resolved; the user prompt is never resolved |
 
@@ -174,7 +176,30 @@ Example — two routes that share the label `code`. To split them by request siz
 }
 ```
 
-At request time the classifier is called at most once, only when a classifier route is reached, and only in the routing phase (after authentication and PII masking). After a classifier timeout or error, classifier calls for that proxy are skipped for 15 seconds. If it fails, times out, answers with an unknown label, or has no provider, classifier routes do not match and routing continues down the list (fail-open).
+Example — a reasoning classifier. A reasoning model adds seconds and token cost to every request that reaches a classifier route, so use a longer timeout and test the routing first:
+
+```json
+{
+  "classifierProviderRefName": "anthropic-prod",
+  "classifierModelId": "claude-sonnet-4-5",
+  "classifierDecisionMode": "REASONING",
+  "classifierReasoningBudget": 1024,
+  "classifierTimeoutMs": 15000
+}
+```
+
+Example — TypeSafe Jev as the classifier. `classifierDecisionMode` and `classifierReasoningBudget` do not apply:
+
+```json
+{
+  "classifierProviderRefName": "typesafe-jev",
+  "classifierModelId": "jev-latest"
+}
+```
+
+TypeSafe Jev and TEI are decision-only providers. TypeSafe Jev can be the classifier or a guard judge. TEI can be a guard judge only. Neither can be a routing target, a pool member, a failover target, or an embedding provider.
+
+At request time the classifier is called at most once, only when a classifier route is reached, and only in the routing phase (after authentication and PII masking). After a classifier timeout or error, classifier calls for that proxy are skipped for 15 seconds. If it fails, times out, refuses to answer, answers with an unknown label, or has no provider, classifier routes do not match and routing continues down the list (fail-open).
 
 ### Field Reference — Circuit Breaker
 
@@ -237,7 +262,8 @@ At request time the classifier is called at most once, only when a classifier ro
 | 400 | Blank `apiProxyName`, empty body, proxy not found, or proxy is not an AI proxy |
 | 400 | A provider id referenced anywhere in `aiRouting` (primary, failover, pool, conditional route, or the semantic embedding provider) is missing or belongs to a different project (error key `aiRouting.providerOutOfScope`). Missing and out-of-scope ids share this key so the response does not reveal whether an id exists in another project. |
 | 400 | A USD budget covering the proxy would meter a model that has no input price in the model catalog (error key `aiQuota.usdBudgetModelPriceMissing`, parameters `modelCount` / `models`). Raised when the body's `aiAppBudget` or the routing changed; an unchanged re-save is not re-checked. Add the price to the model catalog or use a token-based limit. |
-| 400 | A classifier route or the classifier settings are invalid. Error keys: `aiRouting.classifierProviderRequired` (a classifier route exists but the classifier provider or model is missing), `aiRouting.classifierProviderWire` (the classifier provider does not use the OpenAI chat-completions protocol), `aiRouting.classifierLabelInvalid` (the label does not match lowercase letters, digits, `_` and `-`, maximum 64 characters, starting and ending with a letter or digit), `aiRouting.classifierLabelReserved` (the label is `none`), `aiRouting.classifierDescriptionRequired` (a classifier route has a blank description or one longer than 500 characters), `aiRouting.classifierSemanticConflict` (a route defines both a classifier label and semantic utterances) |
+| 400 | A classifier route or the classifier settings are invalid. Error keys: `aiRouting.classifierProviderRequired` (a classifier route exists but the classifier provider or model is missing), `aiRouting.classifierProviderWire` (the classifier provider cannot make decision calls), `aiRouting.classifierLabelInvalid` (the label does not match lowercase letters, digits, `_` and `-`, maximum 64 characters, starting and ending with a letter or digit), `aiRouting.classifierLabelReserved` (the label is `none`), `aiRouting.classifierDescriptionRequired` (a classifier route has a blank description or one longer than 500 characters), `aiRouting.classifierSemanticConflict` (a route defines both a classifier label and semantic utterances) |
+| 400 | A decision-only provider (TypeSafe Jev or TEI) is used as a routing target, a pool member, a failover target, or an embedding provider (error key `aiRouting.decisionOnlyProvider`) |
 | 401 | Invalid or missing token |
 | 500 | Unexpected server error |
 

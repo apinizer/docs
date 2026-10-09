@@ -66,11 +66,19 @@ This policy only checks the response against the RAG context **your own Apinizer
 | type | string | Yes | Must be `llm-judge`. |
 | llmProviderName | string | Yes | Name of the LLM connection to call as the judge. Resolved server-side; an unknown name is rejected with `400`. |
 | modelId | string | No | Judge model identifier. |
-| promptTemplate | string | **Yes** | The judge's prompt template. Unlike the Prompt Guard policy, a blank template is **rejected**, not defaulted — a blank template falls back to a generic safety-taxonomy judge that does not answer a groundedness question at all. |
+| promptTemplate | string | Conditional | The judge's prompt template. **Required for a chat judge.** Unlike the Prompt Guard policy, a blank template is **rejected**, not defaulted — a blank template falls back to a generic safety-taxonomy judge that does not answer a groundedness question at all (error key `prompttemplaterequired`). Not required when `decisionQuestion` (TypeSafe Jev) or `unsafeLabels` (TEI) is set. |
 | jsonMode | boolean | No | Whether the judge is asked to respond in JSON mode. |
 | maxOutputTokens | integer | No | Judge max output tokens. |
 | timeoutMs | integer | No | HTTP call timeout (ms). |
 | maxInputChars | integer | No | Max input characters sent to the judge. |
+| decisionMode | string | No | `STANDARD` or `REASONING`. Unset is `STANDARD`. `llm-judge` only, chat judge. `STANDARD`: temperature `0`, small output limit, default `timeoutMs` `2000`, default `maxOutputTokens` `64`. `REASONING`: for thinking models; no temperature is sent, `maxOutputTokens` is the budget for thinking and verdict together, default `timeoutMs` `15000` (up to `60000`), default `maxOutputTokens` `1024`. A value that you set always wins over the default |
+| decisionThreshold | number | No | Verdict threshold for TypeSafe Jev and TEI judges. Range `0.05` to `0.99`. Default `0.5`. A value outside the range is set to the nearest limit. Jev: unsafe when the probability is at or above the value. TEI: unsafe when a selected label scores at or above the value |
+| unsafeLabels | array[string] | Conditional | TEI judge only. Labels that mean unsafe, for example `INJECTION` and `JAILBREAK`. Matching is not case-sensitive. Required for a TEI judge: at least one label (error key `unsafelabelsrequired`). |
+| decisionQuestion | string | Conditional | TypeSafe Jev judge only. The yes/no question that Jev answers about the text. `yes` means unsafe. Required for a TypeSafe Jev judge on this policy (error key `decisionquestionrequired`). Default question in the Manager UI: Is the answer not supported by the given context? Answer yes when it states facts, numbers or names that the context does not contain. |
+
+**Judge providers.** `llmProviderName` can name an OpenAI-compatible chat provider, an Anthropic provider, a TypeSafe Jev provider (decision model), or a TEI provider (guard classifier). AWS Bedrock, Google Vertex AI, Cohere, the native Gemini wire format, embedding-only providers, and custom providers without an adapter family cannot judge. The provider must use credentials held by the AI gateway (`Provided by AI gateway`). TypeSafe Jev and TEI make decisions only: they do not use `promptTemplate`, `jsonMode`, or `maxOutputTokens`, and they cannot be a routing target, a pool member, a failover target, or an embedding provider.
+
+If the judge provider refuses to answer for safety reasons, the verdict is **UNSAFE** with the category `provider-refusal`. `FAIL_OPEN` does not let this request through. `maxWaitMs` still limits the whole check, so a slow reasoning judge is cut off by it and `failMode` decides.
 
 ---
 
@@ -218,6 +226,20 @@ POST /apiops/projects/{projectName}/apiProxies/{apiProxyName}/policies/{policyNa
 }
 ```
 
+##### Example — TypeSafe Jev Judge
+
+With a decision-only judge, `promptTemplate` is not needed. `decisionQuestion` is required:
+
+```json
+"externalGuardrail": {
+  "type": "llm-judge",
+  "llmProviderName": "typesafe-jev",
+  "modelId": "jev-latest",
+  "decisionQuestion": "Is the answer not supported by the given context? Answer yes when it states facts, numbers or names that the context does not contain.",
+  "decisionThreshold": 0.5
+}
+```
+
 #### Body Fields
 
 See [Fields](#fields) and [Judge fields](#judge-fields) above.
@@ -246,7 +268,7 @@ See [Fields](#fields) and [Judge fields](#judge-fields) above.
 
 | Code | Reason |
 |------|--------|
-| 400 | Blank `name`; `maxWaitMs`/`maxContextChars`/`maxResponseChars` not positive; `externalGuardrail` missing; `externalGuardrail.type` blank; `externalGuardrail.llmProviderName` blank or does not resolve to an existing LLM connection in the project; `externalGuardrail.promptTemplate` blank; `externalGuardrail.timeoutMs`/`maxOutputTokens`/`maxInputChars` not positive; proxy not found. |
+| 400 | Blank `name`; `maxWaitMs`/`maxContextChars`/`maxResponseChars` not positive; `externalGuardrail` missing; `externalGuardrail.type` blank; `externalGuardrail.llmProviderName` blank or does not resolve to an existing LLM connection in the project; `externalGuardrail.promptTemplate` blank for a chat judge; blank `decisionQuestion` for a TypeSafe Jev judge; no `unsafeLabels` for a TEI judge; `externalGuardrail.timeoutMs`/`maxOutputTokens`/`maxInputChars` not positive; proxy not found. |
 | 401 | Missing or invalid token. |
 | 403 | The token's account lacks permission on the project. |
 
