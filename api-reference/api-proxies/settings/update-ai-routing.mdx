@@ -128,6 +128,54 @@ A failover entry without its own `modelId` inherits the **configured** `modelId`
 | semanticEmbeddingProviderRefName | string | Name-based sidecar for `semanticEmbeddingProviderRef`. Resolved to an id within the project when present (Apinizer 2026.09.4) |
 | semanticEmbeddingModelId | string | Embedding model id. Default `text-embedding-3-small` |
 
+Each entry of `conditionalRoutes` also accepts the classifier fields below. A route with a `classifierLabel` is a **classifier route**: the proxy-level LLM classifier answers with one label, and the route with that label is selected. Several routes may share one label; the first one whose `condition` also matches wins.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| classifierLabel | string | Label of a classifier route. Lowercase letters, digits, `_` and `-`; maximum 64 characters; must start and end with a letter or digit. `none` is reserved |
+| classifierDescription | string | Required when `classifierLabel` is set. Maximum 500 characters. The classifier model decides by this text |
+
+The proxy-level classifier settings are fields of `aiRouting` itself:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| classifierProviderRef | string | Classifier LLM provider connection id. The provider must use the OpenAI chat-completions protocol (OpenAI, Azure OpenAI, vLLM, Ollama, or a custom provider declared OpenAI-compatible) |
+| classifierProviderRefName | string | Name-based sidecar for `classifierProviderRef`. Resolved to an id within the project when present |
+| classifierModelId | string | Catalog model id of the classifier. Required when at least one classifier route exists |
+| classifierTimeoutMs | integer | Classifier timeout in milliseconds. Default `1000`. Range `100` to `10000` |
+| classifierMaxInputChars | integer | Maximum characters of the last user message sent to the classifier. Default `2000`. Range `200` to `20000` |
+| classifierInstructions | string | Optional extra instructions for the classifier. `${env}` environment variables are resolved; the user prompt is never resolved |
+
+Example — two routes that share the label `code`. To split them by request size, add a `condition` on the context value **Estimated Request Token Count** (data type numeric, operator greater than) to the first route; the first route whose condition matches wins:
+
+```json
+{
+  "classifierProviderRefName": "openai-prod",
+  "classifierModelId": "gpt-4o-mini",
+  "classifierTimeoutMs": 1000,
+  "classifierMaxInputChars": 2000,
+  "classifierInstructions": "Questions about invoices are finance.",
+  "conditionalRoutes": [
+    {
+      "name": "Large code requests",
+      "classifierLabel": "code",
+      "classifierDescription": "Programming questions: writing, fixing or explaining code.",
+      "llmProviderRefName": "openai-prod",
+      "modelId": "gpt-4o"
+    },
+    {
+      "name": "Code requests",
+      "classifierLabel": "code",
+      "classifierDescription": "Programming questions: writing, fixing or explaining code.",
+      "llmProviderRefName": "openai-prod",
+      "modelId": "gpt-4o-mini"
+    }
+  ]
+}
+```
+
+At request time the classifier is called at most once, only when a classifier route is reached, and only in the routing phase (after authentication and PII masking). After a classifier timeout or error, classifier calls for that proxy are skipped for 15 seconds. If it fails, times out, answers with an unknown label, or has no provider, classifier routes do not match and routing continues down the list (fail-open).
+
 ### Field Reference — Circuit Breaker
 
 | Field | Type | Description |
@@ -166,7 +214,7 @@ A failover entry without its own `modelId` inherits the **configured** `modelId`
 
 ## Behavior
 
-- `llmProviderRefName` and `semanticEmbeddingProviderRefName` (and the name sidecars on failover entries, primary pool entries, and conditional routes) are resolved to connection ids within the project before save. A blank sidecar leaves the corresponding id field untouched; an unresolvable name does the same — it does not clear or reject the id by itself. If the id left in place (from the body, or unchanged because the name did not resolve) is missing or belongs to a different project, the save is rejected with error key `aiRouting.providerOutOfScope`.
+- `llmProviderRefName` and `semanticEmbeddingProviderRefName`, `classifierProviderRefName` (and the name sidecars on failover entries, primary pool entries, and conditional routes) are resolved to connection ids within the project before save. A blank sidecar leaves the corresponding id field untouched; an unresolvable name does the same — it does not clear or reject the id by itself. If the id left in place (from the body, or unchanged because the name did not resolve) is missing or belongs to a different project, the save is rejected with error key `aiRouting.providerOutOfScope`.
 - Every environment the proxy is currently deployed to is marked **redeploy required** — redeploy to activate the new configuration.
 - AI proxies do **not** use the classic `routing` object. Settings endpoints that target classic routing (circuit breaker, connection, mTLS, addresses, …) return HTTP 400 for AI proxies and point here instead.
 
@@ -189,6 +237,7 @@ A failover entry without its own `modelId` inherits the **configured** `modelId`
 | 400 | Blank `apiProxyName`, empty body, proxy not found, or proxy is not an AI proxy |
 | 400 | A provider id referenced anywhere in `aiRouting` (primary, failover, pool, conditional route, or the semantic embedding provider) is missing or belongs to a different project (error key `aiRouting.providerOutOfScope`). Missing and out-of-scope ids share this key so the response does not reveal whether an id exists in another project. |
 | 400 | A USD budget covering the proxy would meter a model that has no input price in the model catalog (error key `aiQuota.usdBudgetModelPriceMissing`, parameters `modelCount` / `models`). Raised when the body's `aiAppBudget` or the routing changed; an unchanged re-save is not re-checked. Add the price to the model catalog or use a token-based limit. |
+| 400 | A classifier route or the classifier settings are invalid. Error keys: `aiRouting.classifierProviderRequired` (a classifier route exists but the classifier provider or model is missing), `aiRouting.classifierProviderWire` (the classifier provider does not use the OpenAI chat-completions protocol), `aiRouting.classifierLabelInvalid` (the label does not match lowercase letters, digits, `_` and `-`, maximum 64 characters, starting and ending with a letter or digit), `aiRouting.classifierLabelReserved` (the label is `none`), `aiRouting.classifierDescriptionRequired` (a classifier route has a blank description or one longer than 500 characters), `aiRouting.classifierSemanticConflict` (a route defines both a classifier label and semantic utterances) |
 | 401 | Invalid or missing token |
 | 500 | Unexpected server error |
 

@@ -1,6 +1,6 @@
 ---
 title: "Routing and Failover"
-description: "You can override routing per request with rule- or meaning-based conditional routes, load-balance across a pool of equal-priority primaries, chain backups into a failover sequence, and cap what a single failover attempt is allowed to cost — all without changing client code."
+description: "You can override routing per request with rule-, meaning-, or classifier-based conditional routes, load-balance across a pool of equal-priority primaries, chain backups into a failover sequence, and cap what a single failover attempt is allowed to cost — all without changing client code."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -56,6 +56,134 @@ The utterances that drive semantic matching, and the header name the affinity st
 
 :::note
 Utterance resolution happens once, when the route's embeddings are first built and cached — not per request. That is why only `${...}` environment variables are accepted here and `#{...}` context variables are not: a per-request value would be embedded on the first request and those same vectors would then be served to every later one.
+:::
+
+## Route Match Methods and the LLM Classifier
+
+In the route dialog, **Match Method** has three options: **Rule-based**, **Semantic**, and **Classifier**. For **Semantic** and **Classifier**, the checkbox **Also require rule conditions (AND)** is shown. Select it to require the rule conditions in addition to the semantic or classifier match.
+
+The route list shows one match type badge per route: `RULE`, `SEMANTIC`, `SEMANTIC + RULE`, `CLASSIFIER`, or `CLASSIFIER + RULE`.
+
+:::note Routes created with the former Hybrid button
+The **Hybrid** button no longer exists. A route that was saved as Hybrid opens as **Semantic** with **Also require rule conditions (AND)** selected. The saved configuration does not change.
+:::
+
+### Classifier Routing
+
+Classifier routing selects the target by how well it suits the request, not only by cost. For example, you can send coding prompts to model A, finance prompts to model B, and legal prompts to model C.
+
+A small LLM, the classifier, reads the prompt and answers with one label. The route with that label is selected. Each classifier route has two fields:
+
+| Field | Description |
+|---|---|
+| **Label** | A short name for the type of request. Use lowercase letters, digits, `_`, and `-`. The maximum length is 64 characters. The label must start and end with a letter or digit. The label `none` is reserved. |
+| **Description** | Required. The maximum length is 500 characters. The classifier model decides by this text, so describe the kind of request that belongs to the route. |
+
+Several routes can use the same label. In this case, the first route in the list whose rule conditions also match wins. Use this to split one label by request size. For example:
+
+1. Route 1: label `code`, with the condition **Estimated Request Token Count** greater than 2000. Target: a large model.
+2. Route 2: label `code`, without a condition. Target: a small model.
+
+### The LLM Classifier Settings
+
+Open the **Conditional Routes** drawer to configure the **LLM classifier** box. This box is shared by all classifier routes of the proxy.
+
+| Field | Description |
+|---|---|
+| **Classifier Provider** | The LLM provider that runs the classifier. |
+| **Classifier Model** | The model of that provider. |
+| **Timeout (ms)** | The maximum time to wait for the classifier. Default `1000`. Range `100` to `10000`. |
+| **Max input characters** | The maximum length of the user message sent to the classifier. Longer messages are truncated. Default `2000`. Range `200` to `20000`. |
+| **Additional instructions** | Optional. Extra text for the classifier, for example "Questions about invoices are finance." `${env}` environment variables are resolved. The user prompt is never resolved. |
+
+The box also shows a preview of the label list that is sent to the classifier.
+
+:::warning The provider must use the OpenAI chat-completions protocol
+Use OpenAI, Azure OpenAI, vLLM, Ollama, or a custom provider that is declared OpenAI-compatible. Apinizer rejects other providers when you save.
+:::
+
+### How Routes Are Evaluated
+
+1. Apinizer evaluates the routes from top to bottom.
+2. For each route, it checks the rule conditions first. Then it checks the semantic or classifier match. Both must match (AND) when the rule conditions are defined.
+3. The classifier is called at most once per request. It is called only when a classifier route is reached.
+4. Only the labels of classifier routes whose rule conditions are met are offered to the classifier.
+5. The classifier receives the last user message, truncated to **Max input characters**. It answers with one label or `none`. Temperature is 0 and the answer is limited to 16 output tokens.
+6. The classifier runs only in the routing phase, after authentication and PII masking. It receives the masked prompt. An unauthenticated request does not cause a classifier call.
+
+If the classifier fails, the request is not rejected. This is fail-open. The classifier routes do not match in these cases:
+
+- The classifier returns an error.
+- The classifier times out.
+- The classifier answers with a label that no route uses.
+- No classifier provider is configured.
+- The classifier failed recently. After a timeout or an error, Apinizer skips classifier calls for that proxy for 15 seconds. The outcome is `BACKOFF`. Redeploying the proxy clears the back-off.
+
+The request then continues down the list. If no route matches, the request goes to the Default Target Group.
+
+:::note Request-phase AI policies
+AI policies that run in the request phase, for example the token rate limit, prompt guard, and semantic cache, run before the classifier. When a classifier route wins later, these policies have seen the model of the next candidate, not the model of the selected route.
+:::
+
+:::note Prompt steering
+A user can try to steer the classifier choice with the text of the prompt. The choice is always limited to the routes that you defined. Quotas and the Limit Plan are not affected by the chosen route.
+:::
+
+In the first stage of the routing screen, the panel shows two information messages: **Classifier: provider · model · timeout ms** and **Embedding: provider · model**.
+
+### Routing by Request Size
+
+You can route by the size of the request. In the rule conditions of a route, select the context value **Estimated Request Token Count**. Set the data type to **Numeric** and select an operator, for example **greater than**.
+
+The value is an estimate of the tokens in the request body. Apinizer uses the body that goes to the backend. If there is none, it uses the body from the client.
+
+### Test Routing
+
+Use **Test routing** to check which route a sample prompt selects. The button is shown only on the **Conditional Routes** panel.
+
+1. Click **Test routing**.
+2. Select a deployed environment.
+3. Enter a sample prompt.
+4. Click **Run test**.
+
+The worker evaluates the saved routing. The target model is not called. Nothing is saved.
+
+:::warning The classifier and embedding providers are called
+The test calls the classifier and embedding providers. These calls can have a cost.
+:::
+
+The result shows:
+
+- The estimated request tokens.
+- The classifier label, outcome, latency, tokens, and cost.
+- A table with one row for each route: the rule, the semantic score, the classifier answer, and the result. The result is **Selected**, **No match**, **Target unusable**, or **Not evaluated**. Hold the pointer over **Selected** to see the target provider and model.
+- The message "No route matched — the request goes to the Default Target Group" when no route matches.
+
+Rules other than **Estimated Request Token Count** need a real request. The test assumes that these rules match and shows them as `RUNTIME_ONLY`. A NOT over a rule that cannot be evaluated without a real request is shown as `INDETERMINATE`.
+
+The test ignores the 15-second back-off. It always calls the classifier. If embedding fails, the dialog shows a warning with the error type only.
+
+### Observability
+
+The traffic log has these sparse fields for the classifier:
+
+| Field | Description |
+|---|---|
+| `aircl` | The label that the classifier returned. |
+| `aircs` | The outcome: `MATCHED`, `NONE`, `UNKNOWN_LABEL`, `TIMEOUT`, `ERROR`, `BACKOFF` (shown as **Skipped (back-off)**), `NO_PROVIDER`, or `NO_INPUT`. |
+| `aircms` | The classifier latency in milliseconds. |
+| `aircti` | The classifier input tokens. |
+| `aircto` | The classifier output tokens. |
+| `airccm` | The classifier cost in micro-USD. |
+
+The trace drawer shows a **Route classifier** section. When AI trace is on, it also shows a **Routing decision** panel with the result for each route.
+
+:::warning Upgrade note: JDBC traffic log databases
+If you write traffic logs to a JDBC database (Oracle, MySQL, PostgreSQL, or MSSQL), run the ALTER script for your database **before** you upgrade. Otherwise, traffic log inserts to this database fail.
+
+The scripts are in the product repository, in `scripts/db-upgrade/APNZ-6880-route-classifier/` (`oracle.sql`, `mysql.sql`, `postgresql.sql`, `mssql.sql`). They add these columns: `ai_route_cls_label`, `ai_route_cls_outcome`, `ai_route_cls_latency_ms`, `ai_route_cls_token_in`, `ai_route_cls_token_out`, and `ai_route_cls_cost_micro`.
+
+For Elasticsearch, no action is needed. A startup migration updates the traffic index template automatically, and the index is rolled over.
 :::
 
 ## Client "model" Field

@@ -1,6 +1,6 @@
 ---
 title: "Yönlendirme ve Failover"
-description: "Koşullu ve semantik rotalarla isteği doğru hedefe yönlendirebilir; birincil ve yedek LLM hedeflerini önceliklendirebilir, maliyet-duyarlı, gecikme-duyarlı veya sabit-önek-yakınlıklı yönlendirme stratejileri seçebilir ve her failover adımı için maliyet sınırı tanımlayabilirsiniz."
+description: "Koşullu, semantik ve sınıflandırıcı tabanlı rotalarla isteği doğru hedefe yönlendirebilir; birincil ve yedek LLM hedeflerini önceliklendirebilir, maliyet-duyarlı, gecikme-duyarlı veya sabit-önek-yakınlıklı yönlendirme stratejileri seçebilir ve her failover adımı için maliyet sınırı tanımlayabilirsiniz."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -61,6 +61,134 @@ Semantik eşleşmeyi besleyen örnek ifadeler ve yakınlık (affinity) stratejil
 
 :::note
 Örnek ifadelerin çözümlenmesi her istekte değil, rotanın vektörleri ilk kez oluşturulup önbelleğe alınırken bir kez yapılır. Burada yalnızca `${...}` ortam değişkenlerinin kabul edilip `#{...}` bağlam değişkenlerinin kabul edilmemesinin nedeni budur: her istekte değişen bir değer ilk istekte vektörlenir ve aynı vektörler sonraki tüm isteklere servis edilirdi.
+:::
+
+## Rota Eşleşme Yöntemleri ve LLM Sınıflandırıcı
+
+Rota penceresinde **Eşleşme Yöntemi** için üç seçenek vardır: **Kural tabanlı**, **Anlamsal** ve **Sınıflandırıcı**. **Anlamsal** ve **Sınıflandırıcı** için **Kural koşulları da sağlansın (VE)** onay kutusu görünür. Anlamsal veya sınıflandırıcı eşleşmesine ek olarak kural koşullarını da zorunlu kılmak için bu kutuyu işaretleyin.
+
+Rota listesi her rota için bir eşleşme türü rozeti gösterir: `KURAL`, `ANLAMSAL`, `ANLAMSAL + KURAL`, `SINIFLANDIRICI` veya `SINIFLANDIRICI + KURAL`.
+
+:::note Hibrit düğmesiyle oluşturulan rotalar
+**Hibrit** düğmesi artık yoktur. Hibrit olarak kaydedilmiş rota **Anlamsal** yöntemiyle ve **Kural koşulları da sağlansın (VE)** işaretli olarak açılır. Kayıtlı yapılandırma değişmez.
+:::
+
+### Sınıflandırıcı ile Yönlendirme
+
+Sınıflandırıcı ile yönlendirme, hedefi yalnız maliyete göre değil, isteğe uygunluğa göre seçer. Örneğin kodlama istemlerini A modeline, finans istemlerini B modeline, hukuk istemlerini C modeline gönderebilirsiniz.
+
+Sınıflandırıcı adlı küçük bir LLM istemi okur ve tek bir etiketle yanıt verir. Bu etikete sahip rota seçilir. Her sınıflandırıcı rotasının iki alanı vardır:
+
+| Alan | Açıklama |
+|---|---|
+| **Etiket** | İstek türü için kısa bir ad. Küçük harf, rakam, `_` ve `-` kullanın. En fazla 64 karakter olabilir. Etiket harf veya rakamla başlar ve biter. `none` etiketi ayrılmıştır. |
+| **Açıklama** | Zorunludur. En fazla 500 karakter olabilir. Sınıflandırıcı model bu metne göre karar verir. Rotaya ait istek türünü açıklayın. |
+
+Birden çok rota aynı etiketi kullanabilir. Bu durumda listede sıradaki ilk ve kural koşulları da sağlanan rota kazanır. Bir etiketi istek boyutuna göre bölmek için bu yöntemi kullanın. Örnek:
+
+1. Rota 1: `code` etiketi, **Tahmini İstek Token Sayısı** 2000'den büyük koşulu. Hedef: büyük model.
+2. Rota 2: `code` etiketi, koşul yok. Hedef: küçük model.
+
+### LLM Sınıflandırıcı Ayarları
+
+**Koşullu Rotalar** çekmecesini açın ve **LLM sınıflandırıcı** kutusunu yapılandırın. Bu kutuyu proxy'nin tüm sınıflandırıcı rotaları paylaşır.
+
+| Alan | Açıklama |
+|---|---|
+| **Sınıflandırıcı Sağlayıcı** | Sınıflandırıcıyı çalıştıran LLM sağlayıcısı. |
+| **Sınıflandırıcı Model** | Bu sağlayıcının modeli. |
+| **Zaman aşımı (ms)** | Sınıflandırıcı için en uzun bekleme süresi. Varsayılan `1000`. Aralık `100` ile `10000`. |
+| **En fazla girdi karakteri** | Sınıflandırıcıya giden kullanıcı mesajının en büyük uzunluğu. Daha uzun mesaj kısaltılır. Varsayılan `2000`. Aralık `200` ile `20000`. |
+| **Ek yönerge (isteğe bağlı)** | Sınıflandırıcı için ek metin. Örnek: "Fatura soruları finance etiketidir." `${env}` ortam değişkenleri çözülür. Kullanıcı istemi hiçbir zaman çözülmez. |
+
+Kutu, sınıflandırıcıya giden etiket listesinin önizlemesini de gösterir.
+
+:::warning Sağlayıcı OpenAI chat-completions protokolünü kullanmalıdır
+OpenAI, Azure OpenAI, vLLM, Ollama veya OpenAI uyumlu olarak tanımlı özel bir sağlayıcı kullanın. Apinizer diğer sağlayıcıları kayıt sırasında reddeder.
+:::
+
+### Rotalar Nasıl Değerlendirilir
+
+1. Apinizer rotaları yukarıdan aşağıya değerlendirir.
+2. Her rota için önce kural koşullarına bakar. Sonra anlamsal veya sınıflandırıcı eşleşmesine bakar. Kural koşulları tanımlıysa ikisi de eşleşmelidir (VE).
+3. Sınıflandırıcı istek başına en fazla bir kez çağrılır. Yalnız bir sınıflandırıcı rotasına gelindiğinde çağrılır.
+4. Sınıflandırıcıya yalnız kural koşulu sağlanan sınıflandırıcı rotalarının etiketleri sunulur.
+5. Sınıflandırıcı son kullanıcı mesajını alır. Mesaj **En fazla girdi karakteri** değerine kısaltılır. Sınıflandırıcı tek bir etiketle veya `none` ile yanıt verir. Sıcaklık 0'dır ve yanıt en fazla 16 çıktı token'ı ile sınırlıdır.
+6. Sınıflandırıcı yalnız yönlendirme aşamasında, kimlik doğrulamadan ve PII maskelemeden sonra çalışır. Maskelenmiş istemi alır. Kimliği doğrulanmamış istek sınıflandırıcı çağrısına neden olmaz.
+
+Sınıflandırıcı başarısız olursa istek reddedilmez. Bu davranış fail-open'dır. Şu durumlarda sınıflandırıcı rotaları eşleşmez:
+
+- Sınıflandırıcı hata verir.
+- Sınıflandırıcı zaman aşımına uğrar.
+- Sınıflandırıcı hiçbir rotanın kullanmadığı bir etiketle yanıt verir.
+- Sınıflandırıcı sağlayıcısı tanımlı değildir.
+- Sınıflandırıcı kısa süre önce başarısız olmuştur. Zaman aşımı veya hatadan sonra Apinizer o proxy için 15 saniye boyunca sınıflandırıcı çağrılarını atlar. Sonuç `BACKOFF` olur. Proxy'yi yeniden yüklemek bekleme süresini sıfırlar.
+
+İstek listede aşağı doğru devam eder. Hiçbir rota eşleşmezse istek Varsayılan Hedef Grubu'na gider.
+
+:::note İstek aşamasındaki AI politikaları
+İstek aşamasında çalışan AI politikaları (örneğin token hız sınırı, istem koruması ve semantik önbellek) sınıflandırıcıdan önce çalışır. Bir sınıflandırıcı rotası sonradan kazanırsa bu politikalar seçilen rotanın modelini değil, sıradaki adayın modelini görmüştür.
+:::
+
+:::note İstemle yönlendirme riski
+Kullanıcı, istem metniyle sınıflandırıcının seçimini yönlendirmeyi deneyebilir. Seçim her zaman tanımladığınız rotalarla sınırlıdır. Seçilen rota kotaları ve Limit Planı'nı etkilemez.
+:::
+
+Yönlendirme ekranının ilk aşama panelinde iki bilgi mesajı görünür: **Sınıflandırıcı: sağlayıcı · model · zaman aşımı ms** ve **Embedding: sağlayıcı · model**.
+
+### İstek Boyutuna Göre Yönlendirme
+
+İsteği boyutuna göre yönlendirebilirsiniz. Rotanın kural koşullarında **Tahmini İstek Token Sayısı** bağlam değerini seçin. Veri tipini **Sayısal** yapın ve bir işleç seçin. Örnek: **büyük**.
+
+Değer, istek gövdesindeki token sayısının tahminidir. Apinizer backend'e giden gövdeyi kullanır. Yoksa istemciden gelen gövdeyi kullanır.
+
+### Yönlendirmeyi Test Etme
+
+Örnek bir istemin hangi rotayı seçtiğini görmek için **Yönlendirmeyi test et** düğmesini kullanın. Düğme yalnız **Koşullu Rotalar** panelinde görünür.
+
+1. **Yönlendirmeyi test et** düğmesine tıklayın.
+2. Yüklenmiş bir ortam seçin.
+3. Örnek bir istem girin.
+4. **Testi çalıştır** düğmesine tıklayın.
+
+Worker kayıtlı yönlendirmeyi değerlendirir. Hedef model çağrılmaz. Hiçbir şey kaydedilmez.
+
+:::warning Sınıflandırıcı ve embedding sağlayıcıları çağrılır
+Test, sınıflandırıcı ve embedding sağlayıcılarını çağırır. Bu çağrıların maliyeti olabilir.
+:::
+
+Sonuç ekranı şunları gösterir:
+
+- Tahmini istek token sayısı.
+- Sınıflandırıcının etiketi, sonucu, gecikmesi, token sayısı ve maliyeti.
+- Her rota için bir satır içeren tablo: kural, anlamsal skor, sınıflandırıcı yanıtı ve sonuç. Sonuç **Seçildi**, **Eşleşmedi**, **Hedef kullanılamaz** veya **Değerlendirilmedi** olur. Hedef sağlayıcıyı ve modeli görmek için **Seçildi** üzerine gelin.
+- Hiçbir rota eşleşmezse "Hiçbir rota eşleşmedi — istek Varsayılan Hedef Grubu'na gider" mesajı.
+
+**Tahmini İstek Token Sayısı** dışındaki kurallar gerçek istek ister. Test bu kuralların eşleştiğini varsayar ve `RUNTIME_ONLY` olarak gösterir. Gerçek istek olmadan değerlendirilemeyen bir kuralın NOT değeri `INDETERMINATE` olarak gösterilir.
+
+Test, 15 saniyelik bekleme süresini yok sayar ve sınıflandırıcıyı her zaman çağırır. Embedding başarısız olursa pencere yalnız hata türünü içeren bir uyarı gösterir.
+
+### Gözlemlenebilirlik
+
+Trafik logunda sınıflandırıcı için şu seyrek alanlar bulunur:
+
+| Alan | Açıklama |
+|---|---|
+| `aircl` | Sınıflandırıcının döndürdüğü etiket. |
+| `aircs` | Sonuç: `MATCHED`, `NONE`, `UNKNOWN_LABEL`, `TIMEOUT`, `ERROR`, `BACKOFF` (**Atlandı (bekleme)** olarak gösterilir), `NO_PROVIDER` veya `NO_INPUT`. |
+| `aircms` | Sınıflandırıcı gecikmesi (milisaniye). |
+| `aircti` | Sınıflandırıcının girdi token sayısı. |
+| `aircto` | Sınıflandırıcının çıktı token sayısı. |
+| `airccm` | Sınıflandırıcı maliyeti (mikro USD). |
+
+İzleme çekmecesi **Rota sınıflandırıcı** bölümünü gösterir. AI izleme açıksa her rotanın sonucunu içeren **Yönlendirme kararı** paneli de görünür.
+
+:::warning Yükseltme notu: JDBC trafik log veritabanları
+Trafik loglarını bir JDBC veritabanına (Oracle, MySQL, PostgreSQL veya MSSQL) yazıyorsanız yükseltmeden **önce** veritabanınıza uygun ALTER betiğini çalıştırın. Aksi halde bu veritabanına trafik logu ekleme işlemleri başarısız olur.
+
+Betikler ürün deposunda `scripts/db-upgrade/APNZ-6880-route-classifier/` klasöründedir (`oracle.sql`, `mysql.sql`, `postgresql.sql`, `mssql.sql`). Betikler şu kolonları ekler: `ai_route_cls_label`, `ai_route_cls_outcome`, `ai_route_cls_latency_ms`, `ai_route_cls_token_in`, `ai_route_cls_token_out` ve `ai_route_cls_cost_micro`.
+
+Elasticsearch için işlem gerekmez. Başlangıçtaki bir geçiş trafik indeks şablonunu otomatik günceller ve indeks yeni döneme alınır.
 :::
 
 ## İstemci "model" Alanı
