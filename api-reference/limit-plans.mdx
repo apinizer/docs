@@ -1,6 +1,6 @@
 ---
 title: "Limit Plans, Assignments & Defaults API"
-description: "Endpoint reference for the manager REST surface behind Limit Plans: the Request Rate and AI Token Budget plan catalog (project- and platform-scope), per-subject limit assignments, owner-level default policies, and the portal subscription linking that materializes assignments from a Subscription Plan."
+description: "Endpoint reference for the manager REST surface behind Limit Plans: the API Request Count and AI Token Budget plan catalog (project- and platform-scope), its deploy and undeploy actions, the assignments that apply a plan to an identity, owner-level default policies, and the portal subscription linking that materializes assignments from a Subscription Plan."
 ---
 
 import {Card} from '@site/src/components/Card';
@@ -9,46 +9,84 @@ import {Card} from '@site/src/components/Card';
 Every endpoint on this page lives under `/api/**` — the same surface the manager's own Angular UI calls — not under `/apiops/**`. The plan catalog, Limit Assignments, and Bulk Assignment each have a portable Management API counterpart, linked from their own sections; Default Limit Policies does not. See [API Client Runtime Deployment (Manager REST API)](/api-reference/credentials#api-client-runtime-deployment-manager-rest-api) for a comparable manager-only surface documented for the same reason.
 :::
 
-For the concepts behind these endpoints — plan lifecycle, publishing a revision, the four assignment modes, target scope, and rule assignments — see [Limit Plans](/en/ai-gateway/limit-plans).
+For the concepts behind these endpoints — plan lifecycle and deploy, target audience, how a plan is counted, and rule assignments — see [Limit Plans](/en/ai-gateway/limit-plans).
 
 <Card title="Limit Plans Management API" icon="layers" href="/api-reference/limit-plans-management-api">
-  The portable, name-based Management API counterpart of the plan catalog below — create, draft, publish, retire and delete a plan through APIops.
+  The portable, name-based Management API counterpart of the plan catalog below — create, draft, publish, deploy, undeploy and delete a plan through APIops.
 </Card>
 
 ## Endpoints
 
 ### Limit Plans — `/api/limit-plans`
 
-The catalog: draft → publish → retire, plus the revision history under a plan. Every endpoint below takes an optional `projectId` query parameter with the same meaning: absent addresses the installation-wide **platform** catalog (`GET`/list still returns a project's own plans plus the platform ones; every other by-key endpoint addresses the platform row directly), present addresses one project's own catalog. Writing a platform-scope row (`POST`, `PUT`, `.../draft-revisions`, `.../publish`, `.../retire`, `DELETE`) is restricted to a system administrator; a project-scoped caller naming a platform plan's key is refused.
+The catalog: draft → deploy → undeploy, plus the revision history under a plan. A plan is either **deployed** (the gateways enforce it) or **undeployed** (it limits nothing). Saved changes to a deployed plan reach the gateways only when the plan is deployed again. Every endpoint below takes an optional `projectId` query parameter with the same meaning: absent addresses the installation-wide **platform** catalog (`GET`/list still returns a project's own plans plus the platform ones; every other by-key endpoint addresses the platform row directly), present addresses one project's own catalog. Writing a platform-scope row is restricted to a system administrator; a project-scoped caller naming a platform plan's key is refused.
 
-- `GET /api/limit-plans` — list plans (`projectId` optional — absent addresses the platform-wide catalog; with a project id the answer is that project's own plans plus the platform catalog; `family` optional)
+Reads:
+
+- `GET /api/limit-plans` — list plans (`projectId` optional — absent addresses the platform-wide catalog; with a project id the answer is that project's own plans plus the platform catalog; `family` optional; `includeManaged=true` also lists the profiles owned by portal subscription plans; `allProjects=true`, system administrator only, lists every scope at once)
 - `GET /api/limit-plans/{planKey}` — one plan
 - `GET /api/limit-plans/{planKey}/revisions` — every revision, oldest first, without the rule body
 - `GET /api/limit-plans/{planKey}/revisions/{revision}` — one revision, full body
 - `GET /api/limit-plans/{planKey}/draft` — the open draft revision (`404` when there is none)
-- `GET /api/limit-plans/{planKey}/published` — the currently published revision (`404` when never published)
+- `GET /api/limit-plans/{planKey}/published` — the revision in force (`404` when never published)
+- `GET /api/limit-plans/{planKey}/change-preview` — what a deploy or redeploy would send to the gateways: the open draft against the revision in force, and the target audience changes saved since the last deploy
+- `GET /api/limit-plans/{planKey}/audience` — the plan's target audience (selected identities and the caller condition), including how each identity is counted
+- `GET /api/limit-plans/{planKey}/delete-impact` — what deleting the plan takes with it
+- `GET /api/limit-plans/published-revisions` — the published body of each plan named in `planIds`, in one read
+
+Writes:
+
 - `POST /api/limit-plans` — create a plan, optionally with an initial draft rule body
 - `PUT /api/limit-plans/{planKey}` — update a plan's name, description, or labels (not its rule body)
+- `PUT /api/limit-plans/{planKey}/rule-spec` — save the plan's limits into its open draft; they reach the gateways with the next deploy
 - `POST /api/limit-plans/{planKey}/draft-revisions` — open a new draft revision, or replace the current one
 - `PUT /api/limit-plans/{planKey}/draft-revisions/{revision}` — edit an open draft revision
 - `POST /api/limit-plans/{planKey}/revisions/{revision}/publish` — publish a draft revision (optional change reason)
-- `POST /api/limit-plans/{planKey}/retire` — retire the plan
-- `DELETE /api/limit-plans/{planKey}` — delete a plan that has never been published
+- `POST /api/limit-plans/{planKey}/deploy` — deploy the plan: publishes the open draft, or sends the revision in force again when there is no draft, and applies the target audience saved since the last deploy
+- `POST /api/limit-plans/{planKey}/undeploy` — stop the plan on every gateway; the assignments, the open draft, the saved audience changes and the counters are kept
+- `POST /api/limit-plans/{planKey}/duplicate` — copy the plan's limits into a new undeployed plan (body: `name`, optional `description`); the target audience is not copied
+- `PUT /api/limit-plans/{planKey}/audience` — save the target audience; on a deployed plan the change reaches the gateways with the next deploy
+- `PUT /api/limit-plans/{planKey}/audience/list-behavior` — save the plan's condition settings (request condition and error messages)
+- `DELETE /api/limit-plans/{planKey}/draft` — discard the saved changes that are not deployed
+- `DELETE /api/limit-plans/{planKey}` — delete the plan in any state: a deployed plan is undeployed first, its assignments end, and the plan and its revisions are removed
+
+The screen also reads a few helper lists: `GET /api/limit-plans/audience-candidates` (identities that can be added to a target audience), `POST /api/limit-plans/{planKey}/audience-overlaps` and `GET /api/limit-plans/{planKey}/taken-targets` (limits that overlap another plan of the same identities), and `GET /api/limit-plans/target-options/endpoints` (the endpoints of an API proxy).
+
+The retire, republish and redeploy endpoints no longer exist; undeploy a plan to stop it.
 
 ### Limit Assignments — `/api/limit-bindings`
 
-One subject's assignment lifecycle: `DRAFT` → `ACTIVE` → `ENDED`. There is no delete endpoint — removing an assignment is ending it, so the record of when a ceiling stopped applying is kept. A portable, name-based equivalent of this same single-assignment surface is also exposed on the Management API — see [Limit Assignments Management API](/api-reference/limit-assignments).
+One assignment applies one plan to one identity (an organization, consumer, application or API client). Its lifecycle is `DRAFT` → `ACTIVE` → `ENDED`. On the Limits tab, a plan added to an identity is saved as a `DRAFT` that goes into force with the identity's deploy (`awaitSubjectDeploy: true` on create). Removing an `ACTIVE` assignment is ending it, so the record of when a limit stopped applying is kept (the **Removed Limit Plans** table); only a `DRAFT`, which was never in force, can be discarded. A portable, name-based equivalent of this same single-assignment surface is also exposed on the Management API — see [Limit Assignments Management API](/api-reference/limit-assignments).
 
 - `GET /api/limit-bindings` — list assignments (`projectId`, `family`, `status` all optional; an absent `status` includes drafts and ended rows). Every list endpoint below returns summary rows that also carry read-only display names next to the ids — `subjectName` (consumer username, API client / application / organization / project / proxy name; absent for `PLATFORM`, `AUDIENCE_RULE`, or a deleted subject) and `target.targetName` (proxy / proxy group name for a narrowed target) — both ignored on write
 - `GET /api/limit-bindings/subject` — every assignment naming one subject (`subjectType` required; `activeOnly=true` returns only the live one, if any)
+- `GET /api/limit-bindings/inherited?subjectType&subjectId` — the plans an identity gets from an organization or consumer above it through an "Each …" counting choice (the nearest one per family); `subjectType` is `API_CLIENT` (`subjectId` is the client id), `CONSUMER` or `ORGANIZATION`
+- `GET /api/limit-bindings/inheritance-summaries?bindingKeys=…` — for each "Each …" assignment, how many identities of that kind sit beneath its subject and how many of them have an assignment of their own in the same family
+- `GET /api/limit-bindings/plan-overlaps?subjectType&subjectId&family` — the plans whose limits overlap an open assignment of the identity
 - `GET /api/limit-bindings/covering-api-proxy?projectId=X&apiProxyId=Y` — every `ACTIVE` `REQUEST_RATE` assignment whose target covers this API proxy: explicit-subject and rule-based (`AUDIENCE_RULE`) assignments alike, installation-wide (`PLATFORM`) ones included. `apiProxyId` is required; `projectId` is optional and defaults to the proxy's own project. Returns the list-row (`LimitPolicyBindingSummaryDTO`) shape, same as every other list endpoint on this page — this is what backs the "Rate Limit" badge and its dialog on the proxy's Develop screen.
 - `GET /api/limit-bindings/{bindingKey}` — one assignment
 - `GET /api/limit-bindings/referencing-plan/{planId}` — impact analysis: every assignment that references a given plan
-- `POST /api/limit-bindings` — create an assignment (mode `PLAN`, `CUSTOM`, `INHERIT`, or `OFF`)
-- `PUT /api/limit-bindings/{bindingKey}` — edit an assignment's content: `mode`, `planIds`, `customRuleSpec`, `audienceRule`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, `customMessageTemplate`/`customMessageContentType`/`customMessageHttpStatusCode`, `validFrom`/`validUntil`, and the caller's observed `version` — its subject and scope (`subjectType`, `subjectId`, `actorScope`, `family`, `target` including the HTTP method axis) cannot be changed this way; every other field on the request body is silently ignored on update
-- `POST /api/limit-bindings/{bindingKey}/activate` — turn a draft assignment live
+- `POST /api/limit-bindings` — create an assignment. The manager screens create `PLAN`-mode assignments: `mode: PLAN` with the plan's id in `planIds`. The API also accepts `CUSTOM` (an inline `customRuleSpec`, no plan) and `OFF` (no local limit; limits above the identity still apply). `INHERIT` is refused.
+- `PUT /api/limit-bindings/{bindingKey}` — edit an assignment's content: `mode`, `planIds`, `customRuleSpec`, `audienceRule`, `assignmentMode`/`inheritTo`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, `customMessageTemplate`/`customMessageContentType`/`customMessageHttpStatusCode`, `validFrom`/`validUntil`, and the caller's observed `version` — its subject and scope (`subjectType`, `subjectId`, `actorScope`, `family`, `target` including the HTTP method axis) cannot be changed this way; every other field on the request body is silently ignored on update
+- `POST /api/limit-bindings/{bindingKey}/activate` — put a saved (`DRAFT`) assignment into force
 - `POST /api/limit-bindings/{bindingKey}/end` — end a live assignment (optional reason)
+- `DELETE /api/limit-bindings/{bindingKey}` — discard a `DRAFT` assignment; it leaves no history
 - `POST /api/limit-bindings/validate` — dry-run every save-time rule without writing anything
+
+Two limits on what an identity can hold: an identity can carry several plans of one family, each counted on its own, but two assignments counted the same way cannot limit the same API, endpoint or AI proxy, nor both set a general limit. A create or an edit that would do so is refused. When a request condition separates the two plans, the overlap is only reported by `plan-overlaps`.
+
+#### How an organization, consumer or application counts a plan — `assignmentMode`, `inheritTo`
+
+This is the **Counted As** choice of the Limits tab. It applies to `ORGANIZATION`, `CONSUMER` and `APPLICATION` subjects; every other subject type is always counted on its own. Set it on create; it may be repeated or left out on update (the stored value is kept).
+
+| `assignmentMode` | `inheritTo` | Counted As |
+|---|---|---|
+| `SELF` (default when absent) | — | The subject's own total: one counter for everything under it, the API clients of its consumers and applications included |
+| `DESCENDANTS` | `API_CLIENT` (default when absent) | Each API client beneath the subject that has no assignment of its own gets the plan with its own counter |
+| `DESCENDANTS` | `CONSUMER` | Each consumer (and application) beneath an organization, same rule. Organization only |
+| `DESCENDANTS` | `ORGANIZATION` | Each sub-organization beneath an organization, same rule. Organization only |
+
+With `DESCENDANTS` the subject itself is not counted. The nearest organization or consumer above an identity that carries such an assignment wins.
 
 #### Target — `target`
 
@@ -60,7 +98,7 @@ The target (the HTTP method axis included) is part of the assignment's identity 
 
 #### Rule Assignments — `subjectType: "AUDIENCE_RULE"`
 
-An assignment whose subject is a condition rather than one fixed API client or credential. `subjectType` is `AUDIENCE_RULE`; `subjectId` is assigned by the server (it is the assignment's own `bindingKey`) and any value sent for it is overwritten. `actorScope` may be omitted: it is then derived from `audienceRule.identitySource` — `AUTH_RESOLVED` → `AUTHENTICATED`, `VARIABLE` → `ANY` (an explicit value is kept). `family` must be `REQUEST_RATE` — there is no rule-based assignment for the AI Token Budget family, since an AI ceiling always has one fixed subject, never an identity condition; `family: AI_TOKEN_BUDGET` on an `AUDIENCE_RULE` subject is refused with `400`, errorKey `limit.binding.audienceRuleFamily`.
+An assignment whose subject is a condition (the plan's **Callers Matching the Condition**) rather than one fixed identity. `subjectType` is `AUDIENCE_RULE`; `subjectId` is assigned by the server (it is the assignment's own `bindingKey`) and any value sent for it is overwritten. `actorScope` may be omitted: it is then derived from `audienceRule.identitySource` — `AUTH_RESOLVED` → `AUTHENTICATED`, `VARIABLE` → `ANY` (an explicit value is kept). Both families support rule assignments. The general quota that an out-of-target action `GENERAL_QUOTA` applies must match the family: `generalQuotaWindows` for `REQUEST_RATE`, `generalQuotaBudget` (at least one token or USD ceiling) for `AI_TOKEN_BUDGET`; the other is refused with `400`, errorKey `limit.binding.audienceRuleFamily`.
 
 The condition itself is `audienceRule`, required for this subject type and forbidden for every other one (`400`, errorKey `limit.binding.audienceRuleShape`):
 
@@ -70,15 +108,18 @@ The condition itself is `audienceRule`, required for this subject type and forbi
 | `variableId` | string | The global `Variable`'s id — required when `identitySource` is `VARIABLE` |
 | `operator` | enum | A comparison operator (`EQ`, `CONTAINS`, `STARTS_WITH`, `IN`, …) — required |
 | `value` | string | Required |
-| `outOfTargetAction` | enum | `BLOCK` (default), `GENERAL_QUOTA`, or `NONE` — `NONE` leaves identities outside the audience untouched: neither blocked nor counted. Omitting the field still means `BLOCK`, so an existing client keeps its behaviour. |
+| `outOfTargetAction` | enum | `BLOCK` (default; shown as "Rejected (403)"), `GENERAL_QUOTA`, or `NONE` — `NONE` leaves identities outside the audience untouched: neither blocked nor counted. Omitting the field still means `BLOCK`, so an existing client keeps its behaviour. |
 | `generalQuotaMode` | enum | `TOTAL` (default) or `PER_IDENTITY` — read only when `outOfTargetAction` is `GENERAL_QUOTA` |
-| `generalQuotaWindows` | array | At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA`, ignored for `BLOCK` and `NONE` |
+| `generalQuotaWindows` | array | `REQUEST_RATE` only. At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA`, ignored for `BLOCK` and `NONE` |
+| `generalQuotaBudget` | object | `AI_TOKEN_BUDGET` only. The AI token budget (same shape as a plan's `aiBudget`) with at least one positive token or USD ceiling — required when `outOfTargetAction` is `GENERAL_QUOTA` |
+| `additionalClauses` | array | Further conditions combined with OR with `operator`/`value` (each with its own `identitySource`, `variableId`, `operator`, `value`) |
+| `identityRegexList` | string[] | Regular expressions combined with OR with every other condition; the first capture group is the counted identity |
 
 `audienceRule` is content, not scope: unlike `target`, it **can** be changed by `PUT`.
 
 #### Enforcement Posture and Custom Message
 
-These fields exist on every assignment regardless of family, and are acted on for `REQUEST_RATE` assignments only; an `AI_TOKEN_BUDGET` assignment is enforced through the Token Rate Limit policy instead, which has its own cache-behavior settings and applies the plan's own overflow action — see [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode):
+These fields exist on every assignment regardless of family, and are acted on for `REQUEST_RATE` assignments only; an `AI_TOKEN_BUDGET` assignment is enforced through the Token Rate Limit policy of the AI proxy instead, which has its own cache-behavior settings (its fail-open switch decides what happens when the counter store is unreachable) and applies the plan's own overflow action — see [Limit Plans](/en/ai-gateway/limit-plans):
 
 | Field | Type | Meaning | Default when absent |
 |---|---|---|---|
@@ -108,7 +149,7 @@ Attaches one assignment — a plan or a custom value — to a large, filtered po
 
 ### Default Limit Policies — `/api/limit-defaults`
 
-An owner's standing offer of a limit to children it will have or already has. This surface has no dedicated manager UI screen in this version; it exists for direct integration use.
+An owner's standing offer of a limit to children it will have or already has. The owner is a platform, a project, a consumer or an application. An organization does not own default limit plans any more: creating or updating a default with `ownerType: ORGANIZATION` is refused with `400`, errorKey `limit.default.organizationOwnerRetired`. To limit the identities under an organization, apply a plan to the organization itself with **Counted As** set to *Each API client*, *Each consumer* or *Each sub-organization* (see `assignmentMode` and `inheritTo` above). This surface has no dedicated manager UI screen in this version; it exists for direct integration use.
 
 - `GET /api/limit-defaults/{defaultKey}` — one default policy (`projectId` absent/blank addresses the platform-wide row)
 - `GET /api/limit-defaults` — every default policy one owner has written (`ownerType` required)
@@ -121,7 +162,7 @@ An owner's standing offer of a limit to children it will have or already has. Th
 
 ### Portal Subscription Linking
 
-A portal API Product's Subscription Plan (`ApiPlan`) can reference a published, platform-scope Limit Plan per family instead of carrying its own numbers — see [API Product → Limit Profiles](/en/api-portal/api-product#limit-profiles) and [Limit Plans → Referenced by a Portal Subscription Plan](/en/ai-gateway/limit-plans#referenced-by-a-portal-subscription-plan) for the concepts. These two endpoints support that surface; the Subscription Plan CRUD endpoints themselves (`/api/api-products/**`, `/api/api-product-app-register`) are the manager's own portal-management REST API and are not otherwise catalogued on this page.
+A portal API Product's Subscription Plan (`ApiPlan`) can reference a deployed, platform-scope Limit Plan per family instead of carrying its own numbers — see [API Product → Limit Profiles](/en/api-portal/api-product#limit-profiles) and [Limit Plans](/en/ai-gateway/limit-plans) for the concepts. These two endpoints support that surface; the Subscription Plan CRUD endpoints themselves (`/api/api-products/**`, `/api/api-product-app-register`) are the manager's own portal-management REST API and are not otherwise catalogued on this page.
 
 - `GET /api/api-products/{productId}/plans/{planId}/limit-impact` — before saving a plan whose limit-profile references (or on-exceed setting) changed, returns how many approved subscriptions and distinct applications would start enforcing the new limits: `approvedSubscriptionCount`, `familiesWithProfile` (the families the plan carries an active reference for), `affectedApplicationCount`.
 - `POST /api/limit-bindings/portal-subscriptions/backfill?apply=false|true` — **system administrator only.** One-shot repair for subscriptions that were approved before this reference model existed. `apply=false` (the default) previews the sweep without writing anything; `apply=true` performs it, one subscription at a time, so a subscription whose profile cannot be resolved does not stop the rest of the backlog. Response: `apply`, `scanned` (subscriptions examined), `wouldCreateOrJoin`, `alreadyBound` (subscription × family counts), and — on an applied run only — `created`, `updated`, `shared`, `conflicts` (one `appId:family` string per family left on another subscription's profile), `failed` (one `appId:message` string per subscription the sweep could not sync, still pending).
@@ -135,18 +176,18 @@ These are manager-application endpoints, authenticated the same way as the rest 
 ## Permissions
 
 - Reads require the **Identity** permission at **View**; every write — including Bulk Assignment's previews, runs, and actions — requires it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
-- The **AI Gateway** license module gates only the **AI Token Budget** family — an `AI_TOKEN_BUDGET` plan or assignment is refused (`403`) without it; a `REQUEST_RATE` plan or assignment needs no license module. A Bulk Assignment run over the AI Token Budget family is refused the same way.
+- No license module is checked on these endpoints: an `AI_TOKEN_BUDGET` plan or assignment is gated by permission exactly like a `REQUEST_RATE` one. (The AI Gateway menu entries of the manager screens keep their own licence gate.)
 - `projectId` (query parameter on Limit Plans, Limit Assignments, Default Limit Policies, and Bulk Assignment) may be omitted to address the platform-wide scope instead of one project's own catalog. Reading platform rows is open to any caller with **View** in some project (they are what that project's picker also offers, badged **Platform**); writing one is reachable only by a system administrator, the same rule the rest of the manager's admin-scoped endpoints follow. Bulk Assignment has no platform-wide subject population — its `projectId` always addresses one project.
 
 ## Notes
 
-- **Both families are usable.** `AI_TOKEN_BUDGET` and `REQUEST_RATE` plans can both be created, published, and referenced — see [Plan Families](/en/ai-gateway/limit-plans#plan-families) for what each carries, and its **Overflow Action** (`REQUEST_RATE`: `BLOCK`/`COUNT_ONLY`, `BLOCK` when absent).
-- **A published revision is immutable.** Correcting one means opening a new draft revision under the same plan and publishing that instead; the superseded revision is kept, not overwritten.
-- **A plan reference is never inlined.** A `PLAN`-mode assignment stores plan ids, not a copy of the plan's rule body — the plan's own published revision is what is resolved at request time.
-- **`OFF` narrows one subject; it does not widen anything above it.** Ancestor ceilings (organization, project, platform) still apply to a subject with an `OFF` assignment — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
-- **Both families enforce for real.** An `ACTIVE` `REQUEST_RATE` binding created through any endpoint on this page — including one sourced from a portal subscription — blocks traffic for real, evaluated at the authentication moment (`429` + `Retry-After` on an exhausted window). An `ACTIVE` `AI_TOKEN_BUDGET` binding enforces the same way, at every subject level the family supports; when it covers the same counter, window, and dimension (overall, or the same model/provider) as an entity-level AI budget (organization/proxy/project/platform default), the gateway reserves the request's cost once, against whichever ceiling is stricter — it never double-reserves. There is no rule-based (`AUDIENCE_RULE`) assignment for `AI_TOKEN_BUDGET` — see Rule Assignments above. See [Enforcement](/en/ai-gateway/limit-plans#enforcement-status-shadow-mode).
-- **The active-scope key (`subjectType` + `subjectId` + `actorScope` + `family` + `target`, HTTP methods included) is immutable.** `PUT` reads only content off the body — see the [Target](/en/ai-gateway/limit-plans#target-what-the-ceiling-narrows-to) note above; changing it means ending the assignment and creating a new one.
-- **`AUDIENCE_RULE` is its own subject type.** `subjectId` is minted by the server; the caller only ever supplies `audienceRule`. See [Rule Assignments](/en/ai-gateway/limit-plans#rule-assignments-limiting-by-identity-condition) for the concept and the [Migrating from a Rate Limit Control List](/en/ai-gateway/limit-plans#migrating-from-a-rate-limit-control-list) mapping table.
+- **Both families are usable.** `AI_TOKEN_BUDGET` and `REQUEST_RATE` plans can both be created, published, deployed and applied — see [Limit Plans](/en/ai-gateway/limit-plans) for what each carries, and its **Overflow Action** (`REQUEST_RATE`: `BLOCK`/`COUNT_ONLY`, `BLOCK` when absent).
+- **A published revision is immutable.** Correcting one means opening a new draft revision under the same plan and deploying that instead; the superseded revision is kept, not overwritten.
+- **A plan reference is never inlined.** A `PLAN`-mode assignment stores plan ids, not a copy of the plan's rule body — the plan's own deployed revision is what is resolved at request time. An assignment of a plan that is undeployed limits nothing.
+- **`OFF` narrows one subject; it does not widen anything above it.** Ancestor ceilings (organization, project, platform) still apply to a subject with an `OFF` assignment. The manager screens do not offer `OFF`.
+- **Both families enforce for real.** An `ACTIVE` `REQUEST_RATE` assignment of a deployed plan blocks traffic for real, evaluated at the authentication moment (`429` + `Retry-After` on an exhausted window). An `ACTIVE` `AI_TOKEN_BUDGET` assignment enforces the same way through the AI proxy's Token Rate Limit policy; when it covers the same counter, window, and dimension (overall, or the same model/provider) as an entity-level AI budget (organization/proxy/project/platform default), the gateway reserves the request's cost once, against whichever ceiling is stricter — it never double-reserves. See [Limit Plans](/en/ai-gateway/limit-plans).
+- **The active-scope key (`subjectType` + `subjectId` + `actorScope` + `family` + `target`, HTTP methods included) is immutable.** `PUT` reads only content off the body — see the Target note above; changing it means ending the assignment and creating a new one.
+- **`AUDIENCE_RULE` is its own subject type.** `subjectId` is minted by the server; the caller only ever supplies `audienceRule`. See [Limit Plans](/en/ai-gateway/limit-plans) for the concept.
 
 ## Related Documentation
 

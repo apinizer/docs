@@ -1,6 +1,6 @@
 ---
 title: "Limit Assignments Management API"
-description: "Manage a single Request Rate or AI Token Budget limit assignment through the Management API: you can list, read, create, update, activate, end, and validate one subject's assignment at a time, addressing every subject, plan, proxy, group, and environment by its portable, name-based reference instead of an internal id."
+description: "Manage a single API Request Count or AI Token Budget limit assignment (one limit plan applied to one identity) through the Management API: you can list, read, create, update, activate, end, and validate one subject's assignment at a time, addressing every subject, plan, proxy, group, and environment by its portable, name-based reference instead of an internal id."
 ---
 
 ## Overview
@@ -71,15 +71,19 @@ The portable owner reference:
 | `type` | enum | `PLATFORM` \| `PROJECT` \| `ORGANIZATION` \| `CONSUMER` \| `APPLICATION` \| `API_CLIENT` \| `API_PROXY` \| `AUDIENCE_RULE` — required |
 | `key` | string | The subject's public key in the type's own convention: a consumer's `username`, an API client's `clientId`, an application's `name`, an organization's `code`, an API proxy's `name`. Absent for `PLATFORM`/`PROJECT` (the scope is the project in the path, or the installation) and for `AUDIENCE_RULE` (its key is minted by the server and echoed back as the assignment's own `bindingKey` on read) |
 
-A `key` that resolves to no subject is `404 resourceNotFound` (`params.subjectType`, `params.subject`). Which `actorScope` values a subject type may carry, and which of `ORGANIZATION`/`CONSUMER`/`APPLICATION`/`API_CLIENT` may hold two live assignments that differ only by `actorScope`, is the same matrix the manager surface documents — see [Limit Plans](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab).
+A `key` that resolves to no subject is `404 resourceNotFound` (`params.subjectType`, `params.subject`). Which `actorScope` values a subject type may carry, and which of `ORGANIZATION`/`CONSUMER`/`APPLICATION`/`API_CLIENT` may hold two live assignments that differ only by `actorScope`, is the same matrix the manager surface documents — see [Limit Plans](/en/ai-gateway/limit-plans).
 
 ### Content
 
-The same shape the [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) carries as its run content — see [Content](/api-reference/limit-assignment-runs#content) and [Target](/api-reference/limit-assignment-runs#target) there for the full field-by-field reference (`family`, `actorScope`, `target`, `planKeys`, `customRuleSpec`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, the three `customMessage*` fields, `validFrom`/`validUntil`).
+The same shape the [Bulk Limit Assignment API](/api-reference/limit-assignment-runs) carries as its run content — see [Content](/api-reference/limit-assignment-runs#content) and [Target](/api-reference/limit-assignment-runs#target) there for the full field-by-field reference (`family`, `actorScope`, `target`, `planKeys`, `customRuleSpec`, `cacheErrorHandlingType`, `cacheConnectionTimeoutInSeconds`, `showRateLimitStatisticsInResponseHeader`, the three `customMessage*` fields, `validFrom`/`validUntil`). It also carries the **Counted As** choice, `assignmentMode` and `inheritTo`, described next.
 
-One difference: on this surface `mode` may additionally be `INHERIT` (explicitly opt this subject into the nearest enabled ancestor default) or `OFF` (this subject contributes no local bucket of its own — ancestor ceilings still apply), on top of `PLAN` and `CUSTOM`. See [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) for what each mode requires and forbids.
+One difference: on this surface `mode` may additionally be `OFF` (this subject contributes no local bucket of its own — ancestor ceilings still apply), on top of `PLAN` and `CUSTOM`. `INHERIT` is retired and refused on create and update; a row that carried it was rewritten to `OFF` at upgrade. See [Limit Plans, Assignments & Defaults API](/api-reference/limit-plans) for what each mode requires and forbids. The manager screens apply plans in `PLAN` mode.
 
-A plan key that resolves to no plan is `404 resourceNotFound` (`params.plan`); a retired or unpublished plan is `409 lifecycleConflict` (`params.reason = limit.binding.planRetired` / `limit.binding.planNotPublished`). `AI_TOKEN_BUDGET` content needs no license module: the API layer applies no module gate, so both families behave identically on every installation.
+**Counted As — `assignmentMode` and `inheritTo`.** For an `ORGANIZATION`, `CONSUMER` or `APPLICATION` subject with a plan or a custom rule, `assignmentMode` is `SELF` (the default when absent: one counter for the subject and everything under it) or `DESCENDANTS` (every subject of the kind named by `inheritTo` beneath this one that has no assignment of its own gets the plan with its own counter; the subject itself is not counted). `inheritTo` is `API_CLIENT` (the default), `CONSUMER` (includes applications) or `ORGANIZATION` for an organization, and only `API_CLIENT` for a consumer or an application. An update that sends `assignmentMode` changes it in place; one that leaves it out keeps the stored value. A pair that the subject type cannot carry is `400 malformedRequest` (`params.reason = limit.binding.assignmentModeSubject` or `limit.binding.inheritToInvalid`).
+
+A plan key that resolves to no plan is `404 resourceNotFound` (`params.plan`); a plan that is not deployed, or a legacy retired plan, is `409 lifecycleConflict` (`params.reason = limit.binding.planNotPublished` / `limit.binding.planRetired`). `AI_TOKEN_BUDGET` content needs no license module: the API layer applies no module gate, so both families behave identically on every installation.
+
+Two assignments of one subject that are counted the same way must not limit the same API, endpoint or AI proxy, nor both set a general limit. Create, an update that changes the plans or the counting mode, and activate are refused with `409 lifecycleConflict` (`params.reason = limit.binding.planOverlap` or `limit.binding.planOverlapGeneral`) when they would.
 
 ### Audience rule
 
@@ -91,11 +95,14 @@ Required when `subject.type` is `AUDIENCE_RULE`, forbidden for every other subje
 | `variableId` | string | The global `Variable`'s id — required when `identitySource` is `VARIABLE` |
 | `operator` | enum | A comparison operator (`EQ`, `CONTAINS`, `STARTS_WITH`, `IN`, …) — required |
 | `value` | string | Required |
-| `outOfTargetAction` | enum | `BLOCK` (default), `GENERAL_QUOTA`, or `NONE` — `NONE` leaves identities outside the audience untouched: neither blocked nor counted. Omitting the field still means `BLOCK`, so an existing client keeps its behaviour. |
+| `outOfTargetAction` | enum | `BLOCK` (default; shown as "Rejected (403)"), `GENERAL_QUOTA`, or `NONE` — `NONE` leaves identities outside the audience untouched: neither blocked nor counted. Omitting the field still means `BLOCK`, so an existing client keeps its behaviour. |
 | `generalQuotaMode` | enum | `TOTAL` (default) or `PER_IDENTITY` — read only when `outOfTargetAction` is `GENERAL_QUOTA` |
-| `generalQuotaWindows` | array | At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA`, ignored for `BLOCK` and `NONE` |
+| `generalQuotaWindows` | array | `REQUEST_RATE` only. At least one window (same shape as a Request Rate plan's windows) — required when `outOfTargetAction` is `GENERAL_QUOTA`, ignored for `BLOCK` and `NONE` |
+| `generalQuotaBudget` | object | `AI_TOKEN_BUDGET` only. The AI token budget (same shape as a plan's `aiBudget`) with at least one positive token or USD ceiling — required when `outOfTargetAction` is `GENERAL_QUOTA` |
+| `additionalClauses` | array | Further conditions combined with OR with `operator`/`value` (each with its own `identitySource`, `variableId`, `operator`, `value`) |
+| `identityRegexList` | string[] | Regular expressions combined with OR with every other condition; the first capture group is the counted identity |
 
-`content.family` must be `REQUEST_RATE` for an `AUDIENCE_RULE` subject — there is no rule-based assignment for the AI Token Budget family; `AI_TOKEN_BUDGET` on an `AUDIENCE_RULE` subject is `400 malformedRequest` (`params.reason = limit.binding.audienceRuleFamily`).
+An `AUDIENCE_RULE` subject works with both families. The general quota must match `content.family`: `generalQuotaWindows` for `REQUEST_RATE`, `generalQuotaBudget` for `AI_TOKEN_BUDGET`. The other one is `400 malformedRequest` (`params.reason = limit.binding.audienceRuleFamily`).
 
 ## Response
 
@@ -110,8 +117,9 @@ The shape every read and write endpoint on this page returns:
 | `family` | enum | `REQUEST_RATE` or `AI_TOKEN_BUDGET` |
 | `actorScope` | enum | `ANY` \| `AUTHENTICATED` \| `ANONYMOUS` |
 | `target` | object | The [Target](/api-reference/limit-assignment-runs#target) this assignment narrows to |
-| `mode` | enum | `PLAN` \| `CUSTOM` \| `INHERIT` \| `OFF` |
-| `planKeys` | string[] | Published plan keys, when `mode` is `PLAN` |
+| `mode` | enum | `PLAN` \| `CUSTOM` \| `OFF` |
+| `planKeys` | string[] | Plan keys, when `mode` is `PLAN` |
+| `assignmentMode` / `inheritTo` | enum / enum | The **Counted As** choice — see [Content](#content) |
 | `customRuleSpec` | object | The inline rule body, when `mode` is `CUSTOM` |
 | `audienceRule` | object | The [Audience rule](#audience-rule), when `subject.type` is `AUDIENCE_RULE` |
 | `cacheErrorHandlingType` / `cacheConnectionTimeoutInSeconds` / `showRateLimitStatisticsInResponseHeader` | enum / integer / boolean | Enforcement posture — Request Rate only |
@@ -152,10 +160,10 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 
 | Error key | When |
 |---|---|
-| `malformedRequest` | The body could not be understood, a reference field was left blank (`params.field` names it), `subjectKey` was sent without `subjectType` on the list, an `httpMethods` list was sent on a target type that does not support one (`params.reason = limit.binding.methodAxisNotAllowed`), `audienceRule` was missing/present on the wrong subject type or its family was not `REQUEST_RATE`, or any other save-time shape rule failed — `params.reason` names the service's own key |
+| `malformedRequest` | The body could not be understood, a reference field was left blank (`params.field` names it), `subjectKey` was sent without `subjectType` on the list, an `httpMethods` list was sent on a target type that does not support one (`params.reason = limit.binding.methodAxisNotAllowed`), `audienceRule` was missing/present on the wrong subject type or its general quota did not match the family, or any other save-time shape rule failed — `params.reason` names the service's own key |
 | `resourceNotFound` | An unknown assignment key, or a subject/content reference (`plan`, `apiProxy`, `apiProxyGroup`, `environment`, or `subjectType` + `subject`) that resolves to nothing |
 | `versionConflict` | `PUT`'s body `version` did not match the stored one — `params.entity`, `params.expected`, `params.current` |
-| `lifecycleConflict` | `params.reason` names the service's own cause: `limit.binding.scopeAlreadyBound` (this subject/family/target/actorScope already has a live assignment), `limit.binding.conflict` (an unrelated unique-index collision), `limit.binding.notDraft` (activate on a row that is not `DRAFT`), `limit.binding.notActive` (end on a row that is not `ACTIVE`), `limit.binding.alreadyEnded`, `limit.binding.endedIsFinal` (update on an `ENDED` row), `limit.binding.planRetired`, `limit.binding.planNotPublished`, `limit.binding.keyAlreadyExists`, `limit.binding.keyImmutable`, `limit.binding.scopeImmutable` (update tried to move subject/family/target), `limit.binding.counterIdentityImmutable`, `limit.binding.versionConflict` (activate/end sent a `version` the row has moved past, while its status still matched), or `limit.binding.statusNotCreatable` (`status: ENDED` on create) |
+| `lifecycleConflict` | `params.reason` names the service's own cause: `limit.binding.scopeAlreadyBound` (this subject/family/target/actorScope already has a live assignment), `limit.binding.conflict` (an unrelated unique-index collision), `limit.binding.notDraft` (activate on a row that is not `DRAFT`), `limit.binding.notActive` (end on a row that is not `ACTIVE`), `limit.binding.alreadyEnded`, `limit.binding.endedIsFinal` (update on an `ENDED` row), `limit.binding.planRetired`, `limit.binding.planNotPublished`, `limit.binding.planOverlap` / `limit.binding.planOverlapGeneral`, `limit.binding.keyAlreadyExists`, `limit.binding.keyImmutable`, `limit.binding.scopeImmutable` (update tried to move subject/family/target), `limit.binding.counterIdentityImmutable`, `limit.binding.versionConflict` (activate/end sent a `version` the row has moved past, while its status still matched), or `limit.binding.statusNotCreatable` (`status: ENDED` on create) |
 | `idempotencyKeyRequired` | `POST /limit-assignments` was missing its `Idempotency-Key` header |
 | `idempotencyKeyReused` | The same key was sent with a different request body |
 | `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the assignment it created |
@@ -168,7 +176,7 @@ See [Common Contract → Error keys](/api-reference/apiops-common-contract#error
 ## Permissions & Licensing
 
 - Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`/`PUT`) require it at **Manage**. The **AI Budgets** permission is also accepted in place of Identity.
-- `AI_TOKEN_BUDGET` content additionally requires the **AI Gateway** license module on every write that touches it (create, update, activate, end, validate); `REQUEST_RATE` needs no license module.
+- No license module is checked on this surface: `AI_TOKEN_BUDGET` content is gated by permission exactly like `REQUEST_RATE`.
 - The admin (platform) project has no subjects and is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`) — assignments are always project-scoped on this surface.
 - A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
 

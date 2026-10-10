@@ -1,6 +1,6 @@
 ---
 title: "Token Quotas and Rate Limiting"
-description: "You can define token and cost quotas at multiple ownership levels, apply limits across minute/hour/day/month windows, and choose what happens automatically when a quota is exceeded."
+description: "You can define token and cost quotas at multiple ownership levels, apply limits across minute/hour/day/month windows (aligned to the UTC calendar), choose what happens automatically when a quota is exceeded, and combine these quotas with Limit Plans."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -20,7 +20,7 @@ You can define quotas at **four ownership levels**. When more than one level app
 
 <CardGroup cols={2}>
   <Card title="Credential" icon="key">
-    The tightest scope — a limit tied to one Consumer or API client's AI traffic on one API proxy and environment. As of 2026.09, this scope is a typed **AI Token Budget** assignment — the same kind of record managed on the [Limits tab](/en/ai-gateway/limit-plans#assigning-a-limit-to-a-subject-the-limits-tab) — so a row created, edited, or removed here is the same row you would see and change there.
+    The tightest scope — a limit tied to one Consumer or API client's AI traffic on one API proxy and environment. To give an identity a reusable set of AI budgets, create an **AI Token Budget** [Limit Plan](/en/ai-gateway/limit-plans) and add it from the identity's **Limits** tab; the plan and the budgets on this screen are then enforced together (see [Working With Limit Plans](#working-with-limit-plans)).
   </Card>
   <Card title="Organization" icon="building">
     Shared across every credential that belongs to the same organization.
@@ -58,7 +58,7 @@ A shared organization's limit is a single record affecting several projects at o
 
 ## Time Windows
 
-Each scope can carry limits across four token windows, plus cost windows in USD:
+Each scope can carry limits across four token windows, plus cost windows in USD. Windows are aligned to the **UTC calendar**: a minute, hour, day or month window renews at the start of the next minute, hour, day (00:00 UTC) or month, not a fixed length after the first request.
 
 <CardGroup cols={2}>
   <Card title="Per Minute" icon="timer">
@@ -101,7 +101,7 @@ The one exception is the **organization** budget: its scope spans the credential
   </Step>
 
   <Step title="Select a Scope">
-    Choose Credential, Organization, Application, or Project. With **Project**, the target field shows the active project's name (the rule is bound to that project; pick a project first if none is active). A **Credential**-scope row is a typed AI Token Budget assignment tied to one Consumer or API client on one API proxy and environment; that Consumer/API client's own **AI Budget Source** setting (see [Configuration Parameters](/en/admin/identity-management/api-proxy-acl#configuration-parameters)) separately controls whether the **Organization** scope below also applies to it. For an API client with no access row on this proxy yet — one that has never actually consumed it — choosing an **AI Budget Source** other than **Inherit** here is rejected with `400 budgetsourcenotapplicable`: the budget itself is still saved, only the source selection is not, since a source is only meaningful for a consumer that already has its own access row.
+    Choose Credential, Organization, Application, or Project. With **Project**, the target field shows the active project's name (the rule is bound to that project; pick a project first if none is active). A **Credential**-scope row is a limit tied to one Consumer or API client on one API proxy and environment; that Consumer/API client's own **AI Budget Source** setting (see [Configuration Parameters](/en/admin/identity-management/api-proxy-acl#configuration-parameters)) separately controls whether the **Organization** scope below also applies to it. For an API client with no access row on this proxy yet — one that has never actually consumed it — choosing an **AI Budget Source** other than **Inherit** here is rejected with `400 budgetsourcenotapplicable`: the budget itself is still saved, only the source selection is not, since a source is only meaningful for a consumer that already has its own access row.
   </Step>
 
   <Step title="Set Base Limits">
@@ -146,6 +146,8 @@ When a request would exceed a quota, you choose what happens next:
   </Card>
 </CardGroup>
 
+If no cheaper model is defined, the provider does not allow the switch, or the consumer has no access to the cheaper model, the request is rejected with HTTP `429` instead.
+
 :::info Retry-After is clamped
 The `Retry-After` value is the time remaining until the exceeded window (minute/hour/day/month) closes, but it is capped by the `apinizer.limit.retryAfterClampSeconds` JVM system property on the worker (default `86400`, i.e. one day) — so a monthly window never reports a 30-day wait, at most one day. A client that retries earlier simply gets a new `429` with an updated `Retry-After`; counter accuracy is unaffected. The clamp applies to every window, not only monthly ones.
 :::
@@ -171,17 +173,46 @@ When a request is truncated, Apinizer always preserves every `system` message an
 
 This is a different concept from the quota-tier **Overflow Actions** above: quota overflow is about a scope's minute/hour/day/month budget running out over time; the per-request size limit is about a single request being too large for the model's context window, independent of any quota.
 
-## Threshold Alarms
+## What the Caller Receives {#what-the-caller-receives}
+
+When the overflow action is **Block**, the Token Rate Limit policy answers with HTTP `429`, error code **ERR-263**, and a `Retry-After` header. The default body is:
+
+```json
+{"error":{"code":429,"message":"AI token quota exceeded","type":"insufficient_quota"}}
+```
+
+You can change the message on the [Error Messages](/en/admin/system-settings/error-messages) screen, and, for a limit that comes from a Limit Plan, on the plan's **Error Message Customization** tab.
+
+## Threshold Alarms {#threshold-alarms}
 
 <Card title="Usage Alerts" icon="triangle-alert">
-  You can raise alerts as usage approaches a quota, independent of the overflow action: at **50%**, **80%**, **90%**, and **100%** of the limit. These alerts appear alongside your other AI alerts so you can react before a quota actually blocks traffic.
+  When usage crosses an alert threshold (**Soft Cap Thresholds (%)**, from 1 to 99 in ascending order; Limit Plans use 50, 80 and 90 by default), the request's traffic record is marked and the event appears in the **Recent Alerts** area of AI Gateway analytics. A request that passes because its overflow action is **Alert Only** is recorded the same way.
 </Card>
+
+:::warning No notification is sent automatically
+Crossing a threshold does **not** notify anyone on its own. To be notified, create an alert rule: either a rule on the [Quota Usage & Alerts](/en/admin/identity-management/quota-usage-and-alerts) screen with **AI Token** and/or **AI Cost** selected in its counter types (an empty counter-type list covers the gateway request counters only), or an alarm with the **AI Quota Soft-Cap Hit Count** or **AI Quota Alert-Only Count** trigger.
+:::
+
+**Hard Cap (%)** sets the percentage of a limit at which the overflow action starts. The default, 100, means when the limit is full.
 
 ## How Quota Tracking Stays Accurate
 
 :::info
 Before a request is sent to the model, Apinizer estimates its token cost and reserves that amount against every applicable scope and window. Once the response finishes — including streamed responses — the reservation is adjusted to match the actual tokens consumed. This keeps concurrent requests from over-counting or under-counting against your quotas.
 :::
+
+Counters are kept in the shared cache service, so every worker uses the same counter and a worker restart does not reset them.
+
+## When the Counter Store Is Unreachable {#when-the-counter-store-is-unreachable}
+
+If the cache service that holds the counters cannot be reached, the **Fail Open on Cache Error** switch of the Token Rate Limit policy decides what happens. This applies to the limits on this screen and to AI Token Budget plans alike; a plan has no setting of its own for it.
+
+- **Off** (the default, fail-closed): the request is rejected with HTTP `500` and error code ERR-234.
+- **On** (fail-open): the request passes without a limit while the cache is down.
+
+## Working With Limit Plans {#working-with-limit-plans}
+
+An AI Token Budget [Limit Plan](/en/ai-gateway/limit-plans) is enforced by the same Token Rate Limit policy as the quotas on this screen. When a quota here and a plan cover the same counter, the stricter limit applies. When they use separate counters, a request must pass both, and the first limit to fill stops it.
 
 ## Monitoring Quota Usage
 
@@ -191,7 +222,7 @@ View real-time quota consumption in [Reports and Analytics](/en/ai-gateway/repor
 - **Cost to Date** against any configured budget
 - **Alerts** raised as usage approaches a limit
 
-Consumer-level AI usage shown here is attributed to the typed AI Token Budget assignment now backing the **Credential** scope above, by that assignment's own subject — see [Quota Usage & Alerts](/en/admin/identity-management/quota-usage-and-alerts) for the account-level view of the same counters, which also tracks usage for a native API client and a portal application under their own AI scopes.
+Usage of the counters, AI token and AI cost rows included, is shown on the [Quota Usage & Alerts](/en/admin/identity-management/quota-usage-and-alerts) screen, which also tracks usage for a native API client and a portal application under their own AI scopes. On this screen, the **Usage %** column of **Scope Rules** shows how full each rule is. The **Limits** tab of an identity shows only what its plans define, not usage.
 
 ### Reading the same numbers through the Management API
 
@@ -209,7 +240,7 @@ If a source cannot be read, the call still answers successfully and marks the re
 
 <CardGroup cols={2}>
   <Card title="Limit Plans" icon="layers" href="/en/ai-gateway/limit-plans">
-    Assign a reusable budget plan to an API client or credential, enforced together with this screen's budgets under the stricter ceiling
+    Add a reusable budget plan to an organization, consumer, application or API client, enforced together with this screen's budgets under the stricter ceiling
   </Card>
   <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
     Configure the failover chain used when a quota routes traffic elsewhere
