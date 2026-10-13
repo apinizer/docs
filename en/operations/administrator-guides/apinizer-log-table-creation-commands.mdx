@@ -55,13 +55,14 @@ This is the main table where all HTTP traffic passing through the API Proxy is r
 
 :::info
 
-The `CREATE TABLE` command below is intended for **new installations** and already includes all columns — AI Gateway, MCP Gateway, A2A Gateway, routing diagnostics, outbound MCP/A2A call auditing, and policy execution time columns. You do not need to run an additional `ALTER`.
+The `CREATE TABLE` command below is intended for **new installations** and already includes all columns — AI Gateway, MCP Gateway, A2A Gateway, routing diagnostics, outbound MCP/A2A call auditing, policy execution time, client attribution, and route classifier columns. You do not need to run an additional `ALTER`.
 
 **If you are upgrading an existing installation**, do not run this command; your table already exists. Run the `ALTER TABLE` script of every version you pass through, in order:
 
-- **If you are coming from version 2026.04.x:** first [2026.09.0 — Log Table ALTER Scripts](/tr/release-notes/2026-09-0-log-tablosu-alter), then [2026.09.1 — Log Table ALTER Scripts](/tr/release-notes/2026-09-1-log-tablosu-alter). Since the cumulative 2026.09.0 script already creates the four outbound MCP/A2A audit columns, on the 2026.09.1 page add only the `policy_exec_times` column.
-- **If you are coming from version 2026.09.0:** only [2026.09.1 — Log Table ALTER Scripts](/tr/release-notes/2026-09-1-log-tablosu-alter). If your table already has the four outbound MCP/A2A audit columns, add only the `policy_exec_times` column — re-adding an existing column raises an error.
+- **If you are coming from version 2026.04.x:** first [2026.09.0 — Log Table ALTER Scripts](/en/release-notes/2026-09-0-log-table-alter), then [2026.09.1 — Log Table ALTER Scripts](/en/release-notes/2026-09-1-log-table-alter). Since the cumulative 2026.09.0 script already creates the four outbound MCP/A2A audit columns, on the 2026.09.1 page add only the `policy_exec_times` column.
+- **If you are coming from version 2026.09.0:** only [2026.09.1 — Log Table ALTER Scripts](/en/release-notes/2026-09-1-log-table-alter). If your table already has the four outbound MCP/A2A audit columns, add only the `policy_exec_times` column — re-adding an existing column raises an error.
 - **Whichever version you are coming from:** also run the [2026.09.2 — Log Table ALTER Scripts](/en/release-notes/2026-09-2-log-table-alter) script once — it adds the client attribution columns, which no earlier script includes.
+- **If you use AI routing with the LLM classifier (2026.09.6):** also run the [2026.09.6 — Log Table ALTER Scripts](/en/release-notes/2026-09-6-log-table-alter) script once, **before** you upgrade the gateway — it adds the six route classifier columns. Without them every traffic-log insert to the database fails.
 
 :::
 
@@ -202,7 +203,13 @@ CREATE TABLE log_ApiProxyTraffic (
   api_client_key VARCHAR2(255),
   client_owner_type VARCHAR2(16),
   client_owner_id VARCHAR2(64),
-  client_organization_id VARCHAR2(64)
+  client_organization_id VARCHAR2(64),
+  ai_route_cls_label VARCHAR2(64),
+  ai_route_cls_outcome VARCHAR2(16),
+  ai_route_cls_latency_ms NUMBER(19),
+  ai_route_cls_token_in NUMBER(19),
+  ai_route_cls_token_out NUMBER(19),
+  ai_route_cls_cost_micro NUMBER(19)
 );
 ```
   </TabItem>
@@ -342,7 +349,13 @@ CREATE TABLE log_ApiProxyTraffic (
   api_client_key VARCHAR(255),
   client_owner_type VARCHAR(16),
   client_owner_id VARCHAR(64),
-  client_organization_id VARCHAR(64)
+  client_organization_id VARCHAR(64),
+  ai_route_cls_label VARCHAR(64),
+  ai_route_cls_outcome VARCHAR(16),
+  ai_route_cls_latency_ms BIGINT,
+  ai_route_cls_token_in BIGINT,
+  ai_route_cls_token_out BIGINT,
+  ai_route_cls_cost_micro BIGINT
 );
 ```
   </TabItem>
@@ -482,7 +495,13 @@ CREATE TABLE log_ApiProxyTraffic (
   api_client_key VARCHAR(255),
   client_owner_type VARCHAR(16),
   client_owner_id VARCHAR(64),
-  client_organization_id VARCHAR(64)
+  client_organization_id VARCHAR(64),
+  ai_route_cls_label VARCHAR(64),
+  ai_route_cls_outcome VARCHAR(16),
+  ai_route_cls_latency_ms BIGINT,
+  ai_route_cls_token_in BIGINT,
+  ai_route_cls_token_out BIGINT,
+  ai_route_cls_cost_micro BIGINT
 );
 ```
   </TabItem>
@@ -622,7 +641,13 @@ CREATE TABLE log_ApiProxyTraffic (
   api_client_key NVARCHAR(255),
   client_owner_type NVARCHAR(16),
   client_owner_id NVARCHAR(64),
-  client_organization_id NVARCHAR(64)
+  client_organization_id NVARCHAR(64),
+  ai_route_cls_label NVARCHAR(64),
+  ai_route_cls_outcome NVARCHAR(16),
+  ai_route_cls_latency_ms BIGINT,
+  ai_route_cls_token_in BIGINT,
+  ai_route_cls_token_out BIGINT,
+  ai_route_cls_cost_micro BIGINT
 );
 ```
   </TabItem>
@@ -632,7 +657,7 @@ CREATE TABLE log_ApiProxyTraffic (
 
 When creating this table, SQL Server issues the following warning: *"the table has been created, but its maximum row size exceeds the allowed maximum of 8060 bytes"*. **This is expected and is not an error.**
 
-The total declared width of the variable-length `NVARCHAR` columns in the table exceeds the 8060-byte in-row limit per row; since SQL Server 2005 these columns are automatically moved to ROW_OVERFLOW_DATA pages when needed, leaving a 24-byte pointer in the row. Because the total of the fixed-length columns (~287 bytes) is well below the limit, `INSERT` operations do not fail. The only effect is the additional page read/write cost on rows where many long text fields are populated at the same time.
+The total declared width of the variable-length `NVARCHAR` columns in the table exceeds the 8060-byte in-row limit per row; since SQL Server 2005 these columns are automatically moved to ROW_OVERFLOW_DATA pages when needed, leaving a 24-byte pointer in the row. Because the total of the fixed-length columns (~327 bytes) is well below the limit, `INSERT` operations do not fail. The only effect is the additional page read/write cost on rows where many long text fields are populated at the same time.
 
 Narrowing the column widths enough to silence this warning (all text columns to 64 characters) was not preferred, as it would cause data loss in fields such as `req_request_uri`, `req_query_string` and `application_name`.
 
@@ -718,6 +743,12 @@ Narrowing the column widths enough to silence this warning (all text columns to 
 | client_owner_type | Kind of subject the API Client belongs to — `CONSUMER` or `APPLICATION` |
 | client_owner_id | Id of the owning Consumer (Credential) or Portal Application |
 | client_organization_id | Organization id of the authenticated identity |
+| ai_route_cls_label | LLM route classifier — label the classifier picked |
+| ai_route_cls_outcome | LLM route classifier — outcome of the decision |
+| ai_route_cls_latency_ms | LLM route classifier — decision time (ms) |
+| ai_route_cls_token_in | LLM route classifier — input tokens used |
+| ai_route_cls_token_out | LLM route classifier — output tokens used |
+| ai_route_cls_cost_micro | LLM route classifier — cost in micro-USD |
 
 ### Recommended Indexes
 
