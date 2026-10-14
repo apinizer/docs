@@ -24,7 +24,6 @@ const sidebars: SidebarsConfig = {
       "collapsible": true,
       "items": [
         "ai-gateway/llm-saglayicilari",
-        "ai-gateway/model-katalogu",
         "ai-gateway/yonlendirme-failover"
       ]
     },
