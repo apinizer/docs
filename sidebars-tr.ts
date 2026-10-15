@@ -60,6 +60,27 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Politikalar",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/politikalar/prompt-sablonu",
+        "ai-gateway/politikalar/prompt-susleyici",
+        "ai-gateway/politikalar/rag-enjeksiyonu",
+        "ai-gateway/politikalar/kisisel-veri-maskeleme",
+        "ai-gateway/politikalar/prompt-korumasi",
+        "ai-gateway/politikalar/konu-korumasi",
+        "ai-gateway/politikalar/dlp-korumasi",
+        "ai-gateway/politikalar/baglam-butunlugu",
+        "ai-gateway/politikalar/dongu-korumasi",
+        "ai-gateway/politikalar/semantik-onbellek",
+        "ai-gateway/politikalar/token-hiz-siniri",
+        "ai-gateway/politikalar/mcp-cagrisi",
+        "ai-gateway/politikalar/a2a-cagrisi"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Bilgi ve Erişim (RAG)",
       "collapsed": false,
       "collapsible": true,
