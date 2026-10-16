@@ -21,8 +21,13 @@ Temel faydalar:
 - **Yerleşik kontroller** — İstek filtreleme, kişisel veri (PII) maskeleme, semantik önbellekleme, token kotaları ve maliyet takibi
 - **Kurumsal görünürlük** — Kullanıcı, ekip, model ve dağıtım türüne (bulut vs. şirket içi) göre ayrıntılı kullanım raporları
 
-:::note Streaming ayarı istemcinin isteğindeki alanı ezer
-Her LLM Gateway'in **Yönlendirme** sekmesinde kendine ait bir **Streaming** ayarı bulunur. Bu ayar kapalıyken gateway, istemci istek gövdesinde `stream: true` gönderse bile isteği her zaman tekil (non-streaming) bir yanıt olarak işler — sağlayıcıya iletmeden önce bu alanı `false` olarak değiştirir (ve `stream_options` alanını kaldırır). Böylece token sayıları ve maliyet, istemcinin ne gönderdiğinden bağımsız olarak Trafik raporunda doğru görünür. **Streaming** açıkken istek etkilenmez ve yukarıda anlatıldığı gibi sunucu tarafından gönderilen olaylarla (SSE) iletilir.
+:::note Streaming ayarı ve istemcinin stream alanı
+Her LLM Gateway'in **Yönlendirme** sekmesinde kendine ait bir **Streaming (SSE)** anahtarı ve bir **İstemci "stream" alanı** ayarı bulunur. Bkz. [İstemci "stream" Alanı](/tr/ai-gateway/yonlendirme-failover#istemci-stream-alani).
+
+- **İstemcinin değerini kullan:** istek gövdesindeki `stream` değeri belirler. `stream: true` yukarıda anlatıldığı gibi sunucu tarafından gönderilen olaylarla (SSE) iletilir, `stream: false` tek seferlik yanıt döner. `stream` alanı olmayan istek **Streaming (SSE)** anahtarını izler. Yeni LLM Gateway'ler bu seçenekle başlar.
+- **Proxy ayarıyla üzerine yaz:** her istekte anahtar belirler. Anahtar kapalıyken gateway, istemci istek gövdesinde `stream: true` gönderse bile isteği tekil (non-streaming) bir yanıt olarak işler — sağlayıcıya iletmeden önce bu alanı `false` olarak değiştirir (ve `stream_options` alanını kaldırır). Böylece token sayıları ve maliyet, istemcinin ne gönderdiğinden bağımsız olarak Trafik raporunda doğru görünür. Daha önce oluşturulmuş ve kayıtlı değeri olmayan LLM Gateway'ler bu şekilde çalışır.
+
+LLM Gateway'de yalnızca tek seferlik yanıtta çalışan bir politika varsa istemci streaming'i açamaz.
 
 Streaming açıkken istemciye gönderilen yanıt akışı, proxy'nin log ayarlarında yanıt gövdesi loglaması açıksa **API Traffic** kaydında yer tutucu yerine gerçek olay akışı olarak görünür (gövde boyutu sınırı dahilinde; sınır aşılırsa kayıt `<<Streaming Body Truncated>>` işaretiyle biter). Kayıt, akış tamamlandığında tek bir trafik kaydı olarak yazılır. Bellek planlaması için kural: her açık akış worker belleğinde en fazla gövde sınırı kadar yer tutar (eşzamanlı akış × gövde sınırı); uzun yanıtların yaygın olduğu ortamlarda kaydedilecek gövdeyi connector'ın **Kısmi boyut** ayarıyla küçük tutun. Ayrıntı: [API Trafik Log Ayarları](/tr/develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari).
 :::
@@ -63,13 +68,14 @@ sequenceDiagram
     Gateway->>Guard: İstek korumalardan geçer
     Note over Guard: PII maskeleme, içerik filtresi,<br/>istem (prompt) denetimi
 
-    Guard->>Cache: Benzer istek önbellekte var mı?
+    Guard->>Router: Sağlayıcı bağlantısı ve model seçilir
+    Router->>Cache: Benzer istek önbellekte var mı?
 
     alt Önbellekte benzer yanıt var
         Cache-->>Client: Önbelleklenmiş yanıt döner
     else Önbellekte yok
         Cache->>Limiter: Kota / hız sınırı kontrolü
-        Limiter->>Router: Kota uygun, yönlendirmeye geç
+        Limiter->>Router: Kota uygun, seçilen bağlantıya ilet
         Router->>Provider: İstek seçilen LLM sağlayıcısına iletilir
         Provider-->>Router: Sağlayıcı yanıtı
         Router-->>Gateway: Yanıt OpenAI formatına normalize edilir
@@ -79,11 +85,13 @@ sequenceDiagram
 
 1. **Alım** — İstek OpenAI formatı JSON olarak doğrulanır ve ayrıştırılır
 2. **Korumalar** (isteğe bağlı) — Kişisel veri maskeleme, içerik filtreleri, istem denetimi; bkz. [Gelişmiş Korumalar](/tr/ai-gateway/gelismis-korumalar)
-3. **Semantik Önbellek** (isteğe bağlı) — Benzer istekler önbelleğe alınmış yanıtları yeniden kullanır
-4. **Hız Sınırlaması** — Çağıran başına Limit Planları ve LLM Gateway'in Token Rate Limit politikası (dakika, saat, gün, ay başına veya USD bütçe); bkz. [Limit Planları](/tr/ai-gateway/limit-planlari) ve [Token Rate Limit Politikası](/tr/ai-gateway/token-kotalari)
-5. **Yönlendirme** — Model kimliğine göre sağlayıcı bağlantısı (ve varsa yedek hedefler) seçilir; bkz. [Yönlendirme ve Failover](/tr/ai-gateway/yonlendirme-failover)
+3. **Yönlendirme** — Model kimliğine göre sağlayıcı bağlantısı ve model (ve varsa yedek hedefler) seçilir; bkz. [Yönlendirme ve Failover](/tr/ai-gateway/yonlendirme-failover)
+4. **Semantik Önbellek** (isteğe bağlı) — Benzer istekler önbelleğe alınmış yanıtları yeniden kullanır
+5. **Hız Sınırlaması** — Çağıran başına Limit Planları ve LLM Gateway'in Token Rate Limit politikası (dakika, saat, gün, ay başına veya USD bütçe); bkz. [Limit Planları](/tr/ai-gateway/limit-planlari) ve [Token Rate Limit Politikası](/tr/ai-gateway/token-kotalari)
 6. **Çıkarım** — İstek LLM sağlayıcısına iletilir
 7. **Yanıt** — Kullanım metrikleri ile chunk başına geri akışı yapılır
+
+Semantik önbellek araması ve Token Rate Limit politikası, yönlendirme modeli belirledikten sonra çalışır. Gateway'in gerçekten çağıracağı modeli kullanırlar.
 
 ### OpenAI SDK Entegrasyonu
 

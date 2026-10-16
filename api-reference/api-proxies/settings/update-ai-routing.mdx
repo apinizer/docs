@@ -76,32 +76,45 @@ The body is the full `AiRouting` object — it **replaces** the proxy's current 
 |-------|------|-------------|
 | llmProviderRef | string | Primary LLM provider connection id. Use `llmProviderRefName` instead when referencing by name |
 | llmProviderRefName | string | Name-based sidecar for `llmProviderRef`. Resolved to an id within the project when present |
-| modelId | string | Primary catalog model id (for example `gpt-4o-mini`, `deepseek-chat`) |
+| modelId | string | Primary model id, a model of the primary LLM provider (for example `gpt-4o-mini`, `deepseek-chat`) |
 | clientModelPresentBehavior | string | What to do when the client's request body already has a `model` field — `USE_CLIENT`, `OVERWRITE`, or `ERROR`. Default `OVERWRITE` when unset |
 | clientModelAbsentBehavior | string | What to do when the client's request body has no `model` field — `KEEP_ABSENT`, `ADD_ROUTING_MODEL`, or `ERROR`. Default `KEEP_ABSENT` when unset |
-| streaming | boolean | Enable SSE streaming responses. Default `false` |
-| timeoutSeconds | integer | Per-call LLM timeout in seconds. Default `60` |
+| streaming | boolean | Enable SSE streaming responses. Default `false`. When `clientStreamPresentBehavior` is `USE_CLIENT`, it applies only to requests that carry no `stream` field |
+| clientStreamPresentBehavior | string | What to do when the client's request body already has a `stream` field — `USE_CLIENT` or `OVERWRITE`. With `USE_CLIENT`, `stream: true` returns a streaming (SSE) response and `stream: false` returns a single response; with `OVERWRITE`, `streaming` always wins. The setting applies to chat and responses requests only. A body that omits the field stores no value, which behaves as `OVERWRITE`; the Create AI API Proxy endpoint starts new proxies with `USE_CLIENT` |
+| timeoutSeconds | integer | Response timeout in seconds: the longest wait for the provider's answer to a single-response (non-streaming) request. Default `60` |
 
 :::note `USE_CLIENT` is not honored on Azure OpenAI
-Gemini, Vertex, and Bedrock carry the *effective* model in the URL path, which the gateway builds itself — attribution and the model that answers always agree. An Azure OpenAI deployment endpoint pins the deployment in the endpoint the operator configured, so the request body's `model` field cannot change which model actually answers — it could only shift the **attribution** (the catalog entry that rate limits, quota, semantic cache, cost calculation, and traffic logs are booked against) to a value the client supplies. Apinizer therefore does not apply `clientModelPresentBehavior: "USE_CLIENT"` on an `AZURE_OPENAI` provider: the effective model stays the configured `modelId` and no catalog check is run against the client's value. The upstream request carries the configured `modelId` in its body, exactly as it does under `OVERWRITE` — the client's value only stops being a reason to reject the request. `OVERWRITE`, `ERROR`, and `clientModelAbsentBehavior` are unaffected.
+Gemini, Vertex, and Bedrock carry the *effective* model in the URL path, which the gateway builds itself — attribution and the model that answers always agree. An Azure OpenAI deployment endpoint pins the deployment in the endpoint the operator configured, so the request body's `model` field cannot change which model actually answers — it could only shift the **attribution** (the model entry of the provider that limits, quota, semantic cache, cost calculation, and traffic logs are booked against) to a value the client supplies. Apinizer therefore does not apply `clientModelPresentBehavior: "USE_CLIENT"` on an `AZURE_OPENAI` provider: the effective model stays the configured `modelId` and no check against the provider's model list is run on the client's value. The upstream request carries the configured `modelId` in its body, exactly as it does under `OVERWRITE` — the client's value only stops being a reason to reject the request. `OVERWRITE`, `ERROR`, and `clientModelAbsentBehavior` are unaffected.
 
-A failover entry without its own `modelId` inherits the **configured** `modelId` above, not the client's model, and re-evaluates `USE_CLIENT` against its own provider's catalog.
+A failover entry without its own `modelId` inherits the **configured** `modelId` above, not the client's model, and re-evaluates `USE_CLIENT` against the model list of its own provider.
 :::
 
 ### Field Reference — Timeouts, Limits, and Retry
 
 | Field | Type | Description |
 |-------|------|-------------|
-| connectTimeoutSeconds | integer | Connection establish timeout (DNS + TCP + TLS). Default `10` |
-| streamTimeoutSeconds | integer | SSE stream idle timeout. Default `120` |
+| connectTimeoutSeconds | integer | Connection establish timeout (DNS + TCP + TLS) to the LLM provider. Applies to streaming and single-response requests. Default `10` |
+| streamTimeoutSeconds | integer | SSE stream idle timeout: the stream is closed when the provider sends no new chunk for this long. Default `120` |
 | maxResponseBytes | long | Maximum response body size; null or ≤ 0 = unlimited |
 | maxChunks | long | Maximum SSE chunks; null or ≤ 0 = unlimited |
-| retryCount | integer | Pre-stream connection retry count for transient errors. Default `0` |
+| retryCount | integer | How many times a single-response request is retried after a transient connection error. Streaming requests are not retried. Default `0` |
 | retryDelayType | string | `NO_DELAY`, `FIXED`, `EXPONENTIAL_BACKOFF` |
 | retryFixedDelayMs | integer | Fixed retry delay in ms. Default `500` |
 | retryInitialDelayMs | integer | Initial backoff delay in ms. Default `500` |
 | retryMaxDelayMs | integer | Maximum backoff delay in ms. Default `10000` |
 | retryBackoffMultiplier | number | Backoff multiplier. Default `2.0` |
+
+### Field Reference — Connection Pool
+
+Connections to each LLM provider of the proxy are reused through a pool. The proxy keeps one pool for each LLM provider in its routing (primary, conditional routes, pool entries, failover chain). The pool is created when the proxy is deployed and applies to streaming requests.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| connectionPoolManagementType | string | `GENERAL`, `CUSTOM` or `NONE`. `GENERAL`: the proxy uses its own pool sized by the connection pool defaults in AI Settings. `CUSTOM`: the proxy uses its own pool sized by the two fields below. `NONE`: no pooling; every request opens a new connection that closes when the request ends. Default `GENERAL` when unset |
+| customConnectionPoolSize | integer | `CUSTOM` only. Idle connections kept open for reuse, for each LLM provider separately. Range `1` to `1000`; a value outside the range is set to the nearest limit. Default `8` when unset |
+| idleConnectionTimeout | integer | `CUSTOM` only. Seconds an idle connection is kept. Range `1` to `3600`; a value outside the range is set to the nearest limit. Keep it below the provider's own idle timeout (vLLM and other uvicorn servers close idle connections after 5 seconds) |
+
+The size limits idle connections only. Connections in use are not limited and requests never wait for a connection. With `GENERAL`, the size and the idle timeout are taken from [AI Gateway Settings](/api-reference/ai-gateway-settings/update-ai-gateway-settings) on every deploy, so any value sent in these two fields is replaced; a change in AI Gateway Settings reaches the gateway with the next deploy.
 
 ### Field Reference — Failover and Load Balancing
 
@@ -140,7 +153,7 @@ The proxy-level classifier settings are fields of `aiRouting` itself:
 |-------|------|-------------|
 | classifierProviderRef | string | Classifier LLM provider connection id. The provider must be able to make decision calls: an OpenAI-compatible chat provider (OpenAI, Azure OpenAI, DeepSeek, Moonshot, Zhipu, Mistral, Groq, Ollama, vLLM, xAI, Google AI Studio, Together, Fireworks, Cerebras, Hugging Face, OpenRouter, Perplexity, NVIDIA NIM, or a custom provider whose adapter family is `OPENAI_COMPATIBLE` or `VLLM`), Anthropic, or TypeSafe Jev. AWS Bedrock, Google Vertex AI, Cohere, the native Gemini wire format, embedding-only providers, TEI, and custom providers without an adapter family are rejected. The provider must use credentials held by the AI gateway (`Provided by AI gateway`) |
 | classifierProviderRefName | string | Name-based sidecar for `classifierProviderRef`. Resolved to an id within the project when present |
-| classifierModelId | string | Catalog model id of the classifier. Required when at least one classifier route exists |
+| classifierModelId | string | Model id of the classifier, a model of the classifier provider. Required when at least one classifier route exists |
 | classifierDecisionMode | string | Optional. `STANDARD` or `REASONING`. Unset is `STANDARD`. `STANDARD` sends temperature `0` and a small output limit. `REASONING` is for thinking models: no temperature is sent and `classifierReasoningBudget` is the output limit. Does not apply to TypeSafe Jev |
 | classifierReasoningBudget | integer | Optional. Used only when `classifierDecisionMode` is `REASONING`. Upper limit for thinking plus answer, in tokens. Range `256` to `8192`. Default `1024`. A value outside the range is set to the nearest limit |
 | classifierTimeoutMs | integer | Classifier timeout in milliseconds. `STANDARD`: default `1000`, range `100` to `10000`. `REASONING`: default `15000`, up to `60000`. A value that you set always wins over the default |

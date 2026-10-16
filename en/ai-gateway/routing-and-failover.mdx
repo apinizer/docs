@@ -9,7 +9,7 @@ import {Card, CardGroup} from '@site/src/components/Card';
 
 The Routing tab lays out an LLM Gateway's configuration as a decision chain that mirrors the order a request is actually evaluated in. A summary band at the top of the screen — **Request → Conditional Gate → Target Selection → Failover → Provider** — is clickable: selecting a step scrolls the screen to the matching section and highlights which stage the current configuration is in.
 
-Below the decision chain the tab carries two more groups of settings that apply to *every* request rather than to one branch of it: a **Client "model" field** card, and the **Connection & Delivery Settings** group (streaming and timeouts, SSL/mTLS, outbound proxy, anonymous access). The Client "model" field card holds its two settings directly on the card — there is no **Configure** drawer to open, and each selection is saved the moment you make it. A user with read-only access on the proxy sees the two selected values as a summary instead of the option cards.
+Below the decision chain the tab carries two more groups of settings that apply to *every* request rather than to one branch of it: a **Client "model" field** card, and the **Connection & Delivery Settings** group. The group has a **Connection** card (timeouts and the connection pool), a **Streaming** card (the Streaming switch, the client "stream" field and the stream limits), and the SSL/mTLS, outbound proxy and anonymous access cards. See [Connection and Delivery Settings](#connection-and-delivery-settings). The Client "model" field card holds its two settings directly on the card — there is no **Configure** drawer to open, and each selection is saved the moment you make it. A user with read-only access on the proxy sees the two selected values as a summary instead of the option cards.
 
 Wherever a step resolves to a specific provider and model — a conditional route, a load-balancing pool entry, the primary itself, or a failover chain entry — an expandable row shows the same **model metadata panel**: the provider's endpoint, deployment type, and live health status; the model's context window, max output tokens, and per-million-token pricing (input, output, cached); and a note when the model is switched off. This standard panel appears at every selection point, so you can check a model's limits and pricing without leaving the screen.
 
@@ -31,7 +31,7 @@ What is **not** skipped: a model that is switched off on the provider, a model y
 :::
 
 :::warning Routing with no target
-You can save an Routing tab with no target at all: no conditional route, no pool row, no failover row, and an empty default provider and model. The tab shows a warning. The proxy can be saved and deployed, but every request fails with HTTP 503 (`POLICY_ROUTING_AI_NO_SUITABLE_PROVIDER`) until you add a target. Deploy is not blocked.
+You can save the Routing tab with no target at all: no conditional route, no pool row, no failover row, and an empty default provider and model. The tab shows a warning. The proxy can be saved and deployed, but every request fails with HTTP 503 (`POLICY_ROUTING_AI_NO_SUITABLE_PROVIDER`) until you add a target. Deploy is not blocked.
 
 A definition that fills a target field but produces no target is still rejected on save. For example, a provider is selected but the model is empty and there is no list entry.
 :::
@@ -204,6 +204,7 @@ If the classifier fails, the request is not rejected. This is fail-open. The cla
 - The provider refuses to answer for safety reasons.
 - The classifier answers with a label that no route uses.
 - No classifier provider is configured.
+- The classifier model is switched off on its provider, or its ID is ambiguous. Apinizer makes no call and records the outcome `NO_PROVIDER`.
 - The classifier failed recently. After a timeout, an error, or `TRUNCATED`, Apinizer skips classifier calls for that proxy for 15 seconds. The outcome is `BACKOFF`. Redeploying the proxy clears the back-off.
 
 The request then continues down the list. If no route matches, the request goes to the Default Target Group.
@@ -323,6 +324,73 @@ A failover leg re-evaluates both settings against its own provider's models. Wit
 
 A leg that does not define a model of its own inherits the **configured routing model**, not the effective model the primary resolved for this request. That distinction matters under **Use the client's model**: the client's model is used on a leg only when that leg's provider has it as an enabled model, and otherwise the leg falls back to a model the provider is known to serve, rather than carrying the client's choice into a provider that never offered it.
 
+## Connection and Delivery Settings {#connection-and-delivery-settings}
+
+These cards apply to every request that the LLM Gateway forwards, not to one branch of the routing decision. Each value is labeled with the request type it applies to: **All requests**, **Single-response requests**, or **Streaming requests**. The **Configure** button of the **Connection** and **Streaming** cards opens the same drawer.
+
+### Connection Card
+
+| Field | Applies to | Description |
+|---|---|---|
+| **Connect Timeout (seconds)** | All requests | The maximum time to open the connection (TCP and TLS) to the LLM provider. Range `1` to `300`. Default `10`. |
+| **Response Timeout (seconds)** | Single-response requests | The maximum time to wait for the provider's answer to a request that is not streamed. Range `1` to `3600`. Default `60`. |
+| **Retry Count** | Single-response requests | How many times a request is retried after a transient connection error. Range `0` to `10`. Default `0`. Streaming requests are not retried. |
+
+:::note Connect timeout and response timeout are separate
+The connect timeout used to bound only the streaming connection, and the single-response connection used the response timeout. Now the connect timeout bounds the connection of both request types, and the response timeout bounds only the wait for the answer.
+:::
+
+### Connection Pool {#connection-pool}
+
+The **Connection pool** group on the same card decides how the gateway reuses connections to the LLM provider. The gateway creates the pool when you deploy the LLM Gateway. It applies to streaming requests.
+
+| Option | Behavior |
+|---|---|
+| **General** (default) | The LLM Gateway has its own pool. Its size and idle timeout come from the AI Settings defaults. |
+| **Custom** | The LLM Gateway has its own pool with the values you enter in **Idle connections per provider** (range `1` to `1000`, default `8`) and **Idle connection timeout (seconds)** (range `1` to `3600`, default `4`). |
+| **None** | No pooling. Every request opens a new connection, and the connection closes when the request ends. |
+
+- **Idle connections per provider** is applied to each LLM provider of the gateway separately. A busy provider does not evict the warm connections of another provider, for example the failover provider.
+- The size limits only the idle connections that are kept for reuse. It does not limit concurrent requests, and a request never waits for a connection.
+- Keep **Idle connection timeout (seconds)** shorter than the idle timeout of the provider. For example, vLLM and other uvicorn servers close an idle connection after 5 seconds. If the gateway keeps the connection longer, it can send a request on a connection that the provider already closed.
+- On the Routing tab, the **Connection** card shows **AI Settings default** for the size and the timeout when the option is **General**.
+
+The **General** defaults are in **System Settings & Limits**, on the **AI Gateway** tab, in the **Connection Pool Defaults** section. This tab is shown when your license includes the AI Gateway. Only a system administrator can save it.
+
+| Field | Range | Default |
+|---|---|---|
+| **Idle Connections per Provider** | `1` to `1000` | `64` |
+| **Idle Connection Timeout (s)** | `1` to `3600` | `4` |
+
+A change in AI Settings reaches an LLM Gateway on its next deploy. The pool of a gateway that uses **General** is rebuilt then. A gateway that uses **Custom** keeps its own values.
+
+### Streaming Card
+
+| Field | Applies to | Description |
+|---|---|---|
+| **Streaming (SSE)** switch | Streaming requests | Turns streaming on for the gateway. How it combines with the client's `stream` field depends on the **Client "stream" field** setting below. |
+| **Stream Idle Timeout (seconds)** | Streaming requests | The gateway closes the stream when the provider sends no new chunk for this long. Range `1` to `3600`. Default `120`. |
+| **Max Response Bytes** | Streaming requests | The gateway cuts the stream when the response reaches this size. `0` means unlimited. |
+| **Max Chunks** | Streaming requests | The gateway closes the stream after this many chunks. `0` means unlimited. |
+
+### Client "stream" Field {#client-stream-field}
+
+This setting decides what the gateway does with the `stream` value that the client sends in the request body. It is on the **Streaming** card. Selecting an option saves it immediately; if the save fails, the selection returns to its previous value. A user with read-only access sees the selected value as a summary. The card is not shown on an A2A agent's routing tab.
+
+| Option | Behavior |
+|---|---|
+| **Use the client's value** | `stream: true` opens a streaming response, and `stream: false` returns a single response. A request without a `stream` field follows the **Streaming (SSE)** switch. |
+| **Overwrite with the proxy setting** | The **Streaming (SSE)** switch decides for every request. The client's value is replaced. With the switch off, a request with `stream: true` still gets a single response. |
+
+- A new LLM Gateway starts with **Use the client's value**. An existing LLM Gateway that has no stored value works as **Overwrite with the proxy setting**, exactly as before.
+- The setting applies to chat completion and Responses requests. Embedding, audio and image requests keep the proxy setting.
+- A client can switch streaming **on** only when the LLM Gateway has no policy that works only on a single response. If the LLM Gateway has such a policy and the client sends `stream: true`, the proxy setting applies and the client gets a single response. These policies are: Groundedness Guard; MCP Call (LLM) and A2A Call (LLM) on the response side; PII Mask that restores masked values inline, or that decodes encoded content on the response side; Topic Guard and DLP Guard both in buffer mode; and a DLP Guard, Topic Guard or PII Mask policy on the response side that uses an external guardrail engine. A client can always switch streaming **off**.
+- The semantic cache keeps separate entries for streaming and single-response requests when the setting is **Use the client's value**.
+
+:::note Single-response responses carry a Content-Type
+A single-response answer from an LLM Gateway reaches the client with a `Content-Type` header. Earlier versions could send the answer without it. This also holds for an answer that comes from the semantic cache. Headers that only the provider uses are not forwarded.
+:::
+
 ## Failover Chains
 
 When you configure an LLM Gateway, you can list more than one provider connection for a model — a **primary** and one or more **backups**. If a request to the primary fails (timeout, error response, or the primary is unavailable), Apinizer automatically retries it against the next connection in the chain, without the client seeing the failure.
@@ -440,6 +508,8 @@ Each row also has a **Test** button that opens the [Test Console](/en/develop/te
 :::warning This test call reaches your real LLM provider
 Sending the pre-filled request from a row's **Test** button goes to the actual configured LLM provider, the same way a real client request would — and consumes cost/quota accordingly. `max_tokens` is kept at 16 to keep a test call cheap, but it is not free, and a cost/quota warning is shown both on the panel and in the test dialog.
 :::
+
+The **Develop** tab of an LLM Gateway has the same shortcut. Its address list shows one row per environment, with a **Test Endpoint** button next to the address of every environment the proxy is deployed to. The button opens the same pre-filled request in a **Test Endpoint** dialog and is available to users who may run tests. The dialog carries the same warning: the call goes to the actual LLM provider and consumes cost and quota, and the minimal request (`max_tokens: 16`) is pre-filled to keep it low.
 
 The panel is hidden when the proxy is embedded in an A2A agent (its traffic doesn't go through `/v1/chat/completions`), and the **Test** button is disabled unless you hold manage permission on the proxy.
 

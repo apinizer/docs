@@ -134,12 +134,25 @@ The manager screen no longer collects a separate Turkish name and always sends `
 
 A `ruleSpec` that is missing, that carries both arms, or that carries the arm for the wrong family, is `400 malformedRequest` — missing is `params.reason = limit.plan.ruleSpecRequired`, the wrong/extra arm is `params.reason = limit.plan.ruleSpecFamilyMismatch`.
 
+#### Plan settings and limits
+
+A plan has no general limit: every limit names its own target and sits in `ruleSpec.targetedRules`. The family arm at the top of the `ruleSpec` (`requestRate` for a `REQUEST_RATE` plan, `aiBudget` for an `AI_TOKEN_BUDGET` plan) is required, but it carries only the plan's settings. A ceiling on it — a request-rate window, or a token, USD or request-count ceiling on the budget, including per-model and per-provider budgets — is refused with `400 malformedRequest` (`params.field` names it, for example `ruleSpec.requestRate.windows` or `initialRuleSpec.aiBudget`).
+
 #### Request Rate arm — `ruleSpec.requestRate`
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
-| `windows` | array | Yes, non-empty | One ceiling per time window — see below |
 | `overflowAction` | enum | No | `BLOCK` (default when absent) refuses the request once a window is exhausted; `COUNT_ONLY` lets it through and keeps counting |
+| `cacheErrorHandlingType` | enum | No | `FAIL` rejects the request when the counter service cannot be reached; `CONTINUE` lets it through uncounted |
+| `cacheConnectionTimeoutInSeconds` | integer | No | Timeout to the counter service, in seconds |
+| `showRateLimitStatisticsInResponseHeader` | boolean | No | Adds the remaining-limit headers to the response |
+| `customMessageTemplate` / `customMessageContentType` / `customMessageHttpStatusCode` | string / string / integer | No | Replaces the standard message when a limit is exceeded |
+
+Each element of `ruleSpec.targetedRules` of a `REQUEST_RATE` plan is one limit: its `target` and a `requestRate` with the `windows` of that limit.
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `windows` | array | Yes, non-empty | One ceiling per time window — see below |
 
 Each entry of `windows`:
 
@@ -151,25 +164,43 @@ Each entry of `windows`:
 | `windowType` | enum | No | `FIXED` or `SLIDING` |
 | `countingMode` | enum | No | `ALL_REQUESTS` counts a request even when it is the one that gets blocked; `ACCEPTED_ONLY` counts only requests that reached the backend |
 
-No default is filled in on unset optional fields here — they are read back exactly as sent, absent members included.
+No default is filled in on unset optional fields here — they are read back exactly as sent, absent members included. Two windows over the same `interval` and `periodLength` are refused.
 
-#### Other `ruleSpec` fields
+#### Targets of a limit — `target`
 
-Next to the family arm, which is the plan's **general limit**, the `ruleSpec` body also carries:
+A limit names its target by name, never by an installation id.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `targetedRules` | array | The plan's targeted limits. Each element repeats the family arm for one API proxy, API proxy group, endpoint, AI proxy, model or provider, and carries its `target` **by name** (API proxy, proxy group, endpoint as proxy + HTTP method + path, environment, LLM provider). An unknown name is `400 malformedRequest` (`params.reason = limit.plan.targetNotFound`, `params.field` names the limit). In the `admin` project a target also names its `projectName`. |
+| `type` | enum | `REQUEST_RATE` plans: `API_PROXY`, `API_PROXY_ENV`, `API_PROXY_GROUP`, `API_PROXY_GROUP_ENV`, `API_ENDPOINT`, `API_ENDPOINT_ENV`. `AI_TOKEN_BUDGET` plans: `API_PROXY`, `API_PROXY_ENV` (an AI proxy), `AI_MODEL`, `AI_PROVIDER`. Any other type is `400 malformedRequest` (`params.reason = limit.plan.targetInvalid`) |
+| `apiProxyName` | string | `API_PROXY`, `API_PROXY_ENV`, and the endpoint types |
+| `apiProxyGroupName` | string | `API_PROXY_GROUP`, `API_PROXY_GROUP_ENV` |
+| `environmentName` | string | The `_ENV` types |
+| `endpointHttpMethod` / `endpointPath` | string | The endpoint types: the endpoint's HTTP method and path, as the API proxy defines them |
+| `llmProviderName` | string | `AI_PROVIDER`: the LLM provider. `AI_MODEL`: the provider that owns the model |
+| `targetKey` | string | `AI_MODEL`: the model identifier, as listed by the provider |
+| `projectName` | string | `admin` project only: the project of the API proxy, group or endpoint |
+| `httpMethods` | string[] | `API_PROXY` and `API_PROXY_ENV` only; empty or absent means every method |
+
+A model limit names one model of one LLM provider (`llmProviderName` plus `targetKey`) and counts only the traffic that provider's model served; the same model identifier on another provider is not counted. The provider must be one the plan's project can use and must list the model, otherwise the request is `400 malformedRequest` (`params.reason = limit.plan.targetInvalid`). Two limits of one plan with the same target are `400 malformedRequest` (`params.reason = limit.plan.targetDuplicate`).
+
+#### Other `ruleSpec` fields
+
+Next to the family arm, the `ruleSpec` body also carries:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `targetedRules` | array | The plan's limits. Each element repeats the family arm for one API proxy, API proxy group, endpoint, AI proxy, model or provider, and carries its `target` **by name** (API proxy, proxy group, endpoint as proxy + HTTP method + path, environment, LLM provider, and for a model the provider plus the model). An unknown name is `400 malformedRequest` (`params.reason = limit.plan.targetNotFound`, `params.field` names the limit). In the `admin` project a target also names its `projectName`. A plan needs at least one limit to be deployed. |
 | `validFrom` / `validUntil` | timestamp | The plan-level validity window; absent on a side means open on that side |
 | `condition` | object | The plan's request condition: the plan counts and blocks only the requests that meet it; absent means every request |
 | `errorMessageList` | array | The plan's error message customizations for the errors its limits raise; absent means the default messages |
 | `ownBudgetThresholds` | boolean | AI Token Budget targeted limit only: `true` when the limit's alert thresholds and hard cap are its own; absent takes the general budget's values |
 
-A draft revision that adds a limit another plan of an identity holding this plan already sets (the same API, endpoint or AI proxy, or a general limit, counted the same way) is `409 lifecycleConflict` (`params.reason = limit.plan.targetOverlap` or `limit.plan.targetOverlapGeneral`). An overlap the previous body already had does not block.
+A draft revision that adds a limit another plan of an identity holding this plan already sets (the same API, endpoint or AI proxy, counted the same way) is `409 lifecycleConflict` (`params.reason = limit.plan.targetOverlap`). An overlap the previous body already had does not block.
 
 #### AI Token Budget arm — `ruleSpec.aiBudget`
 
-The budget object carried inline in a plan revision has these fields:
+The budget object has these fields. On the top-level arm only the plan's settings apply (`softCapPercents`, `hardCapPercent`, `overflowAction`, `cheaperModelId`, the counter-store and custom message settings); the ceilings below are set on the budget of each targeted limit.
 
 ##### Budget Object Fields
 
@@ -184,6 +215,10 @@ The budget object carried inline in a plan revision has these fields:
 | usdPerMinute | number | No | - | Per-minute USD cost cap. `null` = no limit; if set, must be `> 0`. Not available in `modelBudgets` / `providerBudgets` |
 | usdPerHour | number | No | - | Hourly USD cost cap. `null` = no limit; if set, must be `> 0` |
 | usdPerDay | number | No | - | Daily USD cost cap. `null` = no limit; if set, must be `> 0` |
+| requestsPerMinute | integer | No | - | Per-minute LLM call count cap. `null` = no limit; if set, must be `>= 1`. Not available in `modelBudgets` / `providerBudgets` |
+| requestsPerHour | integer | No | - | Hourly LLM call count cap. Same rules as `requestsPerMinute` |
+| requestsPerDay | integer | No | - | Daily LLM call count cap. Same rules as `requestsPerMinute` |
+| requestsPerMonth | integer | No | - | Monthly LLM call count cap. Same rules as `requestsPerMinute` |
 | softCapPercents | array[integer] | No | [] | Soft-cap warning thresholds. Each element in range `[0, 100]`. When omitted, `[]` is stored; a `GET` returns `[]` explicitly when no thresholds are set |
 | hardCapPercent | integer | No | 100 | Hard-cap percent, range `[1, 100]` |
 | overflowAction | string | No | BLOCK | Action on overflow: `BLOCK`, `FAILOVER`, `ALERT_ONLY` or `CHEAPER_MODEL` |
@@ -195,12 +230,13 @@ The budget object carried inline in a plan revision has these fields:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| modelId | string | Yes (model entry) | Catalog model id the override applies to |
-| providerRef | string | Yes (provider entry) | LLM provider reference (`ConnectionConfigLlm` ID) the override applies to |
+| modelId | string | Yes (model entry) | Model id the override applies to |
+| providerRef | string | Yes (provider entry) | LLM provider the override applies to (the provider reference, not its name) |
 | tokensPerHour / tokensPerDay / tokensPerMonth | integer | No | Token caps for this model/provider. If set, must be `>= 1` |
 | monthlyBudgetUsd / usdPerHour / usdPerDay | number | No | USD cost caps for this model/provider. If set, must be `> 0` |
 | overflowAction | string | No | Per-entry overflow action (defaults to `BLOCK`) |
 
+- A request-count ceiling counts one call to the LLM provider for each request and applies on the targeted limits of an AI proxy, model or provider. The Token Rate Limit policy does not accept request-count ceilings.
 - An **empty array** `[]` in `modelBudgets` / `providerBudgets` clears the overrides; `null` or an absent field keeps the stored ones.
 - A USD limit meters only models that have an input price in the LLM provider. A model without a price counts as 0, so the limit does not meter it and the save is not refused. Set the missing price, or use a token-based limit instead.
 
@@ -254,12 +290,17 @@ The shape returned by every revision endpoint (`GET .../revisions/{revision}`, `
   "revision": 2,
   "status": "PUBLISHED",
   "ruleSpec": {
-    "requestRate": {
-      "windows": [
-        { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
-      ],
-      "overflowAction": "BLOCK"
-    }
+    "requestRate": { "overflowAction": "BLOCK" },
+    "targetedRules": [
+      {
+        "target": { "type": "API_PROXY", "apiProxyName": "payments-api" },
+        "requestRate": {
+          "windows": [
+            { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
+          ]
+        }
+      }
+    ]
   },
   "semanticChecksum": "9f2a7c1e4b3d",
   "changeReason": "Raised the per-second ceiling for the new partner tier",
@@ -302,10 +343,10 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 
 | Error key | When |
 |---|---|
-| `malformedRequest` | The body could not be understood or was left empty (`params.reason = bodyRequired`), the plan is missing its `family` (`params.reason = limit.plan.familyRequired`) or `name` (`params.reason = limit.plan.nameRequired`), a rule spec is missing (`params.reason = limit.plan.ruleSpecRequired`) or carries the wrong/extra arm for the plan's family (`params.reason = limit.plan.ruleSpecFamilyMismatch`), a targeted limit names an unknown target (`params.reason = limit.plan.targetNotFound`), a token limit is below 1 or a USD limit is 0 or less (`params.reason = limit.plan.ceilingNotPositive`), a deploy has no limits to send (`params.reason = limit.plan.noLimits`), or the removed `retire` action was called (`params.reason = limit.plan.retireRemoved`) |
+| `malformedRequest` | The body could not be understood or was left empty (`params.reason = bodyRequired`), the plan is missing its `family` (`params.reason = limit.plan.familyRequired`) or `name` (`params.reason = limit.plan.nameRequired`), a rule spec is missing (`params.reason = limit.plan.ruleSpecRequired`) or carries the wrong/extra arm for the plan's family (`params.reason = limit.plan.ruleSpecFamilyMismatch`), a targeted limit names an unknown target (`params.reason = limit.plan.targetNotFound`), a token or request-count limit is below 1 or a USD limit is 0 or less (`params.reason = limit.plan.ceilingNotPositive`), a top-level ceiling is sent where only a targeted limit may carry one (`params.field` names it), a targeted limit has a target its family cannot use or names the same target twice (`params.reason = limit.plan.targetInvalid` / `limit.plan.targetDuplicate`), a deploy has no limits to send (`params.reason = limit.plan.noLimits`), or the removed `retire` action was called (`params.reason = limit.plan.retireRemoved`) |
 | `resourceNotFound` | An unknown `planKey` (`params.reason = limit.plan.notFound`) — including a project-scoped call naming a platform-only `planKey`, see [Platform scope](#platform-scope) — or an unknown revision number: `GET .../revisions/{revision}`, `.../draft`, and `.../published` answer with no `params.reason` (`params.revision` carries the number, or `"draft"`/`"published"`), while a bad revision number on `PUT .../draft-revisions/{revision}` or the publish call carries `params.reason = limit.plan.revisionNotFound` |
 | `versionConflict` | `PUT .../{planKey}`'s `version` field no longer matches the stored plan |
-| `lifecycleConflict` | `params.reason` names the service cause: `limit.plan.staleVersion` (see the `version` note under [Update a plan's metadata](#update-a-plans-metadata) above), `limit.plan.draftAlreadyExists` (the plan already has an open draft), `limit.plan.publishConflict` (the named revision is no longer publishable), `limit.plan.revisionNotDraft` (editing a revision that already left DRAFT), `limit.plan.notDeployed` (undeploying a plan that is not deployed), `limit.plan.targetOverlap` / `limit.plan.targetOverlapGeneral` (a limit that another plan of the same identities already sets), `limit.plan.notDraft` (deleting a plan that has been deployed), `limit.plan.retired` (drafting or publishing under a plan retired by an earlier version), `limit.plan.inUseByBinding` (deleting a plan a live assignment references), `limit.plan.nameAlreadyExists` / `limit.plan.keyAlreadyExists` (duplicate within the scope), or `limit.plan.keyImmutable` / `limit.plan.familyImmutable` / `limit.plan.projectImmutable` (an immutable field was sent on update) |
+| `lifecycleConflict` | `params.reason` names the service cause: `limit.plan.staleVersion` (see the `version` note under [Update a plan's metadata](#update-a-plans-metadata) above), `limit.plan.draftAlreadyExists` (the plan already has an open draft), `limit.plan.publishConflict` (the named revision is no longer publishable), `limit.plan.revisionNotDraft` (editing a revision that already left DRAFT), `limit.plan.notDeployed` (undeploying a plan that is not deployed), `limit.plan.targetOverlap` (a limit that another plan of the same identities already sets), `limit.plan.notDraft` (deleting a plan that has been deployed), `limit.plan.retired` (drafting or publishing under a plan retired by an earlier version), `limit.plan.inUseByBinding` (deleting a plan a live assignment references), `limit.plan.nameAlreadyExists` / `limit.plan.keyAlreadyExists` (duplicate within the scope), or `limit.plan.keyImmutable` / `limit.plan.familyImmutable` / `limit.plan.projectImmutable` (an immutable field was sent on update) |
 | `idempotencyKeyRequired` | `POST /limit-plans` was missing its `Idempotency-Key` header |
 | `idempotencyKeyReused` | The same key was sent with a different request body |
 | `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names the plan it created |
@@ -339,12 +380,17 @@ curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-plans" 
     "description": "Default tier for partner API clients",
     "labels": ["partner", "tier-1"],
     "initialRuleSpec": {
-      "requestRate": {
-        "windows": [
-          { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
-        ],
-        "overflowAction": "BLOCK"
-      }
+      "requestRate": { "overflowAction": "BLOCK" },
+      "targetedRules": [
+        {
+          "target": { "type": "API_PROXY", "apiProxyName": "payments-api" },
+          "requestRate": {
+            "windows": [
+              { "permittedMessageCount": 100, "interval": "ONE_SECOND" }
+            ]
+          }
+        }
+      ]
     }
   }'
 # 201 Created, Location: /apiops/projects/finance/limit-plans/standard-100rps
@@ -361,12 +407,17 @@ curl -X POST "https://apinizer.example.com/apiops/projects/finance/limit-plans/s
   -H "Content-Type: application/json" \
   -d '{
     "ruleSpec": {
-      "requestRate": {
-        "windows": [
-          { "permittedMessageCount": 150, "interval": "ONE_SECOND" }
-        ],
-        "overflowAction": "BLOCK"
-      }
+      "requestRate": { "overflowAction": "BLOCK" },
+      "targetedRules": [
+        {
+          "target": { "type": "API_PROXY", "apiProxyName": "payments-api" },
+          "requestRate": {
+            "windows": [
+              { "permittedMessageCount": 150, "interval": "ONE_SECOND" }
+            ]
+          }
+        }
+      ]
     },
     "changeReason": "Raised the per-second ceiling for the new partner tier"
   }'
