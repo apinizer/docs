@@ -45,12 +45,18 @@ Authorization: Bearer YOUR_TOKEN
 
 The body is the full `McpRouting` object — it **replaces** the proxy's current MCP routing configuration.
 
+:::warning
+This endpoint replaces the routing as a whole. A field you do not send is dropped, and it returns to its default. If you apply an old body (such as the examples below) to a proxy that uses the Standard MCP OAuth profile, `authProfile`, `serviceClientName`, the `downstreamIdentity` of each tool, `riskPolicy`, `riskPolicyExemptions` and `toolRiskOverrides` are lost. Read the current configuration first, change the fields you need, and send the whole object back.
+:::
+
 #### Full JSON Body Example (TOOL_EXPOSE)
 
 ```json
 {
   "routingMode": "TOOL_EXPOSE",
   "protocolVersion": "2025-06-18",
+  "authProfile": "STANDARD_MCP_OAUTH",
+  "serviceClientName": "petstore-service-client",
   "serverJsonOverride": "{\"name\":\"com.example/petstore-mcp\",\"description\":\"Petstore MCP server\",\"version\":\"1.0.0\",\"remotes\":[{\"type\":\"streamable-http\",\"url\":\"${GATEWAY_URL}/petstore-mcp/\"}]}",
   "exposedTools": [
     {
@@ -60,9 +66,14 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
       "apiMethodHttpMethod": "GET",
       "apiMethodPath": "/orders/{id}",
       "requiredScopes": ["orders.read"],
+      "downstreamIdentity": "SERVICE",
+      "riskTier": "LOW",
       "argumentConstraints": []
     }
   ],
+  "riskPolicy": { "low": "ALLOW", "medium": "REQUIRE_APPROVAL", "high": "DENY" },
+  "riskPolicyExemptions": [],
+  "toolRiskOverrides": [],
   "identityAcl": [],
   "argumentConstraints": [],
   "callQuota": null,
@@ -111,9 +122,11 @@ The body is the full `McpRouting` object — it **replaces** the proxy's current
 | Field | Type | Description |
 |-------|------|-------------|
 | routingMode | string | `TOOL_EXPOSE` (expose selected Apinizer proxies as MCP tools) or `PASSTHROUGH` (proxy one or more external backend MCP servers) |
+| authProfile | string | Client authentication profile: `LEGACY` (default; also the value when the field is not sent) or `STANDARD_MCP_OAUTH`. See [Standard MCP Client Profile](/en/ai-gateway/mcp-gateway#standard-mcp-client-profile) |
+| serviceClientName | string | Name of the existing API client that the proxy acts as in the Standard profile. Required there when the proxy exposes any tool. It is a reference only |
 | protocolVersion | string | MCP protocol version: `2024-11-05`, `2025-03-26`, `2025-06-18` (default), `2025-11-25` or `2026-07-28`. See [Protocol Versions](/en/ai-gateway/mcp-gateway#protocol-versions) |
 | serverJsonOverride | string | Optional. A hand-written replacement for the generated `.well-known/mcp/server.json` discovery document — see [Discovery Document](/en/ai-gateway/mcp-gateway#discovery-document). Empty/omitted (the default) keeps the auto-generated document. The value is a JSON document encoded as a string; it must be valid JSON, but its schema completeness is **not** checked here — a document missing `name`/`description`/`version`/`remotes` saves successfully and only surfaces as a warning on the MCP Gateway console. `${VAR}` placeholders inside the string are resolved to environment variables when the document is served, so the same document can be promoted across environments while advertising each one's own host. Once set, the document is served exactly as written — unauthenticated — at `{relativePath}/.well-known/mcp/server.json`; never put a credential in it |
-| exposedTools | array | **TOOL_EXPOSE only.** Tool definitions — `proxyId` (target ApiProxy id), `toolName`, `toolDescription`, optional `overrideSchema`, `apiMethodHttpMethod`/`apiMethodPath` (pin to a specific method), `requiredScopes`, per-tool `argumentConstraints`, optional `riskTier` (`LOW` \| `MEDIUM` \| `HIGH`; empty = the HTTP method default, read only while `riskPolicy` is set). `toolName` is normalized before it is published in `tools/list` (lowercased, any character other than a letter or digit becomes `_`, repeated underscores collapsed, truncated to 64 chars; colliding names get a `_2`/`_3` suffix). A blank `toolName` falls back to the normalized `proxyId`. The published catalog changes only after the proxy is deployed again |
+| exposedTools | array | **TOOL_EXPOSE only.** Tool definitions — `proxyId` (target ApiProxy id), `toolName`, `toolDescription`, optional `overrideSchema`, `apiMethodHttpMethod`/`apiMethodPath` (pin to a specific method), `requiredScopes`, `downstreamIdentity` (`SERVICE` \| `DELEGATED`; required on the Standard profile, ignored on Legacy), per-tool `argumentConstraints`, optional `riskTier` (`LOW` \| `MEDIUM` \| `HIGH`; empty = the HTTP method default, read only while `riskPolicy` is set). `toolName` is normalized before it is published in `tools/list` (lowercased, any character other than a letter or digit becomes `_`, repeated underscores collapsed, truncated to 64 chars; colliding names get a `_2`/`_3` suffix). A blank `toolName` falls back to the normalized `proxyId`. The published catalog changes only after the proxy is deployed again |
 | backendServers | array | **PASSTHROUGH only.** The only way to configure a backend target — there is no reference-based alternative. Inline MCP server definitions — up to 10. Each entry is a full connection object: `name`, `endpoint`, `transport` (`HTTP_SSE`), `authScheme` (`BEARER` \| `OAUTH2_CLIENT_CREDENTIALS` \| `OAUTH2_TOKEN_EXCHANGE` \| `MTLS` \| `API_KEY` \| `BASIC` \| `NONE`) plus the matching credential fields (`bearerToken`; `credentialRef`/`tokenEndpoint`/`clientId`/`clientSecret`/`scope` for the two OAuth2 schemes; `tokenExchangeAudience` (optional) for `OAUTH2_TOKEN_EXCHANGE`; `apiKeyHeaderName` and `apiKey` for `API_KEY`; `basicUsername` and `basicPassword` for `BASIC`; `mTLSSettings`), `trustToolAnnotations` (default `false`; `true` = the tool annotations of this server lower the risk tier), `relayElicitation` (default `false`; `true` = relay elicitation requests of this server to a legacy client), `driftPolicy` (`WARN_ONLY` \| `FAIL_CLOSED`), `allowPrivateNetworkEgress`. Server-managed fields (`id`, `discoveredTools`, `toolsParsedAt`, `healthStatus`, `lastHealthCheckAt`, `pinnedCatalogHash`, `driftDetected`) are always read from the server's own persisted state — a client-supplied value for any of them is ignored, never trusted. Multiple entries aggregate behind one endpoint (see [Multi-Target Aggregation](/en/ai-gateway/mcp-gateway#multi-target-aggregation)). PASSTHROUGH mode requires at least one entry |
 | riskPolicy | object | Tool risk policy: an action for each tier — `low`, `medium`, `high` — each one `ALLOW` \| `REQUIRE_APPROVAL` \| `DENY`. An unset tier means `ALLOW`. `null` (default) = the policy is off and every call is allowed. See [Tool Risk Policy and Approval](/en/ai-gateway/mcp-gateway#tool-risk-policy-and-approval) |
 | riskPolicyExemptions | array | Identity rules (same shape as `identityAcl` entries). For a matching caller, `REQUIRE_APPROVAL` becomes `ALLOW`. `DENY` does not change |
