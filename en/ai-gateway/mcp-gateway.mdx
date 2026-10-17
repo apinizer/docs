@@ -139,6 +139,12 @@ The gateway always serves the **last deployed** configuration. Changing a tool n
 
 Passthrough mode does **not** apply this normalization — there the names come from the backend MCP server and Apinizer relays them verbatim. So a `tools/list` response containing a name with uppercase letters (`hotelDetails`, say) did not come from your Expose Tools configuration: it came either from a Passthrough configuration or from a deployment that has not been refreshed yet.
 
+#### Deprecated Operations
+
+When the source API proxy's specification marks an operation as deprecated, the tool stays in `tools/list` and callers can still call it. The gateway starts the tool description with `[Deprecated] `, so the model and the user can see it.
+
+A disabled endpoint is a different case. Its tool also stays in the list. A call to it returns a tool error (`isError` is true) that says the method is not found or disabled. It is not a JSON-RPC error.
+
 ### Passthrough
 
 Forwards MCP calls to one or more external MCP servers, defined directly on the proxy's **MCP Routing** tab — there's nothing to create or reference elsewhere first.
@@ -346,7 +352,7 @@ When an LLM Gateway's model wants to call a tool (tool_use / function calling), 
     Attach the **MCP Call (LLM)** policy to an LLM Gateway's tool-call step.
   </Step>
   <Step title="Define the server">
-    In the **MCP Server (Inline)** section, enter the endpoint, protocol version, authentication scheme (Bearer / OAuth2 Client Credentials / mTLS / None), and capability-cache settings. It carries a single endpoint — there's no failover/multi-server list here; to call more than one external server, add a separate policy instance for each.
+    In the **MCP Server (Inline)** section, enter the endpoint, protocol version, authentication scheme (see [Backend Authentication](#backend-authentication)), and capability-cache settings. It carries a single endpoint — there's no failover/multi-server list here; to call more than one external server, add a separate policy instance for each.
   </Step>
   <Step title="Discover tools">
     The **Discover Tools** button connects to the server, confirms the connection works, and fetches its tool catalog — it runs before you save, so there's no separate "test connection" step.
@@ -360,17 +366,135 @@ This server definition is subject to the same SSRF protection as Passthrough mod
 
 This policy can also be added and updated through the APIops REST API — see [API Reference: Policies](/api-reference/policies/crud/add-policy).
 
+### Backend Authentication
+
+The same authentication schemes are available on an MCP server row of a Passthrough proxy and on the inline server of the **MCP Call (LLM)** / **MCP Call (Fixed)** policies. The same schemes exist on A2A agents (see [A2A Gateway](/en/ai-gateway/a2a-gateway#outbound-authentication)).
+
+| Scheme | What the gateway sends |
+|---|---|
+| **None** | No credential. |
+| **Bearer** | A fixed bearer token in the `Authorization` header. |
+| **OAuth2 Client Credentials** | A token that the gateway gets from the token endpoint with the client ID and secret. |
+| **mTLS (Client Certificate)** | The client certificate of the selected KeyStore. No `Authorization` header. |
+| **API Key (Header)** | The API key in the header you name, for example `X-API-Key`. No `Authorization` header. `Authorization`, `Proxy-Authorization`, `Host`, `Cookie`, `Accept`, `Accept-Encoding`, content and connection headers, `MCP-Protocol-Version` and `Mcp-Session-Id` cannot be used as the header name. |
+| **Basic Authentication** | The username and password as Basic credentials in the `Authorization` header. The username cannot contain a colon. Use an https endpoint. |
+| **OAuth2 Token Exchange (RFC 8693)** | A token for the target. The gateway exchanges the verified token of the caller at the token endpoint of an external authorization server. Only the new token is sent. |
+
+**OAuth2 Token Exchange** works as follows. The Apinizer Credential AS also accepts this grant (see [Token Exchange](/en/develop/policies/token-service/overview#token-exchange-rfc-8693)).
+
+- The caller token must come from an authentication policy of the proxy (JWT, OAuth2 or OIDC) that verified it in the same request. A Basic credential or an unverified header is not used.
+- A request without a verified caller token is refused. The gateway never falls back to its own credential.
+- **Token Exchange Audience** is optional. When you leave it empty, the authorization server uses its default. The gateway sends the client ID and secret with Basic client authentication.
+- The gateway keeps the exchanged token in a shared cache. The cache entry lives until 30 seconds before the earlier of the token expiry and the caller token expiry. When neither expiry is known, the gateway uses the token for that call only.
+- The cache key includes the caller token, the token endpoint, the client, the scope and the audience. One caller never gets the token of another.
+- When the target answers 401 or 403, an MCP server entry is removed from the cache and the call is tried once more. A2A agents are not tried again.
+- Token forwarding (passthrough) does not apply to this scheme.
+- **Fetch tools**, **Discover / Reparse Tools** and the connection test cannot get a token, because they carry no caller token. The connection test only checks the settings. The health status of such a server shows **Unknown**.
+
+#### Discover Auth
+
+The **Discover Auth** button sits next to the endpoint on the server drawer and on the MCP policy screens. It asks the target what it needs and suggests the form values. **Apply to form** puts the suggestion in the form. Nothing is saved, and no credential is sent.
+
+1. The gateway sends an anonymous request to the endpoint. For a server without a fixed protocol version it starts with `server/discover`, and it tries `initialize` when that fails.
+2. When the target answers 401 with a `resource_metadata` address, the gateway reads the protected resource metadata (RFC 9728) and then the authorization server metadata (RFC 8414, then OpenID Connect).
+3. The form shows the suggested scheme, the token endpoint, the scopes, the grant types and the client authentication methods. You enter the client ID and secret (or the key or password) and save.
+
+What you should know about the result:
+
+- The gateway does not suggest a token endpoint when the issuer in the metadata differs from the authorization server address. A note explains why.
+- A note appears when the resource in the metadata differs from the endpoint, when the authorization server has no client credentials grant, when it supports token exchange, and when the target needs a client certificate.
+- A value that would be read as a variable, and a token endpoint that is not https, are dropped. A note tells you.
+- When the target answers without credentials, the current scheme stays, because the server may protect only the tool calls.
+- The discovery runs in the Manager, not in a gateway worker. It only accepts https addresses. It never follows a redirect, and the whole run has a 30-second limit.
+- Loopback, link-local and cloud-metadata addresses are always refused. Only a system administrator can reach other private-network addresses.
+- Discover Auth needs the manage permission of **AI development** or **API management** in the project.
+
 ## Protocol Versions
 
-An MCP Gateway negotiates one of three protocol behaviors, set per proxy on the **MCP Routing** tab (**Routing Mode** panel → **Configure** → **MCP Protocol Version** → **Save**) and applied on the next redeploy:
+An MCP Gateway uses one protocol behavior, set per proxy on the **MCP Routing** tab (**Routing Mode** panel → **Configure** → **MCP Protocol Version** → **Save**) and applied on the next redeploy. This page calls the versions up to `2025-11-25` *legacy* and `2026-07-28` *modern*.
 
 | Version | Behavior |
 |---|---|
 | `2024-11-05` | Legacy HTTP+SSE transport — a `GET` to the proxy's SSE sub-path opens a bounded push channel. |
-| `2025-06-18` | Streamable HTTP — the default for new proxies. Responses carry an `MCP-Protocol-Version` header confirming the negotiated version. |
-| `2026-07-28` | Stateless mode — no `initialize` handshake is required before calling tools. |
+| `2025-03-26`, `2025-06-18`, `2025-11-25` | Streamable HTTP. The three behave the same on the inbound side. `2025-06-18` is the default for new proxies. Responses carry an `MCP-Protocol-Version` header confirming the negotiated version. |
+| `2026-07-28` | Modern protocol. The client sends the protocol version with every request, so it needs no `initialize` handshake. See [Modern Protocol (2026-07-28)](#modern-protocol-2026-07-28). |
 
 If a connecting client requests a version Apinizer doesn't recognize during `initialize`, the proxy falls back to the nearest earlier version it does support and logs a warning, rather than rejecting the request outright.
+
+### Modern Protocol (2026-07-28)
+
+Only a proxy set to `2026-07-28` reads the modern members of a request. Every other proxy handles every request as before.
+
+- **Version in each request.** A modern client writes the protocol version in the request metadata (`_meta`). The gateway serves the request without a session.
+- **`server/discover`.** Returns the supported versions and the capabilities of the gateway. A legacy request gets the normal "method not found" answer.
+- **Unsupported version.** The gateway answers with the JSON-RPC error `-32022`. The error data lists the supported versions and the version that the client asked for.
+- **No `_meta` in the request.** The gateway handles the request as a legacy request. An `initialize` request on a `2026-07-28` proxy gets a legacy version in the answer.
+
+A modern `tools/call` can also end in an input request or a task. Both need an environment that has a JWT signing key, because the gateway signs the values that it gives to the client. Without the key, the gateway refuses these calls with the JSON-RPC error `-32603`.
+
+#### Input Requests (`input_required`)
+
+In **Passthrough** mode, a modern backend server can answer a tool call with `input_required` instead of a result. The answer lists what the server needs from the user. The client collects the values and sends the same `tools/call` again, with the answers and the `requestState` value that it received.
+
+- The gateway passes the answer to the client. It signs the `requestState` value together with the caller, the client, the proxy, the backend server, the tool name and the arguments. The value is valid for 10 minutes.
+- When a different caller, tool or argument set uses the value, the gateway rejects the call with `-32602`.
+- The gateway passes the answers and the backend state to the backend server unchanged.
+
+#### Tasks
+
+A task lets a client start a long tool call and read the result later. The gateway supports the Tasks extension (`io.modelcontextprotocol/tasks`):
+
+- A client must declare the extension in the request metadata of the same request. A modern client that did not declare it gets the error `-32021` ("Missing required client capability") from `tasks/get`, `tasks/update` and `tasks/cancel`. A legacy request gets "method not found".
+- `tools/call` can answer with `resultType: "task"` and a `taskId`. The client reads the state with `tasks/get`. The gateway also uses `tasks/update` to pass user input to a backend task and `tasks/cancel` to cancel.
+- A task id that does not exist, has expired or belongs to another caller gets the same error (`-32602`, "Task not found").
+
+Three kinds of task exist:
+
+| Kind | When it appears | Where the state lives |
+|---|---|---|
+| **Backend task** (Passthrough) | The backend server answers with a task, and the client declared the extension. The gateway signs the task id and passes it on. A client that did not declare the extension gets an error instead. | The backend server. The gateway keeps no state. The finished result passes the output filter of the proxy. |
+| **Gateway task** (Expose Tools) | A client that declared the extension calls a tool, and the call is not finished in 10 seconds. The same call goes on in the background and is not started again. | The gateway. |
+| **Approval task** | A call waits for approval. See [Tool Risk Policy and Approval](#tool-risk-policy-and-approval). | The gateway. |
+
+Gateway task rules:
+
+- A client that did not declare the extension always gets a normal synchronous answer from a slow call. The gateway never turns that call into a task.
+- The gateway writes the task record before it answers. If it cannot write the record, it waits for the call and answers synchronously.
+- A gateway task is limited to 150 seconds. A task that still runs after that becomes failed. The gateway does not run it again, for example after a worker restart. The suggested poll interval is 2 seconds.
+- The gateway keeps a finished task for 7 days, and then removes it. It removes the stored arguments when the task finishes.
+- Background calls count against the same limit of concurrent tool calls as other calls. When the limit is full, the gateway does not start a task and answers with the session-limit error.
+- `tasks/cancel` marks the task as cancelled. It does **not** undo what the call already did. A call that is already running can complete its side effects.
+
+#### Elicitation
+
+*Elicitation* lets a backend server ask the user for more input during a tool call. The gateway supports it only between two parties of the same era:
+
+| Client | Backend server | Result |
+|---|---|---|
+| Modern (`2026-07-28`) | Modern | Supported. The `input_required` answer goes to the client, as described in [Input Requests](#input-requests-input_required). |
+| Legacy (up to `2025-11-25`) | Legacy | Supported in **Passthrough** mode when **Relay elicitation requests** is on for that backend server. Off by default. |
+| Modern | Legacy | Refused with the error **ERR-310**. |
+| Legacy | Modern | Refused with the error **ERR-310**. |
+| Any | Expose Tools mode | Not applicable. The tools of an Apinizer API proxy do not ask for input. |
+
+A call that does not use elicitation is not affected by these limits.
+
+**Relay elicitation requests** is a switch on the backend server drawer (Passthrough). When you turn it on:
+
+- The gateway tells the backend server that the client can answer questions. Without the switch, the gateway sends no such capability and nothing changes for the server.
+- The question goes to the legacy client in an event stream. The client answers with a separate request. This request can reach another worker. The gateway sends the answer to the backend server.
+- The tool call can wait up to **5 minutes** for the answer. The wait holds the request for that time.
+- The gateway relays only the elicitation request. Other requests from the server get "method not found", and the call continues. A ping gets an empty answer.
+- The relayed question carries a signed id that is bound to the caller and the proxy. The answer of another caller is refused.
+
+#### Error Messages for MCP Calls
+
+| Error code | When | JSON-RPC error |
+|---|---|---|
+| **ERR-309** | A tool call needs approval, and the client did not declare the Tasks extension. The error data holds the `approvalId`. | `-32021` |
+| **ERR-310** | The tool asked for user input, and the gateway cannot relay it between the protocol versions of the client and the server. | `-32603` |
+
+The gateway returns these errors as JSON-RPC errors in an HTTP 200 response, as it does for the other MCP refusals. You can change the default text on the **Error Messages** screen. See [Error Messages](/en/admin/system-settings/error-messages).
 
 The `server.json` document is published, unauthenticated, at the proxy's client path plus `/.well-known/mcp/server.json`, following the MCP Registry's `server.json` schema — required so a client can see not just that the gateway exists but where to connect and with which transport, before it has credentials to authenticate. By default it's generated from the proxy's own settings and its request-authentication policy chain; you can hand-write it entirely instead — see [Discovery Document](#discovery-document). It's a best-effort discovery aid: whenever the proxy has any request policy attached, each entry in the document's `remotes[]` array carries the header(s) that chain actually requires, and the same recipe is repeated machine-readably as `_meta["com.apinizer"].auth`, next to a boolean `_meta["com.apinizer"].authRequired` — but the actual scheme enforced is whatever policy chain you've configured (see [Authentication](#authentication)). The Overview tab's [Client Endpoints](#client-endpoints-overview) section surfaces this same address with a copy button and an **Open** link, and — for a `2024-11-05` proxy — the legacy SSE address as well, so you don't have to build either address by hand.
 
@@ -395,9 +519,97 @@ A Passthrough proxy isn't limited to a single backend: define up to **10** MCP s
 
 Authentication for an MCP Gateway is whatever policy chain you attach to it — API Key, JWT, OAuth2, Basic, and so on — the same policies every other proxy type uses. There's no separate per-server auth-mode selector anymore; the proxy's own policy chain runs before a request ever reaches MCP handling. The one deliberate exception is `server.json` itself, which stays reachable without authentication — it only advertises the requirement (through `remotes[].headers` and `_meta["com.apinizer"].auth`/`authRequired`), it never enforces it; enforcement is always the policy chain's job. The exact client-side recipe — which header, which token endpoint, which curl flag — is derived per policy type and spelled out step by step in the [Client Endpoints](#client-endpoints-overview) section.
 
+### Standard MCP Client Profile
+
+Standard MCP clients (for example MCP Inspector or Claude Code) find the authorization server by themselves. They read the protected resource metadata of the MCP server, read the metadata of the authorization server, get a token for this MCP resource and then call the tools. The **Standard MCP OAuth** profile makes the gateway work this way. The default profile is **Legacy**. It keeps the behavior of earlier versions.
+
+You select the profile in the **Routing Mode** panel on the **MCP Routing** tab (**Configure** → **Client Authentication Profile**). The screen shows the prerequisites and the reason for each problem. It does not let you save an unsuitable authentication chain.
+
+:::warning[Upgrade all workers first]
+Upgrade all workers of the environment before you select the Standard profile. An older worker does not publish the protected resource metadata, and it accepts a standard token on a Legacy proxy.
+:::
+
+#### Prerequisites
+
+- The authentication chain of the proxy uses tokens from **one** authorization server: an OAuth2 or JWT policy with **Manage From ACL** (the Apinizer Credential AS), or an OIDC policy (one identity provider).
+- The environment has an access URL. It defines the canonical resource.
+- In Expose Tools mode, the proxy has a **service client**, and each tool has a **Downstream identity** (see below).
+
+The screen reports these problems:
+
+| Problem | Meaning |
+|---|---|
+| No active authentication policy | Add an OAuth2 or JWT policy with Manage From ACL, or an OIDC policy. |
+| Policy issues proxy key tokens | Select Manage From ACL in the policy. |
+| OIDC policy without an issuer | Set the issuer of the identity provider. |
+| OIDC policy does not accept a Bearer token | Turn on Bearer JWT authentication in the policy. |
+| OIDC policy does not verify the JWT signature | Turn on local JWT validation and signature validation (JWKS). |
+| Policy asks for a credential that is not a token | Remove the policy (Basic, API key, Digest, mTLS, SAML or JOSE policies, for example). |
+| Tokens from more than one authorization server | Keep only one. |
+| A JWT policy and an OAuth2 policy in the same chain | Keep only one. |
+
+The chain is read from the policies of the proxy itself. A proxy group policy runs only for a request that comes through the group path.
+
+#### Canonical resource
+
+The canonical resource is the environment access URL, the Apinizer root context and the proxy path, without a trailing slash. The gateway builds it from the configuration. It never uses the `Host` or `X-Forwarded-*` headers of a request. Tokens are issued for this value and are accepted only with this value in `aud`.
+
+#### Protected resource metadata
+
+The gateway publishes the document (RFC 9728) without authentication at the proxy path plus `/.well-known/oauth-protected-resource`. It contains the resource, the one authorization server (`authorization_servers`), the scopes that clients can ask for (`scopes_supported`) and `bearer_methods_supported` (`header`). When the gateway has nothing true to publish, the address answers `404`. A Legacy proxy does not publish it, and the request goes through the normal authentication chain.
+
+The document is under the proxy path only. If you need the address in the RFC 9728 "path insertion" form, the ingress must provide it. A browser-based client such as MCP Inspector needs the CORS settings of the proxy to be open.
+
+The gateway answers an unauthorized request with a standard `WWW-Authenticate` header that names this document:
+
+| Situation | Answer |
+|---|---|
+| No token | `401` with `Bearer resource_metadata="…"`. |
+| Invalid token | `401` with `error="invalid_token"` and `resource_metadata`. |
+| A tool needs a scope the token does not have (Expose Tools) | `403` with `error="insufficient_scope"`, the `scope` the client can ask for, and `resource_metadata`. |
+
+#### Authorization server metadata
+
+- **Apinizer Credential AS.** The metadata (RFC 8414) is at `/credential/.well-known/openid-configuration`. It lists the token endpoint, the keys, introspection and revocation, the `client_credentials` and token exchange grants, and the client authentication methods `client_secret_basic` and `client_secret_post`. The issuer comes from the configured access URL, and it is equal to the `authorization_servers` value of the protected resource metadata. The Credential AS has no authorization endpoint, because interactive sign-in is not in this release. The older `oauth-authorization-server` document does not change.
+- **Identity provider.** The identity provider publishes its own metadata. The policy issuer is the address that the protected resource metadata names.
+
+#### Getting a token
+
+- **Machine to machine (Credential AS).** The client sends a `client_credentials` request to `/credential/token` with one `resource` parameter (RFC 8707) that equals the canonical resource of the proxy. The token is for this resource only (`aud`). Its format (JWT or opaque) follows the policy of the proxy. It has no refresh token. A request without `resource`, with another grant type or with an unknown resource works as before and gives a legacy token. The Standard proxy refuses a legacy token, and a Legacy proxy refuses a standard token.
+- **Identity provider.** The client registers with the identity provider and gets a token there. The `aud` claim of the token must contain the canonical resource. Some identity providers ignore the `resource` parameter. For example, Keycloak needs an Audience mapper that adds the canonical resource to `aud`. The gateway verifies the JWT locally with the keys (JWKS) of the provider. It reads the token only from the `Authorization` header. It does not accept an opaque token from the provider. The gateway does not read roles from the `scope` claim, and it does not read an array in `scp`.
+
+:::note
+Interactive sign-in at the Credential AS is not in this release. Client ID metadata documents (CIMD) and public-client registration are not in this release either. The metadata does not advertise them (`client_id_metadata_document_supported` is absent), and a `client_id` in the form of an https URL is refused as an unregistered client (`invalid_client`). With an identity provider, the provider registers the client. At the Credential AS, the client is a confidential client that you create beforehand.
+:::
+
+#### Scopes and tool access
+
+In the Standard profile, the scope in the token is a **wire scope**. A role gets its wire scope in its **OAuth Scope Name** field. A client asks for the scope name, not for the role name. A caller can use a tool only when both are true: the token contains the wire scope of the role that the tool needs, and the user holds that role **now**. A role without an OAuth scope name opens no tool. The scope name must be unique among the roles that a client of the project can hold. The [Identity Access Rules](#identity-based-access-control) apply in addition.
+
+#### Calls to the tool target
+
+In the Standard profile, the gateway does not pass the `Authorization` header of the caller to the target of an Expose Tools tool. It creates the token for the target itself. You set this for each tool in **Downstream identity**:
+
+- **Service.** The gateway calls the target as the **service client** of the proxy. The user is recorded only for audit.
+- **Delegated user.** The gateway calls the target as the signed-in user, acting through the service client. The call carries both. The target must accept delegated tokens, and the service client must be in its **Allowed agents** list. The gateway uses the token exchange grant of the Credential AS in-process. See [Token Exchange](/en/develop/policies/token-service/overview#token-exchange-rfc-8693). A user from an identity provider is delegated only when the provider maps the user to an existing API client. Otherwise the call is refused.
+
+A tool argument or a client header cannot set the identity of the call: the gateway removes the `Authorization` value of the caller and any argument that is defined as a header.
+
+#### User context in logs and limits
+
+For a Standard profile call, the traffic log carries the user and the client of the token:
+
+| Log field | Value |
+|---|---|
+| `usub` | The stable user ID: the `sub` of an identity provider token. For a Credential AS token, the client itself. |
+| `uids` | The identity source: the issuer of an identity provider token, or `apinizer` for a Credential AS token. |
+| `ocid` | The OAuth client that got the token (`azp`, else `client_id`). |
+
+The result class of a tool call (`mcprc`) is separate. See [Logging and Analytics](#logging-and-analytics). A Limit Plan can use the OAuth client with the context value **OAuth Client ID (standard MCP token)**. The user stays the authenticated identity, so the user chain of the Limit Plan works as for other proxies.
+
 ### Identity-Based Access Control
 
-Optionally, restrict tool visibility by the caller's credential, role, or organization — in **Passthrough** mode only; Expose Tools mode never evaluates this list, and instead relies solely on each tool's own required-scope check (see [Expose Tools](#expose-tools)). Each rule allows or denies specific tool names for the principal it matches; once at least one rule is configured, a caller not covered by any rule sees nothing in the Passthrough tool list (default-deny) and can't call any tool either. This is set on the proxy's MCP routing configuration — today through the Management REST API rather than a Manager UI screen:
+Optionally, restrict tool visibility by the caller's credential, role, or organization. The rules apply in both modes. In **Expose Tools** mode a caller must also pass the tool's own required-scope check (see [Expose Tools](#expose-tools)). Each rule allows or denies specific tool names for the principal it matches; once at least one rule is configured, a caller not covered by any rule sees nothing in the tool list (default-deny) and can't call any tool either. A name in a deny list always wins. You set the rules in the **Identity Access Rules** drawer on the **MCP Routing** tab, or through the Management REST API:
 
 ```json
 {
@@ -414,7 +626,28 @@ Optionally, restrict tool visibility by the caller's credential, role, or organi
 
 ### Argument Constraints
 
-Attach validation rules to a tool's arguments — a required field, a maximum string length, an allowed value list, or a regular expression — matched with dot-notation against the argument object (for example `user.email`). A malformed rule is skipped rather than blocking all traffic through the tool. Regular-expression rules run under a hard ceiling (a 4096-character input cap and a 200ms evaluation deadline) so a crafted value can't turn a rule into a denial-of-service vector.
+Attach validation rules to a tool's arguments. The gateway checks the rules before it sends the call, and it rejects the call when a rule fails.
+
+You set the rules on the **MCP Routing** tab:
+
+- **Expose Tools:** open the tool in the tool drawer and use its **Argument constraints** editor.
+- **Passthrough:** use the **Argument constraints** panel. Add a tool and enter its name exactly as `tools/list` shows it. The match is case-sensitive. A tool that two servers use appears as `server__tool`.
+
+Each rule has an **Argument path**, a **Rule** type and a **Value**:
+
+| Rule | Value | The call is rejected when |
+|---|---|---|
+| **Regex (full match)** | A regular expression | The argument does not match the whole expression. |
+| **Maximum length** | A whole number, 0 or greater | The text of the argument is longer. |
+| **Allowed values** | Values separated by commas | The argument is not one of the values. |
+| **Required** | None | The argument is missing. |
+
+- The argument path is a list of property names separated by dots, for example `user.email`. Array indexes (`items.0.name`) and wildcards (`*`) are not supported.
+- Regex, maximum length and allowed values check an argument only when it is present. Add a **Required** rule to make an argument mandatory.
+- The gateway skips a saved rule that is not valid (an empty path, a regular expression that does not compile) and does not block the traffic. The screen does not save such a rule, so you see the problem before the save. Environment variables (`${var}`) are resolved at run time and are not checked on the screen.
+- Regular-expression rules run under a hard ceiling (a 4096-character input cap and a 200ms evaluation deadline) so a crafted value can't turn a rule into a denial-of-service vector.
+
+The same rules are available as JSON in the Management REST API:
 
 ```json
 {
@@ -439,6 +672,68 @@ Cap how often a tool can be called per minute, hour, or day — scoped per tool,
   "callQuota": { "scope": "PER_CREDENTIAL", "period": "HOUR", "limit": 1000 }
 }
 ```
+
+### Tool Risk Policy and Approval
+
+The tool risk policy gives every tool call a risk tier and sets what the gateway does for each tier. It works in both modes and is off by default. While it is off, every call is allowed and no tier is computed.
+
+#### Risk tiers
+
+A tool gets one of three tiers: **Low**, **Medium** or **High**. The gateway takes the first rule that matches:
+
+1. **Your setting.** In Expose Tools mode, the **Risk tier** field of the tool. In Passthrough mode, a row in **Tool risk tiers** for the tool name as `tools/list` shows it.
+2. **Trusted tool annotations.** When **Trust tool annotations** is on for the backend server: a read-only tool is Low, a destructive tool is High, and any other tool is Medium.
+3. **Untrusted tool annotations.** When **Trust tool annotations** is off (the default), the annotations can only raise the tier. A destructive tool is High. A read-only mark does not lower the tier. When a tool is marked both read-only and destructive, it is High.
+4. **Default.** In Expose Tools mode, the HTTP method of the operation: GET and HEAD are Low, DELETE is High and other methods are Medium. In Passthrough mode, Medium.
+
+A tool without annotations keeps the default tier. Turn **Trust tool annotations** on only for a server that you control.
+
+#### Actions
+
+For each tier, you choose one of three actions:
+
+| Action | What the gateway does |
+|---|---|
+| **Allow** | The call goes on. |
+| **Require approval** | The call waits until a manager approves it. |
+| **Deny** | The gateway rejects the call. |
+
+When you turn the policy on, the screen starts with Low = Allow, Medium = Allow and High = Require approval. You can change each one.
+
+**Exemptions** are identity rules (credential, role or organization). For a matching caller, **Require approval** becomes **Allow**. **Deny** does not change. The exemption checks only the identity, so it applies to every tool.
+
+The risk check runs after the scope and identity rules, the argument constraints and the call quota, and just before the call is sent.
+
+#### Approval flow
+
+1. The call needs approval. The gateway writes an approval request and answers the client at once:
+   - A client that declared the Tasks extension gets a task in the state "waiting for approval".
+   - Any other client gets the error `-32021` with an `approvalId` (**ERR-309**).
+2. A manager approves or rejects the request in **Pending tool approvals** (see below).
+3. After the approval, the client reads the task with `tasks/get`, or sends the same call again. The gateway then runs the call **one time**. Nothing runs the call by itself.
+4. A new attempt of the same call before the decision does not create a second request. The same caller can hold at most **20** open approval requests on one proxy. A further call is refused.
+
+Rules for the approval:
+
+- **15 minutes.** The request is valid for 15 minutes from the moment of the request. The decision and the single run must both happen in that time. After that the request expires.
+- **Rejected.** For 15 minutes after the rejection, the same call is refused with a policy error. After that, a new attempt creates a new request.
+- **Bound to the call.** The approval belongs to the caller, the client, the proxy, the tool and the exact arguments. It also belongs to the operation that the tool resolves to: in Expose Tools mode the target proxy, the HTTP method and the path; in Passthrough mode the backend server and its tool name. If any of these has changed when the call runs, the gateway does not run it, and the task fails.
+- **Checked again at run time.** The gateway checks the scope, the identity rules and the risk policy again when it runs the approved call. A policy that now denies the tool stops the call.
+- **Not an approval.** An answer to an elicitation or the opening of a link is never an approval. Only a manager in the Manager makes the decision.
+- **Anonymous proxies.** When the proxy has no authentication, the gateway cannot tie the approval to an identity. Every call with the same arguments uses the same approval. Use the risk policy with an authentication policy.
+
+#### Pending tool approvals
+
+The **Pending tool approvals** panel on the **MCP Routing** tab lists the requests that wait for a decision. It shows the tool, the risk tier, the caller, the client ID, the operation (a summary of the resolved target), the request time and the expiry time. Select **Approve** or **Reject** and confirm.
+
+- The panel shows the operation summary and the tool. It does not show the argument values.
+- You need the manage permission of **AI development** or **API management** in the project.
+- Every decision is written to the audit log.
+
+#### Traffic log and alarms
+
+- The traffic detail of a call shows **Tool approval** with the state: Pending, Approved, Rejected or Expired. The same value is a log field named `mcpap`. The Elasticsearch template carries it after the upgrade.
+- Two alarm trigger types watch the approvals: **MCP Tool Approval Pending Count** (the requests that wait now) and **MCP Tool Approval Rejected Count** (the rejections of the last hour). Both use the Project scope. See [Alarms](/en/monitor/alarm).
 
 ### Catalog Drift Protection
 
@@ -527,11 +822,13 @@ Every MCP call is recorded in your traffic logs with the request's correlation I
 
 An MCP Gateway's own detail page carries this same trace/traffic/analytics view under its **Trace**, **Traffic**, and **Analytics** tabs — so you don't have to leave the proxy to inspect its recent calls or trends.
 
-On the **Traffic** tab — and the general API Traffic list — selecting **Detailed View** for an MCP call opens the same right-side drawer used for LLM Gateway calls, instead of a separate dialog. The drawer's last tab is named for whatever the call actually carries: when the record includes AI usage data, that tab appears as **LLM Insights**; otherwise it takes the name **MCP Details** (or **A2A Details** for A2A traffic) and shows the tool name, the JSON-RPC id, and the outbound tool names/call count recorded for that request. If a call carries neither AI usage data nor any of these audit fields — a discovery request, for example — this last tab doesn't appear at all. REST, SOAP, and every other proxy type keep opening their call detail in the original dialog.
+On the **Traffic** tab — and the general API Traffic list — selecting **Detailed View** for an MCP call opens the same right-side drawer used for LLM Gateway calls, instead of a separate dialog. The drawer's last tab is named for whatever the call actually carries: when the record includes AI usage data, that tab appears as **LLM Insights**; otherwise it takes the name **MCP Details** (or **A2A Details** for A2A traffic) and shows the tool name, the JSON-RPC id, the outbound tool names/call count recorded for that request, and — for a call that the [tool risk policy](#tool-risk-policy-and-approval) held for approval — the **Tool approval** state. If a call carries neither AI usage data nor any of these audit fields — a discovery request, for example — this last tab doesn't appear at all. REST, SOAP, and every other proxy type keep opening their call detail in the original dialog.
 
 An inbound MCP `tools/call` row now carries the address it was routed to in the **Routing** column — the source API Proxy path reached through the gateway in Expose Tools mode, or the MCP server host:port in Passthrough mode — tagged with a **tool call** badge in place of the generic **direct** badge. Every JSON-RPC refusal the gateway returns for a call (HTTP 200 with a JSON-RPC error body, as the MCP spec requires) is also classified for the traffic list: client/policy refusals — an unknown tool, an insufficient scope, a call quota, an argument-rule violation, or an output-filter block — are recorded as **Blocked**, while gateway/backend faults — an unavailable tool backend proxy, a failed tool execution, or a session limit — are recorded as **Error**, with the error type kept alongside. The row's Routing badge reads **refused at gateway** or **gateway error** to match. This means a refused call shows up under the traffic list's Blocked/Error filters and in analytics like any other refused request, even though the HTTP status code returned to the client stays 200. See [Routing Status Badges](/en/analytic/api-traffic#routing-status-badges) for the full badge list.
 
 The same rule now extends to every MCP call the gateway answers itself, not just `tools/call`: an `initialize`, `tools/list`, or `ping` handled in Expose Tools mode shows the proxy's own MCP endpoint URL in the Routing column instead of an empty address. In Passthrough mode, `tools/list` is a real call to the backend MCP server — live discovery, not a cached list — so its row shows the target MCP server's endpoint URL (with any query string and embedded credentials stripped before logging), the same way a Passthrough `tools/call` does.
+
+The new MCP log fields are `mcpap` (tool approval state), `usub`, `uids` and `ocid` (user context of the [Standard profile](#standard-mcp-client-profile)) and `mcprc` (result class of a tool call: `OK`, `TOOL_ERROR`, `JSONRPC_ERROR`, `TRANSPORT` or `POLICY_REJECT`). The Elasticsearch, MongoDB, GELF and JSON log connectors write them. The column list of the **SQL/JDBC traffic-log connector** does not change in this release, so these fields are not stored there.
 
 ### Outbound Tool Names: an Audit Trail Independent of Trace
 

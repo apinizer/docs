@@ -203,6 +203,12 @@ Bir istemcinin `siparis_sorgula` adlı bir aracı çağırma isteği şu şekild
 }
 ```
 
+#### Kullanım Dışı Operasyonlar
+
+Kaynak API proxy'nin tanım dosyası bir operasyonu kullanım dışı (deprecated) olarak işaretlediyse araç `tools/list` yanıtında kalır ve çağrılabilir. Gateway araç açıklamasını `[Deprecated] ` ile başlatır. Böylece model ve kullanıcı durumu görür. Araç listeden çıkarılmaz.
+
+Devre dışı endpoint ayrı bir durumdur. Aracı da listede kalır. Çağrı, "metot bulunamadı veya devre dışı" diyen bir araç hatası döndürür (`isError` true olur). Bu bir JSON-RPC hatası değildir.
+
 ### Passthrough
 
 Proxy'ye gelen her MCP çağrısını, arka uç bir MCP sunucusuna olduğu gibi iletir. Bir **araç izin listesi** ile hangi araçların dışarıya açılacağı daraltılabilir:
@@ -377,7 +383,7 @@ Bir LLM Gateway'in LLM'i bir araç çağırmak istediğinde (tool_use / function
     Bir LLM Gateway'in araç çağırma adımına **MCP Çağrısı (LLM)** politikasını ekleyin.
   </Step>
   <Step title="Sunucuyu tanımlayın">
-    **MCP Sunucusu (Satır İçi)** bölümünde adresi, protokol sürümünü, kimlik doğrulama şemasını (Bearer / OAuth2 Client Credentials / mTLS / Yok) ve capability cache ayarlarını girin. Tek bir endpoint taşır — failover/çoklu-sunucu listesi yoktur; birden çok dış sunucuya araç çağrısı için ayrı politika örnekleri eklenir.
+    **MCP Sunucusu (Satır İçi)** bölümünde adresi, protokol sürümünü, kimlik doğrulama şemasını ([Arka Uç Kimlik Doğrulama](#arka-uc-kimlik-dogrulama) bölümüne bakın) ve capability cache ayarlarını girin. Tek bir endpoint taşır — failover/çoklu-sunucu listesi yoktur; birden çok dış sunucuya araç çağrısı için ayrı politika örnekleri eklenir.
   </Step>
   <Step title="Araçları keşfedin">
     **Araçları Keşfet** butonu sunucuya bağlanır, bağlantının çalıştığını doğrular ve araç kataloğunu getirir — kaydetmeden önce çalışır, ayrı bir "bağlantıyı test et" adımı yoktur.
@@ -391,17 +397,135 @@ Bu sunucu tanımı da Passthrough modundakiyle aynı SSRF korumasına tabidir (b
 
 Bu politika da APIops REST API ile eklenip güncellenebilir; bkz. [API Referansı: Policies](/api-reference/policies/crud/add-policy).
 
+### Arka Uç Kimlik Doğrulama {#arka-uc-kimlik-dogrulama}
+
+Aynı kimlik doğrulama şemaları, Passthrough proxy'nin MCP sunucu satırında ve **MCP Çağrısı (LLM)** / **MCP Çağrısı (Sabit)** politikalarının satır içi sunucusunda kullanılabilir. A2A ajanlarında da aynı şemalar vardır (bkz. [A2A Gateway](/tr/ai-gateway/a2a-gateway#giden-kimlik-dogrulama)).
+
+| Şema | Gateway'in gönderdiği |
+|---|---|
+| **Yok** | Kimlik bilgisi göndermez. |
+| **Bearer Token** | `Authorization` başlığında sabit bir bearer token. |
+| **OAuth2 Client Credentials** | Gateway'in client ID ve secret ile token adresinden aldığı token. |
+| **mTLS (İstemci Sertifikası)** | Seçilen KeyStore'daki istemci sertifikası. `Authorization` başlığı gönderilmez. |
+| **API Anahtarı (Başlık)** | API anahtarı, adını verdiğiniz başlıkta (örneğin `X-API-Key`). `Authorization` başlığı gönderilmez. `Authorization`, `Proxy-Authorization`, `Host`, `Cookie`, `Accept`, `Accept-Encoding`, içerik ve bağlantı başlıkları, `MCP-Protocol-Version` ve `Mcp-Session-Id` başlık adı olarak kullanılamaz. |
+| **Basic Kimlik Doğrulama** | `Authorization` başlığında Basic kimlik bilgisi olarak kullanıcı adı ve parola. Kullanıcı adı iki nokta (`:`) içeremez. https uç noktası kullanın. |
+| **OAuth2 Token Exchange (RFC 8693)** | Hedef için üretilmiş bir token. Gateway, çağıranın doğrulanmış token'ını dış bir yetkilendirme sunucusunun token adresinde değiştirir. Yalnız yeni token gönderilir. |
+
+**OAuth2 Token Exchange** şöyle çalışır. Apinizer Credential AS de bu grant'ı kabul eder (bkz. [Token Exchange](/tr/develop/politikalar/token-service/genel-bakis#token-exchange-rfc-8693)).
+
+- Çağıranın token'ı, proxy'nin bir kimlik doğrulama politikası (JWT, OAuth2 veya OIDC) tarafından aynı istekte doğrulanmış olmalıdır. Basic kimlik bilgisi ya da doğrulanmamış ham başlık kullanılmaz.
+- Doğrulanmış çağıran token'ı olmayan istek reddedilir. Gateway kendi kimlik bilgisine geri dönmez.
+- **Token Exchange Audience** isteğe bağlıdır. Boş bırakırsanız yetkilendirme sunucusunun varsayılanı kullanılır. Gateway, client ID ve secret'ı Basic istemci kimlik doğrulamasıyla gönderir.
+- Gateway değiştirilmiş token'ı ortak bir önbellekte tutar. Kayıt, token süresi ile çağıran token süresinden erken olanın bitişinden 30 saniye önce sona erer. İki süre de bilinmiyorsa token yalnız o çağrıda kullanılır.
+- Önbellek anahtarı çağıran token'ı, token adresini, istemciyi, scope'u ve audience değerini içerir. Bir çağıran başka bir çağıranın token'ını almaz.
+- Hedef 401 veya 403 dönerse MCP sunucusu için önbellek kaydı silinir ve çağrı bir kez daha denenir. A2A ajanlarında yeniden deneme yoktur.
+- Token iletme (passthrough) bu şemada uygulanmaz.
+- **Araçları getir**, **Araçları Keşfet / Yeniden Tara** ve bağlantı testi token alamaz, çünkü çağıran token'ı taşımazlar. Bağlantı testi yalnız ayarları denetler. Bu sunucunun sağlık durumu **Unknown** görünür.
+
+#### Auth Keşfet
+
+**Auth Keşfet** düğmesi, sunucu çekmecesinde adresin yanında ve MCP politika ekranlarında bulunur. Düğme hedefe ne gerektiğini sorar ve form değerlerini önerir. **Forma uygula** öneriyi forma yazar. Hiçbir şey kaydedilmez ve kimlik bilgisi gönderilmez.
+
+1. Gateway, adrese kimliksiz bir istek gönderir. Protokol sürümü sabitlenmemiş sunucuda önce `server/discover` dener. Olmazsa `initialize` dener.
+2. Hedef, `resource_metadata` adresiyle 401 dönerse gateway korunan kaynak meta verisini (RFC 9728), sonra yetkilendirme sunucusu meta verisini (RFC 8414, sonra OpenID Connect) okur.
+3. Form önerilen şemayı, token adresini, scope'ları, grant türlerini ve istemci kimlik doğrulama yöntemlerini gösterir. Client ID ve secret'ı (veya anahtar ya da parolayı) girin ve kaydedin.
+
+Sonuç hakkında bilmeniz gerekenler:
+
+- Meta verideki issuer, yetkilendirme sunucusu adresinden farklıysa gateway token adresi önermez. Bir not nedenini açıklar.
+- Meta veri başka bir kaynağı gösteriyorsa, yetkilendirme sunucusu client credentials grant sunmuyorsa, token exchange destekliyorsa ve hedef istemci sertifikası istiyorsa bir not görünür.
+- Değişken olarak okunacak bir değer ve https olmayan bir token adresi forma yazılmaz. Bir not sizi bilgilendirir.
+- Hedef kimlik bilgisi olmadan yanıt verirse mevcut şema korunur, çünkü sunucu yalnız araç çağrılarını koruyor olabilir.
+- Keşif, gateway worker'ında değil Manager'da çalışır. Yalnız https adreslerini kabul eder. Yönlendirmeyi (redirect) izlemez. Tüm çalışma için 30 saniyelik sınır vardır.
+- Loopback, link-local ve bulut metadata adresleri her zaman reddedilir. Diğer özel ağ adreslerine yalnız sistem yöneticisi erişebilir.
+- Auth Keşfet için projede **AI geliştirme** veya **API yönetimi** MANAGE yetkisi gerekir.
+
 ## Protokol Sürümleri
 
-Her MCP Gateway'inin istemcilere bildirdiği protokol sürümü ayrı ayrı yapılandırılabilir (**MCP Routing** sekmesi → **Routing Modu** bölümü → **Yapılandır** → **MCP Protokol Sürümü** → **Kaydet**):
+Bir MCP Gateway tek bir protokol davranışıyla çalışır. Davranışı proxy başına **MCP Routing** sekmesinde seçersiniz (**Routing Modu** bölümü → **Yapılandır** → **MCP Protokol Sürümü** → **Kaydet**). Seçim bir sonraki redeploy ile uygulanır. Bu sayfada `2025-11-25` ve öncesi sürümlere *legacy*, `2026-07-28` sürümüne *modern* denir.
 
 | Sürüm | Davranış |
 |-------|----------|
 | `2024-11-05` | Eski (legacy) taşıma — HTTP + Sunucu Tarafından Gönderilen Olaylar (SSE), `GET .../sse` push kanalı |
-| `2025-06-18` | Streamable HTTP, yanıtlarda `MCP-Protocol-Version` başlığı — **varsayılan** |
-| `2026-07-28` | Stateless taşıma — `initialize` el sıkışması gerekmez |
+| `2025-03-26`, `2025-06-18`, `2025-11-25` | Streamable HTTP. Gelen istek tarafında üçü aynı davranır. `2025-06-18` **varsayılandır**. Yanıtlarda `MCP-Protocol-Version` başlığı bulunur. |
+| `2026-07-28` | Modern protokol. İstemci her istekte protokol sürümünü gönderir, bu yüzden `initialize` el sıkışması gerekmez. Bkz. [Modern Protokol](#modern-protokol). |
 
 Sürüm değişikliği proxy'yi yeniden deploy etmenizi gerektirir. Alan boş bırakılırsa gateway varsayılanı (`2025-06-18`) kullanılır; tanınmayan/hatalı yazılmış bir sürüm değeri, en yakın alt sürüme düşürülür ve bu durum bir uyarı olarak loglanır — istek reddedilmez.
+
+### Modern Protokol {#modern-protokol}
+
+İsteğin modern üyelerini yalnız `2026-07-28` sürümündeki proxy okur. Diğer tüm proxy'ler her isteği eskisi gibi işler.
+
+- **Her istekte sürüm.** Modern istemci protokol sürümünü istek meta verisine (`_meta`) yazar. Gateway isteği oturum olmadan işler.
+- **`server/discover`.** Desteklenen sürümleri ve gateway yeteneklerini döndürür. Legacy istek bu metot için olağan "metot bulunamadı" yanıtını alır.
+- **Desteklenmeyen sürüm.** Gateway `-32022` JSON-RPC hatasıyla yanıt verir. Hata verisi desteklenen sürümleri ve istemcinin istediği sürümü listeler.
+- **İstekte `_meta` yoksa.** Gateway isteği legacy istek olarak işler. `2026-07-28` proxy'sindeki `initialize` isteği, yanıtta legacy bir sürüm alır.
+
+Modern bir `tools/call` bir girdi isteğiyle ya da bir task ile de bitebilir. İkisi için de ortamda bir JWT imzalama anahtarı olmalıdır, çünkü gateway istemciye verdiği değerleri imzalar. Anahtar yoksa gateway bu çağrıları `-32603` JSON-RPC hatasıyla reddeder.
+
+#### Girdi İstekleri (`input_required`) {#girdi-istekleri}
+
+**Passthrough** modunda modern bir arka uç sunucu, araç çağrısına sonuç yerine `input_required` ile yanıt verebilir. Yanıt, sunucunun kullanıcıdan ne istediğini listeler. İstemci değerleri toplar ve aynı `tools/call` isteğini, yanıtlarla ve aldığı `requestState` değeriyle yeniden gönderir.
+
+- Gateway yanıtı istemciye iletir. `requestState` değerini çağıran, istemci, proxy, arka uç sunucu, araç adı ve argümanlarla birlikte imzalar. Değer 10 dakika geçerlidir.
+- Farklı bir çağıran, araç ya da argüman kümesi değeri kullanırsa gateway çağrıyı `-32602` ile reddeder.
+- Gateway yanıtları ve arka uç durumunu arka uç sunucuya değiştirmeden iletir.
+
+#### Task'lar
+
+Task, istemcinin uzun bir araç çağrısını başlatıp sonucu sonra okumasını sağlar. Gateway Tasks uzantısını (`io.modelcontextprotocol/tasks`) destekler:
+
+- İstemci uzantıyı aynı isteğin meta verisinde bildirmelidir. Uzantıyı bildirmeyen modern istemci `tasks/get`, `tasks/update` ve `tasks/cancel` için `-32021` ("Missing required client capability") hatası alır. Legacy istek "metot bulunamadı" yanıtı alır.
+- `tools/call`, `resultType: "task"` ve bir `taskId` ile yanıt verebilir. İstemci durumu `tasks/get` ile okur. Gateway ayrıca arka uç task'ına kullanıcı girdisi iletmek için `tasks/update`, iptal için `tasks/cancel` kullanır.
+- Var olmayan, süresi dolmuş ya da başka bir çağırana ait task kimliği aynı hatayı alır (`-32602`, "Task not found").
+
+Üç tür task vardır:
+
+| Tür | Ne zaman oluşur | Durum nerede tutulur |
+|---|---|---|
+| **Arka uç task'ı** (Passthrough) | Arka uç sunucu task ile yanıt verir ve istemci uzantıyı bildirmiştir. Gateway task kimliğini imzalar ve iletir. Uzantıyı bildirmeyen istemci hata alır. | Arka uç sunucu. Gateway durum tutmaz. Biten sonuç proxy'nin çıktı filtresinden geçer. |
+| **Gateway task'ı** (Araçları Aç) | Uzantıyı bildiren istemci bir aracı çağırır ve çağrı 10 saniyede bitmez. Aynı çağrı arka planda sürer, yeniden başlatılmaz. | Gateway. |
+| **Onay task'ı** | Çağrı onay bekler. Bkz. [Araç Risk Politikası ve Onay](#arac-risk-politikasi-ve-onay). | Gateway. |
+
+Gateway task kuralları:
+
+- Uzantıyı bildirmeyen istemci yavaş bir çağrıda her zaman normal eşzamanlı yanıt alır. Gateway o çağrıyı task'a çevirmez.
+- Gateway task kaydını yanıt vermeden önce yazar. Kaydı yazamazsa çağrıyı bekler ve eşzamanlı yanıt verir.
+- Gateway task'ı en çok 150 saniye sürebilir. Bu süreden sonra hâlâ çalışıyorsa task başarısız olur. Gateway task'ı yeniden çalıştırmaz (örneğin worker yeniden başladıysa). Önerilen yoklama aralığı 2 saniyedir.
+- Gateway biten task'ı 7 gün saklar, sonra siler. Task bitince saklanan argümanları siler.
+- Arka plan çağrıları diğer çağrılarla aynı eşzamanlı araç çağrısı sınırına sayılır. Sınır doluysa gateway task başlatmaz ve oturum sınırı hatasıyla yanıt verir.
+- `tasks/cancel` task'ı iptal edilmiş olarak işaretler. Çağrının yaptığı işi **geri almaz**. Çalışmakta olan bir çağrı yan etkilerini tamamlayabilir.
+
+#### Elicitation
+
+*Elicitation*, arka uç sunucunun araç çağrısı sırasında kullanıcıdan ek girdi istemesini sağlar. Gateway bunu yalnız aynı dönemdeki iki taraf arasında destekler:
+
+| İstemci | Arka uç sunucu | Sonuç |
+|---|---|---|
+| Modern (`2026-07-28`) | Modern | Desteklenir. `input_required` yanıtı istemciye gider ([Girdi İstekleri](#girdi-istekleri) bölümüne bakın). |
+| Legacy (`2025-11-25` ve öncesi) | Legacy | **Passthrough** modunda, o arka uç sunucuda **Elicitation isteklerini aktar** açıksa desteklenir. Varsayılan kapalıdır. |
+| Modern | Legacy | **ERR-310** hatasıyla reddedilir. |
+| Legacy | Modern | **ERR-310** hatasıyla reddedilir. |
+| Herhangi | Araçları Aç modu | Uygulanmaz. Apinizer API proxy araçları girdi istemez. |
+
+Elicitation kullanmayan çağrılar bu sınırlardan etkilenmez.
+
+**Elicitation isteklerini aktar**, arka uç sunucu çekmecesindeki (Passthrough) bir anahtardır. Açtığınızda:
+
+- Gateway arka uç sunucuya istemcinin soru yanıtlayabildiğini bildirir. Anahtar kapalıyken gateway bu yeteneği göndermez ve sunucu için hiçbir şey değişmez.
+- Soru, legacy istemciye bir olay akışıyla gider. İstemci yanıtı ayrı bir istekle gönderir. Bu istek başka bir worker'a gidebilir. Gateway yanıtı arka uç sunucuya iletir.
+- Araç çağrısı yanıt için en çok **5 dakika** bekleyebilir. Bekleme boyunca istek açık kalır.
+- Gateway yalnız elicitation isteğini aktarır. Sunucunun diğer istekleri "metot bulunamadı" yanıtı alır ve çağrı sürer. Ping boş yanıt alır.
+- Aktarılan soru, çağırana ve proxy'ye bağlı imzalı bir kimlik taşır. Başka bir çağıranın yanıtı reddedilir.
+
+#### MCP Çağrıları için Hata Mesajları
+
+| Hata kodu | Ne zaman | JSON-RPC hatası |
+|---|---|---|
+| **ERR-309** | Araç çağrısı onay gerektirir ve istemci Tasks uzantısını bildirmemiştir. Hata verisinde `approvalId` bulunur. | `-32021` |
+| **ERR-310** | Araç kullanıcıdan girdi istedi ve gateway bunu istemci ile sunucunun protokol sürümleri arasında aktaramıyor. | `-32603` |
+
+Gateway bu hataları, diğer MCP reddi yanıtlarında olduğu gibi HTTP 200 yanıtında JSON-RPC hatası olarak döndürür. Varsayılan metni **Hata Mesajları** ekranından değiştirebilirsiniz. Bkz. [Hata Mesajları](/tr/admin/system-settings/hata-mesajlari).
 
 ## Deployment Bilgileri
 
@@ -426,10 +550,23 @@ Passthrough modunda, **MCP Routing** sekmesindeki satır içi sunucu listesine e
 
 Kimlik doğrulama artık **proxy'nin normal politika zincirinden** gelir — JWT, OIDC, API Anahtarı, Basic gibi mevcut tüm auth politikaları MCP Gateway'lerinde de kullanılabilir; ayrı bir "MCP kimlik doğrulama modu" yoktur. Zincirdeki her aktif politikanın istemciden ne beklediği tek bir yerden türetilir ve iki yüzeyde aynı şekilde kullanılır: **Overview** sekmesindeki [Kimlik Doğrulama](#kimlik-doğrulama) bölümü ve `server.json` belgesi — biri değişince diğeri asla farklı bir şey söylemez. Discovery belgesi (`.well-known/mcp/server.json`, MCP Registry server.json biçiminde) bu zincirden **muaftır** ve her zaman açık erişimlidir; yalnızca başlıkta taşınabilen şemaların (Basic, Bearer API anahtarı, başlıkta taşınan API anahtarı, JWT/OAuth2/OIDC token'ı) beklediği başlığı `remotes[].headers` altında bildirir ve genel durumu `_meta["com.apinizer"].authRequired` ile işaretler — query parametresinde taşınan bir anahtar, Digest ya da mTLS gibi başlıkta taşınmayan şemalar için hiçbir başlık ilan edilmez. Bu belge her zaman en iyi çaba (best-effort) bir keşif ipucudur; gerçek erişim kontrolü daima istek asıl politika zincirinden geçerken uygulanır. **Overview** sekmesindeki [İstemci Uç Noktaları](#istemci-uc-noktalari-overview) bölümü bu adresi bir kopyalama düğmesi ve bir **Aç** bağlantısıyla gösterir — proxy `2024-11-05` sürümündeyse eski SSE adresini de aynı şekilde sunar; böylece bu adresleri elle oluşturmanız gerekmez.
 
-Aşağıdaki governance özellikleri şu an bir yönetim ekranı üzerinden değil, **API proxy yapılandırmasının bir parçası olarak (APIops)** ayarlanır:
+Aşağıdaki governance özellikleri **API proxy yapılandırmasının bir parçasıdır**. Kimlik erişim kurallarını, argüman kısıtlarını ve araç risk politikasını **MCP Routing** sekmesinden ayarlarsınız. Hepsi APIops ile de ayarlanabilir:
 
-- **Kimlik bazlı erişim listesi (identity-ACL)** — yalnızca **Passthrough** modunda uygulanır; Araçları Aç modunda bu liste hiç değerlendirilmez, o moddaki erişim tamamen yukarıda anlatılan zorunlu scope alanına dayanır. Opsiyonel: boş bırakılırsa mevcut araç izin listesi/keşif davranışı aynen sürer. Doldurulursa **default-deny** olur: kimlik bilgisi (credential), rol veya organizasyon bazında tanımlanan kurallarla eşleşmeyen bir çağıran hiçbir aracı ne `tools/list` yanıtında görebilir ne de çağırabilir; bir kuralın engelleme listesi, aynı veya başka bir kuralın izin listesine her zaman önceliklidir.
-- **Araç argüman kısıtları** (yalnızca MCP — A2A'da karşılığı yoktur, çünkü A2A skill çağrılarının MCP'deki gibi bir giriş şeması yoktur) — bir aracın argümanlarına nokta-gösterimli bir yol üzerinden (örn. `user.email`) REGEX, MAX_LENGTH, ENUM veya REQUIRED tipinde doğrulama kuralı tanımlanabilir. Regex kuralları ReDoS'a karşı sınırlıdır (4096 karakter üst sınırı + 200ms zaman aşımı). Hatalı yazılmış bir kural (boş yol, geçersiz regex vb.) sessizce atlanır ve trafiği asla durdurmaz.
+- **Kimlik bazlı erişim listesi (identity-ACL)** — her iki modda da uygulanır. Araçları Aç modunda çağıran, aracın zorunlu scope denetimini de geçmelidir (yukarıda anlatılmıştır). Opsiyonel: boş bırakılırsa mevcut araç izin listesi/keşif davranışı aynen sürer. Doldurulursa **default-deny** olur: kimlik bilgisi (credential), rol veya organizasyon bazında tanımlanan kurallarla eşleşmeyen bir çağıran hiçbir aracı ne `tools/list` yanıtında görebilir ne de çağırabilir; bir kuralın engelleme listesi, aynı veya başka bir kuralın izin listesine her zaman önceliklidir. Kuralları **MCP Routing** sekmesindeki **Kimlik Erişim Kuralları** çekmecesinden ya da APIops ile ayarlarsınız.
+- **Araç argüman kısıtları** (yalnızca MCP — A2A'da karşılığı yoktur, çünkü A2A skill çağrılarının MCP'deki gibi bir giriş şeması yoktur) — bir aracın argümanlarına kural tanımlarsınız. Gateway kuralları çağrıyı göndermeden önce denetler ve bir kural sağlanmazsa çağrıyı reddeder. Kuralları **MCP Routing** sekmesinde ayarlarsınız:
+  - **Araçları Aç:** araç çekmecesini açın ve aracın **Argüman kısıtları** düzenleyicisini kullanın.
+  - **Passthrough:** **Argüman kısıtları** bölümünü kullanın. **Araç ekle** ile aracı ekleyin ve adını `tools/list` yanıtındaki gibi tam olarak yazın. Eşleşme büyük-küçük harf duyarlıdır. İki sunucunun kullandığı araç adı `sunucu__araç` biçiminde görünür.
+
+  Her kuralın bir **Argüman yolu**, bir **Kural** türü ve bir **Değer** alanı vardır:
+
+  | Kural | Değer | Çağrı şu durumda reddedilir |
+  |---|---|---|
+  | **Düzenli ifade (tam eşleşme)** | Düzenli ifade | Argüman ifadenin tamamıyla eşleşmezse. |
+  | **En fazla uzunluk** | 0 veya daha büyük bir tam sayı | Argüman metni daha uzunsa. |
+  | **İzin verilen değerler** | Virgülle ayrılmış değerler | Argüman değerlerden biri değilse. |
+  | **Zorunlu** | Yok | Argüman yoksa. |
+
+  Argüman yolu, noktayla ayrılmış özellik adlarıdır (örneğin `user.email`). Dizi indeksi (`items.0.name`) ve joker karakter (`*`) desteklenmez. Düzenli ifade, en fazla uzunluk ve izin verilen değerler kuralları bir argümanı yalnız argüman varsa denetler. Argümanı zorunlu yapmak için **Zorunlu** kuralı ekleyin. Kayıtlı geçersiz bir kuralı (boş yol, derlenmeyen düzenli ifade) gateway sessizce atlar ve trafiği durdurmaz. Ekran böyle bir kuralı kaydetmez; sorunu kayıttan önce görürsünüz. Ortam değişkenleri (`${var}`) çalışma zamanında çözülür ve ekranda denetlenmez. Regex kuralları ReDoS'a karşı sınırlıdır (4096 karakter üst sınırı + 200ms zaman aşımı).
 - **Çağrı kotası (call-quota)** — dakika/saat/gün periyodunda, araç bazlı / kimlik bilgisi bazlı / ikisinin birleşimi bazlı bir çağrı limiti tanımlanabilir. Varsayılan kapalıdır (hiç yapılandırılmamışsa kota kontrolü hiç çalışmaz). Yapılandırıldığında kontrol, tüm yetkilendirme ve argüman doğrulama adımlarından **sonra**, çağrı gerçek hedefe gitmeden hemen **önce** yapılır — yetkisiz veya hatalı bir çağrı kota hakkı tüketmez.
 - **Katalog sapması (catalog drift) koruması** — bir MCP sunucusunun aracı ilk keşfedildiğinde (veya elle yeniden keşfedildiğinde) onaylanan katalog bir özet (hash) olarak sabitlenir; periyodik bir sağlık kontrolü canlı kataloğu bu özetle karşılaştırır. Varsayılan davranış (**yalnızca uyar**) sapmayı loglar ve uyarı üretir ama çağrıları engellemez; **kapalı-güvenli** davranış seçilirse, katalog yeniden onaylanana kadar sapma tespit edilen sunucu üzerindeki çağrılar reddedilir.
 - **Token aktarımı (opt-in)** — çağıranın kendi token'ı varsayılan olarak arka uca iletilmez; sunucu satırının gateway kimlik bilgisi kullanılır. Sıfır güven mimarisinde arka uç MCP sunucusu gerçek çağıranı yetkilendirmelidir. Bunun için **MCP Routing** sekmesinde **Backend MCP Server** kartındaki **İstemci Erişimi ve İletim** bölümünde **Configure**'u seçin ve **İstemci token'ını arka uç sunucuya ilet** seçeneğini açın. Açıkken çağıranın `Authorization: Bearer` token'ı her çağrıda arka uca gider: `initialize`, `tools/list` ve `tools/call`. Sunucu satırının gateway kimlik bilgisi gönderilmez. **Kabul edilen token audience değerleri** isteğe bağlıdır; doluysa yalnız `aud` claim'i listedeki bir değerle eşleşen JWT iletilir. Bu listeyi doldurmanızı öneririz: bu MCP sunucusu için verilen bir token yalnız bu sunucuya ulaşır (RFC 8707). İletilecek token yoksa (istemci göndermediyse ya da audience eşleşmediyse) sunucu satırının gateway kimlik bilgisi kullanılır; çağrı kimliksiz gönderilmez.
@@ -444,6 +581,156 @@ Passthrough çağrıları (araç keşfi, araç çalıştırma, sağlık yoklamas
 :::danger
 Hedef adres; bulut metadata uç noktaları, loopback, link-local, multicast ve carrier-grade-NAT (CGNAT) aralıklarına karşı her zaman doğrulanır — bu adreslere yönelik istekler, yapılandırmadan bağımsız olarak **her zaman** engellenir. Bir sunucu tanımı, opsiyonel olarak diğer özel ağ aralıklarına (RFC1918 / IPv6 ULA — örn. cluster-içi bir MCP sunucusu) erişecek şekilde ayrıca izinlendirilebilir, ancak bu opt-in yukarıdaki adresleri asla açmaz.
 :::
+
+### Standart MCP İstemci Profili {#standart-mcp-istemci-profili}
+
+Standart MCP istemcileri (örneğin MCP Inspector veya Claude Code) yetkilendirme sunucusunu kendileri bulur. MCP sunucusunun korunan kaynak meta verisini okurlar, yetkilendirme sunucusunun meta verisini okurlar, bu MCP kaynağı için token alırlar ve sonra araçları çağırırlar. **Standard MCP OAuth** profili gateway'i bu şekilde çalıştırır. Varsayılan profil **Legacy**'dir. Önceki sürümlerin davranışını korur.
+
+Profili **MCP Routing** sekmesindeki **Routing Modu** bölümünden seçersiniz (**Yapılandır** → **İstemci Kimlik Doğrulama Profili**). Ekran ön koşulları ve her sorunun nedenini gösterir. Uygun olmayan bir kimlik doğrulama zincirinin kaydedilmesine izin vermez.
+
+:::warning[Önce tüm worker'ları yükseltin]
+Standard profilini seçmeden önce ortamdaki tüm worker'ları yükseltin. Eski bir worker korunan kaynak meta verisini yayınlamaz ve Legacy proxy'de standart token kabul eder.
+:::
+
+#### Ön koşullar
+
+- Proxy'nin kimlik doğrulama zinciri **tek bir** yetkilendirme sunucusunun token'larını kullanır: **ACL'den Yönet** seçili bir OAuth2 veya JWT politikası (Apinizer Credential AS) ya da bir OIDC politikası (tek kimlik sağlayıcı).
+- Ortamda erişim adresi tanımlıdır. Erişim adresi kanonik kaynağı belirler.
+- Araçları Aç modunda proxy'nin bir **servis istemcisi** vardır ve her aracın bir **Hedef kimliği** vardır (aşağıya bakın).
+
+Ekran şu sorunları bildirir:
+
+| Sorun | Anlamı |
+|---|---|
+| Etkin kimlik doğrulama politikası yok | ACL'den Yönet seçili bir OAuth2 veya JWT politikası ya da bir OIDC politikası ekleyin. |
+| Politika proxy anahtarı token'ı veriyor | Politikada ACL'den Yönet seçin. |
+| Issuer'ı olmayan OIDC politikası | Kimlik sağlayıcının issuer'ını girin. |
+| OIDC politikası Bearer token kabul etmiyor | Politikada Bearer JWT kimlik doğrulamasını açın. |
+| OIDC politikası JWT imzasını doğrulamıyor | Yerel JWT doğrulamasını ve imza doğrulamasını (JWKS) açın. |
+| Politika token olmayan bir kimlik bilgisi istiyor | Politikayı kaldırın (örneğin Basic, API anahtarı, Digest, mTLS, SAML veya JOSE politikaları). |
+| Birden fazla yetkilendirme sunucusunun token'ı | Yalnız birini bırakın. |
+| Aynı zincirde JWT ve OAuth2 politikası | Yalnız birini bırakın. |
+
+Zincir proxy'nin kendi politikalarından okunur. Proxy grubu politikası yalnız grup yolundan gelen istekte çalışır.
+
+#### Kanonik kaynak
+
+Kanonik kaynak; ortam erişim adresi, Apinizer kök bağlamı ve proxy yoludur (sonda `/` yok). Gateway bunu yapılandırmadan üretir. İsteğin `Host` veya `X-Forwarded-*` başlıklarını hiç kullanmaz. Token'lar bu değer için verilir ve yalnız `aud` içinde bu değer varsa kabul edilir.
+
+#### Korunan kaynak meta verisi
+
+Gateway belgeyi (RFC 9728) kimlik doğrulamasız olarak proxy yolu artı `/.well-known/oauth-protected-resource` adresinde yayınlar. Belge kaynağı, tek yetkilendirme sunucusunu (`authorization_servers`), istemcilerin isteyebileceği scope'ları (`scopes_supported`) ve `bearer_methods_supported` (`header`) değerini içerir. Gateway'in yayınlayacak doğru bilgisi yoksa adres `404` döndürür. Legacy proxy belgeyi yayınlamaz; istek normal kimlik doğrulama zincirinden geçer.
+
+Belge yalnız proxy yolunun altındadır. RFC 9728 "yol ekleme" biçimindeki adrese ihtiyacınız varsa bunu ingress sağlamalıdır. MCP Inspector gibi tarayıcı tabanlı istemci için proxy'nin CORS ayarları açık olmalıdır.
+
+Gateway yetkisiz isteğe, bu belgeyi adlandıran standart bir `WWW-Authenticate` başlığıyla yanıt verir:
+
+| Durum | Yanıt |
+|---|---|
+| Token yok | `Bearer resource_metadata="…"` ile `401`. |
+| Geçersiz token | `error="invalid_token"` ve `resource_metadata` ile `401`. |
+| Bir araç, token'ın sahip olmadığı scope'u ister (Araçları Aç) | `error="insufficient_scope"`, istemcinin isteyebileceği `scope` ve `resource_metadata` ile `403`. |
+
+#### Yetkilendirme sunucusu meta verisi
+
+- **Apinizer Credential AS.** Meta veri (RFC 8414) `/credential/.well-known/openid-configuration` adresindedir. Token ucunu, anahtarları, introspection ve iptal uçlarını, `client_credentials` ve token exchange grant'larını ve `client_secret_basic` ile `client_secret_post` istemci kimlik doğrulama yöntemlerini listeler. Issuer yapılandırılmış erişim adresinden gelir ve korunan kaynak meta verisindeki `authorization_servers` değerine eşittir. Credential AS'nin yetkilendirme ucu yoktur, çünkü etkileşimli oturum açma bu sürümde yoktur. Eski `oauth-authorization-server` belgesi değişmez.
+- **Kimlik sağlayıcı.** Kimlik sağlayıcı kendi meta verisini yayınlar. Korunan kaynak meta verisi politikadaki issuer adresini gösterir.
+
+#### Token alma
+
+- **Makineden makineye (Credential AS).** İstemci `/credential/token` adresine, proxy'nin kanonik kaynağına eşit tek bir `resource` parametresiyle (RFC 8707) `client_credentials` isteği gönderir. Token yalnız bu kaynak içindir (`aud`). Biçimi (JWT veya opaque) proxy'nin politikasına uyar. Refresh token yoktur. `resource` içermeyen, başka grant türü kullanan veya bilinmeyen kaynak içeren istek eskisi gibi çalışır ve legacy token verir. Standard proxy legacy token'ı, Legacy proxy standart token'ı reddeder.
+- **Kimlik sağlayıcı.** İstemci kimlik sağlayıcıya kayıt olur ve token'ı oradan alır. Token'ın `aud` claim'i kanonik kaynağı içermelidir. Bazı kimlik sağlayıcılar `resource` parametresini yok sayar. Örneğin Keycloak'ta kanonik kaynağı `aud` değerine ekleyen bir Audience mapper gerekir. Gateway JWT'yi sağlayıcının anahtarlarıyla (JWKS) yerelde doğrular. Token'ı yalnız `Authorization` başlığından okur. Sağlayıcının opaque token'ını kabul etmez. Gateway rolleri `scope` claim'inden okumaz ve `scp` içindeki diziyi okumaz.
+
+:::note
+Credential AS'de etkileşimli oturum açma bu sürümde yoktur. İstemci kimliği meta veri belgeleri (CIMD) ve açık istemci (public client) kaydı da bu sürümde yoktur. Meta veri bunları ilan etmez (`client_id_metadata_document_supported` yoktur) ve https URL biçimindeki `client_id` kayıtsız istemci olarak reddedilir (`invalid_client`). Kimlik sağlayıcıda istemciyi sağlayıcı kaydeder. Credential AS'de istemci, önceden sizin oluşturduğunuz gizli istemcidir.
+:::
+
+#### Scope'lar ve araç erişimi
+
+Standard profilinde token'daki scope bir **wire scope**'tur. Rol, wire scope'unu **OAuth Scope Adı** alanında alır. İstemci rol adını değil scope adını ister. Çağıran bir aracı yalnız şu ikisi doğruysa kullanabilir: token aracın istediği rolün wire scope'unu içerir ve kullanıcı o role **şu anda** sahiptir. OAuth scope adı olmayan rol hiçbir aracı açmaz. Scope adı, projenin bir istemcisinin sahip olabileceği roller arasında benzersiz olmalıdır. Kimlik erişim kuralları (identity-ACL) ek olarak uygulanır.
+
+#### Araç hedefine yapılan çağrılar
+
+Standard profilinde gateway, çağıranın `Authorization` başlığını Araçları Aç aracının hedefine iletmez. Hedef için token'ı kendisi üretir. Bunu her araç için **Hedef kimliği** alanında belirlersiniz:
+
+- **Servis.** Gateway hedefi proxy'nin **servis istemcisi** olarak çağırır. Kullanıcı yalnız denetim için kaydedilir.
+- **Delege kullanıcı.** Gateway hedefi oturum açmış kullanıcı olarak, servis istemcisi aracılığıyla çağırır. Çağrı ikisini de taşır. Hedef yetki devri token'larını kabul etmeli ve servis istemcisi onun **İzin verilen ajanlar** listesinde olmalıdır. Gateway, Credential AS'nin token exchange grant'ını süreç içinde kullanır. Bkz. [Token Exchange](/tr/develop/politikalar/token-service/genel-bakis#token-exchange-rfc-8693). Kimlik sağlayıcıdan gelen kullanıcı yalnız sağlayıcı kullanıcıyı mevcut bir API istemcisine eşliyorsa delege edilir. Aksi halde çağrı reddedilir.
+
+Araç argümanı ya da istemci başlığı çağrının kimliğini belirleyemez: gateway çağıranın `Authorization` değerini ve başlık olarak tanımlı argümanı siler.
+
+#### Loglarda ve limitlerde kullanıcı bağlamı
+
+Standard profilindeki bir çağrıda trafik logu token'ın kullanıcısını ve istemcisini taşır:
+
+| Log alanı | Değer |
+|---|---|
+| `usub` | Kalıcı kullanıcı kimliği: kimlik sağlayıcı token'ında `sub`. Credential AS token'ında istemcinin kendisi. |
+| `uids` | Kimlik kaynağı: kimlik sağlayıcı token'ının issuer'ı veya Credential AS token'ı için `apinizer`. |
+| `ocid` | Token'ı alan OAuth istemcisi (`azp`, yoksa `client_id`). |
+
+Araç çağrısının sonuç sınıfı (`mcprc`) ayrıdır. Bkz. [Loglama ve Analytics](#loglama-ve-analytics). Limit Planı, OAuth istemcisini **OAuth Client ID (standard MCP token)** bağlam değeriyle kullanabilir. Kullanıcı doğrulanmış kimlik olarak kalır. Bu yüzden Limit Planı kullanıcı zinciri diğer proxy'lerdeki gibi çalışır.
+
+### Araç Risk Politikası ve Onay {#arac-risk-politikasi-ve-onay}
+
+Araç risk politikası her araç çağrısına bir risk düzeyi verir ve her düzey için gateway'in ne yapacağını belirler. Her iki modda da çalışır ve varsayılan olarak kapalıdır. Politika kapalıyken her çağrıya izin verilir ve hiçbir düzey hesaplanmaz.
+
+#### Risk düzeyleri
+
+Bir araç üç düzeyden birini alır: **Düşük**, **Orta** veya **Yüksek**. Gateway eşleşen ilk kuralı uygular:
+
+1. **Sizin ayarınız.** Araçları Aç modunda aracın **Risk düzeyi** alanı. Passthrough modunda **Araç risk düzeyleri** listesinde aracın `tools/list` yanıtındaki adıyla eklediğiniz satır.
+2. **Güvenilen araç işaretleri.** Arka uç sunucuda **Araç işaretlerine güven** açıksa: salt okunur araç Düşük, yıkıcı araç Yüksek, diğer araçlar Orta olur.
+3. **Güvenilmeyen araç işaretleri.** **Araç işaretlerine güven** kapalıysa (varsayılan) işaretler düzeyi yalnız yükseltebilir. Yıkıcı araç Yüksek olur. Salt okunur işareti düzeyi düşürmez. Araç hem salt okunur hem yıkıcı işaretliyse Yüksek olur.
+4. **Varsayılan.** Araçları Aç modunda operasyonun HTTP metodu: GET ve HEAD Düşük, DELETE Yüksek, diğer metotlar Orta. Passthrough modunda Orta.
+
+İşareti olmayan araç varsayılan düzeyini korur. **Araç işaretlerine güven** ayarını yalnız sizin yönettiğiniz sunucu için açın.
+
+#### İşlemler
+
+Her düzey için üç işlemden birini seçersiniz:
+
+| İşlem | Gateway'in yaptığı |
+|---|---|
+| **İzin ver** | Çağrı devam eder. |
+| **Onay iste** | Çağrı, bir yönetici onaylayana kadar bekler. |
+| **Reddet** | Gateway çağrıyı reddeder. |
+
+Politikayı açtığınızda ekran Düşük = İzin ver, Orta = İzin ver ve Yüksek = Onay iste değerleriyle başlar. Her birini değiştirebilirsiniz.
+
+**Muafiyetler**, kimlik kurallarıdır (credential, rol veya organizasyon). Eşleşen çağıran için **Onay iste**, **İzin ver** olur. **Reddet** değişmez. Muafiyet yalnız kimliği denetler. Bu yüzden bütün araçlar için geçerlidir.
+
+Risk denetimi scope ve kimlik kurallarından, argüman kısıtlarından ve çağrı kotasından sonra, çağrı gönderilmeden hemen önce çalışır.
+
+#### Onay akışı
+
+1. Çağrı onay gerektirir. Gateway bir onay isteği yazar ve istemciye hemen yanıt verir:
+   - Tasks uzantısını bildiren istemci "onay bekliyor" durumunda bir task alır.
+   - Diğer istemciler `approvalId` içeren `-32021` hatasını alır (**ERR-309**).
+2. Yönetici isteği **Bekleyen araç onayları** bölümünde onaylar ya da reddeder (aşağıya bakın).
+3. Onaydan sonra istemci task'ı `tasks/get` ile okur ya da aynı çağrıyı yeniden gönderir. Gateway çağrıyı **bir kez** çalıştırır. Hiçbir şey çağrıyı kendiliğinden çalıştırmaz.
+4. Karardan önce aynı çağrının yeni bir denemesi ikinci istek oluşturmaz. Aynı çağıran bir proxy'de en çok **20** açık onay isteğine sahip olabilir. Sonraki çağrı reddedilir.
+
+Onay kuralları:
+
+- **15 dakika.** İstek, istek anından itibaren 15 dakika geçerlidir. Karar ve tek çalıştırma bu sürede gerçekleşmelidir. Sonra istek sona erer.
+- **Reddedilen istek.** Reddten sonra 15 dakika boyunca aynı çağrı bir politika hatasıyla reddedilir. Sonra yeni bir deneme yeni istek oluşturur.
+- **Çağrıya bağlı.** Onay; çağıran, istemci, proxy, araç ve tam argümanlara aittir. Aracın çözümlendiği operasyona da aittir: Araçları Aç modunda hedef proxy, HTTP metodu ve yol; Passthrough modunda arka uç sunucu ve onun araç adı. Çağrı çalışırken bunlardan biri değişmişse gateway çağrıyı çalıştırmaz ve task başarısız olur.
+- **Çalışma anında yeniden denetim.** Gateway onaylanan çağrıyı çalıştırırken scope'u, kimlik kurallarını ve risk politikasını yeniden denetler. Aracı artık reddeden bir politika çağrıyı durdurur.
+- **Onay sayılmayanlar.** Elicitation yanıtı ya da bir bağlantıyı açmak hiçbir zaman onay değildir. Kararı yalnız Manager'daki yönetici verir.
+- **Anonim proxy'ler.** Proxy'de kimlik doğrulama yoksa gateway onayı bir kimliğe bağlayamaz. Aynı argümanlı her çağrı aynı onayı kullanır. Risk politikasını bir kimlik doğrulama politikasıyla birlikte kullanın.
+
+#### Bekleyen araç onayları
+
+**MCP Routing** sekmesindeki **Bekleyen araç onayları** bölümü karar bekleyen istekleri listeler. Araç, risk düzeyi, çağıran, istemci kimliği, işlem (çözümlenen hedefin özeti), istek zamanı ve son geçerlilik zamanı görünür. **Onayla** veya **Reddet** seçeneğini seçin ve onaylayın.
+
+- Bölüm araç adını ve işlem özetini gösterir. Argüman değerlerini göstermez.
+- Projede **AI geliştirme** veya **API yönetimi** MANAGE yetkisine ihtiyacınız vardır.
+- Her karar denetim loguna yazılır.
+
+#### Trafik logu ve alarmlar
+
+- Çağrının trafik detayı **Araç onayı** alanını gösterir: Bekliyor, Onaylandı, Reddedildi veya Süresi doldu. Aynı değer `mcpap` adlı bir log alanıdır. Elasticsearch şablonu bu alanı yükseltmeden sonra taşır.
+- İki alarm tetiklenme tipi onayları izler: **MCP Araç Onayı Bekleyen Sayısı** (şu anda bekleyen istekler) ve **MCP Araç Onayı Ret Sayısı** (son 1 saatteki redler). İkisi de Proje kapsamını kullanır. Bkz. [Alarmlar](/tr/monitor/alarm).
 
 ## Yapılandırmada Ortam Değişkenleri
 
@@ -474,11 +761,13 @@ Araç tespit desenleri ve çıktı engelleme desenleri değişken kabul **etmez*
 
 MCP tipindeki bir proxy'nin detay sayfasında da **Trace**, **Trafik** ve **Analitik** sekmeleri bulunur — REST/SOAP proxy'lerindeki eşdeğer sekmelerle aynı yapıdadır; sekme adı proxy tipini tekrarlamaz, zaten o proxy'nin içindesinizdir. Her MCP çağrısı (gelen araç çağrısı, giden araç çağrısı ve giden sağlık yoklaması), gecikme/boyut/istemci IP'si gibi standart alanların yanında MCP'ye özgü alanlarla birlikte trafik logunda görünür. **Analitik** sayfasının **Trafik** tab'ındaki "Flags" rozet kolonu bir isteğin önbellek/koruma/PII/streaming durumunu tek bakışta gösterir; ayrıntılı kullanım, maliyet ve koruma metrikleri aynı **Analitik** sayfasında izlenebilir — bkz. [Raporlar ve Analitik](/tr/ai-gateway/raporlar).
 
-MCP tipindeki bir kaydın **Detaylı Göster**'i seçildiğinde log kaydı ayrı bir pencerede değil, LLM Gateway trafiğiyle aynı sağdan açılan detay panelinde (drawer) görüntülenir. Kayıtta AI kullanım verisi yoksa panelin son sekmesi **LLM İçgörüleri** yerine **MCP Detayları** (A2A trafiğinde **A2A Detayları**) başlığıyla açılır ve yalnızca araç adı, JSON-RPC id'si ile giden araç çağrısı bilgilerini gösterir; hiçbir denetim verisi yoksa bu sekme hiç görünmez. REST/SOAP gibi diğer proxy tipleri eski detay penceresini (dialog) kullanmaya devam eder.
+MCP tipindeki bir kaydın **Detaylı Göster**'i seçildiğinde log kaydı ayrı bir pencerede değil, LLM Gateway trafiğiyle aynı sağdan açılan detay panelinde (drawer) görüntülenir. Kayıtta AI kullanım verisi yoksa panelin son sekmesi **LLM İçgörüleri** yerine **MCP Detayları** (A2A trafiğinde **A2A Detayları**) başlığıyla açılır ve yalnızca araç adı, JSON-RPC id'si ile giden araç çağrısı bilgilerini ve — [araç risk politikasının](#arac-risk-politikasi-ve-onay) onay için beklettiği çağrılarda — **Araç onayı** durumunu gösterir; hiçbir denetim verisi yoksa bu sekme hiç görünmez. REST/SOAP gibi diğer proxy tipleri eski detay penceresini (dialog) kullanmaya devam eder.
 
 MCP proxy'nin döndürdüğü her JSON-RPC reddi (özellik gereği HTTP durumu her zaman 200 kalır, hata JSON-RPC gövdesinde taşınır) trafik logunda ayrıca sınıflandırılır: istemci veya politika kaynaklı redler (hatalı istek, bilinmeyen metot, bilinmeyen araç, politika kapısı, çağrı kotası, argüman kısıtı) **ağ geçidinde reddedildi**, gateway veya backend kaynaklı hatalar (araç backend proxy'sine ulaşılamaması, araç çalıştırma hatası, oturum limiti) **ağ geçidi hatası** rozetiyle işaretlenir; bu çağrılar Engellenen/Hata filtrelerinde ve analitikte diğer redler gibi görünür. `tools/call` isteklerinde Yönlendirme Adresi artık boş değildir — adres, Araçları Aç modunda gateway üzerinden ulaşılan kaynak API proxy yolunu, Passthrough modunda ise MCP sunucusunun host:port'unu gösterir ve **araç çağrısı** rozetiyle işaretlenir. Başarıyla yanıtlanan ama backend'e hiç gitmeyen istekler (`initialize`, `tools/list`, `ping` gibi protokol çağrıları) **ağ geçidinde yanıtlandı** rozetini taşır; bu satırlarda Yönlendirme Adresi artık boş kalmaz — istemcinin çağırdığı proxy'nin MCP uç nokta adresi soluk renkte gösterilir. Passthrough modunda `tools/list` canlı bir keşif için gerçek bir backend çağrısıdır; bu durumda satırda hedef MCP sunucusunun uç nokta adresi görünür (query string ve varsa kullanıcı adı/parola ayıklanmış hâlde loglanır). Rozetlerin tam listesi için [API Trafiği](/tr/develop/izleme-analiz/api-trafigi#yönlendirme-rozetleri-routing-badges) sayfasına bakın.
 
 Bir LLM Gateway'in birden çok aracı art arda çağırdığı durumlarda (agentic loop), her çağrının süresi ve sonuç durumu ayrı ayrı uçtan uca izleme kaydında (trace) görünür. Uçtan uca bir araç çağrısı zincirini takip etmek için [İzleme ve Tekrar Oynatma](/tr/ai-gateway/izleme-ve-tekrar-oynatma) sayfasına bakın.
+
+Yeni MCP log alanları şunlardır: `mcpap` (araç onayı durumu), `usub`, `uids` ve `ocid` ([Standard profilinin](#standart-mcp-istemci-profili) kullanıcı bağlamı) ve `mcprc` (araç çağrısının sonuç sınıfı: `OK`, `TOOL_ERROR`, `JSONRPC_ERROR`, `TRANSPORT` veya `POLICY_REJECT`). Elasticsearch, MongoDB, GELF ve JSON log bağlayıcıları bu alanları yazar. **SQL/JDBC trafik log bağlayıcısının** kolon listesi bu sürümde değişmez; bu alanlar orada saklanmaz.
 
 ### Giden Araç Adları: Trace'ten Bağımsız Denetim İzi
 

@@ -79,7 +79,7 @@ There's no standalone "A2A connection" screen to visit first — an external age
 - On a **Passthrough** proxy's A2A Routing tab, where it can be one of several aggregated agents for discovery (see [Multi-Target Aggregation](#multi-target-aggregation)).
 - Inside the **A2A Call (LLM)** / **A2A Call (Fixed)** policy, as a single agent a model delegates a sub-task to as part of any LLM Gateway's own [tool-call loop](/en/ai-gateway/routing-and-failover#tool-call-loop-agentic-requests) — no A2A Gateway required for that path at all.
 
-Each definition carries its own endpoint, authentication — including an **OAuth2 client-credentials** flow for agents that require one, acquired automatically at runtime — discovered skill catalog, health status, and approved-catalog fingerprint. Nothing is shared by reference between proxies or policies.
+Each definition carries its own endpoint, authentication (see [Outbound Authentication](#outbound-authentication)), discovered skill catalog, health status, and approved-catalog fingerprint. Nothing is shared by reference between proxies or policies.
 
 :::note
 The endpoint you enter is the address tasks are sent to. Its agent card is looked for at that same address first, and if the card isn't served there, at the standard discovery path below it (`.../.well-known/agent-card.json`) — so entering an agent's task endpoint is enough for discovery to work, and entering its card URL directly keeps working as before.
@@ -116,13 +116,69 @@ This agent definition is subject to the same SSRF protection as Passthrough mode
 
 This policy can also be added and updated through the APIops REST API — see [API Reference: Policies](/api-reference/policies/crud/add-policy).
 
+### Outbound Authentication
+
+An A2A agent row of a Passthrough proxy and the inline agent of the **A2A Call** policies use the same authentication schemes as an MCP server. See [Backend Authentication](/en/ai-gateway/mcp-gateway#backend-authentication) for the schemes (None, Bearer, OAuth2 Client Credentials, mTLS, API Key (Header), Basic Authentication and OAuth2 Token Exchange), the token exchange rules and the **Discover Auth** button.
+
+Differences for A2A:
+
+- **Discover Auth** reads the agent card from the endpoint you entered, and then from its `/.well-known/agent-card.json` address. It suggests the scheme from the security schemes of the card, and accepts both the flat form and the A2A 1.0 form. A note appears when the card cannot be read.
+- When a call with a token exchange token gets 401 or 403, the gateway does not try again.
+- **Discover Skills** and the health check cannot get an exchange token, because they carry no caller token. The card read is refused for that scheme.
+
 ## Agent Card, Task Lifecycle, and Streaming
 
 ### Agent Card
 
-Every A2A Gateway publishes a self-describing agent card, unauthenticated, at the proxy's client path plus `/.well-known/agent-card.json` — required so a client can discover the agent before it has credentials. The card includes the agent's name, description, skills, and supported input/output modalities, plus an advertised authentication scheme derived automatically from the proxy's own authentication policies (JWT and OAuth2 are reflected as bearer/OAuth2 schemes, Basic as a basic scheme) — an unauthenticated proxy's card advertises no scheme at all. There's no separate per-agent auth-mode selector anymore, and the card can never claim a scheme the gateway doesn't actually enforce. An authenticated client can also fetch the same card over the JSON-RPC channel.
+Every A2A Gateway publishes a self-describing agent card, unauthenticated, at the proxy's client path plus `/.well-known/agent-card.json` — required so a client can discover the agent before it has credentials. The card includes the agent's name, description, skills, and supported input/output modalities, plus the authentication the proxy requires, derived automatically from the proxy's own authentication policies (see [Security Schemes in the Card](#security-schemes-in-the-card)) — an unauthenticated proxy's card advertises no scheme at all. There's no separate per-agent auth-mode selector anymore, and the card can never claim a scheme the gateway doesn't actually enforce. An authenticated client can also fetch the same card over the JSON-RPC channel.
 
 In Passthrough mode the rewritten card's `documentationUrl` advertises this proxy's own full gateway address — the environment's access URL, the Apinizer root context, and the proxy's client path — rather than the backend agent's, so a client that follows it reaches the gateway. On an environment with no access URL configured the field is root-relative — the Apinizer root context plus the proxy path; where neither is configured it falls back to the proxy path on its own.
+
+#### Security Schemes in the Card
+
+The card describes the authentication chain of the proxy in the A2A 1.0 form. Each scheme keeps the older flat fields (`type`, `scheme`) that earlier cards already had, so a client that reads the old form sees what it saw before. A 1.0 client uses the new form.
+
+| Authentication policy | Scheme in the card |
+|---|---|
+| JWT or OAuth2 policy that uses a token from the Apinizer Credential authorization server | An OAuth2 flow. The token URL is the token endpoint of the Credential authorization server (client credentials, or password when the policy uses that grant). The scheme also names the metadata address of that server when the address is https. |
+| OpenID Connect policy with an https issuer | An OpenID Connect scheme with the discovery address of the issuer. |
+| OpenID Connect policy without an https issuer | An OAuth2 flow with the token URL, when the policy has one. Otherwise a bearer (JWT) scheme. |
+| JWT policy that only validates tokens from another issuer | A bearer (JWT) scheme. |
+| Basic or Digest | An HTTP scheme (`basic` or `digest`). |
+| API key | An API key scheme with the location and the name of the key. |
+| Bearer API key | An HTTP bearer scheme. |
+| mTLS | A mutual TLS scheme. |
+
+- The chain is additive: every policy runs. The card holds one security requirement that names all schemes, on the card and on every skill.
+- A policy that no A2A client can satisfy as it is does not appear in the card.
+- In Passthrough mode the card of the backend agent is rewritten. The skills carry the requirements of the gateway, not the ones of the backend agent, because the client authenticates to the gateway.
+
+#### Protected Resource Metadata
+
+Every A2A Gateway also answers an unauthenticated `GET` at the proxy's client path plus `/.well-known/oauth-protected-resource` (RFC 9728). The document names the resource and the authorization server that issues the tokens, so a client can find where to get a token.
+
+The gateway publishes the document only when all of these are true:
+
+- At least one active authentication policy guards the proxy, and every one of them accepts a Bearer token from **one** authorization server (the Apinizer Credential authorization server, or one identity provider).
+- The environment has an access URL.
+
+In every other case the address answers `404` with no body. Examples: a policy that issues proxy key tokens, tokens from more than one authorization server, a JWT policy and an OAuth2 policy in the same chain, a policy that asks for a credential that is not a token, or a policy that does not verify the JWT signature locally.
+
+This is discovery information only. The A2A Gateway has no sign-in profile, and the token check and the 401 answer work as before. The document is shown on the **Discovery** card of the A2A Routing tab.
+
+:::note
+Client ID metadata documents (CIMD) and public-client registration are **not** part of this release. The gateway does not advertise them. A client registers with the authorization server that issues its tokens: with the identity provider, or with the Credential authorization server as a confidential client. A `client_id` in the form of an https URL is refused as an unregistered client (`invalid_client`).
+:::
+
+#### Discovery Card
+
+The **A2A Routing** tab has a read-only **Discovery** card. It shows, for one environment of the proxy:
+
+- the **Agent card URL**,
+- the **Protected resource metadata URL**, or the reason why the gateway does not publish it,
+- the **Authorization server** (the issuer, and whether it is the Apinizer Credential AS or an identity provider).
+
+You cannot change anything on the card. It uses the same rules as the gateway, so "Not published" on the card means that the gateway answers 404.
 
 ### Protocol Version
 
@@ -174,11 +230,11 @@ A Passthrough proxy can aggregate up to **10** agents on its A2A Routing tab beh
 
 ### Authentication
 
-Same model as MCP: whatever policy chain you attach to the proxy. The agent-card discovery endpoint is exempt from it by design.
+Same model as MCP: whatever policy chain you attach to the proxy. The agent-card discovery endpoint and the [protected resource metadata](#protected-resource-metadata) address are exempt from it by design.
 
 ### Identity-Based Access Control (Passthrough discovery only)
 
-In **Passthrough** mode, you can restrict which skills the proxy advertises to a given credential, role, or organization — a caller not covered by any rule sees no skills once at least one rule is configured. This narrows what appears in the **agent card**, not what a `SendMessage` call is allowed to do: the A2A wire message carries no per-call skill identifier, so — unlike MCP's per-tool-call enforcement — this can't gate an individual task at call time; actual authorization for a delegated message is up to the backend agent. In **Expose Agent** mode this setting isn't applied at all.
+In **Passthrough** mode, you can restrict which skills the proxy advertises to a given credential, role, or organization — a caller not covered by any rule sees no skills once at least one rule is configured. This narrows what appears in the **agent card**, not what a `SendMessage` call is allowed to do: the A2A wire message carries no per-call skill identifier, so — unlike MCP's per-tool-call enforcement — this can't gate an individual task at call time; actual authorization for a delegated message is up to the backend agent. In **Expose Agent** mode this setting isn't applied at all. You set the rules in the **Identity Access Rules** area of the Passthrough settings on the **A2A Routing** tab, or through the API.
 
 ### Call Quotas
 
