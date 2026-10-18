@@ -205,6 +205,8 @@ In **Expose Agent** mode, Apinizer's own agent only ever advances a task through
 
 A client polls status with `GetTask`, lists a proxy's tasks with `ListTasks`, and can cancel an in-progress task with `CancelTask` — cancellation actually interrupts the task's processing on the worker, not just its recorded status.
 
+When the gateway answers `CancelTask` from its own task records (Expose Agent mode, and the tasks that a Passthrough proxy tracks itself), a task that is already in a terminal state (`completed`, `failed`, `canceled` or `rejected`) gets the JSON-RPC error `-32002` (TaskNotCancelableError) with the message "Task cannot be canceled: it is already in a terminal state or not cancelable.". It does not return the task as a successful result any more. A second `CancelTask` on a task that was canceled already gets the same error, and the task stays `canceled`. The same error returns when the task finishes or is canceled at the same moment as your call. If the cancel cannot be completed for another reason, the answer is a JSON-RPC internal error with the message "Task could not be canceled, try again.".
+
 In **Passthrough** mode the backend agent owns the tasks it creates, so `GetTask` and `CancelTask` resolve in two steps: the proxy first looks for a task it tracks itself (a streaming relay is tracked by the gateway), and if the ID isn't one of those, the call is forwarded to the backend agent and its answer is returned as-is — including its own "task not found" if the ID is unknown there too. This is what lets a client poll the exact task ID a Passthrough `SendMessage` returned. Whether a given task ID may be read or canceled is decided by the backend agent, the same way it decides authorization for a delegated message. `ListTasks` and `SubscribeToTask` always answer from the gateway's own task records and are not forwarded; on a proxy that aggregates more than one agent, `GetTask` and `CancelTask` return an error rather than guessing which agent owns the task.
 
 :::note
@@ -253,7 +255,21 @@ Cap `SendMessage` volume per minute, hour, or day, scoped per calling credential
 
 ### Catalog Drift Protection
 
-The same mechanism as MCP, applied to an inline agent's advertised skill list instead of a tool catalog: a fingerprint is captured at the last approved discovery, a periodic health check compares the live card against it, and drift either logs and surfaces a warning (the default) or blocks task delegation through that agent until it's re-approved.
+The same mechanism as MCP, applied to an inline agent's advertised skill list instead of a tool catalog: a fingerprint is captured at the last approved discovery (an explicit Discover Skills, or the first discovery at deploy — see [Catalog Discovery at Deploy](#catalog-discovery-at-deploy)), a periodic health check compares the live card against it, and drift either logs and surfaces a warning (the default) or blocks task delegation through that agent until it's re-approved.
+
+### Catalog Discovery at Deploy {#catalog-discovery-at-deploy}
+
+An inline agent of an **A2A Call (LLM)** or **A2A Call (Fixed)** policy that has no skill catalog and no approved fingerprint yet gets its first catalog when you deploy the proxy.
+
+- On deploy, the Manager reads the agent card of the agent once, before the worker receives the proxy.
+- A successful first result is saved as the skill catalog and becomes the approved baseline. Later changes are checked against it (see above).
+- An agent that already has a catalog or an approved fingerprint is not probed again. A drift that was detected is not approved by a deploy.
+- An agent that returns no skills, or cannot be reached, does not stop the deploy. The deploy result shows a WARNING line for it, and its calls stay refused until a catalog is discovered. Use **Discover Skills** and deploy again.
+- The agents in the **A2A Routing** tab of a Passthrough proxy are not probed at deploy.
+
+### Response Flow Only {#response-flow-only}
+
+The **A2A Call (LLM)** policy acts on the tool calls that the model returns. These calls exist only in the response. For this reason the proxy accepts this policy, and the **MCP Call (LLM)** policy, only in the response flow. The platform names them "A2A Agent Call" and "MCP Tool Call" in the error. A save that puts one of them in the request flow or the error flow is rejected with the message "MCP Tool Call and A2A Agent Call policies can be placed only in the response flow". The check covers proxy-level and method-level flows and policy groups, and it applies to every save path, including the APIops REST API and import. The platform does not move the policy to another flow for you. The **A2A Call (Fixed)** and **MCP Call (Fixed)** policies are not part of this check.
 
 ### Token Passthrough
 
