@@ -543,7 +543,7 @@ Upgrade all workers of the environment before you select the Standard profile. A
 
 #### Prerequisites
 
-- The authentication chain of the proxy uses tokens from **one** authorization server: an OAuth2 or JWT policy with **Manage From ACL** (the Apinizer Credential AS), or an OIDC policy (one identity provider).
+- The authentication chain of the proxy uses tokens from **one** authorization server: an OAuth2 or JWT policy with **Manage From ACL** (the Apinizer Credential AS), an OAuth2 or JWT policy with **Manage From This Policy** and the **Browser login (authorization_code)** switch on (the Apinizer `/auth` authorization server), or an OIDC policy (one identity provider).
 - The environment has an access URL. It defines the canonical resource.
 - In Expose Tools mode, the proxy has a **service client**, and each tool has a **Downstream identity** (see below).
 
@@ -552,7 +552,7 @@ The screen reports these problems:
 | Problem | Meaning |
 |---|---|
 | No active authentication policy | Add an OAuth2 or JWT policy with Manage From ACL, or an OIDC policy. |
-| Policy issues proxy key tokens | Select Manage From ACL in the policy. |
+| Policy issues proxy key tokens without browser login | Turn on the Browser login (authorization_code) switch in the policy, or select Manage From ACL. |
 | OIDC policy without an issuer | Set the issuer of the identity provider. |
 | OIDC policy does not accept a Bearer token | Turn on Bearer JWT authentication in the policy. |
 | OIDC policy does not verify the JWT signature | Turn on local JWT validation and signature validation (JWKS). |
@@ -582,16 +582,18 @@ The gateway answers an unauthorized request with a standard `WWW-Authenticate` h
 
 #### Authorization server metadata
 
-- **Apinizer Credential AS.** The metadata (RFC 8414) is at `/credential/.well-known/openid-configuration`. It lists the token endpoint, the keys, introspection and revocation, the `client_credentials` and token exchange grants, and the client authentication methods `client_secret_basic` and `client_secret_post`. The issuer comes from the configured access URL, and it is equal to the `authorization_servers` value of the protected resource metadata. The Credential AS has no authorization endpoint, because interactive sign-in is not in this release. The older `oauth-authorization-server` document does not change.
+- **Apinizer Credential AS (Manage From ACL).** The issuer is `<access URL>/credential`. The canonical metadata (RFC 8414) is at `https://<host>/.well-known/oauth-authorization-server/credential`. The older `/credential/.well-known/openid-configuration` and `/credential/.well-known/oauth-authorization-server` addresses keep working. The metadata lists the token endpoint, the keys, introspection and revocation, the `client_credentials` and token exchange grants, and the client authentication methods. The issuer comes from the configured access URL, and it is equal to the `authorization_servers` value of the protected resource metadata. When browser login is on, the metadata also advertises `authorization_endpoint`, the `authorization_code` grant, PKCE `S256` and the `none` client authentication method.
+- **Apinizer `/auth` authorization server (Manage From This Policy).** When the **Browser login (authorization_code)** switch is on in the policy, the issuer is `<access URL>/auth`. The canonical metadata is at `https://<host>/.well-known/oauth-authorization-server/auth`. The older `/auth/.well-known/oauth-authorization-server` address keeps working. When the switch is off, the proxy cannot use the Standard profile. The screen reports this.
 - **Identity provider.** The identity provider publishes its own metadata. The policy issuer is the address that the protected resource metadata names.
 
 #### Getting a token
 
-- **Machine to machine (Credential AS).** The client sends a `client_credentials` request to `/credential/token` with one `resource` parameter (RFC 8707) that equals the canonical resource of the proxy. The token is for this resource only (`aud`). Its format (JWT or opaque) follows the policy of the proxy. It has no refresh token. A request without `resource`, with another grant type or with an unknown resource works as before and gives a legacy token. The Standard proxy refuses a legacy token, and a Legacy proxy refuses a standard token.
+- **Machine to machine (Credential AS).** The client sends a `client_credentials` request to `/credential/token` with one `resource` parameter (RFC 8707) that equals the canonical resource of the proxy. The token is for this resource only (`aud`). Its format (JWT or opaque) follows the policy of the proxy. This request gets no refresh token. A request without `resource`, with another grant type or with an unknown resource works as before and gives a legacy token. The Standard proxy refuses a legacy token, and a Legacy proxy refuses a standard token.
+- **Browser login (Apinizer authorization server).** The client follows the authorization code + PKCE flow with a public API client that belongs to an application. The `authorize` and `token` endpoints are under `/credential` in Manage From ACL mode and under `/auth` in Manage From This Policy mode. `resource` is required and must equal the canonical resource of the proxy. The `aud` of the access token is this resource. If it is a JWT, its header has `typ: at+jwt`. The refresh token rotates on every use, and the replay of a used refresh token revokes the token family. The access of the user and the access of the application are both required: access of the user ∩ access of the application. For the setup, the limits and the check with curl, see [MCP Gateway Browser Sign-In Without Keycloak](/en/tutorials/ai-proxy-scenarios/mcp-gateway-browser-sign-in).
 - **Identity provider.** The client registers with the identity provider and gets a token there. The `aud` claim of the token must contain the canonical resource. Some identity providers ignore the `resource` parameter. For example, Keycloak needs an Audience mapper that adds the canonical resource to `aud`. The gateway verifies the JWT locally with the keys (JWKS) of the provider. It reads the token only from the `Authorization` header. It does not accept an opaque token from the provider. The gateway does not read roles from the `scope` claim, and it does not read an array in `scp`.
 
 :::note
-Interactive sign-in at the Credential AS is not in this release. Client ID metadata documents (CIMD) and public-client registration are not in this release either. The metadata does not advertise them (`client_id_metadata_document_supported` is absent), and a `client_id` in the form of an https URL is refused as an unregistered client (`invalid_client`). With an identity provider, the provider registers the client. At the Credential AS, the client is a confidential client that you create beforehand.
+Client ID metadata documents (CIMD) and dynamic client registration (DCR) are not in this release. The metadata does not advertise them (`client_id_metadata_document_supported` is absent), and a `client_id` in the form of an https URL is refused as an unregistered client (`invalid_client`). With an identity provider, the provider registers the client. At the Apinizer authorization server, the client is an API client that you create beforehand: a confidential client for a machine client, and a public client that belongs to an application for browser login.
 :::
 
 #### Scopes and tool access
@@ -613,13 +615,15 @@ For a Standard profile call, the traffic log carries the user and the client of 
 
 | Log field | Value |
 |---|---|
-| `usub` | The stable user ID: the `sub` of an identity provider token. For a Credential AS token, the client itself. |
-| `uids` | The identity source: the issuer of an identity provider token, or `apinizer` for a Credential AS token. |
+| `usub` | The stable user ID: the `sub` of an identity provider token. For a Credential AS `client_credentials` token, the client itself. For a browser-login token, the username of the signed-in user (in Manage From ACL mode, the username of the consumer). |
+| `uids` | The identity source: the issuer of an identity provider token, `apinizer` for a Credential AS token and for a browser-login token from Manage From ACL mode (`/credential`), or `apinizer-policy` for a browser-login token from Manage From This Policy mode (`/auth`). |
 | `ocid` | The OAuth client that got the token (`azp`, else `client_id`). |
 
 The result class of a tool call (`mcprc`) is separate. See [Logging and Analytics](#logging-and-analytics). A Limit Plan can use the OAuth client with the context value **OAuth Client ID (standard MCP token)**. The user stays the authenticated identity, so the user chain of the Limit Plan works as for other proxies.
 
-Step-by-step example: [MCP Gateway Sign-In with Keycloak](/en/tutorials/ai-proxy-scenarios/mcp-gateway-keycloak-oauth-sign-in).
+In the Standard profile, the prerequisites panel on the **MCP Routing** tab shows the canonical resource, the authorization server (issuer) and the **Browser login (authorization_code)** row. The row reports one of three states: on (users of the identity source of the policy sign in on the login page), available (you turn it on in the API client of each application), or not offered by this authorization server.
+
+Step-by-step examples: [MCP Gateway Sign-In with Keycloak](/en/tutorials/ai-proxy-scenarios/mcp-gateway-keycloak-oauth-sign-in) (external identity provider) and [MCP Gateway Browser Sign-In Without Keycloak](/en/tutorials/ai-proxy-scenarios/mcp-gateway-browser-sign-in) (Apinizer authorization server).
 
 ### Identity-Based Access Control
 
