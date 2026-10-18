@@ -538,6 +538,31 @@ Denied topics have their own similarity threshold and action, each optional and 
 
 Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
 
+### When the Embedding Provider Cannot Be Found {#topic-embedding-provider}
+
+The built-in comparison needs the embedding provider that you select in the policy. If the gateway cannot find this provider when a request arrives, the **Fail Open on Embedding Error** switch decides. The provider may have been removed or not deployed, or the policy may hold a value that is not a provider. The same switch decides when the embedding call itself fails.
+
+| Switch | Behavior |
+|---|---|
+| **Off** | The gateway blocks the request. For a streamed response, the gateway withholds the response. |
+| **On** | The request continues without the check. The skip is recorded visibly. |
+
+**Observe-Only** mode never blocks, so the request continues and the skip is recorded. On the policy screen, a new policy has the switch on. A policy that you create through APIops without setting this option has the switch off.
+
+When you create or update the policy through APIops, Apinizer looks up the embedding provider by name, first in the project of the API proxy and then in the admin project. Apinizer rejects a name that it cannot find. See [Topic Guard policy](/api-reference/policies/policies/policy-ai-topic-guard).
+
+:::warning After an upgrade: policies that APIops created earlier
+Earlier versions stored the provider **name** instead of the provider ID when you created the policy through APIops. The gateway could not find the provider and skipped the check without an error. Now these policies block requests when **Fail Open on Embedding Error** is off.
+
+The upgrade runs the migration `202610-007004-03`. It looks for a provider with the same name in the policy library, policy groups, proxy groups and API proxies. The name match is exact and not case-sensitive. The migration searches the project of the policy first. Then it searches the admin project and the providers that have no project. It converts the name to the provider ID only when exactly one provider matches. The API proxies and proxy groups that the migration changes show **Redeploy required**. Deploy them.
+
+If the migration cannot find exactly one provider, it keeps the value and writes one WARN line to the Manager log for each policy copy. It writes at most 100 lines, then one summary line. Search the log for this text:
+
+`Migration 202610-007004-03: AI Topic Guard embedding provider not resolved`
+
+The policy blocks requests until you select the embedding provider again in the policy and deploy it.
+:::
+
 ### Streaming Responses: Buffer-and-Scan {#streaming-buffer-and-scan}
 
 Off-Topic Protection used to scan only the **incoming request** (the user's own message). It can now also inspect **streamed responses** — the text the model itself generates is compared against the same allowed/denied topic definitions, so a response that drifts off-topic mid-stream (for example, a jailbroken model that starts answering something unrelated in detail) is detected too.
@@ -818,14 +843,16 @@ The judge's own HTTP call timeout (the **Timeout** setting above, default 2000 m
 
 | External Failure Mode | Behavior |
 |---|---|
-| **Block on failure** (default) | If the external provider call itself errors out or times out, the request is blocked. |
+| **Block on failure** (default) | If the external provider call itself errors out or times out, the request is blocked. If the gateway cannot use the external provider at all, the request is also blocked. |
 | **Allow on failure** | The request continues, unguarded by the external judge for that call, and the failure is still recorded visibly rather than passing silently. |
 
 :::info
-This setting only governs an actual call failure or timeout — not what the judge decides. If the evaluation engine is set to use an external provider but no usable connection is actually configured (for example, a gap reached through APIops or export/import that bypasses the UI's own checks), Apinizer degrades to the built-in check instead of failing the request outright, and records the degradation visibly for troubleshooting. The external failure mode above never applies to this case.
+This setting does not govern what the judge decides. It governs two cases: the external call fails or times out, and the gateway cannot use the external provider at all. The second case happens when the evaluation engine is set to use an external provider, but the adapter is missing or the connection cannot be found. This can happen with a policy that APIops or export/import created without the UI checks, or when the connection was deleted. With **Block on failure**, the gateway blocks the request. Before this version, the gateway skipped the external check without an error in this case. With **Allow on failure**, the request continues with the built-in check only, and the gateway records the skip visibly.
+
+In **Observe-Only** mode, Prompt Protection and Off-Topic Protection never block, also in this case. They keep the built-in check and record the skip.
 :::
 
-**Error returned when the external judge blocks an Off-Topic Protection request.** When the `llm-judge` judge returns an unsafe verdict, or fails or times out under **Block on failure**, the request is stopped with HTTP 403 and error code **ERR-305**. The default message is `AI Topic Guard: request blocked by the external judge ({0})`. The `{0}` part is `llm-judge verdict: unsafe`, `judge timed out, fail-closed`, or `judge failed, fail-closed`. This error appears as its own row on the **Error Message** tab, so you can customize its message, status code, and error code. The similarity-based off-topic error (ERR-271) is not used for judge blocks, so a customization you made for that error does not apply to them.
+**Error returned when the external judge blocks an Off-Topic Protection request.** When the `llm-judge` judge returns an unsafe verdict, or fails or times out under **Block on failure**, the request is stopped with HTTP 403 and error code **ERR-305**. The default message is `AI Topic Guard: request blocked by the external judge ({0})`. The `{0}` part is `llm-judge verdict: unsafe`, `judge timed out, fail-closed`, `judge failed, fail-closed`, `external guardrail not available, fail-closed`, or `embedding provider not available, fail-closed`. This error appears as its own row on the **Error Message** tab, so you can customize its message, status code, and error code. The similarity-based off-topic error (ERR-271) is not used for judge blocks, so a customization you made for that error does not apply to them.
 
 ### Configuring via APIops
 
@@ -874,24 +901,25 @@ Once the engine is set to anything other than Built-in, you separately choose wh
 
 The adapter choice only changes **who produces the verdict**. The engine options (Built-in only / Built-in + External provider / External provider only), the External Failure Mode (Block/Allow on failure), and the three behavioral differences described just below are identical for both adapters.
 
-### Three Differences from Prompt/Off-Topic Protection
+### Two Differences from Prompt/Off-Topic Protection
 
-This integration shares the same underlying plumbing as [External Provider Guardrails](#external-provider-guardrails), but behaves differently in three ways:
+This integration shares the same underlying plumbing as [External Provider Guardrails](#external-provider-guardrails), but behaves differently in two ways:
 
 1. **Execution mode is always Inline.** The Inline / Asynchronous / Observe-Only choice available on Prompt Protection and Off-Topic Protection does **not** exist here — the external call always runs synchronously, on the thread handling the request; the adapter's own connection timeout is the only bound.
 2. **The external service is never called for streamed responses.** Chunk-by-chunk scanning always uses the built-in rule list only, regardless of the engine setting. The practical consequence: a policy configured with **External provider only** scans nothing at all (neither built-in nor external) on a streamed response — on non-streamed (unary) requests and responses the external service still runs normally.
-3. **A configuration inconsistency is handled separately from a runtime failure.** If the engine wants an external provider but the adapter is undefined or the connection reference can't be resolved, that's a save/deploy-time error — the engine automatically degrades to Built-in, and the failure behavior below does **not** apply. That failure behavior only kicks in once the external call is actually attempted and errors out or times out.
+
+A missing adapter or a connection that cannot be found follows the failure behavior below, the same as for Prompt and Off-Topic Protection.
 
 ### Failure Behavior {#external-dlp-failure-behavior}
 
-If the external call errors out or times out:
+If the external call errors out or times out, or if the engine wants an external provider but the adapter is undefined or the connection cannot be found:
 
 | Setting | Behavior |
 |---|---|
-| **Block on failure** (default) | The request is blocked |
-| **Allow on failure** | The request continues; this is always recorded visibly — there is no silent fail-open |
+| **Block on failure** (default) | The request is blocked. Before this version, the gateway skipped the external check without an error when the adapter or connection was missing. |
+| **Allow on failure** | The request continues with the built-in rule list only; this is always recorded visibly — there is no silent fail-open |
 
-**Error returned when the external judge blocks a Personal Data Masking request.** When the external judge (`llm-judge` or `http-dlp`) finds personal data, or fails or times out under **Block on failure**, the request is stopped with HTTP 403 and error code **ERR-306**. The default message is `AI PII Mask: request blocked by the external judge ({0})`. The `{0}` part tells what the judge decided, for example `external guardrail llm-judge detected personal data (pii)`, `judge timed out, fail-closed`, or `judge failed, fail-closed`. This error appears as its own row on the **Error Message** tab, so you can customize its message, status code, and error code. The encoded-content error (ERR-298) is not used for judge blocks, so a customization you made for that error does not apply to them.
+**Error returned when the external judge blocks a Personal Data Masking request.** When the external judge (`llm-judge` or `http-dlp`) finds personal data, or fails or times out under **Block on failure**, the request is stopped with HTTP 403 and error code **ERR-306**. The default message is `AI PII Mask: request blocked by the external judge ({0})`. The `{0}` part tells what the judge decided, for example `external guardrail llm-judge detected personal data (pii)`, `judge timed out, fail-closed`, `judge failed, fail-closed`, or `external guardrail not available, fail-closed`. This error appears as its own row on the **Error Message** tab, so you can customize its message, status code, and error code. The encoded-content error (ERR-298) is not used for judge blocks, so a customization you made for that error does not apply to them.
 
 ### Connection and Request/Response Contract {#external-dlp-connection-contract}
 
@@ -954,15 +982,11 @@ This guardrail **only** checks groundedness against the RAG context this proxy i
 - If the retrieved context itself is wrong (your source data is inaccurate), a response that faithfully repeats that wrong information is still judged **grounded** — the guardrail never questions the source's accuracy.
 :::
 
-### How RAG Context Is Detected — the Single Biggest Caveat
+### How RAG Context Is Detected
 
-This guardrail does not read a dedicated signal published by the RAG policy — it looks for a literal `<CONTEXT>...</CONTEXT>` marker pair inside the request body actually sent to the backend LLM. RAG Injection's own default Injection Template already contains exactly this marker pair (see [RAG Injection configuration](/en/ai-gateway/rag-injection#configuration)).
+This guardrail uses the context that the RAG policy retrieved and injected into the same request. It works with every **Injection Mode** of the RAG policy. If a client writes a `<CONTEXT>...</CONTEXT>` text in its own message, the guardrail does not use that text as retrieved context.
 
-:::danger Only works when RAG's Injection Mode is set to "Inject via Template"
-RAG Injection's **Injection Mode** field defaults to **Prepend to User Message** — in that mode the context is inserted as plain text ahead of the user's request with no marker at all. In that default mode (or in **Prepend to System Message** / **Append After System Message**), Groundedness Protection finds no detectable context in the request and **silently does nothing** — it neither blocks nor flags, because it has nothing to evaluate. This guardrail only works when RAG's Injection Mode is set to **Inject via Template** and the template in use (default or custom) still contains the `<CONTEXT>`/`</CONTEXT>` pair. **Adding this guardrail while leaving RAG on its default injection mode produces a configuration that looks active but never actually evaluates any request** — if you plan to pair RAG with Groundedness Protection, set Injection Mode to **Inject via Template**.
-:::
-
-A request where no detectable context is found (RAG never ran, or ran in an undetectable mode) is indistinguishable from one where the context happened to be empty — both fall through to the same silent no-op. This is the only behavior-preserving choice available without widening the guardrail's own scope.
+A request without injected context (the RAG policy did not run, or it found nothing) is not evaluated. The guardrail neither blocks nor flags such a request.
 
 ### Unary Responses Only
 
@@ -984,7 +1008,7 @@ The judge's own settings (model name, timeout, JSON mode, max input/output token
 |---|---|---|
 | **Action** | Flag | Block rejects the ungrounded response |
 | **Evaluation Mode** | Inline | Off-Topic Protection defaults to Asynchronous; here the default is **Inline** because this is a security gate that can Block a response — correctness is prioritized over latency. Asynchronous and Observe-Only are also available. |
-| **Judge Failure Mode** | Block on failure | If the judge call errors or times out, the response is blocked. Allow on failure lets it continue, unverified, with a visible warning. |
+| **Judge Failure Mode** | Block on failure | If the judge call errors or times out, the response is blocked. The same applies when the judge is not configured or the gateway cannot find it, but only for a request that has injected context. Allow on failure lets the response continue, unverified, with a visible warning. In Observe-Only mode, the guardrail never blocks. |
 | **Max Context Characters** | 6000 | Truncation cap applied to the retrieved context before it reaches the judge |
 | **Max Response Characters** | 4000 | Truncation cap applied to the response text before it reaches the judge |
 
