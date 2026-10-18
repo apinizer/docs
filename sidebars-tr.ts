@@ -1264,7 +1264,8 @@ const sidebars: SidebarsConfig = {
           "items": [
             "tutorials/ai-proxy-senaryolari/rag-embedding-provider-ve-vector-db",
             "tutorials/ai-proxy-senaryolari/knowledge-base-olusturma-ve-indexleme",
-            "tutorials/ai-proxy-senaryolari/ai-rag-injection-politikasi"
+            "tutorials/ai-proxy-senaryolari/ai-rag-injection-politikasi",
+            "tutorials/ai-proxy-senaryolari/mcp-gateway-keycloak-oauth-girisi"
           ]
         },
         {

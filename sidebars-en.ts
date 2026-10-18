@@ -1259,6 +1259,15 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "AI Proxy Scenarios",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "tutorials/ai-proxy-scenarios/mcp-gateway-keycloak-oauth-sign-in"
+          ]
+        },
+        {
+          "type": "category",
           "label": "API Creator",
           "collapsed": true,
           "collapsible": true,
