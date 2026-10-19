@@ -1,6 +1,6 @@
 ---
 title: "MCP Gateway Browser Sign-In Without Keycloak"
-description: "You can protect an MCP Gateway with the Apinizer authorization server itself, without an external identity provider, and let MCP clients such as Claude Code sign in on the Apinizer login page. The scenario covers both the Manage From ACL and the Manage From This Policy mode."
+description: "You can protect an MCP Gateway, in Passthrough or Expose Tools mode, with the Apinizer authorization server itself, without an external identity provider, and let MCP clients such as Claude Code sign in on the Apinizer login page. The scenario covers both the Manage From ACL and the Manage From This Policy mode, and the tool access that scopes control."
 ---
 
 import {Steps, Step} from '@site/src/components/Steps';
@@ -9,7 +9,7 @@ import {Steps, Step} from '@site/src/components/Steps';
 
 In this scenario you use the Apinizer OAuth2 or JWT policy as the authorization server. You do not need an external identity provider.
 
-- An MCP Gateway that uses the Standard MCP OAuth profile.
+- An MCP Gateway (Passthrough or Expose Tools) that uses the Standard MCP OAuth profile.
 - A flow where the user signs in on the Apinizer login page in the browser (authorization code + PKCE).
 - An application, with a public API client, that gets tokens on behalf of the user.
 
@@ -19,8 +19,9 @@ There are two management modes. The OAuth2 or JWT policy of the proxy selects th
 |---|---|---|
 | Endpoint family | `/credential` | `/auth` |
 | Issuer | `https://gateway.example.com/credential` | `https://gateway.example.com/auth` |
-| Signed-in user | An Apinizer consumer. A local password, or a consumer synchronized with LDAP. | A user of the identity source of the policy: Secret Manager, LDAP, database or API. |
+| Signed-in user | An Apinizer consumer. The user enters the consumer name and the secret of an API client of the consumer. A consumer with a local password, or a consumer synchronized with LDAP, also works. | A user of the identity source of the policy: Secret Manager, LDAP, database or API. |
 | Access | ACL row of the user ∩ ACL row of the application | Authorization of the policy ∩ ACL row of the application |
+| CORS settings that apply | CORS settings of the environment (worker) | CORS settings of the target proxy (**Settings** tab) |
 | Extra policy setting | None. You turn on browser login in the API client. | The **Browser login (authorization_code)** switch |
 
 ```mermaid
@@ -34,7 +35,7 @@ sequenceDiagram
     G-->>C: resource + authorization_servers (Apinizer)
     C->>G: GET authorization server metadata
     C->>U: Open the browser with the authorize URL
-    U->>G: Username and password on the login page
+    U->>G: Username and secret (or password) on the login page
     G-->>C: Redirect: code + state + iss
     C->>G: Token request (code + code_verifier)
     G-->>C: Access token (aud = proxy URL) + refresh token
@@ -51,10 +52,21 @@ The profile itself is described in [Standard MCP Client Profile](/en/ai-gateway/
 - If an ingress adds a path prefix, it must route the host-root `/.well-known/oauth-authorization-server/...` path to the gateway. See [Limits and Behavior](#limits-and-behavior).
 - The identity source of the users is not **OIDC**. Browser login does not support an OIDC identity source.
 
-The examples use the gateway `https://gateway.example.com` and the proxy path `/jira-pt`. The canonical resource of the proxy is:
+The examples use one scenario in the project **Order Management** on the gateway `https://gateway.example.com`:
+
+| Item | Example |
+|---|---|
+| Passthrough proxy | **Order Desk MCP**, path `/order-desk`. The backend MCP server has the tools `get_order_status`, `list_open_orders` and `cancel_order`. |
+| Expose Tools proxy | **Order Service Tools**, path `/order-tools`. It publishes methods of the REST proxy **Order Service API**. |
+| Application | **Claude Code**, with the public API client `claude-code-desktop`. |
+| Consumers | `jane.doe` (role **Order Viewer**) and `sam.lee` (roles **Order Viewer** and **Order Manager**). |
+| Roles | **Order Viewer** (OAuth Scope Name `orders.read`) and **Order Manager** (OAuth Scope Name `orders.write`). |
+| Service application | **Order Tools Gateway**, with the API client `order-tools-gateway`. |
+
+The canonical resource of the **Order Desk MCP** proxy is:
 
 ```text
-https://gateway.example.com/apigateway/jira-pt
+https://gateway.example.com/apigateway/order-desk
 ```
 
 ## Common Steps for Both Modes
@@ -65,11 +77,11 @@ An API client of any owner, an application or a consumer, can use browser login.
 
 <Steps>
   <Step title="Create the application">
-    Create an application that represents the client that gets tokens on behalf of the user. See [Portal Applications](/en/admin/identity-management/portal-applications).
+    Create an application (for example **Claude Code**) that represents the client that gets tokens on behalf of the user. See [Portal Applications](/en/admin/identity-management/portal-applications).
   </Step>
 
   <Step title="Create an API client">
-    On the **API Clients** tab of the application, create a new API client. The **client ID** of the client is the OAuth `client_id`.
+    On the **API Clients** tab of the application, create a new API client. The **client ID** of the client is the OAuth `client_id`. In the example it is `claude-code-desktop`.
   </Step>
 
   <Step title="Turn on browser login">
@@ -78,11 +90,13 @@ An API client of any owner, an application or a consumer, can use browser login.
     | Field | Value |
     |---|---|
     | Client type | **Public (no secret)**. MCP clients cannot keep a secret. |
-    | Redirect URIs | The redirect URI that the MCP client uses. One URI on each line. |
-    | Access token lifetime | A finite lifetime. |
-    | Allow refresh token | On. Enter a finite refresh lifetime. |
+    | Redirect URIs | The redirect URI that the MCP client uses. One URI on each line. Example: `http://localhost:33418/callback` |
+    | Access token lifetime | A finite lifetime. Example: 15 minutes. |
+    | Allow refresh token | On. Enter a finite refresh lifetime. Example: 8 hours. |
 
     There is no limit on the number of redirect URIs. Each URI must be different, absolute, without a fragment, and at most 2048 characters. `http` is allowed on any host. A redirect URI is matched exactly. For `http://127.0.0.1`, `http://[::1]` and `http://localhost`, only the port can differ.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-01-public-client.png" alt="Edit API Client dialog of claude-code-desktop with browser login on, Public client type, redirect URI and token lifetimes" width="800" />
   </Step>
 
   <Step title="Save and activate the client">
@@ -104,7 +118,18 @@ Access follows this rule: **access of the user ∩ access of the application**. 
 
 <Steps>
   <Step title="Prepare the user">
-    Create a **Consumer** for the person who signs in. The consumer can have a local password, or can be synchronized with LDAP. A consumer synchronized with Keycloak or another OIDC provider is not supported. The identity of an application and its API clients cannot be users.
+    Create a **Consumer** for the person who signs in (for example `jane.doe`). A consumer that you create on this version has no password. Its API clients hold the secrets:
+
+    1. On the **API Clients** tab of the consumer, create a new API client. Leave **Browser login** off. The client is then a confidential client.
+    2. Create a client secret for the client. Apinizer shows the secret only once. The user keeps it.
+    3. Activate the API client.
+    4. Deploy the consumer.
+
+    The user signs in with the **consumer name** and this **client secret**.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-02-consumer-client.png" alt="API Clients tab of the consumer jane.doe with one active confidential client" width="1000" />
+
+    The user can also enter the **client ID** of an API client and its own secret. The client ID of a public client never counts as a user. A consumer that is expired, cut off, refused by IP or disabled is refused. A consumer with a local password (an older consumer) or a consumer synchronized with LDAP signs in as before. A consumer synchronized with Keycloak or another OIDC provider is not supported. The identity of an application and its API clients cannot be users.
   </Step>
 
   <Step title="Give the user access">
@@ -121,10 +146,14 @@ Access follows this rule: **access of the user ∩ access of the application**. 
 
   <Step title="Select the profile">
     On the **MCP Routing** tab, select **Configure** in the **Routing Mode** panel. Under **Client Authentication Profile**, select **Standard MCP OAuth** and save. Deploy the proxy.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-03-standard-profile.png" alt="Edit Routing Mode dialog of Order Desk MCP with Passthrough, Standard MCP OAuth and the prerequisites" width="800" />
   </Step>
 </Steps>
 
 In this mode the client uses `https://gateway.example.com/credential/authorize` and `https://gateway.example.com/credential/token`. The same family also has the `/credential/revoke` and `/credential/introspect` endpoints.
+
+The browser login client sets the access lifetime and the refresh lifetime. It has no refresh count field. The sign-in ceiling bounds the refresh. See [Sign-in lifetime](#limits-and-behavior).
 
 ## B. Manage From This Policy Mode (`/auth`)
 
@@ -134,7 +163,7 @@ In this mode the client uses `https://gateway.example.com/credential/authorize` 
   </Step>
 
   <Step title="Set finite token lifetimes">
-    Turn off **Token Never Expires** and enter an access token lifetime. If you allow a refresh token, enter a finite refresh lifetime. The policy cannot be saved with lifetimes that are not finite.
+    Turn off **Token Never Expires** and enter an access token lifetime. If you allow a refresh token, enter a finite refresh lifetime. The policy cannot be saved with lifetimes that are not finite. You can also limit the refreshes with **Refresh Token Count**. See below.
   </Step>
 
   <Step title="Turn on browser login">
@@ -154,10 +183,66 @@ In this mode the client uses `https://gateway.example.com/auth/authorize` and `h
 
 The users come from the identity source of the policy:
 
-- **Secret Manager.** The user must be a consumer. The gateway checks the user again on every request.
+- **Secret Manager.** The user must be a consumer. The user signs in in the same way as in Manage From ACL mode: the consumer name with the secret of a confidential API client of the consumer, or the client ID of an API client with its own secret. The gateway checks the user again on every request.
 - **LDAP, database, API.** The source is not queried on every request. The roles are queried again at refresh.
 
+**Refresh Token Count.** In this mode, the **Refresh Token Count** setting of the JWT or OAuth2 policy limits the number of refreshes in one sign-in (one token family). An empty value means unlimited. The last allowed refresh returns a new access token without a new refresh token. After that, the user signs in again.
+
 The roles travel in the scope of the token. A client can ask for a role by its name or by the **OAuth Scope Name** of the role. Both give the role.
+
+## Expose Tools Proxies
+
+The same sign-in flow works for an MCP Gateway in **Expose Tools** mode, where REST API methods are published as MCP tools. The endpoints, the login page and the tokens are the same. Only the canonical resource differs: it is the URL of the Expose Tools proxy, for example `https://gateway.example.com/apigateway/order-tools`.
+
+<Steps>
+  <Step title="Create the service client">
+    With the Standard MCP OAuth profile, an Expose Tools proxy needs a **service client**. The gateway calls the target REST proxy as this client. Create an application (for example **Order Tools Gateway**) with an active API client (for example `order-tools-gateway`) in the same project. The service client does not call the MCP proxy, so it needs no ACL row there. Deploy the application after you add the API client.
+  </Step>
+
+  <Step title="Set the service client in the proxy">
+    On the **MCP Routing** tab of the **Order Service Tools** proxy, select **Configure** in the **Routing Mode** panel. Select **Standard MCP OAuth**. Under the **Prerequisites** list, enter the client ID of the service client in the **Service client** field. Save and deploy the proxy. If you save without a service client, Apinizer refuses the save: "STANDARD_MCP_OAUTH needs a service client for the exposed tools".
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-08-service-client.png" alt="Edit Routing Mode dialog of Order Service Tools with Expose Tools, Standard MCP OAuth and the Service client field" width="800" />
+  </Step>
+
+  <Step title="Set the downstream identity of each tool">
+    Each exposed tool has a **Downstream identity**:
+
+    - **Service.** The gateway calls the target as the service client. The user is recorded only for audit.
+    - **Delegated user.** The gateway calls the target as the signed-in user. See [Calls to the tool target](/en/ai-gateway/mcp-gateway#calls-to-the-tool-target).
+  </Step>
+
+  <Step title="Set the required scopes of the tools">
+    In **Required Scopes** of a tool, enter the **role name**, for example **Order Manager**. The field placeholder shows a scope example, but you must enter the role name. A tool with an empty **Required Scopes** field shows as open in the tool table.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-09-required-scopes.png" alt="Edit Tool dialog of cancel_order with the Required Scopes chip Order Manager and Downstream identity Service" width="550" />
+  </Step>
+</Steps>
+
+In the example, `list_orders` and `get_order` have no required scope. `create_order` and `cancel_order` need the role **Order Manager**.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-07-exposed-tools.png" alt="Routing tab of Order Service Tools with the Exposed Tools table, Required Scopes and Downstream identity columns" width="1000" />
+
+**How the scope works.** The client asks for the **OAuth Scope Name** of the role (for example `orders.write`) in the `scope` parameter of the authorize request. The protected resource metadata lists these names in `scopes_supported`. The login page shows the asked scopes under **Requested access**. Without a scope, it shows **Basic access**.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-10-login-scope.png" alt="Login page for Order Service Tools with the requested access orders.write" width="450" />
+
+The example uses the roles **Order Viewer** (no scope needed) and **Order Manager** (OAuth Scope Name `orders.write`):
+
+| User | Roles | Result with `scope=orders.write` |
+|---|---|---|
+| `jane.doe` | Order Viewer | The token scope is empty. `tools/list` shows only `list_orders` and `get_order`. `tools/call` for `cancel_order` returns HTTP `403`. |
+| `sam.lee` | Order Viewer, Order Manager | The token scope is `orders.write`. `tools/list` shows all four tools. `cancel_order` succeeds. |
+
+A tool that the caller cannot use is not shown in `tools/list`. If the caller calls such a tool, the gateway answers with `403` and this header:
+
+```text
+WWW-Authenticate: Bearer error="insufficient_scope", scope="orders.write", resource_metadata="https://gateway.example.com/apigateway/order-tools/.well-known/oauth-protected-resource"
+```
+
+:::note
+The user and the **Claude Code** application each need their ACL row for the MCP proxy, as in the other modes. The access is the user ∩ the application. Deploy the applications after you add API clients.
+:::
 
 ## Connecting an MCP Client
 
@@ -168,26 +253,39 @@ A standard MCP client (Claude Code, MCP Inspector) follows this order by itself:
 3. The client reads the authorization server metadata.
 4. The client opens the browser with the Apinizer login page.
 
-The login page shows the name of the application, the redirect address and the target resource. The page has username and password fields and a **Sign in and allow** button. If the password is wrong, the same page opens again with an error message. If the sign-in succeeds, Apinizer redirects the browser to the redirect address with the `code`, `state` and `iss` parameters. The client exchanges the code for a token and calls the tools.
+The login page shows the name of the application, the redirect address, the target resource and the requested access. The page has username and password fields and a **Sign in and allow** button. The user enters the consumer name and the client secret (see [Manage From ACL Mode](#a-manage-from-acl-mode-credential)). If the secret is wrong, the same page opens again with this message: "Sign-in failed. Check your username and password and try again." The message does not tell which part is wrong. If the sign-in succeeds, Apinizer redirects the browser to the redirect address with the `code`, `state` and `iss` parameters. The client exchanges the code for a token and calls the tools.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-04-login-page-en.png" alt="Apinizer login page in English" width="450" />
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-06-login-error.png" alt="Login page after a wrong secret, with the sign-in failed message" width="450" />
+
+**Language.** The page has **English** and **Türkçe** buttons under the form. The client can also send `ui_locales` (for example `ui_locales=tr`) in the authorize request. Without a button choice or `ui_locales`, the `Accept-Language` header of the browser decides. A language switch shows the same page again. It is never a sign-in attempt. The page uses no JavaScript. The Enter key signs in.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-05-login-page-tr.png" alt="Apinizer login page in Turkish" width="450" />
 
 For Claude Code, give the client ID of the API client and a fixed callback port. The registered redirect URI and the address that the client uses must be the same.
 
 ```bash
-claude mcp add --transport http --client-id <client ID of the API client> --callback-port 33418 jira-pt https://gateway.example.com/apigateway/jira-pt
+claude mcp add --transport http --client-id claude-code-desktop --callback-port 33418 order-desk https://gateway.example.com/apigateway/order-desk
 ```
 
 Then select the server on the `/mcp` screen and use **Authenticate**.
 
-MCP Inspector runs in the browser. Allow the origin of Inspector in CORS, so that the browser can send requests to the token endpoint. In Manage From ACL mode, the CORS setting of the worker in the environment applies. In Manage From This Policy mode, the CORS setting on the **Settings** tab of the proxy applies. See [Token Service](/en/develop/policies/token-service/overview).
+MCP Inspector runs in the browser. Allow the origin of Inspector in CORS, so that the browser can send requests to the token endpoint. Which CORS setting applies depends on the mode:
+
+- **Manage From ACL (`/credential`).** The CORS settings of the environment (worker) apply.
+- **Manage From This Policy (`/auth`).** The CORS settings of the target proxy apply (the **Settings** tab of the proxy). This is the same as for the legacy `/auth` endpoints.
+
+See [Token Service](/en/develop/policies/token-service/overview).
 
 ## Verifying with curl
 
-The examples use the Manage From ACL mode. For the other mode, write `/auth` instead of `/credential`.
+The examples use the Manage From ACL mode. For the other mode, write `/auth` instead of `/credential`. In the examples, `<client secret>` is the secret of the API client. Never write a real secret in a script or a document.
 
 **1. Read the metadata.** The protected resource metadata names the Apinizer issuer. The authorization server metadata is at the canonical address:
 
 ```bash
-curl -s https://gateway.example.com/apigateway/jira-pt/.well-known/oauth-protected-resource
+curl -s https://gateway.example.com/apigateway/order-desk/.well-known/oauth-protected-resource
 
 curl -s https://gateway.example.com/.well-known/oauth-authorization-server/credential
 ```
@@ -203,10 +301,16 @@ echo "$CHALLENGE"
 **3. Open the authorize URL in a browser.** The `redirect_uri` must be registered in the API client. `resource` is required:
 
 ```text
-https://gateway.example.com/credential/authorize?response_type=code&client_id=<client ID>&redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2Fcb&code_challenge=<CHALLENGE value>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Fjira-pt&state=abc123
+https://gateway.example.com/credential/authorize?response_type=code&client_id=claude-code-desktop&redirect_uri=http%3A%2F%2Flocalhost%3A33418%2Fcallback&code_challenge=<CHALLENGE value>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Forder-desk&state=abc123
 ```
 
-Enter the username and password on the login page. The browser goes to `http://127.0.0.1:33418/cb?code=...&state=abc123&iss=...`. If nothing listens on this port, the browser shows a connection error. Copy the `code` value from the address bar. The `iss` value equals the issuer.
+Enter the consumer name (for example `jane.doe`) and the `<client secret>` on the login page. The browser goes to `http://localhost:33418/callback?code=...&state=abc123&iss=https%3A%2F%2Fgateway.example.com%2Fcredential`. If nothing listens on this port, the browser shows a connection error. Copy the `code` value from the address bar. The `iss` value equals the issuer.
+
+For an Expose Tools proxy, use the canonical resource of that proxy and ask for the OAuth Scope Name of the role in `scope`:
+
+```text
+https://gateway.example.com/credential/authorize?response_type=code&client_id=claude-code-desktop&redirect_uri=http%3A%2F%2Flocalhost%3A33418%2Fcallback&code_challenge=<CHALLENGE value>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Forder-tools&scope=orders.write&state=abc123
+```
 
 **4. Exchange the code for a token.** Send `code` in the body. A `code` in the URL query is refused:
 
@@ -215,38 +319,75 @@ curl -s -X POST https://gateway.example.com/credential/token \
   -d grant_type=authorization_code \
   -d code=<code value> \
   -d code_verifier="$VERIFIER" \
-  -d redirect_uri=http://127.0.0.1:33418/cb \
-  -d client_id=<client ID> \
-  -d resource=https://gateway.example.com/apigateway/jira-pt
+  -d redirect_uri=http://localhost:33418/callback \
+  -d client_id=claude-code-desktop \
+  -d resource=https://gateway.example.com/apigateway/order-desk
 ```
 
-The answer contains `access_token`, `refresh_token`, `expires_in` and `token_type`. The header of a JWT access token has `typ: at+jwt`.
+The answer contains `access_token`, `refresh_token`, `expires_in` and `token_type`:
+
+```json
+{"access_token":"…","refresh_token":"…","token_type":"Bearer","expires_in":900}
+```
+
+The header of a JWT access token has `typ: at+jwt`. A decoded token looks like this:
+
+```json
+{
+  "header": {"typ": "at+jwt", "alg": "RS256", "kid": "…"},
+  "claims": {
+    "sub": "jane.doe",
+    "tokenSubjectType": "CONSUMER",
+    "clientOwnerType": "APPLICATION",
+    "iss": "https://gateway.example.com/credential",
+    "client_id": "claude-code-desktop",
+    "aud": "https://gateway.example.com/apigateway/order-desk",
+    "X-TokenProfile": "mcp-standard",
+    "grantType": "authorization_code",
+    "exp": 0,
+    "iat": 0,
+    "jti": "…"
+  }
+}
+```
 
 **5. Call the proxy:**
 
 ```bash
-curl -i -X POST https://gateway.example.com/apigateway/jira-pt \
+curl -i -X POST https://gateway.example.com/apigateway/order-desk \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-**6. Refresh the token.** The refresh token rotates on every use. If you send an old refresh token again, Apinizer revokes the whole token family:
+For an Expose Tools proxy, a call to a tool that needs a role the user does not have returns `403` with `insufficient_scope`:
+
+```bash
+curl -i -X POST https://gateway.example.com/apigateway/order-tools \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cancel_order","arguments":{"orderId":"1001"}}}'
+```
+
+**6. Refresh the token.** The refresh token rotates on every use. If you send an old refresh token again, Apinizer returns `400 invalid_grant` ("Refresh Token is not valid!") and revokes the whole token family:
 
 ```bash
 curl -s -X POST https://gateway.example.com/credential/token \
   -d grant_type=refresh_token \
   -d refresh_token=<refresh_token> \
-  -d client_id=<client ID>
+  -d client_id=claude-code-desktop
 ```
+
+A refresh is also refused with `invalid_grant` when refresh is no longer allowed for the client or the policy.
 
 **7. Sign out.** A public client revokes its own token with the `client_id` only. Revoking the refresh token ends the whole family:
 
 ```bash
 curl -s -X POST https://gateway.example.com/credential/revoke \
   -d token=<refresh_token> \
-  -d client_id=<client ID>
+  -d client_id=claude-code-desktop
 ```
 
 ## Limits and Behavior
@@ -272,7 +413,7 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 - The refresh token rotates on every use. If a used refresh token comes again, the token family is revoked.
 - After a family is revoked, a JWT access token stays valid until it expires. For an immediate effect, set [Revocation Strictness](/en/admin/identity-management/token-management-settings#revocation-strictness) to **STRICT**.
 
-**Sign-in lifetime.** At sign-in, a ceiling is set: the longest of the access and refresh lifetimes. Refresh does not extend this ceiling. When the ceiling is reached, the user signs in again.
+**Sign-in lifetime.** At sign-in, a ceiling is set: the longest of the access and refresh lifetimes. Refresh does not extend this ceiling. When the ceiling is reached, the user signs in again. In Manage From This Policy mode, **Refresh Token Count** also limits the refreshes in one sign-in.
 
 **Turning the switch off.** In Manage From This Policy mode, if you turn the switch off, save and deploy, the tokens issued by browser login become invalid immediately. The refresh of these tokens is refused too. Tokens from the legacy grants are not affected.
 
@@ -281,7 +422,7 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 - With LDAP, database and API sources, an account that is disabled in the source can work until the token family expires. A deleted user or a revoked role is dropped at refresh. In a token family that carries no role, a deleted user can also work until the family expires.
 - If a consumer is suspended, or an API client is revoked, the tokens stop on the next request.
 
-**Role authorization.** At sign-in, the role authorization on method level is not asked, because there is no method yet. A user whose role is not enough gets a token. The gateway refuses the call.
+**Role authorization.** At sign-in, the role authorization on method level is not asked, because there is no method yet. A user whose role is not enough gets a token. The gateway refuses the call. In an Expose Tools proxy, the gateway also hides the tools that the caller cannot use.
 
 **Legacy flows.** Tokens from `client_credentials`, `password` and the older `refresh_token` keep working. An MCP proxy with the Standard profile still refuses a token of the legacy type.
 
@@ -298,15 +439,23 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 | The canonical authorization server address answers `404` | The access URL of the environment is not defined, or the path is not `/auth` or `/credential`. | Define the access URL. Check the path. |
 | After the password, the page says the sign-in expired or does not continue | The access URL is plain `http` on an address that is not loopback, so the browser drops the secure sign-in cookie; or the user opened the login page from another address than the access URL. | Use an HTTPS access URL and open the authorize address under it. |
 | Sign-in works but the call gets `403` | After the token, the ACL row of the user or the application was removed, or the role is not enough. | Check the ACL rows and the OAuth scope name of the role. |
+| Sign-in failed with the consumer name | The API client is public, is not active, or is not deployed. The secret is expired. The consumer is not deployed. | Use a confidential API client (browser login off). Activate it, check the secret, and deploy the consumer. |
+| An Expose Tools proxy cannot be saved: it needs a service client | The Standard MCP OAuth profile needs a service client for the exposed tools. | Enter the client ID of an active API client of the same project in **Service client**. |
+| `tools/call` returns `403` with `insufficient_scope` | The user does not hold the role of the tool, or the client did not ask for the OAuth Scope Name of the role. | Give the user the role. Ask for the OAuth Scope Name in the `scope` parameter of the authorize request. |
+| MCP Inspector shows a CORS error | The origin of Inspector is not allowed in the CORS settings that apply to the mode. | In Manage From ACL mode, change the CORS settings of the environment. In Manage From This Policy mode, change the CORS settings on the **Settings** tab of the proxy. |
 
 ## Checking the Setup
 
 - When you add the proxy to Claude Code, does the Apinizer login page open?
 - Does the login page show the application name and the target resource?
-- When you enter a wrong password, does the same page open again with an error message?
+- Can the user sign in with the consumer name and the secret of a confidential API client?
+- When you enter a wrong secret, does the same page open again with an error message?
+- When you use the **Türkçe** and **English** buttons, does the page change language without a sign-in attempt?
 - After the sign-in, does the tool list arrive?
+- In an Expose Tools proxy, does a user without the role not see the scoped tools, and does a call to such a tool return `403`?
 - When the access token expires, does the client keep working without a new sign-in?
 - When you send the same refresh token a second time, is the request refused?
+- In Manage From This Policy mode, after the number of refreshes in **Refresh Token Count**, does the user have to sign in again?
 - When you remove the ACL row of the application, is the next call refused?
 - When you remove the ACL row of the user, is the next call refused?
 - When you disable the consumer, is the next call refused?
