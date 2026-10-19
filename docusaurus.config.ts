@@ -12,7 +12,6 @@ const config: Config = {
   organizationName: 'apinizer',
   projectName: 'docs',
   onBrokenLinks: 'warn',
-  onBrokenMarkdownLinks: 'warn',
   onBrokenAnchors: 'warn',
   trailingSlash: false,
 
@@ -31,6 +30,9 @@ const config: Config = {
 
   markdown: {
     mermaid: true,
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
   },
 
   themes: [
@@ -47,6 +49,8 @@ const config: Config = {
         indexPages: false,
         indexBlog: false,
         docsRouteBasePath: ['/tr', '/en', '/api-reference'],
+        // Content folders of the three docs plugins (the default 'docs' does not exist here).
+        docsDir: ['tr', 'en', 'api-reference'],
         docsPluginIdForPreferredVersion: 'tr',
         // Per-context shards (tr/en/api-reference) so the global combined
         // index is not the only path — needed for Cloudflare Pages's 25 MB
