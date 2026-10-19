@@ -1264,7 +1264,8 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "tutorials/ai-proxy-scenarios/mcp-gateway-keycloak-oauth-sign-in",
-            "tutorials/ai-proxy-scenarios/mcp-gateway-browser-sign-in"
+            "tutorials/ai-proxy-scenarios/mcp-gateway-browser-sign-in",
+            "tutorials/ai-proxy-scenarios/mcp-gateway-authorization-cards"
           ]
         },
         {
