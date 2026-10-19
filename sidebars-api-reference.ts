@@ -379,6 +379,8 @@ const sidebars: SidebarsConfig = {
                 "consumers/crud/create-consumer",
                 "consumers/crud/update-consumer",
                 "consumers/crud/change-consumer-password",
+                "consumers/crud/enable-consumer",
+                "consumers/crud/disable-consumer",
                 "consumers/crud/delete-consumer"
               ]
             },
