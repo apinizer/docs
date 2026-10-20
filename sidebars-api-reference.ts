@@ -381,6 +381,7 @@ const sidebars: SidebarsConfig = {
                 "consumers/crud/change-consumer-password",
                 "consumers/crud/enable-consumer",
                 "consumers/crud/disable-consumer",
+                "consumers/crud/sync-match-consumer",
                 "consumers/crud/delete-consumer"
               ]
             },
@@ -392,6 +393,8 @@ const sidebars: SidebarsConfig = {
               "items": [
                 "consumers/access/list-consumer-access",
                 "consumers/access/grant-consumer-access",
+                "consumers/access/update-consumer-api-proxy-access",
+                "consumers/access/update-consumer-proxy-group-access",
                 "consumers/access/revoke-consumer-access"
               ]
             },
@@ -401,6 +404,7 @@ const sidebars: SidebarsConfig = {
               "collapsed": true,
               "collapsible": true,
               "items": [
+                "consumers/secrets/get-consumer-secrets",
                 "consumers/secrets/set-consumer-secret-key",
                 "consumers/secrets/remove-consumer-secret-key",
                 "consumers/secrets/set-consumer-certificate",
@@ -433,6 +437,7 @@ const sidebars: SidebarsConfig = {
               "collapsed": true,
               "collapsible": true,
               "items": [
+                "consumers/token-settings/get-consumer-token-settings",
                 "consumers/token-settings/set-consumer-token-settings",
                 "consumers/token-settings/reset-consumer-token-settings"
               ]
@@ -538,6 +543,29 @@ const sidebars: SidebarsConfig = {
                 "oidc-providers/crud/get-oidc-provider",
                 "oidc-providers/crud/list-oidc-providers",
                 "oidc-providers/crud/update-oidc-provider"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Consumer Roles",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "consumer-roles/consumer-roles",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumer-roles/crud/crud",
+                "consumer-roles/crud/list-consumer-roles",
+                "consumer-roles/crud/get-consumer-role",
+                "consumer-roles/crud/create-consumer-role",
+                "consumer-roles/crud/update-consumer-role",
+                "consumer-roles/crud/delete-consumer-role"
               ]
             }
           ]
