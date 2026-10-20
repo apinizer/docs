@@ -362,6 +362,85 @@ const sidebars: SidebarsConfig = {
         },
         {
           "type": "category",
+          "label": "Consumers",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "consumers/consumers",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumers/crud/crud",
+                "consumers/crud/list-consumers",
+                "consumers/crud/get-consumer",
+                "consumers/crud/create-consumer",
+                "consumers/crud/update-consumer",
+                "consumers/crud/change-consumer-password",
+                "consumers/crud/enable-consumer",
+                "consumers/crud/disable-consumer",
+                "consumers/crud/delete-consumer"
+              ]
+            },
+            {
+              "type": "category",
+              "label": "Access",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumers/access/list-consumer-access",
+                "consumers/access/grant-consumer-access",
+                "consumers/access/revoke-consumer-access"
+              ]
+            },
+            {
+              "type": "category",
+              "label": "Secrets Management",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumers/secrets/set-consumer-secret-key",
+                "consumers/secrets/remove-consumer-secret-key",
+                "consumers/secrets/set-consumer-certificate",
+                "consumers/secrets/remove-consumer-certificate",
+                "consumers/secrets/set-consumer-public-key",
+                "consumers/secrets/remove-consumer-public-key",
+                "consumers/secrets/set-consumer-private-key",
+                "consumers/secrets/remove-consumer-private-key",
+                "consumers/secrets/set-consumer-keystore",
+                "consumers/secrets/remove-consumer-keystore",
+                "consumers/secrets/set-consumer-truststore",
+                "consumers/secrets/remove-consumer-truststore"
+              ]
+            },
+            {
+              "type": "category",
+              "label": "JWK Settings",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumers/jwk-settings/set-consumer-jwk-validation",
+                "consumers/jwk-settings/remove-consumer-jwk-validation",
+                "consumers/jwk-settings/set-consumer-jwk-encryption",
+                "consumers/jwk-settings/remove-consumer-jwk-encryption"
+              ]
+            },
+            {
+              "type": "category",
+              "label": "Token Settings",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumers/token-settings/set-consumer-token-settings",
+                "consumers/token-settings/reset-consumer-token-settings"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
           "label": "Credentials",
           "collapsed": true,
           "collapsible": true,
@@ -459,6 +538,29 @@ const sidebars: SidebarsConfig = {
                 "oidc-providers/crud/get-oidc-provider",
                 "oidc-providers/crud/list-oidc-providers",
                 "oidc-providers/crud/update-oidc-provider"
+              ]
+            }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Consumer Organizations",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "consumer-organizations/consumer-organizations",
+            {
+              "type": "category",
+              "label": "CRUD Operations",
+              "collapsed": true,
+              "collapsible": true,
+              "items": [
+                "consumer-organizations/crud/crud",
+                "consumer-organizations/crud/list-consumer-organizations",
+                "consumer-organizations/crud/get-consumer-organization",
+                "consumer-organizations/crud/create-consumer-organization",
+                "consumer-organizations/crud/update-consumer-organization",
+                "consumer-organizations/crud/delete-consumer-organization"
               ]
             }
           ]

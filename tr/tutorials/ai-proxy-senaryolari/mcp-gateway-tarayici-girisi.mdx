@@ -1,6 +1,6 @@
 ---
 title: "MCP Gateway'e Keycloak Olmadan Tarayıcı ile Giriş"
-description: "Harici bir kimlik sağlayıcı kurmadan MCP Gateway'inizi Apinizer'ın kendi yetkilendirme sunucusuyla koruyabilir ve Claude Code gibi MCP istemcilerinin Apinizer giriş sayfasından oturum açmasını sağlayabilirsiniz. Senaryo hem ACL'den Yönet hem Bu Poliçe'den Yönet modunu anlatır."
+description: "Harici bir kimlik sağlayıcı kurmadan MCP Gateway'inizi (Passthrough veya Araçları Aç modunda) Apinizer'ın kendi yetkilendirme sunucusuyla koruyabilir ve Claude Code gibi MCP istemcilerinin Apinizer giriş sayfasından oturum açmasını sağlayabilirsiniz. Senaryo hem ACL'den Yönet hem Bu Poliçe'den Yönet modunu ve scope ile denetlenen araç erişimini anlatır."
 ---
 
 import {Steps, Step} from '@site/src/components/Steps';
@@ -9,7 +9,7 @@ import {Steps, Step} from '@site/src/components/Steps';
 
 Bu senaryoda Apinizer'ın OAuth2 veya JWT politikasını yetkilendirme sunucusu olarak kullanırsınız. Harici bir kimlik sağlayıcı gerekmez.
 
-- Standart MCP OAuth profilini kullanan bir MCP Gateway.
+- Standart MCP OAuth profilini kullanan bir MCP Gateway (Passthrough veya Araçları Aç).
 - Kullanıcının tarayıcıda Apinizer giriş sayfasıyla oturum açtığı bir akış (authorization code + PKCE).
 - Kullanıcı adına token alan bir uygulama ve onun açık (public) API istemcisi.
 
@@ -19,8 +19,9 @@ Bu senaryoda Apinizer'ın OAuth2 veya JWT politikasını yetkilendirme sunucusu 
 |---|---|---|
 | Uç nokta ailesi | `/credential` | `/auth` |
 | Issuer | `https://gateway.example.com/credential` | `https://gateway.example.com/auth` |
-| Giriş yapan kullanıcı | Apinizer tüketicisi. Yerel parola ya da LDAP ile eşitlenmiş tüketici. | Politikanın kimlik kaynağındaki kullanıcı: Secret Manager, LDAP, veritabanı ya da API. |
+| Giriş yapan kullanıcı | Apinizer tüketicisi. Kullanıcı tüketici adını ve tüketicinin bir API istemcisinin secret'ını girer. Yerel parolası olan ya da LDAP ile eşitlenmiş tüketici de çalışır. | Politikanın kimlik kaynağındaki kullanıcı: Secret Manager, LDAP, veritabanı ya da API. |
 | Erişim | Kullanıcının ACL satırı ∩ uygulamanın ACL satırı | Politikanın yetkilendirmesi ∩ uygulamanın ACL satırı |
+| Geçerli CORS ayarı | Ortamın (worker) CORS ayarı | Hedef proxy'nin CORS ayarı (**Settings** sekmesi) |
 | Politikada ek ayar | Yok. Tarayıcı girişi API istemcisinde açılır. | **Tarayıcı ile giriş (authorization_code)** anahtarı |
 
 ```mermaid
@@ -34,7 +35,7 @@ sequenceDiagram
     G-->>C: resource + authorization_servers (Apinizer)
     C->>G: Yetkilendirme sunucusu meta verisini oku
     C->>U: Tarayıcıyı authorize adresiyle aç
-    U->>G: Giriş sayfasında kullanıcı adı ve parola
+    U->>G: Giriş sayfasında kullanıcı adı ve secret (ya da parola)
     G-->>C: Yönlendirme: code + state + iss
     C->>G: Token isteği (code + code_verifier)
     G-->>C: Access token (aud = proxy URL) + refresh token
@@ -51,10 +52,21 @@ Profilin kendisi [Standart MCP İstemci Profili](/tr/ai-gateway/mcp-gateway#stan
 - Ingress, yolun başına bir önek ekliyorsa host kökündeki `/.well-known/oauth-authorization-server/...` yolunu gateway'e yönlendirmelidir. Ayrıntı için [Sınırlar ve Davranışlar](#sınırlar-ve-davranışlar) bölümüne bakın.
 - Kullanıcıların kimliği bir **OIDC** kaynağı değildir. Tarayıcı girişi OIDC kimlik kaynağını desteklemez.
 
-Örneklerde gateway `https://gateway.example.com`, proxy yolu `/jira-pt` olarak geçer. Proxy'nin kanonik kaynağı şudur:
+Örnekler **Order Management** projesindeki tek bir senaryoyu ve `https://gateway.example.com` gateway'ini kullanır:
+
+| Öğe | Örnek |
+|---|---|
+| Passthrough proxy | **Order Desk MCP**, yol `/order-desk`. Arka uç MCP sunucusunun araçları: `get_order_status`, `list_open_orders` ve `cancel_order`. |
+| Araçları Aç proxy'si | **Order Service Tools**, yol `/order-tools`. REST proxy'si **Order Service API**'nin metotlarını yayımlar. |
+| Uygulama | **Claude Code**, açık API istemcisi `claude-code-desktop`. |
+| Tüketiciler | `jane.doe` (rol **Order Viewer**) ve `sam.lee` (roller **Order Viewer** ve **Order Manager**). |
+| Roller | **Order Viewer** (OAuth Scope Adı `orders.read`) ve **Order Manager** (OAuth Scope Adı `orders.write`). |
+| Servis uygulaması | **Order Tools Gateway**, API istemcisi `order-tools-gateway`. |
+
+**Order Desk MCP** proxy'sinin kanonik kaynağı şudur:
 
 ```text
-https://gateway.example.com/apigateway/jira-pt
+https://gateway.example.com/apigateway/order-desk
 ```
 
 ## Ortak Adımlar
@@ -65,11 +77,11 @@ Tarayıcı girişini sahibi uygulama ya da tüketici olan her API istemcisi kull
 
 <Steps>
   <Step title="Uygulamayı oluşturun">
-    Kullanıcı adına token alacak istemciyi temsil eden bir uygulama oluşturun. Bkz. [Portal Uygulamaları](/tr/admin/identity-management/portal-applications).
+    Kullanıcı adına token alacak istemciyi temsil eden bir uygulama (örneğin **Claude Code**) oluşturun. Bkz. [Portal Uygulamaları](/tr/admin/identity-management/portal-applications).
   </Step>
 
   <Step title="API istemcisi oluşturun">
-    Uygulamanın **API İstemcileri** sekmesinde yeni bir API istemcisi oluşturun. İstemcinin **client kimliği** OAuth `client_id` değeridir.
+    Uygulamanın **API İstemcileri** sekmesinde yeni bir API istemcisi oluşturun. İstemcinin **client kimliği** OAuth `client_id` değeridir. Örnekte bu değer `claude-code-desktop` olur.
   </Step>
 
   <Step title="Tarayıcı girişini açın">
@@ -78,11 +90,13 @@ Tarayıcı girişini sahibi uygulama ya da tüketici olan her API istemcisi kull
     | Alan | Değer |
     |---|---|
     | İstemci türü | **Public (secret yok)**. MCP istemcileri secret saklayamaz. |
-    | Redirect URI'ler | MCP istemcisinin kullandığı yönlendirme adresi. Her satıra bir adres yazın. |
-    | Access token süresi | Sonlu bir süre. |
-    | Refresh token'a izin ver | Açık. Sonlu bir refresh süresi girin. |
+    | Redirect URI'ler | MCP istemcisinin kullandığı yönlendirme adresi. Her satıra bir adres yazın. Örnek: `http://localhost:33418/callback` |
+    | Access token süresi | Sonlu bir süre. Örnek: 15 dakika. |
+    | Refresh token'a izin ver | Açık. Sonlu bir refresh süresi girin. Örnek: 8 saat. |
 
     Yönlendirme adresi sayısında sınır yoktur. Her adres farklı ve mutlak olmalı, parça (fragment) içermemeli ve en çok 2048 karakter olmalıdır. `http` her ana makinede kullanılabilir. Yönlendirme adresi tam eşleşir. `http://127.0.0.1`, `http://[::1]` ve `http://localhost` adreslerinde yalnız port farklı olabilir.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-01-public-client.png" alt="claude-code-desktop API istemcisini düzenleme penceresi: tarayıcı girişi açık, Public istemci türü, yönlendirme adresi ve token süreleri" width="800" />
   </Step>
 
   <Step title="Kaydedin ve istemciyi etkinleştirin">
@@ -104,7 +118,18 @@ Erişim şu kuralla belirlenir: **kullanıcının erişimi ∩ uygulamanın eri�
 
 <Steps>
   <Step title="Kullanıcıyı hazırlayın">
-    Giriş yapacak kişi için bir **Tüketici** oluşturun. Tüketici yerel bir parolayla ya da LDAP ile eşitlenmiş olabilir. Keycloak ya da başka bir OIDC ile eşitlenmiş tüketici desteklenmez. Uygulamanın kimliği ve API istemcileri kullanıcı olamaz.
+    Giriş yapacak kişi için bir **Tüketici** oluşturun (örneğin `jane.doe`). Bu sürümde oluşturduğunuz tüketicinin parolası yoktur. Secret'ları tüketicinin API istemcileri tutar:
+
+    1. Tüketicinin **API İstemcileri** sekmesinde yeni bir API istemcisi oluşturun. **Tarayıcı girişi** anahtarını kapalı bırakın. İstemci böylece gizli (confidential) istemci olur.
+    2. İstemci için bir client secret oluşturun. Apinizer secret'ı yalnız bir kez gösterir. Kullanıcı secret'ı saklar.
+    3. API istemcisini etkinleştirin.
+    4. Tüketiciyi deploy edin.
+
+    Kullanıcı **tüketici adı** ve bu **client secret** ile giriş yapar.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-02-consumer-client.png" alt="jane.doe tüketicisinin API İstemcileri sekmesi: etkin bir gizli istemci" width="1000" />
+
+    Kullanıcı bir API istemcisinin **client kimliğini** ve o istemcinin kendi secret'ını da girebilir. Açık (public) istemcinin client kimliği hiçbir zaman kullanıcı sayılmaz. Süresi dolmuş, kesilmiş, IP'si reddedilmiş ya da devre dışı bırakılmış tüketici reddedilir. Yerel parolası olan (eski) tüketici ve LDAP ile eşitlenmiş tüketici eskisi gibi giriş yapar. Keycloak ya da başka bir OIDC ile eşitlenmiş tüketici desteklenmez. Uygulamanın kimliği ve API istemcileri kullanıcı olamaz.
   </Step>
 
   <Step title="Kullanıcıya erişim verin">
@@ -121,10 +146,14 @@ Erişim şu kuralla belirlenir: **kullanıcının erişimi ∩ uygulamanın eri�
 
   <Step title="Profili seçin">
     **MCP Routing** sekmesinde **Routing Modu** bölümünde **Yapılandır** düğmesini seçin. **İstemci Kimlik Doğrulama Profili** altında **Standart MCP OAuth** seçeneğini seçin ve kaydedin. Proxy'yi deploy edin.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-03-standard-profile.png" alt="Order Desk MCP için Routing Modu düzenleme penceresi: Passthrough, Standart MCP OAuth ve ön koşullar" width="800" />
   </Step>
 </Steps>
 
 Bu modda istemci `https://gateway.example.com/credential/authorize` ve `https://gateway.example.com/credential/token` adreslerini kullanır. Aynı ailede `/credential/revoke` ve `/credential/introspect` uçları da vardır.
+
+Access süresini ve refresh süresini tarayıcı girişi yapan API istemcisi belirler. İstemcide refresh sayısı alanı yoktur. Refresh, giriş üst sınırıyla sınırlanır. Bkz. [Oturum süresi](#sınırlar-ve-davranışlar).
 
 ## B. Bu Poliçe'den Yönet Modu (`/auth`)
 
@@ -134,7 +163,7 @@ Bu modda istemci `https://gateway.example.com/credential/authorize` ve `https://
   </Step>
 
   <Step title="Sonlu token süreleri verin">
-    **Token Never Expires** ayarını kapatın ve bir access token süresi girin. Refresh token'a izin verdiyseniz sonlu bir refresh süresi girin. Süreler sonlu değilse politika kaydedilemez.
+    **Token Never Expires** ayarını kapatın ve bir access token süresi girin. Refresh token'a izin verdiyseniz sonlu bir refresh süresi girin. Süreler sonlu değilse politika kaydedilemez. Refresh sayısını **Refresh Token Count** ile de sınırlayabilirsiniz. Aşağıya bakın.
   </Step>
 
   <Step title="Tarayıcı girişini açın">
@@ -154,10 +183,66 @@ Bu modda istemci `https://gateway.example.com/auth/authorize` ve `https://gatewa
 
 Kullanıcılar politikanın kimlik kaynağından gelir:
 
-- **Secret Manager.** Kullanıcı bir tüketici olmalıdır. Gateway her istekte kullanıcıyı yeniden kontrol eder.
+- **Secret Manager.** Kullanıcı bir tüketici olmalıdır. Kullanıcı ACL'den Yönet modundaki gibi giriş yapar: tüketici adı ve tüketicinin gizli bir API istemcisinin secret'ı, ya da bir API istemcisinin client kimliği ve o istemcinin kendi secret'ı. Gateway her istekte kullanıcıyı yeniden kontrol eder.
 - **LDAP, veritabanı, API.** Kaynak kullanıcı için her istekte sorgulanmaz. Roller refresh sırasında yeniden sorulur.
 
+**Refresh Token Count.** Bu modda JWT veya OAuth2 politikasındaki **Refresh Token Count** ayarı, tek bir girişteki (tek token ailesindeki) refresh sayısını sınırlar. Boş bırakılırsa sınır yoktur. İzin verilen son refresh yeni bir access token döner, ama yeni refresh token dönmez. Bundan sonra kullanıcı yeniden giriş yapar.
+
 Roller token'ın scope değerinde taşınır. İstemci bir rolü adıyla ya da rolün **OAuth Scope Adı** ile isteyebilir. İkisinde de rol verilir.
+
+## Araçları Aç Proxy'leri
+
+Aynı giriş akışı **Araçları Aç** modundaki bir MCP Gateway için de çalışır. Bu modda REST API metotları MCP aracı olarak yayımlanır. Uç noktalar, giriş sayfası ve token'lar aynıdır. Yalnız kanonik kaynak değişir: kaynak, Araçları Aç proxy'sinin URL'sidir. Örnek: `https://gateway.example.com/apigateway/order-tools`.
+
+<Steps>
+  <Step title="Servis istemcisini oluşturun">
+    Standart MCP OAuth profilinde Araçları Aç proxy'sinin bir **servis istemcisi** olmalıdır. Gateway hedef REST proxy'sini bu istemci olarak çağırır. Aynı projede bir uygulama (örneğin **Order Tools Gateway**) ve etkin bir API istemcisi (örneğin `order-tools-gateway`) oluşturun. Servis istemcisi MCP proxy'sini çağırmaz, bu yüzden orada ACL satırı gerekmez. API istemcisini ekledikten sonra uygulamayı deploy edin.
+  </Step>
+
+  <Step title="Servis istemcisini proxy'de girin">
+    **Order Service Tools** proxy'sinin **MCP Routing** sekmesinde **Routing Modu** bölümünde **Yapılandır** düğmesini seçin. **Standart MCP OAuth** profilini seçin. **Ön koşullar** listesinin altındaki **Servis istemcisi** alanına servis istemcisinin client kimliğini girin. Kaydedin ve proxy'yi deploy edin. Servis istemcisi olmadan kaydederseniz Apinizer kaydı reddeder: "STANDARD_MCP_OAUTH needs a service client for the exposed tools".
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-08-service-client.png" alt="Order Service Tools için Routing Modu düzenleme penceresi: Araçları Aç, Standart MCP OAuth ve Servis istemcisi alanı" width="800" />
+  </Step>
+
+  <Step title="Her aracın hedef kimliğini belirleyin">
+    Her araç için bir **Hedef kimliği** vardır:
+
+    - **Servis.** Gateway hedefi servis istemcisi olarak çağırır. Kullanıcı yalnız denetim için kaydedilir.
+    - **Delege kullanıcı.** Gateway hedefi oturum açmış kullanıcı olarak çağırır. Bkz. [Araç hedefine yapılan çağrılar](/tr/ai-gateway/mcp-gateway#araç-hedefine-yapılan-çağrılar).
+  </Step>
+
+  <Step title="Araçların gerekli scope'larını belirleyin">
+    Bir aracın **Zorunlu Scope'lar** alanına **rol adını** yazın, örneğin **Order Manager**. Alandaki örnek metin bir scope örneği gösterir, ama siz rol adını girmelisiniz. **Zorunlu Scope'lar** alanı boş olan araç araç tablosunda açık görünür.
+
+    <img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-09-required-scopes.png" alt="cancel_order aracını düzenleme penceresi: Zorunlu Scope'lar alanında Order Manager, Hedef kimliği Servis" width="550" />
+  </Step>
+</Steps>
+
+Örnekte `list_orders` ve `get_order` araçlarının gerekli scope'u yoktur. `create_order` ve `cancel_order` araçları **Order Manager** rolünü ister.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-07-exposed-tools.png" alt="Order Service Tools Routing sekmesi: Yayımlanan araçlar tablosu, Zorunlu Scope'lar ve Hedef kimliği sütunları" width="1000" />
+
+**Scope nasıl çalışır.** İstemci, authorize isteğinin `scope` parametresinde rolün **OAuth Scope Adını** ister (örneğin `orders.write`). Korunan kaynak meta verisi bu adları `scopes_supported` alanında listeler. Giriş sayfası istenen scope'ları **İstenen erişim** başlığı altında gösterir. Scope istenmezse sayfa **Temel erişim** gösterir.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-10-login-scope.png" alt="Order Service Tools için giriş sayfası: istenen erişim orders.write" width="450" />
+
+Örnekte **Order Viewer** (scope gerekmez) ve **Order Manager** (OAuth Scope Adı `orders.write`) rolleri kullanılır:
+
+| Kullanıcı | Roller | `scope=orders.write` ile sonuç |
+|---|---|---|
+| `jane.doe` | Order Viewer | Token scope'u boştur. `tools/list` yalnız `list_orders` ve `get_order` araçlarını gösterir. `cancel_order` için `tools/call` HTTP `403` döner. |
+| `sam.lee` | Order Viewer, Order Manager | Token scope'u `orders.write` olur. `tools/list` dört aracın hepsini gösterir. `cancel_order` başarılı olur. |
+
+Çağıranın kullanamadığı araç `tools/list` içinde görünmez. Çağıran böyle bir aracı yine de çağırırsa gateway `403` ve şu başlıkla yanıt verir:
+
+```text
+WWW-Authenticate: Bearer error="insufficient_scope", scope="orders.write", resource_metadata="https://gateway.example.com/apigateway/order-tools/.well-known/oauth-protected-resource"
+```
+
+:::note
+Kullanıcının ve **Claude Code** uygulamasının her birinin MCP proxy'si için ACL satırı olmalıdır. Diğer modlarda da böyledir. Erişim kullanıcı ∩ uygulama kuralıyla belirlenir. API istemcisi ekledikten sonra uygulamaları deploy edin.
+:::
 
 ## MCP İstemcisini Bağlama
 
@@ -168,26 +253,39 @@ Standart bir MCP istemcisi (Claude Code, MCP Inspector) şu sırayı kendisi izl
 3. İstemci yetkilendirme sunucusunun meta verisini okur.
 4. İstemci tarayıcıyı Apinizer giriş sayfasıyla açar.
 
-Giriş sayfası uygulamanın adını, yönlendirme adresini ve hedef kaynağı gösterir. Sayfada kullanıcı adı ve parola alanları ile **Giriş yap ve izin ver** düğmesi bulunur. Parola yanlışsa aynı sayfa hata mesajıyla yeniden açılır. Giriş başarılıysa Apinizer tarayıcıyı `code`, `state` ve `iss` parametreleriyle yönlendirme adresine yönlendirir. İstemci code'u token ile değiştirir ve araçları çağırır.
+Giriş sayfası uygulamanın adını, yönlendirme adresini, hedef kaynağı ve istenen erişimi gösterir. Sayfada kullanıcı adı ve parola alanları ile **Giriş yap ve izin ver** düğmesi bulunur. Kullanıcı tüketici adını ve client secret'ı girer (bkz. [ACL'den Yönet Modu](#a-aclden-yönet-modu-credential)). Secret yanlışsa aynı sayfa şu mesajla yeniden açılır: "Giriş başarısız. Kullanıcı adınızı ve parolanızı kontrol edip yeniden deneyin." Mesaj hangi bilginin yanlış olduğunu söylemez. Giriş başarılıysa Apinizer tarayıcıyı `code`, `state` ve `iss` parametreleriyle yönlendirme adresine yönlendirir. İstemci code'u token ile değiştirir ve araçları çağırır.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-05-login-page-tr.png" alt="Apinizer giriş sayfası, Türkçe" width="450" />
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-06-login-error.png" alt="Yanlış secret sonrası giriş sayfası ve giriş hatası mesajı (İngilizce)" width="450" />
+
+**Dil.** Sayfada formun altında **English** ve **Türkçe** düğmeleri vardır. İstemci authorize isteğinde `ui_locales` parametresini de gönderebilir (örneğin `ui_locales=tr`). Düğme seçimi ya da `ui_locales` yoksa tarayıcının `Accept-Language` başlığı belirler. Dil değiştirmek aynı sayfayı yeniden gösterir. Bu bir giriş denemesi sayılmaz. Sayfa JavaScript kullanmaz. Enter tuşu girişi yapar.
+
+<img src="/images/tutorials/ai-proxy-senaryolari/mcp-signin-04-login-page-en.png" alt="Apinizer giriş sayfası, İngilizce" width="450" />
 
 Claude Code için API istemcisinin client kimliğini ve sabit bir callback portunu verin. Kayıtlı yönlendirme adresiyle istemcinin kullandığı adres aynı olmalıdır.
 
 ```bash
-claude mcp add --transport http --client-id <API istemcisinin client kimliği> --callback-port 33418 jira-pt https://gateway.example.com/apigateway/jira-pt
+claude mcp add --transport http --client-id claude-code-desktop --callback-port 33418 order-desk https://gateway.example.com/apigateway/order-desk
 ```
 
 Sonra `/mcp` ekranında sunucuyu seçin ve **Authenticate** seçeneğini kullanın.
 
-MCP Inspector tarayıcıda çalışır. Token ucuna tarayıcıdan istek gönderebilmesi için Inspector'ın kökenine CORS izni verin. ACL'den Yönet modunda ortamdaki worker'ın CORS ayarı, Bu Poliçe'den Yönet modunda proxy'nin **Settings** sekmesindeki CORS ayarı geçerlidir. Bkz. [Token Servisi](/tr/develop/politikalar/token-service/genel-bakis).
+MCP Inspector tarayıcıda çalışır. Token ucuna tarayıcıdan istek gönderebilmesi için Inspector'ın kökenine CORS izni verin. Hangi CORS ayarının geçerli olduğu moda bağlıdır:
+
+- **ACL'den Yönet (`/credential`).** Ortamın (worker) CORS ayarı geçerlidir.
+- **Bu Poliçe'den Yönet (`/auth`).** Hedef proxy'nin CORS ayarı geçerlidir (proxy'nin **Settings** sekmesi). Eski `/auth` uç noktalarında da böyledir.
+
+Bkz. [Token Servisi](/tr/develop/politikalar/token-service/genel-bakis).
 
 ## curl ile Doğrulama
 
-Aşağıdaki örnekler ACL'den Yönet modunu kullanır. Bu modda `/credential` yerine `/auth` yazarak modu değiştirin.
+Aşağıdaki örnekler ACL'den Yönet modunu kullanır. Bu modda `/credential` yerine `/auth` yazarak modu değiştirin. Örneklerde `<client secret>`, API istemcisinin secret'ıdır. Gerçek bir secret'ı hiçbir betiğe ya da belgeye yazmayın.
 
 **1. Meta verileri okuyun.** Korunan kaynak meta verisi Apinizer issuer'ını verir. Yetkilendirme sunucusu meta verisi kanonik adrestedir:
 
 ```bash
-curl -s https://gateway.example.com/apigateway/jira-pt/.well-known/oauth-protected-resource
+curl -s https://gateway.example.com/apigateway/order-desk/.well-known/oauth-protected-resource
 
 curl -s https://gateway.example.com/.well-known/oauth-authorization-server/credential
 ```
@@ -203,10 +301,16 @@ echo "$CHALLENGE"
 **3. Authorize adresini tarayıcıda açın.** `redirect_uri` değeri API istemcisinde kayıtlı olmalıdır. `resource` zorunludur:
 
 ```text
-https://gateway.example.com/credential/authorize?response_type=code&client_id=<client kimliği>&redirect_uri=http%3A%2F%2F127.0.0.1%3A33418%2Fcb&code_challenge=<CHALLENGE değeri>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Fjira-pt&state=abc123
+https://gateway.example.com/credential/authorize?response_type=code&client_id=claude-code-desktop&redirect_uri=http%3A%2F%2Flocalhost%3A33418%2Fcallback&code_challenge=<CHALLENGE değeri>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Forder-desk&state=abc123
 ```
 
-Giriş sayfasında kullanıcı adı ve parolayı girin. Tarayıcı `http://127.0.0.1:33418/cb?code=...&state=abc123&iss=...` adresine gider. Bu portta dinleyen bir şey yoksa tarayıcı bağlantı hatası gösterir. Adres çubuğundan `code` değerini kopyalayın. `iss` değeri issuer'a eşittir.
+Giriş sayfasında tüketici adını (örneğin `jane.doe`) ve `<client secret>` değerini girin. Tarayıcı `http://localhost:33418/callback?code=...&state=abc123&iss=https%3A%2F%2Fgateway.example.com%2Fcredential` adresine gider. Bu portta dinleyen bir şey yoksa tarayıcı bağlantı hatası gösterir. Adres çubuğundan `code` değerini kopyalayın. `iss` değeri issuer'a eşittir.
+
+Araçları Aç proxy'si için o proxy'nin kanonik kaynağını kullanın ve `scope` içinde rolün OAuth Scope Adını isteyin:
+
+```text
+https://gateway.example.com/credential/authorize?response_type=code&client_id=claude-code-desktop&redirect_uri=http%3A%2F%2Flocalhost%3A33418%2Fcallback&code_challenge=<CHALLENGE değeri>&code_challenge_method=S256&resource=https%3A%2F%2Fgateway.example.com%2Fapigateway%2Forder-tools&scope=orders.write&state=abc123
+```
 
 **4. Code'u token ile değiştirin.** `code` gövdede gönderilir. URL sorgusundaki `code` reddedilir:
 
@@ -215,38 +319,75 @@ curl -s -X POST https://gateway.example.com/credential/token \
   -d grant_type=authorization_code \
   -d code=<code değeri> \
   -d code_verifier="$VERIFIER" \
-  -d redirect_uri=http://127.0.0.1:33418/cb \
-  -d client_id=<client kimliği> \
-  -d resource=https://gateway.example.com/apigateway/jira-pt
+  -d redirect_uri=http://localhost:33418/callback \
+  -d client_id=claude-code-desktop \
+  -d resource=https://gateway.example.com/apigateway/order-desk
 ```
 
-Yanıt `access_token`, `refresh_token`, `expires_in` ve `token_type` alanlarını içerir. JWT biçimindeki access token'ın başlığında `typ: at+jwt` bulunur.
+Yanıt `access_token`, `refresh_token`, `expires_in` ve `token_type` alanlarını içerir:
+
+```json
+{"access_token":"…","refresh_token":"…","token_type":"Bearer","expires_in":900}
+```
+
+JWT biçimindeki access token'ın başlığında `typ: at+jwt` bulunur. Çözülmüş bir token şöyle görünür:
+
+```json
+{
+  "header": {"typ": "at+jwt", "alg": "RS256", "kid": "…"},
+  "claims": {
+    "sub": "jane.doe",
+    "tokenSubjectType": "CONSUMER",
+    "clientOwnerType": "APPLICATION",
+    "iss": "https://gateway.example.com/credential",
+    "client_id": "claude-code-desktop",
+    "aud": "https://gateway.example.com/apigateway/order-desk",
+    "X-TokenProfile": "mcp-standard",
+    "grantType": "authorization_code",
+    "exp": 0,
+    "iat": 0,
+    "jti": "…"
+  }
+}
+```
 
 **5. Proxy'yi çağırın:**
 
 ```bash
-curl -i -X POST https://gateway.example.com/apigateway/jira-pt \
+curl -i -X POST https://gateway.example.com/apigateway/order-desk \
   -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
-**6. Token'ı yenileyin.** Refresh token her kullanımda yenilenir. Eski refresh token'ı tekrar gönderirseniz Apinizer tüm token ailesini iptal eder:
+Araçları Aç proxy'sinde, kullanıcının sahip olmadığı bir rolü isteyen araca yapılan çağrı `insufficient_scope` ile `403` döner:
+
+```bash
+curl -i -X POST https://gateway.example.com/apigateway/order-tools \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"cancel_order","arguments":{"orderId":"1001"}}}'
+```
+
+**6. Token'ı yenileyin.** Refresh token her kullanımda yenilenir. Eski refresh token'ı tekrar gönderirseniz Apinizer `400 invalid_grant` ("Refresh Token is not valid!") döner ve tüm token ailesini iptal eder:
 
 ```bash
 curl -s -X POST https://gateway.example.com/credential/token \
   -d grant_type=refresh_token \
   -d refresh_token=<refresh_token> \
-  -d client_id=<client kimliği>
+  -d client_id=claude-code-desktop
 ```
+
+İstemci ya da politika için refresh artık izinli değilse refresh de `invalid_grant` ile reddedilir.
 
 **7. Çıkış yapın.** Açık istemci yalnız `client_id` ile kendi token'ını iptal eder. Refresh token'ın iptali tüm aileyi düşürür:
 
 ```bash
 curl -s -X POST https://gateway.example.com/credential/revoke \
   -d token=<refresh_token> \
-  -d client_id=<client kimliği>
+  -d client_id=claude-code-desktop
 ```
 
 ## Sınırlar ve Davranışlar
@@ -272,7 +413,7 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 - Refresh token her kullanımda döner. Kullanılmış bir refresh token yeniden gelirse token ailesi iptal edilir.
 - JWT access token, aile iptalinden sonra süresi dolana kadar geçerli kalır. Hemen düşmesini istiyorsanız [Token İptali Katılık Ayarı](/tr/admin/identity-management/token-yonetim-ayarlari#token-iptali-katilik-ayari) ayarını **STRICT** yapın.
 
-**Oturum süresi.** Giriş anında bir üst sınır belirlenir: en uzun access veya refresh süresi. Refresh bu sınırı uzatmaz. Sınır dolunca kullanıcı yeniden giriş yapar.
+**Oturum süresi.** Giriş anında bir üst sınır belirlenir: en uzun access veya refresh süresi. Refresh bu sınırı uzatmaz. Sınır dolunca kullanıcı yeniden giriş yapar. Bu Poliçe'den Yönet modunda **Refresh Token Count** da tek girişteki refresh sayısını sınırlar.
 
 **Anahtarı kapatma.** Bu Poliçe'den Yönet modunda anahtarı kapatıp kaydederseniz ve deploy ederseniz, tarayıcı girişiyle verilmiş token'lar hemen geçersiz olur. Bu token'ların refresh'i de reddedilir. Eski grant'larla alınmış token'lar etkilenmez.
 
@@ -281,7 +422,7 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 - LDAP, veritabanı ve API kaynaklarında kaynakta kapatılan hesap, token ailesinin süresi dolana kadar çalışabilir. Silinen kullanıcı ya da geri alınan rol refresh sırasında düşer. Rol taşımayan bir token ailesinde silinen kullanıcı da aile süresi dolana kadar çalışabilir.
 - Tüketici askıya alınırsa ya da API istemcisi iptal edilirse token'lar sonraki istekte düşer.
 
-**Rol yetkisi.** Girişte metot düzeyindeki rol yetkisi sorulmaz, çünkü henüz bir metot yoktur. Rolü yetmeyen kullanıcı token alır. Gateway çağrıyı reddeder.
+**Rol yetkisi.** Girişte metot düzeyindeki rol yetkisi sorulmaz, çünkü henüz bir metot yoktur. Rolü yetmeyen kullanıcı token alır. Gateway çağrıyı reddeder. Araçları Aç proxy'sinde gateway, çağıranın kullanamadığı araçları da gizler.
 
 **Eski akışlar.** `client_credentials`, `password` ve eski `refresh_token` token'ları çalışmaya devam eder. Standart profilli bir MCP proxy'si eski türde token'ı yine reddeder.
 
@@ -298,15 +439,23 @@ curl -s -X POST https://gateway.example.com/credential/revoke \
 | Kanonik yetkilendirme sunucusu adresi `404` veriyor | Ortamın erişim URL'si tanımlı değil ya da yol `/auth` veya `/credential` değil. | Erişim URL'sini tanımlayın. Yolu kontrol edin. |
 | Paroladan sonra sayfa girişin süresinin dolduğunu söylüyor ya da ilerlemiyor | Erişim URL'si loopback olmayan bir adreste düz `http`. Bu yüzden tarayıcı güvenli giriş çerezini atıyor. Ya da kullanıcı giriş sayfasını erişim URL'sinden farklı bir adresten açtı. | HTTPS erişim URL'si kullanın ve authorize adresini bu URL'nin altında açın. |
 | Giriş başarılı ama çağrı `403` | Token sonrası kullanıcının ya da uygulamanın ACL satırı kaldırıldı ya da rol yetmiyor. | ACL satırlarını ve rolün OAuth scope adını kontrol edin. |
+| Tüketici adıyla giriş başarısız | API istemcisi açık (public), etkin değil ya da deploy edilmemiş. Secret'ın süresi dolmuş. Tüketici deploy edilmemiş. | Gizli bir API istemcisi kullanın (tarayıcı girişi kapalı). İstemciyi etkinleştirin, secret'ı kontrol edin ve tüketiciyi deploy edin. |
+| Araçları Aç proxy'si kaydedilmiyor: servis istemcisi gerekiyor | Standart MCP OAuth profili, yayımlanan araçlar için bir servis istemcisi ister. | **Servis istemcisi** alanına aynı projedeki etkin bir API istemcisinin client kimliğini girin. |
+| `tools/call` `insufficient_scope` ile `403` döner | Kullanıcı aracın rolüne sahip değil ya da istemci rolün OAuth Scope Adını istemedi. | Kullanıcıya rolü verin. Authorize isteğinin `scope` parametresinde OAuth Scope Adını isteyin. |
+| MCP Inspector CORS hatası veriyor | Inspector'ın kökeni, modun geçerli CORS ayarında izinli değil. | ACL'den Yönet modunda ortamın CORS ayarını değiştirin. Bu Poliçe'den Yönet modunda proxy'nin **Settings** sekmesindeki CORS ayarını değiştirin. |
 
 ## Kurulumu Kontrol Etme
 
 - Claude Code'a proxy eklenince Apinizer giriş sayfası açılıyor mu?
 - Giriş sayfası uygulamanın adını ve hedef kaynağı gösteriyor mu?
-- Yanlış parola girilince aynı sayfa hata mesajıyla yeniden açılıyor mu?
+- Kullanıcı tüketici adı ve gizli bir API istemcisinin secret'ı ile giriş yapabiliyor mu?
+- Yanlış secret girilince aynı sayfa hata mesajıyla yeniden açılıyor mu?
+- **Türkçe** ve **English** düğmeleri, giriş denemesi yapmadan sayfanın dilini değiştiriyor mu?
 - Girişten sonra araç listesi geliyor mu?
+- Araçları Aç proxy'sinde rolü olmayan kullanıcı kapsamlı araçları görmüyor mu ve böyle bir araca yapılan çağrı `403` dönüyor mu?
 - Access token süresi dolunca istemci yeniden giriş istemeden çalışıyor mu?
 - Aynı refresh token ikinci kez gönderilince istek reddediliyor mu?
+- Bu Poliçe'den Yönet modunda **Refresh Token Count** kadar refresh'ten sonra kullanıcı yeniden giriş yapmak zorunda kalıyor mu?
 - Uygulamanın ACL satırı kaldırılınca bir sonraki çağrı reddediliyor mu?
 - Kullanıcının ACL satırı kaldırılınca bir sonraki çağrı reddediliyor mu?
 - Tüketici devre dışı bırakılınca bir sonraki çağrı reddediliyor mu?
