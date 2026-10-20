@@ -82,7 +82,7 @@ There's no standalone "A2A connection" screen to visit first — an external age
 Each definition carries its own endpoint, authentication (see [Outbound Authentication](#outbound-authentication)), discovered skill catalog, health status, and approved-catalog fingerprint. Nothing is shared by reference between proxies or policies.
 
 :::note
-The endpoint you enter is the address tasks are sent to. Its agent card is looked for at that same address first, and if the card isn't served there, at the standard discovery path below it (`.../.well-known/agent-card.json`) — so entering an agent's task endpoint is enough for discovery to work, and entering its card URL directly keeps working as before.
+The endpoint you enter is the address tasks are sent to — enter the agent's task base URL, not its card URL. The agent card is looked for at that address first, and if the card isn't served there, at the standard discovery path below it (`.../.well-known/agent-card.json`). Entering a card URL directly (`.../.well-known/agent-card.json`) works for card discovery but breaks task sending, because tasks are POSTed to the same configured URL.
 :::
 
 #### Applying a Backend Agent: Apply to List → Save → deploy
@@ -95,17 +95,17 @@ The gateway always serves the **last deployed** configuration. Saving the A2A Ro
 
 ## Outbound Agent Call
 
-When you want to send a task from Apinizer to an external A2A agent, the component that actually delivers it is the **A2A Call (LLM)** / **A2A Call (Fixed)** policy (attached to an LLM Gateway). As with Passthrough mode, the target agent is defined **inline, on the policy's own screen**:
+When you want to send a task from Apinizer to an external A2A agent, the component that actually delivers it is the **A2A Call (LLM)** policy, attached to an LLM Gateway's response flow. As with Passthrough mode, the target agent is defined **inline, on the policy's own screen**. For a fixed, admin-chosen skill dispatch that runs on the request or error flow instead — see [A2A Call (Fixed)](#a2a-call-fixed) below.
 
 <Steps>
   <Step title="Add the policy">
-    Attach the **A2A Call (LLM)** policy to an LLM Gateway.
+    Attach the **A2A Call (LLM)** policy to an LLM Gateway's response flow.
   </Step>
   <Step title="Define the agent">
     In the **A2A Agent (Inline)** section, enter the endpoint, authentication, and mTLS settings if required.
   </Step>
   <Step title="Discover skills">
-    The **Discover Skills** button connects to the agent, fetches its agent card, and confirms its skill list — it runs before you save, so there's no separate "test connection" step.
+    The **Discover / Reparse Skills** button connects to the agent, fetches its agent card, and confirms its skill list — it runs before you save, so there's no separate "test connection" step.
   </Step>
   <Step title="Restrict allowed skills (optional)">
     Leave it empty to allow every discovered skill; to restrict, pick from the **Allowed Skills** list.
@@ -113,6 +113,28 @@ When you want to send a task from Apinizer to an external A2A agent, the compone
 </Steps>
 
 This agent definition is subject to the same SSRF protection as Passthrough mode (see [Security and Governance](#security-and-governance)). The policy screen's **A2A Connection** field is kept for backward compatibility: it's disabled once an inline agent is defined, and only one of the two is ever used at runtime.
+
+This policy can also be added and updated through the APIops REST API — see [API Reference: Policies](/api-reference/policies/crud/add-policy).
+
+### A2A Call (Fixed) {#a2a-call-fixed}
+
+The **A2A Call (Fixed)** policy dispatches a task to a fixed, admin-chosen skill on an external A2A agent, independently of the model. Unlike **A2A Call (LLM)**, it does not wait for the model to produce a tool call — it runs in the **request flow or the error flow** of any proxy type.
+
+| Field | Description |
+|---|---|
+| **Target Skill** | The skill to invoke, selected from the agent's discovered skill list. A skill not in the catalog is rejected fail-closed. |
+| **Message Template** | The message body sent to the agent. `${VARIABLE_NAME}` [environment variables](/en/develop/environment-variables) are resolved first; `#{...}` [context variables](/en/develop/policies/message-builder) next. |
+| **Wait Mode** | **Fire and Forget** (default) — dispatches asynchronously without blocking the flow. **Sync to Variable** — waits for the result and writes it to the named output variable. |
+| **Output Variable Name** | Required only when **Wait Mode** is **Sync to Variable**. |
+| **Call Timeout (ms)** | Per-send HTTP timeout. Default: 30 000 ms. |
+| **Task Wait Timeout (ms)** | Total polling budget for the async task wait loop. Default: 60 000 ms. |
+
+**Failure behavior.** Two failure categories apply:
+
+- **Configuration problems** — inline agent not configured, target skill blank or its environment variable unresolved, skill absent from the catalog, or the caller's identity denied by access rules — block the request with HTTP 500 / ERR-286.
+- **Dispatch failures** — timeout, remote agent error, or a transport failure — are logged only and never block the request or error flow. In **Sync to Variable** mode the output variable stays empty; check it before using it downstream.
+
+The agent result is written to the output variable without personal-data masking.
 
 This policy can also be added and updated through the APIops REST API — see [API Reference: Policies](/api-reference/policies/crud/add-policy).
 
@@ -124,7 +146,7 @@ Differences for A2A:
 
 - **Discover Auth** reads the agent card from the endpoint you entered, and then from its `/.well-known/agent-card.json` address. It suggests the scheme from the security schemes of the card, and accepts both the flat form and the A2A 1.0 form. A note appears when the card cannot be read.
 - When a call with a token exchange token gets 401 or 403, the gateway does not try again.
-- **Discover Skills** and the health check cannot get an exchange token, because they carry no caller token. The card read is refused for that scheme.
+- **Discover / Reparse Skills** and the health check cannot get an exchange token, because they carry no caller token. The card read is refused for that scheme.
 
 ## Agent Card, Task Lifecycle, and Streaming
 
@@ -251,7 +273,7 @@ A `callQuota` value saved by an earlier version is ignored, and the next save of
 
 ### Catalog Drift Protection
 
-The same mechanism as MCP, applied to an inline agent's advertised skill list instead of a tool catalog: a fingerprint is captured at the last approved discovery (an explicit Discover Skills, or the first discovery at deploy — see [Catalog Discovery at Deploy](#catalog-discovery-at-deploy)), a periodic health check compares the live card against it, and drift either logs and surfaces a warning (the default) or blocks task delegation through that agent until it's re-approved.
+The same mechanism as MCP, applied to an inline agent's advertised skill list instead of a tool catalog: a fingerprint is captured at the last approved discovery (an explicit **Discover / Reparse Skills**, or the first discovery at deploy — see [Catalog Discovery at Deploy](#catalog-discovery-at-deploy)), a periodic health check compares the live card against it, and drift either logs and surfaces a warning (the default) or blocks task delegation through that agent until it's re-approved.
 
 ### Catalog Discovery at Deploy {#catalog-discovery-at-deploy}
 
@@ -261,8 +283,8 @@ An inline agent of an **A2A Call (LLM)** or **A2A Call (Fixed)** policy that has
 - All probes of one deploy run in parallel. One total time limit of 30 seconds applies to the whole deploy.
 - A successful first result is saved as the skill catalog and becomes the approved baseline. Later changes are checked against it (see above).
 - An agent that already has a catalog or an approved fingerprint is not probed again. A drift that was detected is not approved by a deploy.
-- An agent that returns no skills, cannot be reached, or does not answer within 30 seconds does not stop the deploy. The deploy result shows a WARNING line for it, and its calls stay refused until a catalog is discovered. Use **Discover Skills** and deploy again.
-- An agent whose authentication scheme is OAuth2 token exchange is not probed at deploy. There is no caller token at deploy time, and the scheduled A2A health check skips it for the same reason. No WARNING line is written for it. Use **Discover Skills** to get its skill catalog.
+- An agent that returns no skills, cannot be reached, or does not answer within 30 seconds does not stop the deploy. The deploy result shows a WARNING line for it, and its calls stay refused until a catalog is discovered. Use **Discover / Reparse Skills** and deploy again.
+- An agent whose authentication scheme is OAuth2 token exchange is not probed at deploy. There is no caller token at deploy time, and the scheduled A2A health check skips it for the same reason. No WARNING line is written for it. Use **Discover / Reparse Skills** to get its skill catalog.
 - The agents in the **A2A Routing** tab of a Passthrough proxy are not probed at deploy.
 
 ### Response Flow Only {#response-flow-only}

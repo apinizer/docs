@@ -9,7 +9,7 @@ import {Steps, Step} from '@site/src/components/Steps';
 :::warning Policy order: guardrails run after the policies that build the prompt
 Prompt protection, data-loss protection and context integrity must run **after** [Prompt Template](/en/ai-gateway/prompt-templates), [Prompt Decorator](/en/ai-gateway/prompt-decorator) and [RAG Injection](/en/ai-gateway/rag-injection). Inspection has to happen on the prompt exactly as it will reach the model; a guardrail that runs earlier cannot see content added afterwards.
 
-**Personal-data masking is deliberately exempt.** Whether masking runs before or after RAG is your own data-boundary decision, and Apinizer never moves that policy. Placing masking before RAG keeps the caller's personal data from ever reaching the embedding provider.
+**Personal-data masking is deliberately exempt.** Whether masking runs before or after RAG is your own data-boundary decision, and Apinizer never moves that policy. Placing masking before RAG keeps the caller's personal data from ever reaching the embedding provider. Placing it after RAG causes it to also scan and mask personal data inside the injected context before that context reaches the model.
 
 If you save the policy list in an order that breaks this rule, Apinizer corrects the order **when you save** and tells you what was moved and why. This keeps the order you see on the Develop screen identical to the real execution order shown in [tracing](/en/ai-gateway/tracing-and-replay).
 
@@ -23,7 +23,7 @@ Prompt protection and context integrity always scan the request body. They do no
     Detects and masks personal data — such as Turkish national ID numbers, IBANs, and phone numbers — in both regular requests and streamed responses.
   </Card>
   <Card title="Prompt Protection" icon="shield-alert">
-    Detects jailbreak and injection attempts in incoming prompts before they reach the model. Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
+    Detects jailbreak and injection attempts in incoming prompts before they reach the model. Each rule carries its own **Block** or **Flag** action — a Block rule wins over any Flag rule regardless of order, and an external judge verdict of **unsafe** always blocks regardless of rule actions. An empty rule list makes the policy inactive (no-op). A blocked request returns **HTTP 403** (**ERR-264**). Can be paired with an external LLM judge — see [External Provider Guardrails](#external-provider-guardrails).
   </Card>
   <Card title="Data-Loss Protection (DLP)" icon="shield-check">
     Detects and masks secrets — such as API keys, certificates, and JWTs — that could otherwise leak through a request or response.
@@ -185,10 +185,14 @@ When the request or response body is JSON, masking does not scan it as flat text
 
 The practical consequence: a broad or greedily written custom regex cannot corrupt the body's structure, not even inside a very long prompt. The masked body always reaches the provider as valid JSON, and when no rule matches, the body is passed through byte for byte. For non-JSON bodies (plain text, form data) the scan still runs over the whole text as before.
 
-**When a masked body cannot be produced, the request is rejected.** After masking, the rebuilt JSON is validated before it replaces the original body. In the unlikely case that validation fails, Apinizer does not fall back to forwarding the original — that would send the very personal data the rule matched to the provider unmasked — and it does not forward a broken body either. The request is rejected with error **ERR-303** (`AI PII Mask: request rejected — a masked request body could not be produced safely`, HTTP 500). The message and status code can be customized on the **Error Message** tab like any other policy error. No request content is written to the application log in this case.
+**When a masked body cannot be produced, the request is rejected.** After masking, the rebuilt JSON is validated before it replaces the original body. In the unlikely case that validation fails, Apinizer does not fall back to forwarding the original — that would send the very personal data the rule matched to the provider unmasked — and it does not forward a broken body either. The request is rejected with error **ERR-303** (`AI PII Mask: request rejected — a masked request body could not be produced safely, so the original body was not forwarded`, HTTP 500). The message and status code can be customized on the **Error Message** tab like any other policy error. No request content is written to the application log in this case.
 
 :::note
 To mask by field name, use the **element-name** rule type rather than a regex — that rule matches the key and masks the corresponding **value**.
+:::
+
+:::info Streaming: sliding-window carry buffer, no time-to-first-token loss
+On a streamed response, masking uses a sliding-window carry mechanism — chunks are released to the client as they arrive, keeping only a small overlap buffer (**Carry Buffer Size**, default **48 bytes**) across chunk boundaries so that a match split across two chunks is never missed. Because only this small buffer is held back, time-to-first-token is not affected. The carry buffer size is configurable on the policy screen.
 :::
 
 ### Tool Results in the Tool-Call Loop {#pii-tool-results}
@@ -201,7 +205,7 @@ Apinizer collects these masking rules before the response-direction policies run
 
 ## Data-Loss Protection Patterns
 
-Data-loss protection ships with ready-made patterns for common secret formats, and you can add your own custom patterns for your organization:
+Data-loss protection ships with ready-made patterns for common secret formats, and you can add your own custom patterns for your organization. A pattern match with a **Block** action returns **HTTP 403** (**ERR-269**).
 
 | Pattern | Example |
 |---------|---------|
@@ -215,7 +219,7 @@ Data-loss protection ships with ready-made patterns for common secret formats, a
 | Generic password/secret/API-key assignment | `password: ...`, `api_key=...` |
 
 :::warning
-For streamed responses, data-loss protection scans the response in chunk groups. Once a match triggers a block in one chunk group, every remaining chunk group in that stream is masked as well — this keeps a secret that happens to be split across chunk boundaries from leaking.
+When a **Block** or **Mask** rule is active, this policy buffers the **entire** streamed response before scanning — the complete text is scanned once the stream ends, which removes time-to-first-token for that policy's streamed responses. Flag-only rules (with no File Signature Detection active) use the per-chunk path and preserve streaming behavior; a sliding-window carry buffer (**Streaming Carry Buffer Size**, default **512 characters**) keeps matches split across chunk boundaries from being missed.
 :::
 
 ### Built-in Pattern Versioning {#dlp-builtin-pattern-versioning}
@@ -359,16 +363,20 @@ Patterns use **Java regular-expression** syntax (`java.util.regex.Pattern`) — 
 The **Test the pattern** panel on the PII Patterns screen runs a pattern against sample text before you save it. The test executes **server-side**, on the same engine as the gateway, so the matches and masked output you see there are exactly what will happen at runtime.
 
 :::warning
-Patterns that can backtrack catastrophically are **skipped** at runtime. The gateway screens every pattern with a ReDoS check, and one that fails is never applied while a request is processed — the rule looks enabled but masks nothing. The test panel reports this as a "ReDoS risk" before you save.
+For **Personal Data Masking**, **Data-Loss Protection**, and **Context-Integrity** policies, saving a pattern that fails the ReDoS check is **rejected** — the policy cannot be saved with that pattern in it. The test panel reports the risk before you reach that point.
+
+For patterns in the **PII Patterns catalog**, a ReDoS-suspect pattern can still be saved (the catalog flags it as a risk), but the gateway runtime skips it and it masks nothing. Use the test panel to verify patterns before adding them.
 :::
 
 ## Actions
 
-Every guardrail applies one of three actions when it matches:
+Most guardrails apply one of three actions when a match is found:
 
 - **Block** — the request or response is rejected entirely
 - **Flag** — processing continues, but the match is recorded for review
 - **Mask** — the matched value is replaced before continuing
+
+**Personal Data Masking** is the exception: it has no Block action. Instead, each rule carries a **Mask Strategy** — **Mask** (replace with `***`), **Delete**, **Encrypt**, **Hash**, or **Detect** (record the match without changing it). Data-Loss Protection's Mask action writes `[REDACTED]` in place of the matched value.
 
 ### Mask Shapes
 
@@ -443,7 +451,9 @@ Choose encryption for data that may need to be read later, hashing or masking fo
 
 ## Retry-Storm (Loop) Protection: Counting and Limit Changes
 
-Retry-Storm (Loop) Protection counts repeats of the **exact same request** (same credential, LLM Gateway and model, byte-identical prompt) inside a sliding **Window (seconds)**, and fires its **Action** — FLAG (default: traffic passes, the hit is recorded for monitoring) or BLOCK (HTTP 429) — once the count exceeds **Max Repeats**.
+Retry-Storm (Loop) Protection runs on the **request lane only** — it does not inspect responses. It counts repeats of the **exact same request** (same model, API proxy, caller identity, and byte-identical prompt body — stored as a SHA-256 hash of that combination) inside a sliding window and fires its **Action** — FLAG (default: traffic passes, the hit is recorded for monitoring) or BLOCK (**HTTP 429**, error code **ERR-270**) — once the count exceeds **Max Repeats**. The default **Window** is **60 seconds** and the default **Max Repeats** is **5**.
+
+When the distributed cache is temporarily unreachable, the **Fail Open on Cache Error** switch determines behavior. The default is **on** (fail-open — the request passes and the skip is logged). When the switch is **off** (fail-closed), an unreachable cache blocks the request with **HTTP 503** and error code **ERR-270**.
 
 Two more settings control how that counter itself behaves:
 
@@ -456,7 +466,7 @@ Two more settings control how that counter itself behaves:
 
 - **Clamp to previous limit** — the counter is capped to whatever the limit was *before* the change (`used = min(used, previous limit)`), not the new one. Example: Max Repeats goes from 100 to 300 while the counter — inflated by rejected requests under **All requests** counting — sits at 500; it drops to 100, leaving 200 of the new limit available. Lowering the limit isn't affected by this clamp, so blocking continues exactly as it would without it.
 - **Reset** — the counter is zeroed, but **only when the limit is raised**. Apinizer never resets on a lowered limit, since that would silently forgive quota that was actually consumed.
-- **Leave unchanged** (default) — the counter is left alone; a limit change only takes effect once the current window ends on its own.
+- **Leave unchanged** (default) — the counter is left as-is; the new limit is checked against it immediately from the next request on. A counter that has already reached a lowered limit keeps rejecting until the window ends.
 
 These two settings share their names and semantics with every other rate-limit-style policy in Apinizer — API-based throttling and quota policies expose the same **Counting Mode** / **Limit Change Action** choice.
 
@@ -470,7 +480,7 @@ The retry-storm (loop) guardrail keys its counter on the model, the API proxy an
 |--------|-----------|
 | **Do not apply the policy** (default) | The request passes and no repeat counter is kept |
 | **Consume from a shared pool** | All anonymous traffic is counted in a **single** bucket |
-| **Reject the request** | Anonymous requests are turned away with HTTP 401 |
+| **Reject the request** | Anonymous requests are turned away with **HTTP 401** (**ERR-285**) |
 
 The default matches the behaviour before this setting existed: on an anonymous request the guardrail is silently inactive. With the shared pool, tenant isolation is **not expected** — one caller's consumption spends everyone else's budget; it is meant for installations that deliberately allow anonymous access but still want a ceiling.
 
@@ -493,12 +503,12 @@ This guardrail keeps oversized requests from growing unchecked in both cost and 
 
 ## Context-Integrity Protection
 
-Detects attempts to inject a **fabricated system/assistant role** into the chat history (message list). While Prompt Protection scans content for meaning, this guardrail protects the **structure** of the conversation:
+Detects attempts to inject a **fabricated system/assistant role** into the conversation structure. While Prompt Protection scans content for meaning, this guardrail protects the **structure** of the conversation:
 
-- **Fake role-marker detection** — patterns embedded in a user message's content that try to trick the model into treating it as a prior system/assistant turn (for example, chat-template control markers or fake instruction markers resembling `###Instruction`)
-- **Role-order validation** (optional) — blocks a client from adding more system messages than allowed, or from using a role that isn't permitted
+- **Fake role-marker detection** (default **on**) — patterns embedded in **any message turn** — including system, assistant, and the Anthropic top-level `system` field — that try to trick the model into treating them as a prior turn of a different role (for example, chat-template control markers or fake instruction markers resembling `###Instruction`). When a marker is detected, the Mask action replaces it with `[REDACTED-ROLE-MARKER]`.
+- **Role-sequence validation** (default **off**, optional) — validates that every turn uses a role from the **Allowed Roles** list (default: `system`, `user`, `assistant`, `tool`, `developer`; an empty list falls back to these five) and that the number of `system` turns does not exceed **Max System Turns** (default **1**).
 
-A match applies one of three actions: **Block**, **Flag**, or **Mask** (only fake role-marker matches can be masked; a role-order violation falls back to Flag instead of Mask — a structural mismatch can't be masked).
+A match applies one of three actions: **Block** (default), **Flag**, or **Mask** (only fake role-marker matches can be masked; a role-sequence violation falls back to Flag instead of Mask — a structural mismatch can't be masked). A blocked request returns **HTTP 403** with error code **ERR-282**.
 
 ## Execution Modes
 
@@ -507,14 +517,18 @@ A match applies one of three actions: **Block**, **Flag**, or **Mask** (only fak
     The guardrail is evaluated before the request continues. This is required for a **Block** action to reliably prevent a match from going through.
   </Card>
   <Card title="Asynchronous" icon="zap">
-    The guardrail is evaluated in the background so it doesn't add latency to the request path; matches are still recorded and reported. This is the default mode for off-topic protection.
+    The guardrail waits up to a configurable **Max Wait** (default 500 ms) for the result. A **Block** verdict arriving within that budget is enforced; if the window expires or an error occurs, the request passes through (fail-open). Matches recorded during the wait are still reported. This is the default mode for Off-Topic Protection.
   </Card>
-  <Card title="Observe-Only" icon="eye">
-    The guardrail runs and reports matches without ever blocking or masking — useful for tuning thresholds before turning on enforcement.
+  <Card title="Shadow" icon="eye">
+    Runs the guardrail but never applies the verdict. With the **Built-in only** engine this records nothing — a shadow run of Prompt Protection or Off-Topic Protection against only the built-in check is a deliberate no-op. With an external judge configured, both verdicts are compared and the comparison is recorded as a calibration metric only; neither verdict is applied.
   </Card>
 </CardGroup>
 
-When an external provider is attached to Prompt Protection or Off-Topic Protection, Asynchronous mode's wait budget and Observe-Only mode's comparison behavior both extend to the external call as well — see [External Provider Guardrails](#external-provider-guardrails).
+:::note Personal Data Masking and Loop Guard have no Latency Mode setting
+Personal Data Masking and Retry-Storm (Loop) Protection always run inline and cannot be configured as Asynchronous or Shadow. They are not shown in the Latency Mode selector.
+:::
+
+When an external provider is attached to Prompt Protection or Off-Topic Protection, Asynchronous mode's wait budget and Shadow mode's comparison behavior both extend to the external call as well — see [External Provider Guardrails](#external-provider-guardrails).
 
 ## Off-Topic Protection: Allowed and Denied Topics
 
@@ -522,8 +536,8 @@ Off-topic protection compares an incoming prompt's embedding against the topics 
 
 Two independent topic lists exist, and you can configure either one or both. With the built-in (embedding) engine enabled the screen asks for **at least one topic definition** — a guardrail with nothing to compare against silently does nothing at runtime, so Save stays disabled while both lists are empty. A denied-only setup is a legitimate mode and is not blocked. When the engine is set to external-only, the built-in comparison never runs and no topic list is required.
 
-- **Allowed Topics** — what this proxy is supposed to answer about. A prompt that falls below the threshold on every allowed topic is treated as off-topic.
-- **Denied Topics** — topics this proxy must never answer about, no matter how well the same prompt also matches an allowed topic. Useful for carving an exception out of an otherwise broad allowed scope — for example, denying "legal advice" on a banking assistant that allows broad financial questions.
+- **Allowed Topics** — what this proxy is supposed to answer about. A prompt whose highest similarity to any allowed topic falls **below** the threshold is treated as off-topic (flagged or blocked, **ERR-271**).
+- **Denied Topics** — topics this proxy must never answer about, no matter how well the same prompt also matches an allowed topic. A prompt whose similarity to any denied topic is **at or above** the denied threshold triggers the action (flagged or blocked, **ERR-291**). Useful for carving an exception out of an otherwise broad allowed scope — for example, denying "legal advice" on a banking assistant that allows broad financial questions.
 
 :::warning Denied Always Wins
 When a prompt matches both an allowed topic and a denied topic, the denied match takes precedence — the request is flagged or blocked as denied even though it would otherwise have passed the allowed-topics check. If a request is being blocked unexpectedly, check the denied list first.
@@ -536,7 +550,7 @@ Denied topics have their own similarity threshold and action, each optional and 
 | Denied Similarity Threshold | Similarity Threshold |
 | Denied Topic Action | Action |
 
-Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; add your topics before going live so the first request isn't slowed down by the embedding call.
+Topic embeddings — for both lists — are computed once and cached, not re-embedded on every request; they are rebuilt automatically whenever you add, edit, or remove a topic definition. Add your topics before going live so the first request isn't slowed down by the embedding call. The default **Similarity Threshold** is **0.75**, which is not calibrated for any specific embedding model — verify and adjust it after changing the embedding provider.
 
 ### When the Embedding Provider Cannot Be Found {#topic-embedding-provider}
 
@@ -585,7 +599,7 @@ If the accumulated buffer exceeds 65,536 characters before the stream ends (an u
 :::warning No incremental streaming while the buffer is active — and it never runs alongside a buffering DLP check
 While a Block-configured Off-Topic Protection is buffering a response, the caller sees nothing until the stream ends: there is no time-to-first-token, only a single delta at the end carrying either the whole response (Pass/Flag) or nothing at all (Block). That verdict is recorded in [tracing and the Security and Guardrails report](/en/ai-gateway/reports) either way. Non-streamed (unary) responses are unaffected by this trade-off — evaluation there already happens before the response reaches the client.
 
-This buffer also never activates when Data-Loss Protection's own buffer-and-scan is active on the same response (a Block or Mask rule, or File Signature Detection, configured under [Data-Loss Protection Patterns](#data-loss-protection-patterns) above): DLP already owns per-chunk withholding there and can release a scanned partial prefix mid-stream, and Off-Topic Protection's single whole-response classification has no way to retract content DLP already released. When both are configured on the same proxy, DLP's buffering takes over and Off-Topic Protection's streaming check does not run for that response at all — its request-side check, and its check on non-streamed responses, are unaffected.
+This buffer also never activates when Data-Loss Protection's own buffer-and-scan is active on the same response (a Block or Mask rule, or File Signature Detection, configured under [Data-Loss Protection Patterns](#data-loss-protection-patterns) above): DLP buffers the entire response there too and releases it only once scanning is complete, and Off-Topic Protection's single whole-response classification has no way to re-scan content DLP already processed and released. When both are configured on the same proxy, DLP's buffering takes over and Off-Topic Protection's streaming check does not run for that response at all — its request-side check, and its check on non-streamed responses, are unaffected.
 :::
 
 ## Content Safety Categories (AILuminate) {#content-safety-categories-ailuminate}
@@ -1054,7 +1068,7 @@ The personal-data, prompt-guard and data-loss protection policies do not read th
 | State | What it means |
 |-------|---------------|
 | **Catalog-bound** | The preset owns the content. Editing the preset and saving rewrites this rule in every policy using it and marks the affected deployments "redeploy required". The rule's catalog-owned fields are read-only in the policy screen. |
-| **Localized** | A detached, independent copy. Preset edits never reach it, and you can edit it freely in the policy screen. |
+| **Local** | A detached, independent copy. Preset edits never reach it, and you can edit it freely in the policy screen. |
 
 A rule added from the catalog starts out **catalog-bound**. The rule row switches between the two states:
 
@@ -1122,7 +1136,7 @@ Personal-data, prompt-guard, and data-loss protection presets can also be manage
 
 ## Guardrails and the Semantic Cache
 
-When response masking or data-loss protection is active, the [semantic cache](/en/ai-gateway/semantic-cache) stores the masked response rather than the raw one — so a cache hit can never bypass your masking rules.
+When a response-side Personal Data Masking policy has active masking rules (any strategy other than Detect), or when Data-Loss Protection has a Block or Mask rule active, the [semantic cache](/en/ai-gateway/semantic-cache) **does not cache that response at all** — a cache hit can never bypass your masking rules. Detect-only PII rules and Flag-only DLP rules do not disable caching. File Signature Detection (even Flag-only) also disables caching for that policy's streamed responses.
 
 ## Next Steps
 
