@@ -1,6 +1,6 @@
 ---
 title: "AI Gateway Overview"
-description: "You can connect to multiple LLM providers — including non-OpenAI providers like Anthropic, Gemini, and Bedrock — through a single OpenAI-compatible endpoint, and rely on built-in guardrails, semantic caching, token quotas, and cost tracking without changing your client code."
+description: "You can connect to multiple LLM providers — including non-OpenAI providers like Anthropic, Gemini, and Bedrock — through a single OpenAI-compatible endpoint, and rely on built-in guardrails, semantic caching, token limits, and cost tracking without changing your client code."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -16,7 +16,7 @@ import {Steps, Step} from '@site/src/components/Steps';
     Route requests to OpenAI, Anthropic, Google Vertex/Gemini, AWS Bedrock, and OpenAI-compatible self-hosted engines from the same interface. Non-OpenAI responses are normalized back to the OpenAI format automatically.
   </Card>
   <Card title="Built-in Guardrails and Cost Controls" icon="shield">
-    PII masking, prompt-injection guards, semantic caching, token quotas, and per-model cost tracking are available out of the box — no separate tooling to wire up.
+    PII masking, prompt-injection guards, semantic caching, Limit Plans and token rate limits, and per-model cost tracking are available out of the box — no separate tooling to wire up.
   </Card>
   <Card title="Enterprise Visibility" icon="chart-bar">
     Usage and cost reports broken down by person, team, project, model, and deployment type (cloud vs. on-premise) give you a single source of truth for AI spend.
@@ -33,7 +33,7 @@ Each LLM Gateway has its own **Streaming (SSE)** switch and a **Client "stream" 
 
 When the LLM Gateway has a policy that works only on a single response, the client cannot switch streaming on.
 
-With streaming on, the response stream sent to the client appears in the **API Traffic** record as the actual event stream instead of a placeholder, provided response body logging is enabled in the proxy's log settings (within the body size limit; once the limit is exceeded the record ends with a `<<Streaming Body Truncated>>` marker). The record is written once, as a single traffic entry, when the stream completes. Memory planning rule: every open stream holds at most the body limit in worker memory (concurrent streams × body limit); where long answers are common, keep the recorded body small with the connector's **Partial size** setting. See [API Traffic Log Settings](/en/develop/api-proxy-configuration/api-traffic-log-settings) for details.
+With streaming on, the response stream sent to the client appears in the **Traffic** record as the actual event stream instead of a placeholder, provided response body logging is enabled in the proxy's log settings (within the body size limit; once the limit is exceeded the record ends with a `<<Streaming Body Truncated>>` marker). The record is written once, as a single traffic entry, when the stream completes. Memory planning rule: every open stream holds at most the body limit in worker memory (concurrent streams × body limit); where long answers are common, keep the recorded body small with the connector's **Partial size** setting. See [Traffic Log Settings](/en/develop/api-proxy-configuration/api-traffic-log-settings) for details.
 :::
 
 :::info
@@ -42,8 +42,8 @@ New to LLM terms like tokens, embeddings, or RAG? See [AI Fundamentals](/en/conc
 
 ## Supported LLM Providers
 
-- **Cloud**: OpenAI, Anthropic (Claude), Azure OpenAI, Google Vertex AI (Gemini), AWS Bedrock
-- **Self-hosted**: vLLM, Ollama, Hugging Face TGI
+- **Cloud**: OpenAI, Anthropic (Claude), Azure OpenAI, Google Vertex AI (Gemini), AWS Bedrock, and many OpenAI-compatible cloud providers such as Mistral, DeepSeek, Groq and xAI
+- **Self-hosted**: vLLM, Ollama
 - **Custom**: any OpenAI-compatible API endpoint
 
 Each provider is configured once as a **connection**, with encrypted credentials and a deployment type. See [LLM Providers and Models](/en/ai-gateway/llm-providers) for the full list and setup steps.
@@ -58,12 +58,12 @@ sequenceDiagram
     participant Gateway as 🚪 LLM Gateway
     participant Guardrails as 🛡️ Guardrails
     participant Cache as 🧠 Semantic Cache
-    participant Quota as ⏳ Rate Limit & Quota
+    participant Quota as ⏳ Rate Limit
     participant Router as 🔀 Routing
     participant Provider as 🤖 LLM Provider
 
-    Client->>Gateway: POST /api/ai/v1/chat/completions
-    Gateway->>Guardrails: PII mask, prompt guard, content filters
+    Client->>Gateway: POST /relative-path/v1/chat/completions
+    Gateway->>Guardrails: PII mask, prompt guard, DLP
     Guardrails->>Router: Select the provider connection and model
     Router->>Cache: Look up a similar prior request
 
@@ -72,8 +72,8 @@ sequenceDiagram
         Gateway->>Client: Response (from cache)
     else Cache miss
         Cache->>Quota: Continue
-        Quota->>Quota: Check token / USD quota for this scope
-        Quota->>Router: Quota OK → forward to the selected connection
+        Quota->>Quota: Check token / USD limits for this scope
+        Quota->>Router: Limits OK → forward to the selected connection
         Router->>Provider: Forward request (translated to provider format)
         Provider->>Router: Response (streamed or unary)
         Router->>Gateway: Normalize to OpenAI format
@@ -82,7 +82,7 @@ sequenceDiagram
 ```
 
 1. **Intake** — the request is validated and parsed as OpenAI-format JSON
-2. **Guardrails** *(optional)* — PII masking, prompt-injection checks, content filters
+2. **Guardrails** *(optional)* — PII masking, prompt-injection checks, data-loss protection
 3. **Routing** — a provider connection and model are selected based on the requested model and your routing/failover configuration
 4. **Semantic cache** *(optional)* — a similar recent request short-circuits the call and returns a cached response
 5. **Rate limiting** — the token and USD limits of the caller's [Limit Plans](/en/ai-gateway/limit-plans) and of the LLM Gateway's [Token Rate Limit policy](/en/ai-gateway/token-quotas) are checked
@@ -105,7 +105,7 @@ An LLM Gateway is **the same `ApiProxy` entity** in Apinizer — it goes through
 The LLM Gateway runtime **never reads** the classic `routing` object, so settings tied to it don't apply to an LLM Gateway.
 
 :::warning Behavior Change
-The following 12 settings endpoints (`PATCH .../apiProxies/{apiProxyName}/settings/<X>/`) now return **HTTP 400** when called on an LLM Gateway. Previously they returned HTTP 200 but **had no effect at all** (a silent no-op) — that's now an explicit rejection:
+The following 12 settings endpoints (`PATCH .../apiProxies/{apiProxyName}/settings/<X>/`) now return **HTTP 400** when called on an LLM Gateway (or an MCP or A2A Gateway). Previously they returned HTTP 200 but **had no effect at all** (a silent no-op) — that's now an explicit rejection:
 
 `circuit-breaker` · `proxy-server` · `mtls` · `ntlm` · `connection` · `error-handling` · `custom-message` · `grpc` · `websocket` · `addresses` · `routing-status` · `metadata`
 
@@ -118,14 +118,14 @@ See [API Reference: API Proxy Settings](/api-reference/api-proxies/settings) for
 
 ## Try It: OpenAI SDK Quickstart
 
-Use Apinizer AI Gateway with the Python OpenAI SDK or any compatible client — no client-side code changes beyond `base_url` and the API key:
+Use Apinizer AI Gateway with the Python OpenAI SDK or any compatible client — no client-side code changes beyond `base_url` and the API key. Get `base_url` from the **Endpoints** panel on the LLM Gateway's **Routing** tab (the address plus `/v1`):
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-apinizer-credential-key",
-    base_url="https://your-apinizer-gateway.com/api/ai/v1"
+    api_key="your-consumer-key",
+    base_url="https://<gateway-access-url>/<relative-path>/v1"
 )
 
 response = client.chat.completions.create(
@@ -172,10 +172,11 @@ Apinizer keeps no creation timestamp for a model — OpenAI SDKs parse the field
 
 ### The List Is This Proxy's Serving Surface, Not the Provider's Model List
 
-The response is not the LLM provider's full model list — it's the union of models this specific LLM Gateway's `aiRouting` configuration can actually serve (the primary model, plus any [primary pool](/en/ai-gateway/routing-and-failover#load-balancing-across-equal-priority-primaries), [conditional routing](/en/ai-gateway/routing-and-failover#conditional-routing), and [failover chain](/en/ai-gateway/routing-and-failover#failover-chains) entries), after two elimination checks run in order:
+The response is not the LLM provider's full model list — it's the union of models this specific LLM Gateway's `aiRouting` configuration can actually serve (the primary model, plus any [primary pool](/en/ai-gateway/routing-and-failover#load-balancing-across-equal-priority-primaries), [conditional routing](/en/ai-gateway/routing-and-failover#conditional-routing), and [failover chain](/en/ai-gateway/routing-and-failover#failover-chains) entries). When the **Client "model" field** is set to use the client's model, the list also holds every model of the providers that can serve as primary, because the client may call any of them. Three elimination checks then run:
 
 1. A candidate whose provider connection is **not deployed or disabled** is dropped.
 2. A candidate whose model is switched off (the **Enabled** switch of the model in its provider) is dropped — a model that the gateway refuses with 403 isn't advertised here.
+3. A model whose access list does not include the caller is dropped. Two callers can therefore get different lists from the same LLM Gateway.
 
 An empty result is not an error: `{"object":"list","data":[]}` with HTTP 200 is a valid response when nothing survives the checks above.
 
@@ -193,7 +194,7 @@ A discovery request never reaches an LLM provider, so no token or cost usage is 
 
 The **Advanced Search** panel on the **AI Gateway → LLM Gateway** list adds three fields that appear only for LLM Gateways, alongside the classic proxy filters (name, description, path, category, environment, status):
 
-- **AI keyword** — Free text. Matches the model identifier of the proxy's target, or the name or type of its LLM provider. Typing `openai` returns every proxy routed to an OpenAI-type provider; typing `gpt-4o` returns the proxies using that model.
+- **Search by AI model or LLM provider** — Free text. Matches the model identifier of the proxy's target, or the name or type of its LLM provider. Typing `openai` returns every proxy routed to an OpenAI-type provider; typing `gpt-4o` returns the proxies using that model.
 - **Model type** — The modality recorded on the model in its LLM provider (Text (Chat), Vision, Audio, Embedding, Rerank, Multimodal, Image Generation). Lists the proxies that use a model of the selected type. The **Unspecified** option at the end of the list returns the proxies whose model has no type recorded at all — models added through the **Discover from provider** tab or the **Add manually** tab that have not been classified yet, and model identifiers that are not on the model list of any provider. It is evaluated per provider — a model id classified on one connection but blank on another counts as unspecified only for the second — and it also lists proxies whose LLM provider has been deleted or is outside your scope, since their model can no longer be classified. Those proxies appear under no other type value, so this option is how you find unclassified entries.
 - **LLM Provider** — Chosen from the providers defined in your project or shared by an administrator.
 
@@ -219,7 +220,7 @@ Because the filter is applied in the database query, the page count and total re
     Configure provider connections, models, prices and deployment types
   </Card>
   <Card title="Routing and Failover" icon="route" href="/en/ai-gateway/routing-and-failover">
-    Failover chains, cost- and latency-aware routing
+    Failover chains, cost- and latency-aware routing, and LLM classifier routing
   </Card>
   <Card title="Prompt Decorator" icon="list-plus" href="/en/ai-gateway/prompt-decorator">
     Inject fixed system instructions into every request
@@ -228,7 +229,7 @@ Because the filter is applied in the database query, the page count and total re
     Let clients reference a reusable, parameterized prompt by name
   </Card>
   <Card title="Token Rate Limit Policy" icon="gauge" href="/en/ai-gateway/token-quotas">
-    Set up quota rules and monitoring
+    Set up token limits and monitoring
   </Card>
   <Card title="AI Cost Settings" icon="dollar-sign" href="/en/ai-gateway/cost-settings">
     Configure pricing and multi-currency display
@@ -246,6 +247,27 @@ Because the filter is applied in the database query, the page count and total re
     Use audio (STT/TTS) and image generation endpoints
   </Card>
   <Card title="Tracing and Replay" icon="history" href="/en/ai-gateway/tracing-and-replay">
-    Inspect the request chain in a timeline and re-execute it
+    Inspect each step of a traced request and replay it
+  </Card>
+  <Card title="MCP Gateway" icon="plug" href="/en/ai-gateway/mcp-gateway">
+    Govern MCP tool calls with risk tiers
+  </Card>
+  <Card title="Semantic Cache" icon="database" href="/en/ai-gateway/semantic-cache">
+    Reuse answers to similar requests
+  </Card>
+  <Card title="RAG" icon="book-open" href="/en/ai-gateway/rag-injection">
+    Add knowledge-base context to requests
+  </Card>
+  <Card title="Limit Plans" icon="gauge" href="/en/ai-gateway/limit-plans">
+    Limit usage per caller
+  </Card>
+  <Card title="Access Control and Roles" icon="lock" href="/en/ai-gateway/access-control-rbac">
+    Control who can use which model
+  </Card>
+  <Card title="AI Asset Inventory" icon="list" href="/en/ai-gateway/ai-asset-inventory">
+    See which AI services are in use
+  </Card>
+  <Card title="OpenTelemetry" icon="activity" href="/en/ai-gateway/opentelemetry">
+    Send AI traces to your observability stack
   </Card>
 </CardGroup>
