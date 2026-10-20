@@ -1,6 +1,6 @@
 ---
 title: "API Clients Management API"
-description: "Manage OAuth-style machine credentials on the Management API: list, read, create and edit an API client, run its lifecycle (activate, suspend, resume, revoke), issue or rotate its secret generations, and read the limit assignments that apply to it — everything addressed by portable, name-based references."
+description: "Manage OAuth-style machine credentials on the Management API: list, read, create and edit an API client, create it active with its first secret, run its lifecycle (suspend, resume, revoke), issue or rotate its secret generations, and read the limit assignments that apply to it — everything addressed by portable, name-based references."
 ---
 
 ## Overview
@@ -25,21 +25,23 @@ An API client has no access setting of its own: it is authorized by the ACL rows
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api-clients` | List the project's API clients, by name by default |
+| `GET` | `/api-clients` | List the project's API clients, by `clientId` by default |
 | `GET` | `/api-clients/{apiClientKey}` | One API client; never carries secret material |
-| `POST` | `/api-clients` | Create a `DRAFT` client holding no material (`201` + `Location`) |
+| `POST` | `/api-clients` | Create an `ACTIVE` client with its first secret and deploy it to the gateways (`201` + `Location`, `no-store`) |
 | `PUT` | `/api-clients/{apiClientKey}` | Replace the editable half of a client; the version must match |
-| `DELETE` | `/api-clients/{apiClientKey}` | Discard a draft that was never activated |
-| `POST` | `/api-clients/{apiClientKey}/actions/activate` | Move a materially ready `DRAFT` client into service |
 | `POST` | `/api-clients/{apiClientKey}/actions/suspend` | Pause an `ACTIVE` client, reversibly |
 | `POST` | `/api-clients/{apiClientKey}/actions/resume` | Return a `SUSPENDED` client to service |
 | `POST` | `/api-clients/{apiClientKey}/actions/revoke` | End a client permanently and destroy its material — irreversible (`200`, or `202` + `Location` when handed to the durable sweeper) |
+
+:::warning[Draft lifecycle removed]
+A client is no longer created as a `DRAFT`. The `POST /api-clients/{apiClientKey}/actions/activate` endpoint (answers `404`) and the draft discard `DELETE /api-clients/{apiClientKey}` (answers `405`) of earlier versions are removed. To take a client out of service, suspend or revoke it.
+:::
 
 ### Secret Generations — `/api-clients/{apiClientKey}/secret-versions`
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api-clients/{apiClientKey}/secret-versions` | Issue the first generation, or rotate (`201` + `Location`, `no-store`); a generated value is returned once |
+| `POST` | `/api-clients/{apiClientKey}/secret-versions` | Rotate: add a new generation (`201` + `Location`, `no-store`); a generated value is returned once |
 | `POST` | `/api-clients/{apiClientKey}/secret-versions/{versionId}/actions/revoke` | Destroy one generation now, including the active one |
 
 ### Owner Views (read-only) {#owner-views}
@@ -54,14 +56,14 @@ The endpoint above returns a plain array — not the [paged envelope](/api-refer
 
 ### List API clients
 
-`GET /api-clients?ownerType&ownerKey&state&search&page&size&sort` sorts by `name,asc` by default; `sort` may also name `operationalState` or `expiresAt`. `size` is capped at 200, same as [Pagination](/api-reference/apiops-common-contract#pagination).
+`GET /api-clients?ownerType&ownerKey&state&search&page&size&sort` sorts by `clientId,asc` by default; `sort` may also name `operationalState` or `expiresAt`. `name` is still accepted as a sort field and is read as `clientId`. `size` is capped at 200, same as [Pagination](/api-reference/apiops-common-contract#pagination).
 
 | Parameter | Type | Meaning |
 |---|---|---|
 | `ownerType` | enum | `CONSUMER` or `APPLICATION` — required together with `ownerKey` |
 | `ownerKey` | string | The owner's own public key (a consumer's `username` or an application's `name`) — required together with `ownerType` |
-| `state` | enum | `DRAFT` \| `ACTIVE` \| `SUSPENDED` \| `REVOKED` |
-| `search` | string | Case-insensitive name / `clientId` contains-search |
+| `state` | enum | `ACTIVE` \| `SUSPENDED` \| `REVOKED` (`DRAFT` only matches clients left from earlier versions) |
+| `search` | string | Case-insensitive `clientId` / `description` contains-search |
 
 `ownerKey` without `ownerType` is `400 malformedRequest` (`params.reason = ownerKeyRequiresOwnerType`); `ownerType` without `ownerKey` is the mirror (`params.reason = ownerTypeRequiresOwnerKey`).
 
@@ -75,31 +77,31 @@ Unlike the equivalent Manager screen, `ownerType`/`ownerKey` are **optional** he
 
 | Situation | Result |
 |---|---|
-| New key | The client is created, or the secret generation is issued |
+| New key | The client is created with its first secret, or the secret generation is issued |
 | Same key, same body, first call already finished | `409 idempotencyReplayExpired` — `params.resource` names the `apiClientKey` (create) or the `versionId` (secret generation) the first call produced; read it back with `GET` instead |
 | Same key, same body, first call still in flight | `409 idempotencyInProgress` |
 | Same key, a different body | `409 idempotencyKeyReused` |
 
-:::warning A replayed secret generation is never handed out twice
-The dedup record for `POST .../secret-versions` stores only the outcome's identity — the generation's `versionId` and the client's new `version` — never the generated value. A replayed key answers `409`, not the original response; store the secret from the first successful call, because it cannot be retrieved again.
+:::warning A replayed secret is never handed out twice
+The dedup record for `POST /api-clients` and `POST .../secret-versions` stores only the outcome's identity — the generation's `versionId` and the client's new `version` — never the generated value. A replayed key answers `409`, not the original response; store the secret from the first successful call, because it cannot be retrieved again.
 :::
 
 ## Request Body
 
 ### Create / update an API client — `POST` / `PUT /api-clients/{apiClientKey}`
 
-Both share one body. On `PUT`, the management key (`apiClientKey`) and the `clientId` are immutable — a body that omits either keeps the stored value, a body that changes either is `409 lifecycleConflict`. The owner is **not editable** through this body: an `owner` sent on update is accepted syntactically and ignored, the stored owner is always restored. An absent `organizationCode` on update keeps the stored organization rather than detaching the client.
+Both share one body. `POST` creates the client **active**, with its first secret, and deploys it to the gateways at once — there is no draft to equip and activate later. On `PUT`, the management key (`apiClientKey`) and the `clientId` are immutable — a body that omits either keeps the stored value, a body that changes either is `409 lifecycleConflict`. The owner is **not editable** through this body: an `owner` sent on update is accepted syntactically and ignored, the stored owner is always restored. An absent `organizationCode` on update keeps the stored organization rather than detaching the client.
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `owner` | object | Create: yes. Update: no (kept) | `{type, key}` — see [Owner reference](#owner-reference) below |
 | `organizationCode` | string | No | The owning organization's `code`; absent on update keeps the stored one, an explicit blank clears it |
-| `name` | string | No | |
 | `description` | string | No | |
 | `clientId` | string | No | Blank on create mints one; immutable afterwards |
 | `validFrom` / `expiresAt` | timestamp | No | Validity window |
 | `allowedGrantTypes` | string[] | No | |
-| `tokenEndpointAuthMethod` | string | No | |
+| `tokenEndpointAuthMethod` | string | No | `none` makes a public client (browser login): it is created active without a secret |
+| `redirectUris` | string[] | No | Browser-login redirect URIs of a public client; absent on update keeps the stored list |
 | `tokenIssuanceProfile` | string | No | |
 | `tokenNeverExpires` | boolean | No | |
 | `tokenExpiresInAmount` | integer | No | Paired with `tokenExpiresInUnit` |
@@ -109,9 +111,12 @@ Both share one body. On `PUT`, the management key (`apiClientKey`) and the `clie
 | `refreshTokenExpiresInAmount` | integer | No | Paired with `refreshTokenExpiresInUnit` |
 | `refreshTokenExpiresInUnit` | enum | No | Same values as `tokenExpiresInUnit` |
 | `jwtSignatureAlgorithm` | string | No | |
+| `secret` | object | `POST` only, optional | The first secret, in the shape of [`POST .../secret-versions`](#issue-or-rotate-a-secret) and under the same rules. Absent, a value is generated and returned once. Refused for a public client, and on `PUT` (`400 malformedRequest`, `params.field = secret`, `params.reason = secretOnCreateOnly`) |
 | `version` | integer | `PUT` only | The stored `version` the caller expects to be updating |
 
-A body missing entirely on `POST`/`PUT` is `400 malformedRequest` (`params.reason = bodyRequired`). A create whose body carries no `owner` at all is `400 malformedRequest` (`params.field = owner`, `params.reason = ownerRequired`).
+A body missing entirely on `POST`/`PUT` is `400 malformedRequest` (`params.reason = bodyRequired`). A create whose body carries no `owner` at all is `400 malformedRequest` (`params.field = owner`, `params.reason = ownerRequired`). A first secret that cannot be used now (already expired, or starting later) is refused before anything is written.
+
+A client has no display name on this surface; it is identified by its `clientId`. A `name` sent in the body is accepted and ignored, never a `400`.
 
 #### Owner reference
 
@@ -122,18 +127,16 @@ A body missing entirely on `POST`/`PUT` is `400 malformedRequest` (`params.reaso
 
 ### Lifecycle action body
 
-Shared by `activate` / `suspend` / `resume` / `revoke` on the client, and by `actions/revoke` on a secret generation:
+Shared by `suspend` / `resume` / `revoke` on the client, and by `actions/revoke` on a secret generation:
 
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `version` | integer | **Yes** | The stored `version` the caller expects; a missing value is `400 malformedRequest` (`params.field = version`, `params.reason = versionRequired`) rather than an unguarded write |
 | `reason` | string | No | Operator free text; stored verbatim, read back only by the actions that record one (`suspend`, `revoke`) |
 
-Discarding a draft (`DELETE /api-clients/{apiClientKey}?version=`) takes the same `version` as a **query parameter** instead — a `DELETE` carries no body, so what is deleted, and on which revision, is readable from the URL alone.
+### Issue or rotate a secret — `POST /api-clients/{apiClientKey}/secret-versions?version=` {#issue-or-rotate-a-secret}
 
-### Issue or rotate a secret — `POST /api-clients/{apiClientKey}/secret-versions?version=`
-
-The stored client `version` travels as a **required query parameter**, the same reasoning as the `DELETE` above. `Idempotency-Key` is also required (see [Idempotency](#idempotency)).
+The stored client `version` travels as a **required query parameter**. `Idempotency-Key` is also required (see [Idempotency](#idempotency)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -158,14 +161,15 @@ An absent `version` query parameter is `400 malformedRequest` (`params.field = v
 |---|---|---|
 | `apiClientKey` | string | Portable, installation-wide public identifier |
 | `clientId` | string | The gateway-facing identifier a token request presents |
-| `name` / `description` | string | |
+| `description` | string | |
 | `owner` | object | `{type, key}` — see [Owner reference](#owner-reference) |
 | `organizationCode` | string | The owning organization's `code`, or absent |
-| `operationalState` | enum | `DRAFT` \| `ACTIVE` \| `SUSPENDED` \| `REVOKED` — whether the operator currently allows this client to be used |
+| `operationalState` | enum | `ACTIVE` \| `SUSPENDED` \| `REVOKED` — whether the operator currently allows this client to be used. `DRAFT` appears only on clients left from earlier versions |
 | `readiness` | enum | `READY` \| `PENDING_SECRET` \| `UNRESOLVED_DEPENDENCY` — whether the client actually has what it needs, independent of `operationalState` |
 | `validFrom` / `expiresAt` | timestamp | |
 | `allowedGrantTypes` | string[] | |
 | `tokenEndpointAuthMethod` / `tokenIssuanceProfile` | string | |
+| `redirectUris` | string[] | Browser-login redirect URIs of a public client |
 | `tokenNeverExpires` | boolean | |
 | `tokenExpiresInAmount` / `tokenExpiresInUnit` | integer / enum | |
 | `refreshTokenAllowed` | boolean | |
@@ -178,7 +182,7 @@ An absent `version` query parameter is `400 malformedRequest` (`params.field = v
 | `secretVersions` | array | Every generation of this client, described **without any secret material** — see below |
 
 :::note No material, ever
-Neither this shape nor any other list on this page carries a stored verifier, a platform ciphertext, a KEK recovery envelope, a secret reference, or a hint of one. `secretVersions` describes each generation's identity and lifecycle only. A generated value exists on the wire exactly once, in the [Secret issued](#secret-issued-201) response.
+Neither this shape nor any other list on this page carries a stored verifier, a platform ciphertext, a KEK recovery envelope, a secret reference, or a hint of one. `secretVersions` describes each generation's identity and lifecycle only. A generated value exists on the wire exactly once, in the [Client created](#client-created-201) or [Secret issued](#secret-issued-201) response.
 :::
 
 #### Secret generation (nested)
@@ -199,7 +203,7 @@ One entry of `secretVersions`, on the client shape above:
 
 ### Mutation — `200` / `201` / `202` {#mutation-200-201-202}
 
-Every write on the client itself (`POST`, `PUT`, and every `actions/*`), and `POST .../secret-versions/{versionId}/actions/revoke`, answers with:
+Every write on the client itself (`POST`, `PUT`, and every `actions/*`), and `POST .../secret-versions/{versionId}/actions/revoke`, answers with the fields below; `POST` adds the first secret's fields — see [Client created](#client-created-201):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -209,6 +213,15 @@ Every write on the client itself (`POST`, `PUT`, and every `actions/*`), and `PO
 `runtimeDeployment.state` is `IN_SYNC` when every environment acknowledged the change, or `DEGRADED` when the change is stored but at least one environment did not acknowledge it. Each `environments[]` entry carries `name`, `acknowledged` and, when the environment did not acknowledge, a one-line `detail` of at most 300 characters. Do not retry a `DEGRADED` write; redeploy instead. After a secret rotation or a generation revoke, a `DEGRADED` write means a gateway may still verify against the previous copy of the secret, so a pipeline must test `runtimeDeployment.state` and not only the HTTP status before it retires the old secret.
 
 `POST .../actions/revoke` is the one action on this surface that may answer `202` instead of `200`: when the withdrawal has been handed to the durable sweeper rather than completed synchronously, the response carries `Location` pointing at the same client and `runtimeDeployment.state = PENDING`.
+
+### Client created — `201` {#client-created-201}
+
+The answer to `POST /api-clients`, sent with `Cache-Control: no-store` and `Pragma: no-cache`: the [Mutation](#mutation) fields plus
+
+| Field | Type | Meaning |
+|---|---|---|
+| `versionId` | string | The first secret generation's key; absent for a public client |
+| `secret` | string | The generated first secret, shown **once** — absent when the caller supplied its own `secret.value`, and for a public client |
 
 ### Secret issued — `201` {#secret-issued-201}
 
@@ -260,10 +273,10 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 
 | Error key | When |
 |---|---|
-| `malformedRequest` | A body was missing (`params.reason = bodyRequired`), a required field was missing (`ownerRequired`, `versionRequired`, `modeRequired` — `params.field` names it), `ownerKey`/`ownerType` was given without its pair (`ownerKeyRequiresOwnerType` / `ownerTypeRequiresOwnerKey`), the admin (platform) project was addressed (`platformScopeNotSupported`), or an underlying validation rule was refused — `params.reason` then carries the service's own key |
+| `malformedRequest` | A body was missing (`params.reason = bodyRequired`), a required field was missing (`ownerRequired`, `versionRequired`, `modeRequired` — `params.field` names it), a `secret` was sent on `PUT` (`secretOnCreateOnly`), `ownerKey`/`ownerType` was given without its pair (`ownerKeyRequiresOwnerType` / `ownerTypeRequiresOwnerKey`), the admin (platform) project was addressed (`platformScopeNotSupported`), or an underlying validation rule was refused — `params.reason` then carries the service's own key |
 | `resourceNotFound` | An unknown or out-of-project `apiClientKey` or `ownerKey` |
 | `versionConflict` | The stored `version` no longer matches what the caller sent — `params.reason = apiClientRevisionConflict` (client) |
-| `lifecycleConflict` | `params.reason` names the cause: `apiClientIllegalTransition` (an activate/suspend/resume/revoke move the current state refuses), `apiClientNotReady` (activate attempted before the client is materially ready), `apiClientSecretRotationRefused`, `secretVersionAlreadyRevoked`, `apiClientNotDraft` (discard attempted on a non-draft client), `clientIdImmutable` / `apiClientKeyImmutable` (an update tried to change an immutable identifier) |
+| `lifecycleConflict` | `params.reason` names the cause: `apiClientIllegalTransition` (a suspend/resume/revoke move the current state refuses), `apiClientNotReady` (the client does not have what it needs to be in service), `apiClientRevokedReadOnly` (an update of a revoked client), `apiClientSecretRotationRefused`, `secretVersionAlreadyRevoked`, `clientIdImmutable` / `apiClientKeyImmutable` (an update tried to change an immutable identifier) |
 | `idempotencyKeyRequired` | `POST /api-clients` or `POST .../secret-versions` was missing its `Idempotency-Key` header |
 | `idempotencyKeyReused` | The same key was sent with a different request body |
 | `idempotencyReplayExpired` | The same key and body already completed — `params.resource` names what it created |
@@ -274,49 +287,44 @@ See [Common Contract → Error keys](/api-reference/apiops-common-contract#error
 
 ## Permissions & Licensing
 
-- Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`/`PUT`/`DELETE`) require it at **Manage**. No AI Gateway license module gates any endpoint on this surface.
+- Reads (`GET`) require the **Identity** permission at **View**; writes (`POST`/`PUT`) require it at **Manage**. No AI Gateway license module gates any endpoint on this surface.
 - API clients are project-owned; the admin (platform) project has none of its own and every endpoint refuses a platform-scoped call with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
 - A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart). The same rule applies to a client whose *stored* project does not match the one in the path: it is answered with the identical `404` a nonexistent key would get, never a distinguishing status.
 
 ## Example
 
-Create a client owned by a consumer, issue its first secret, activate it, then revoke it:
+Create a client owned by a consumer — it is active at once, with its first secret — rotate the secret, then revoke the client:
 
 ```bash
-# 1. Create — DRAFT, no material yet
+# 1. Create — ACTIVE, deployed, with a generated first secret
 curl -X POST "https://apinizer.example.com/apiops/projects/finance/api-clients" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 5e2a1c7b-9d4f-4a3e-8b1c-2f6d9a0e3c81" \
   -d '{
     "owner": { "type": "CONSUMER", "key": "acme-integration-user" },
-    "name": "acme-nightly-batch",
     "description": "Nightly settlement batch job",
     "allowedGrantTypes": ["client_credentials"],
     "tokenExpiresInAmount": 1,
-    "tokenExpiresInUnit": "HOURS"
+    "tokenExpiresInUnit": "HOURS",
+    "secret": { "generate": true, "label": "initial", "storageMode": "ENCRYPTED" }
   }'
 # 201 Created, Location: /apiops/projects/finance/api-clients/acme-nightly-batch-4f9a2c8d
+# response.secret holds the plaintext ONCE; store it now. response.apiClient.version is the version to send next
 
-# 2. Issue the first secret — version 0 (freshly created)
-curl -X POST "https://apinizer.example.com/apiops/projects/finance/api-clients/acme-nightly-batch-4f9a2c8d/secret-versions?version=0" \
+# 2. Rotate the secret — send the client's current version
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/api-clients/acme-nightly-batch-4f9a2c8d/secret-versions?version=1" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: 9a0c3e7f-1b2d-4c5e-9f6a-8d7c1e0b4a92" \
   -d '{
     "generate": true,
-    "label": "initial",
-    "storageMode": "ENCRYPTED"
+    "label": "rotation-1",
+    "graceWindowSeconds": 3600
   }'
-# 201 Created — response.secret holds the plaintext ONCE; store it now
+# 201 Created — response.secret holds the new plaintext ONCE
 
-# 3. Activate the client — version has advanced with the secret write; read it back first
-curl -X POST "https://apinizer.example.com/apiops/projects/finance/api-clients/acme-nightly-batch-4f9a2c8d/actions/activate" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "version": 1 }'
-
-# 4. Revoke it later — irreversible
+# 3. Revoke it later — irreversible; read the client back first for its current version
 curl -X POST "https://apinizer.example.com/apiops/projects/finance/api-clients/acme-nightly-batch-4f9a2c8d/actions/revoke" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
