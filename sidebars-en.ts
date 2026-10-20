@@ -59,6 +59,27 @@ const sidebars: SidebarsConfig = {
     },
     {
       "type": "category",
+      "label": "Policies",
+      "collapsed": false,
+      "collapsible": true,
+      "items": [
+        "ai-gateway/policies/prompt-template",
+        "ai-gateway/policies/prompt-decorator",
+        "ai-gateway/policies/rag-injection",
+        "ai-gateway/policies/pii-mask",
+        "ai-gateway/policies/prompt-guard",
+        "ai-gateway/policies/topic-guard",
+        "ai-gateway/policies/dlp-guard",
+        "ai-gateway/policies/context-integrity",
+        "ai-gateway/policies/loop-guard",
+        "ai-gateway/policies/semantic-cache",
+        "ai-gateway/policies/token-rate-limit",
+        "ai-gateway/policies/mcp-call",
+        "ai-gateway/policies/a2a-call"
+      ]
+    },
+    {
+      "type": "category",
       "label": "Knowledge and Retrieval (RAG)",
       "collapsed": false,
       "collapsible": true,
