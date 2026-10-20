@@ -1265,6 +1265,7 @@ const sidebars: SidebarsConfig = {
           "items": [
             "tutorials/ai-proxy-scenarios/mcp-gateway-keycloak-oauth-sign-in",
             "tutorials/ai-proxy-scenarios/mcp-gateway-browser-sign-in",
+            "tutorials/ai-proxy-scenarios/mcp-gateway-delegated-user",
             "tutorials/ai-proxy-scenarios/mcp-gateway-authorization-cards"
           ]
         },
