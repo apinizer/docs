@@ -56,6 +56,7 @@ The body is the full `AiRouting` object — it **replaces** the proxy's current 
   "contextWindowAction": "TRUNCATE",
   "contextKeepTurns": 2,
   "contextRagAction": "KEEP",
+  "contextLastUserMessageAction": "KEEP",
   "streaming": false,
   "timeoutSeconds": 60,
   "connectTimeoutSeconds": 10,
@@ -87,6 +88,7 @@ The body is the full `AiRouting` object — it **replaces** the proxy's current 
 | contextWindowAction | string | What happens when a chat or responses request does not fit the selected model's context window — `REJECT`, `TRUNCATE`, or `PASS`. Default `REJECT` when unset. The input limit is the model's `contextWindow` (set on the LLM provider's model) minus the requested output tokens (`max_completion_tokens`, `max_tokens`, or `max_output_tokens`) minus a 512-token safety margin. `REJECT` answers HTTP 400 with error code ERR-311 (`context_length_exceeded`) before any provider call. `TRUNCATE` drops the oldest conversation turns until the request fits. `PASS` sends the request to the provider unchanged. No check runs when the model has no context window value. With failover, a candidate whose context window is too small is skipped. See [Context Window](/en/ai-gateway/routing-and-failover#context-window) |
 | contextKeepTurns | integer | `TRUNCATE` only: how many conversation turns before the last one are never dropped. System and developer messages and the last turn are always kept. A tool call and its result are dropped together. Default `0`. The Manager UI accepts 0–50 |
 | contextRagAction | string | `TRUNCATE` only: whether the context added by a RAG Injection policy may be shortened — `KEEP` or `TRIM_END` (shortened from its end). Default `KEEP` |
+| contextLastUserMessageAction | string | `TRUNCATE` only: whether the gateway may shorten the last user message when dropping turns and cutting the RAG context are not enough — `KEEP` or `TRIM_MIDDLE` (the middle of the text is removed; the start and end are kept, and a note marks the removed part). At most half of the text is removed; otherwise the request is rejected. Only text is cut. Default `KEEP`; an omitted or `null` value resets to `KEEP`, because the body replaces the whole object |
 | timeoutSeconds | integer | Response timeout in seconds: the longest wait for the provider's answer to a single-response (non-streaming) request. Default `60` |
 
 :::note `USE_CLIENT` is not honored on Azure OpenAI
@@ -142,6 +144,7 @@ Example: `connectionPoolManagementType` is `NONE`, the routing has `customConnec
 | failoverStatusCodeList | array[integer] | HTTP status codes eligible for failover. Empty = default 5xx/408/429 |
 | failoverRetryCount | integer | Inner retry count per failover entry. Default `1` |
 | conditionalLatencyThresholdMs | integer | For `CONDITIONAL` strategy — proactive latency threshold in ms |
+| trySiblingPoolTargets | boolean | What happens when the selected pool target fails. `true` or unset: the selected target, retries on the same target (if any), the other pool targets, then the failover chain. `false`: the selected target, retries on the same target (if any), then the failover chain directly; with an empty chain the request returns an error. Applies to `primaryPool` and to every conditional route `targetPool`. Unset behaves as `true` |
 | primaryPool | array | N-primary load-balancing pool — each entry with `llmProviderRef`/`llmProviderRefName`, optional `modelId`, `weight`, `displayName` |
 | enumAiRoutingAlgorithm | string | `ROUND_ROBIN`, `WEIGHTED`, `RANDOM`, `LEAST_COST`, `PREFIX_AFFINITY`, `LRU` |
 | leastCostOutputRatio | number | Output-to-input cost weight for `LEAST_COST`. Default `0.25` |
@@ -152,10 +155,54 @@ Example: `connectionPoolManagementType` is `NONE`, the routing has `customConnec
 
 | Field | Type | Description |
 |-------|------|-------------|
-| conditionalRoutes | array | Ordered route variants — each with `name`, `condition`, optional `llmProviderRef`/`llmProviderRefName`, `modelId`, `semanticUtterances`, `semanticThreshold` |
+| conditionalRoutes | array | Ordered route variants — each with `name`, `condition`, optional `llmProviderRef`/`llmProviderRefName`, `modelId`, `semanticUtterances`, `semanticThreshold`, and optionally a target pool (see below) |
 | semanticEmbeddingProviderRef | string | Embedding provider id for semantic route matching |
 | semanticEmbeddingProviderRefName | string | Name-based sidecar for `semanticEmbeddingProviderRef`. Resolved to an id within the project when present (Apinizer 2026.09.4) |
 | semanticEmbeddingModelId | string | Embedding model id. Default `text-embedding-3-small` |
+
+Each entry of `conditionalRoutes` also accepts the target pool fields below. A route with a non-empty `targetPool` is a **target pool route**: it load-balances the matching requests across its targets with its own algorithm. A route without `targetPool` (empty or absent) is a single-target route that uses `llmProviderRef` and `modelId`, as before. When `targetPool` is set, the route is not validated or routed by `llmProviderRef` and `modelId`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| targetPool | array | Targets of the route pool. Each entry has the fields in the next table |
+| enumAiRoutingAlgorithm | string | Algorithm of this route pool: `ROUND_ROBIN`, `WEIGHTED`, `RANDOM`, `LRU`, `LEAST_COST`, `LEAST_LATENCY`, `PREFIX_AFFINITY`. Default `ROUND_ROBIN` |
+| affinityKeyHeader | string | Header for the `PREFIX_AFFINITY` key of this route. Default `session_id` |
+| affinityLoadFactor | number | Bounded-load factor for `PREFIX_AFFINITY` of this route. Default `1.25` |
+
+Fields of a `targetPool` entry:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| llmProviderRef | string | LLM provider connection id. Required. Use `llmProviderRefName` instead when referencing by name |
+| llmProviderRefName | string | Name-based sidecar for `llmProviderRef` (export/import). Resolved to an id within the project when present |
+| modelId | string | Model id. Required. A target does not inherit the model of the default target |
+| weight | integer | Used by `WEIGHTED` only. A higher value receives more traffic. Empty or `0` or less counts as `1` |
+| displayName | string | Name of the target in the Manager UI |
+| connectionPoolSize | integer | Optional provider-specific pool size. See Connection Pool above |
+| idleConnectionTimeout | integer | Optional provider-specific idle connection timeout in seconds. See Connection Pool above |
+
+Example — a target pool route. Requests that match the route rule (for example `model = qwen3-8b`) are distributed across three servers with Round Robin. If the selected server fails, the other two are tried (`trySiblingPoolTargets` is on):
+
+```json
+{
+  "llmProviderRefName": "openai-prod",
+  "modelId": "gpt-4o-mini",
+  "trySiblingPoolTargets": true,
+  "conditionalRoutes": [
+    {
+      "name": "qwen3-8b farm",
+      "enumAiRoutingAlgorithm": "ROUND_ROBIN",
+      "targetPool": [
+        { "llmProviderRefName": "vllm-a1", "modelId": "qwen3-8b", "displayName": "a1" },
+        { "llmProviderRefName": "vllm-a2", "modelId": "qwen3-8b", "displayName": "a2" },
+        { "llmProviderRefName": "vllm-a3", "modelId": "qwen3-8b", "displayName": "a3" }
+      ]
+    }
+  ]
+}
+```
+
+The example omits the `condition` field, which carries the rule `model = qwen3-8b`. Create the rule in the Manager UI and read the route back to see the `condition` shape.
 
 Each entry of `conditionalRoutes` also accepts the classifier fields below. A route with a `classifierLabel` is a **classifier route**: the proxy-level LLM classifier answers with one label, and the route with that label is selected. Several routes may share one label; the first one whose `condition` also matches wins.
 
@@ -267,7 +314,7 @@ At request time the classifier is called at most once, only when a classifier ro
 
 ## Behavior
 
-- `llmProviderRefName` and `semanticEmbeddingProviderRefName`, `classifierProviderRefName` (and the name sidecars on failover entries, primary pool entries, and conditional routes) are resolved to connection ids before save. Apinizer looks for each name in the project of the API proxy first, then in the admin project (shared providers). A provider in the own project wins when both have the same name. A blank sidecar leaves the corresponding id field untouched; an unresolvable name does the same — it does not clear or reject the id by itself. If the id left in place (from the body, or unchanged because the name did not resolve) is missing or belongs to a different project, the save is rejected with error key `aiRouting.providerOutOfScope`.
+- `llmProviderRefName` and `semanticEmbeddingProviderRefName`, `classifierProviderRefName` (and the name sidecars on failover entries, primary pool entries, conditional routes, and conditional route target pool entries) are resolved to connection ids before save. Apinizer looks for each name in the project of the API proxy first, then in the admin project (shared providers). A provider in the own project wins when both have the same name. A blank sidecar leaves the corresponding id field untouched; an unresolvable name does the same — it does not clear or reject the id by itself. If the id left in place (from the body, or unchanged because the name did not resolve) is missing or belongs to a different project, the save is rejected with error key `aiRouting.providerOutOfScope`.
 - An empty routing object (`{}`) is accepted and **replaces** (clears) the existing routing. No conditional route, pool entry, failover entry, default provider, or default model is required. If the proxy is then deployed, every request fails with HTTP 503 (`POLICY_ROUTING_AI_NO_SUITABLE_PROVIDER`) until a target is added. Deploy is not blocked.
 - Every environment the proxy is currently deployed to is marked **redeploy required** — redeploy to activate the new configuration.
 - AI proxies do **not** use the classic `routing` object. Settings endpoints that target classic routing (circuit breaker, connection, mTLS, addresses, …) return HTTP 400 for AI proxies and point here instead.
@@ -295,6 +342,7 @@ The call does not deploy the proxy. Redeploy it to activate the change.
 | 400 | Blank `apiProxyName`, empty body, proxy not found, or proxy is neither an AI proxy nor an A2A proxy in `AGENT_EXPOSE` mode |
 | 400 | A provider id referenced anywhere in `aiRouting` (primary, failover, pool, conditional route, or the semantic embedding provider) is missing or belongs to a different project (error key `aiRouting.providerOutOfScope`). Missing and out-of-scope ids share this key so the response does not reveal whether an id exists in another project. |
 | 400 | A classifier route or the classifier settings are invalid. Error keys: `aiRouting.classifierProviderRequired` (a classifier route exists but the classifier provider or model is missing), `aiRouting.classifierProviderWire` (the classifier provider cannot make decision calls), `aiRouting.classifierLabelInvalid` (the label does not match lowercase letters, digits, `_` and `-`, maximum 64 characters, starting and ending with a letter or digit), `aiRouting.classifierLabelReserved` (the label is `none`), `aiRouting.classifierDescriptionRequired` (a classifier route has a blank description or one longer than 500 characters), `aiRouting.classifierSemanticConflict` (a route defines both a classifier label and semantic utterances) |
+| 400 | A `targetPool` entry of a conditional route has no provider (error key `aiRouting.primaryPoolProviderRequired`) or no model (error key `aiRouting.entryModelRequired`) |
 | 400 | A decision-only provider (TypeSafe Jev or TEI) is used as a routing target, a pool member, a failover target, or an embedding provider (error key `aiRouting.decisionOnlyProvider`) |
 | 400 | A target field is filled but the definition produces no target, for example a provider is set but `modelId` is empty and there are no list entries (error key `aiRouting.targetRequired`). A routing with no target field filled at all is accepted, not rejected |
 | 401 | Invalid or missing token |
