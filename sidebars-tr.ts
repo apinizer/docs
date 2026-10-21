@@ -532,8 +532,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "develop/politikalar/ws-gelen-mesaj",
             "develop/politikalar/ws-giden-mesaj",
+            "develop/politikalar/ws-gelen-mesaj",
             "develop/politikalar/ws-kimlik-dogrulama",
             "develop/politikalar/ws-sifreleme",
             "develop/politikalar/ws-decrypt",
