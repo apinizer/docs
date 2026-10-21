@@ -44,7 +44,36 @@ A **Conditional Route** overrides the primary provider and model for requests th
 |---|---|
 | **Route Name** | A label for the route, shown in the routing screen's summary table (for example, "Code questions → DeepSeek"). |
 | **Condition** | A rule built from Apinizer's condition editor. Left empty, the route always matches on the rule side. |
-| **Target Provider · Model** | The provider connection and model this route sends matching requests to. Leave either blank to inherit the primary's value. |
+| **Target type** | **Single target** (default) or **Target pool (load balancing)**. See [Target Pool Routes](#target-pool-routes). |
+| **Target Provider · Model** | Shown for **Single target**. The provider connection and model this route sends matching requests to. Leave either blank to inherit the primary's value. |
+
+### Target Pool Routes {#target-pool-routes}
+
+Select **Target pool (load balancing)** as the **Target type** when the same model runs on several servers. The route then distributes the matching requests across its targets with its own algorithm. A single route needs no second proxy in front of the servers.
+
+Example: the model `qwen3-8b` runs on the servers a1, a2 and a3.
+
+1. Create a route with the rule `model = qwen3-8b`. Select **Target pool (load balancing)** and add one target for each server.
+2. Create a second route with the rule `model = deepseek-r1`. Select **Target pool (load balancing)** and add its targets.
+
+Each route has its own pool and its own balance state. Round Robin on one route does not affect another route.
+
+| Field | Description |
+|---|---|
+| **Algorithm** | The same seven algorithms as the Default Target Group: Round Robin, Weighted, Least Latency, Random, LRU, Least Cost, and Prefix Affinity. See [Load Balancing Across Equal-Priority Primaries](#load-balancing-across-equal-priority-primaries). |
+| **Affinity Key Header** and **Bounded Load Factor** | Shown for Prefix Affinity. Each route has its own values. Defaults: `session_id` and `1.25`. |
+| **Display Name** | The name of the target in the route list and in the pool summary. |
+| **LLM Provider** | Required for every target. |
+| **Model ID** | Required for every target. A target does not inherit the model of the default target. |
+| **Weight** | Shown for Weighted only. A higher weight receives more traffic. |
+
+Click **Add Target** to add a row. Saving is rejected when a target has no provider or no model.
+
+The route list and the route summary show **Target pool · algorithm · N targets** for a pool route. A route that was saved before this option existed opens as **Single target**. No migration is needed.
+
+:::note When a pool target fails
+Whether the other targets of the pool are tried is set by **Try the other pool targets** in the Error path settings. See [Try the Other Pool Targets](#try-the-other-pool-targets).
+:::
 
 ### Semantic Matching
 
@@ -249,6 +278,7 @@ The result shows:
 - The estimated request tokens.
 - The classifier label, outcome, latency, tokens, and cost. For a reasoning model, the tokens include the thinking tokens. If the provider does not report thinking tokens (for example Ollama or vLLM), Apinizer estimates them from the thinking text the model returns. For TypeSafe Jev, the result also shows the **Confidence**.
 - A table with one row for each route: the rule, the semantic score, the classifier answer, and the result. The result is **Selected**, **No match**, **Target unusable**, or **Not evaluated**. Hold the pointer over **Selected** to see the target provider and model.
+- For a pool route, the result is **Selected → Target pool · algorithm · N targets**. The gateway picks the target when the request arrives, so the test does not name a pool target.
 - The message "No route matched — the request goes to the Default Target Group" when no route matches.
 
 Rules other than **Estimated Request Token Count** need a real request. The test assumes that these rules match and shows them as `RUNTIME_ONLY`. A NOT over a rule that cannot be evaluated without a real request is shown as `INDETERMINATE`.
@@ -367,13 +397,34 @@ You can change this message on the **Error Messages** screen. The traffic log re
 
 ### Truncation Rules
 
-- The gateway always keeps the system messages that the client sent, the last user message, and everything after it.
+- The gateway always keeps the system messages that the client sent, the last user message, and everything after it. The only change allowed to the last user message is the shortening that **Last user message** sets (see below).
 - A tool call and its result are removed together.
 - Removal starts with the oldest turn. A turn is a user message and the assistant and tool messages after it.
 - **Recent turns to keep** sets how many of the latest turns the gateway never removes. The value is from 0 to 50. The default is 0.
 - **Context added by RAG** has two options. **Keep** (default) never removes the context that the gateway added. **Shorten from the end** removes the least relevant last chunks when removing turns is not enough.
+- **Last user message** has two options. **Keep** (default) never changes the last user message. **Shorten from the middle** removes the middle of its text when the steps above are not enough.
 
-The response to a truncated request carries the `X-Apinizer-AI-Truncated` header. The header holds the number of removed messages. The traffic log also marks the request.
+The gateway applies the steps in this order:
+
+1. It removes the oldest conversation turns.
+2. When **Context added by RAG** is **Shorten from the end**, it cuts the end of the RAG context.
+3. When **Last user message** is **Shorten from the middle** and the request still does not fit, it removes the middle of the last user message.
+
+When the gateway shortens the last user message, it keeps the start and the end of the text. In place of the removed part it puts a note: `[... N characters removed by the gateway to fit the model context window ...]`. The model can see that content is missing. The gateway measures the request again with the note. If the request still does not fit, the gateway rejects it with HTTP 400.
+
+Rules for **Shorten from the middle**:
+
+- The gateway removes at most half of the text of the last user message. Characters are counted as Unicode code points. If more is needed, the gateway rejects the request.
+- The cut moves to a line break when one is close.
+- The gateway cuts text only. It never changes images, audio, files, tool calls or tool results.
+- It works with Chat Completions `messages[].content` (a string or text parts) and with Responses `input` (a string or user input items).
+- A RAG context set to **Keep** is never cut. If several RAG Injection policies run on the proxy, the gateway cannot find the kept context in the message. In this case it cuts nothing and rejects the request.
+
+:::warning Content is lost
+Typical use is a whole file pasted into one message. Pasted JSON, XML or code can break in the removed part. The answer cannot take the removed content into account. To analyze a whole document, the client should split the content into several requests.
+:::
+
+The response to a truncated request carries the `X-Apinizer-AI-Truncated` header. The header holds the number of removed messages. When only the last user message was shortened, the value is `0`. The traffic log also marks the request.
 
 Click **See an example** to open a side drawer. The drawer runs the saved rules on a sample conversation.
 
@@ -467,6 +518,18 @@ This setting decides what the gateway does with the `stream` value that the clie
 A single-response answer from an LLM Gateway reaches the client with a `Content-Type` header. Earlier versions could send the answer without it. This also holds for an answer that comes from the semantic cache. Headers that only the provider uses are not forwarded.
 :::
 
+### Certificate Trust for the LLM Provider {#certificate-trust}
+
+The gateway checks the certificate of the LLM provider with the certificates in the Apinizer certificate store. This applies to single-response and streaming requests. It applies when the routing does not use mTLS and **Skip SSL Verification** is off. The gateway uses the certificates that you assign to the environment of the LLM Gateway on the **Management → Secrets Management → Certificates** screen.
+
+- A certificate that you add or remove applies to new connections right away. You do not need to redeploy the LLM Gateway. This is the same behavior as in API proxy routing.
+- If the routing uses mTLS, the trust settings of the mTLS configuration apply.
+- This does not change hostname verification.
+
+:::tip PKIX path building failed
+This error means that the certificate chain of the provider is not trusted. Add the issuing certificate authority (or the certificate) to the certificate store for the environment of the LLM Gateway. See [SSL/TLS Certificate Issues](/en/operations/common-problems-solutions/ssl-tls-certificate-issues).
+:::
+
 ## Failover Chains
 
 When you configure an LLM Gateway, you can list more than one provider connection for a model — a **primary** and one or more **backups**. If a request to the primary fails (timeout, error response, or the primary is unavailable), Apinizer automatically retries it against the next connection in the chain, without the client seeing the failure.
@@ -511,7 +574,9 @@ The reason code describes only the last failed attempt:
 | `transport_error` | Another network failure. |
 | `upstream_status` | The provider answered with an error status. |
 
-The headers carry no provider message, address or body. The error body, status and error type do not change. Apinizer does not send these two headers for a streaming request.
+The headers carry no provider message, address or body. The error body and status that the client receives do not change. Apinizer does not send these two headers for a streaming request.
+
+If every attempt to the provider (primary, retries and failover) fails on TLS, the traffic log records the error type `POLICY_ROUTING_SSLHANDSHAKE`. It records `POLICY_ROUTING_SSLEXPIRED` when all attempts failed because the certificate is expired or not yet valid. Apinizer does not record a TLS connection that is cut during the handshake as an SSL error. If the failures are mixed (for example TLS and timeout), the error type stays `POLICY_ROUTING_AI_PROVIDER_EXHAUSTED`. The client response, including the `tls_error` reason header, does not change.
 
 ## Load Balancing Across Equal-Priority Primaries
 
@@ -555,7 +620,24 @@ If the pool members sit behind a layer that already makes its own KV-cache routi
 
 A pool member is skipped when its provider is deleted or disabled, or when it has no resolvable model — the pool simply load-balances across what remains. If nothing remains, routing falls through to the single default target and then to the failover chain.
 
+When you save the Default Target Group drawer from the screen, the screen clears the older proxy-level single default provider and model (the one shown with the **Single default** badge). The pool is then the only default target, so removing the last member leaves the group empty and routing goes to the failover chain. If a conditional route, pool member, or failover entry has an empty provider or model and used the cleared single default, the save is rejected: give that route or entry its own model. A routing written with APIops can still keep the single default. Then it is used as described above.
+
 **Bounded-load protection**: for Prefix Affinity, if the target member's current load exceeds the pool average by more than the configurable **Bounded Load Factor** (default `1.25`), the request shifts to the next member instead — this keeps one popular conversation from overloading a single pool member.
+
+### Try the Other Pool Targets {#try-the-other-pool-targets}
+
+The **Try the other pool targets** switch is in the **Error path** (Failover) drawer. It decides what happens when the selected pool target fails. It applies to the Default Target Group and to every conditional route pool.
+
+| Setting | Order of attempts |
+|---|---|
+| **On** (default) | The selected target, then retries on the same target (if any), then the other pool targets, then the failover chain. |
+| **Off** | The selected target, then retries on the same target (if any), then the failover chain directly. If the chain is empty, the request returns an error. |
+
+If the switch was never saved, it is on.
+
+Apinizer moves to the next step in these cases: a connection error, a timeout, a failover status code, or by default a 5xx, 408 or 429 response. This list does not change. A model access denial or a 4xx client error does not move to the next step. When a stream has started, the target does not change.
+
+Retries on the same target are a separate setting.
 
 ## Routing Strategies
 
