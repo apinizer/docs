@@ -1,329 +1,208 @@
 ---
 title: "JVM Garbage Collector Ayarlama"
-description: "Apinizer modüllerinin otomatik bellek yönetimi profillerini, GC seçeneklerini ve container ortamında güvenli heap yapılandırmasını açıklar."
+description: "Apinizer modüllerinin container belleğine göre otomatik JVM bellek kademelerini, GC seçimini, jvmOverride davranışını ve container ortamında güvenli heap yapılandırmasını açıklar."
 ---
 
-## Otomatik Bellek Profili Sistemi
+## Otomatik Bellek Kademeleri
 
-Apinizer, tüm modüllerinde (Worker, Cache, Manager, Integration) container başlangıcında **otomatik bellek profili** sistemi kullanır. Bu sistem:
+Apinizer'ın tüm modülleri (Worker, Cache, Manager, Integration, Portal) container başlangıcında `entrypoint.sh` üzerinden **otomatik JVM bellek ayarı** uygular:
 
-1. Container'a ayrılan bellek miktarını cgroup üzerinden tespit eder
-2. Bellek miktarına göre uygun bir profil seçer
-3. Profil kapsamında GC algoritmasını ve heap yüzdesini otomatik belirler
+1. Container'a ayrılan bellek limiti cgroup (v1/v2) üzerinden tespit edilir; limit yoksa sunucunun toplam belleği kullanılır.
+2. Bellek kademelere göre sınıflandırılır (Worker, Manager, Integration ve Portal'da 1 GB'lık adımlarla; Cache'te 1 / 2 / 4 / 8 GB ve üzeri).
+3. Seçilen kademeye göre heap yüzdesi (`MaxRAMPercentage`), direct memory, metaspace, thread stack boyutu ve GC parametreleri belirlenir.
 
-### Profil Seçim Tablosu
+Seçilen kademe pod log'larına yazdırılır. Örnek (Worker, 4 GB):
 
-| Profil | Container Bellek | GC Algoritması | Heap Yüzdesi | Stack Boyutu |
-|--------|-----------------|----------------|--------------|-------------|
-| **Low** (Düşük) | ≤ 768 MB | Serial GC | %50 | 512 KB |
-| **Medium** (Orta) | 769 – 1536 MB | G1GC | %60 | 512 KB |
-| **High** (Yüksek) | > 1536 MB | ZGC | %70 | Varsayılan |
-
-:::info
-
-Profil seçimi container başlangıcında pod log'larına yazdırılır. Örnek:
 ```
 Detected container memory: 4096MB
-JVM profile: HIGH MEMORY (ZGC, 70% heap, AlwaysPreTouch)
+JVM tier: 4GB (heap 65%, direct 512m, metaspace 256m, stack 512k)
+jvmOverride not set: tier defaults will override JAVA_OPTS
+```
+
+:::warning
+
+Eski sürümlerdeki `JVM_MEMORY_PROFILE` (low/medium/high) ortam değişkeni ve "bellek 1536 MB'ı aşınca otomatik ZGC" davranışı **kaldırılmıştır**. Bu değişkeni tanımlamanın artık bir etkisi yoktur; ortam değişkenlerinizde varsa silebilirsiniz.
+
+:::
+
+### Worker (Gateway)
+
+Worker her kademede Java 25'in varsayılan GC'si olan **G1GC**'yi kullanır.
+
+| Container Bellek | Heap | Direct Memory | Metaspace | GC Parametreleri |
+|-----------------|------|---------------|-----------|------------------|
+| ≤ 1 GB | %50 | 128m | 128m | `G1HeapRegionSize=1m` |
+| ≤ 2 GB | %60 | 256m | 192m | `G1HeapRegionSize=1m` |
+| ≤ 3 GB | %60 | 384m | 256m | `G1HeapRegionSize=2m` |
+| ≤ 4 GB | %65 | 512m | 256m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 5 GB | %65 | 768m | 320m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 6 GB | %65 | 1024m | 384m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 7 GB | %65 | 1280m | 384m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 8 GB | %65 | 1536m | 384m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| > 8 GB | %65 | belleğin ~%20'si (en fazla 4096m) | 512m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+
+### Cache (Hazelcast)
+
+Cache modülü 2 GB ve üzerinde **ZGC** kullanır. Hazelcast heap dışında da bellek kullandığı için heap oranları Worker'dan düşüktür.
+
+| Container Bellek | GC | Heap | Direct Memory | Metaspace |
+|-----------------|----|------|---------------|-----------|
+| ≤ 1 GB | G1GC | %50 | 64m | 128m |
+| ≤ 2 GB | ZGC | %50 | 128m | 128m |
+| ≤ 4 GB | ZGC + `AlwaysPreTouch` | %55 | 192m | 192m |
+| ≤ 8 GB | ZGC + `AlwaysPreTouch` | %55 | 256m | 256m |
+| > 8 GB | ZGC + `AlwaysPreTouch` | %55 | 384m | 384m |
+
+### Manager
+
+Manager her kademede G1GC kullanır. Metaspace, yüklenen sınıf sayısı pod boyutundan bağımsız olduğu için tüm kademelerde **512m** olarak sabittir.
+
+| Container Bellek | Heap | Direct Memory | GC Parametreleri |
+|-----------------|------|---------------|------------------|
+| ≤ 1 GB | %50 | 128m | `G1HeapRegionSize=1m` |
+| ≤ 2 GB | %55 | 192m | `G1HeapRegionSize=1m` |
+| ≤ 3 GB | %55 | 256m | `G1HeapRegionSize=2m` |
+| ≤ 4 GB | %60 | 384m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 5 GB | %60 | 512m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 6 GB | %60 | 640m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 7 GB | %60 | 768m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| ≤ 8 GB | %60 | 1024m | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+| > 8 GB | %60 | belleğin ~%15'i | `AlwaysPreTouch`, `MaxGCPauseMillis=100` |
+
+:::warning
+
+Manager için **en az 2 GB** bellek ayırın. 1 GB kademesinde pod log'larına şu uyarı yazılır ve tam ısınma sonrası bellek yetersiz kalabilir:
+
+```
+WARNING: 1GB is below the Manager minimum; heap + metaspace + JVM overhead exceed the limit under full warm-up. Use >= 2GB.
 ```
 
 :::
 
-### Profil Seçim Öncelik Sırası
+### Integration ve Portal
 
-Sistem, aşağıdaki sırayla karar verir:
+Integration ve Portal, Manager ile aynı heap ve direct memory kademelerini ve G1GC'yi kullanır; yalnızca metaspace kademeye göre değişir (≤ 1 GB: 128m, ≤ 2 GB: 192m, ≤ 4 GB: 256m, ≤ 5 GB: 320m, ≤ 8 GB: 384m, > 8 GB: 512m).
 
-1. **`JVM_MEMORY_PROFILE` ortam değişkeni** — Ayarlanmışsa (`low`, `medium` veya `high`), doğrudan bu profil kullanılır
-2. **`JAVA_OPTS` içindeki GC/heap ayarları** — Kullanıcı `JAVA_OPTS`'da GC (`-XX:+UseG1GC` vb.) veya heap (`-XX:MaxRAMPercentage`, `-Xmx` vb.) belirtmişse, otomatik değerler geçersiz kılınır
-3. **Otomatik algılama** — Yukarıdakiler yoksa, container belleği cgroup'tan okunur ve profil tablosuna göre seçim yapılır
+## JAVA_OPTS ve jvmOverride
+
+`JAVA_OPTS` ile verdiğiniz parametreler ile kademe değerleri birlikte JVM'e iletilir. JVM'de aynı parametre birden fazla verilirse **son verilen geçerli olur**; hangisinin sona yazılacağını `jvmOverride` ortam değişkeni belirler:
+
+| `jvmOverride` | Davranış |
+|---------------|----------|
+| Tanımlı değil (varsayılan) | Kademe değerleri sona yazılır. `JAVA_OPTS` içinde kademenin de belirlediği parametreler (`-XX:MaxRAMPercentage`, `-XX:MaxDirectMemorySize`, `-XX:MaxMetaspaceSize`, `-Xss`; 4 GB ve üzerinde `-XX:MaxGCPauseMillis`) **geçersiz kalır**. Kademenin belirlemediği parametreler (örn. `-Xmx`, `-Xms`) uygulanır. |
+| `true` | `JAVA_OPTS` sona yazılır; verdiğiniz değerler kademe değerlerinin önüne geçer. |
+
+:::warning
+
+`JAVA_OPTS` içinde `-XX:MaxRAMPercentage=75.0` gibi bir değer verdiyseniz ve `jvmOverride=true` tanımlamadıysanız, bu değer **uygulanmaz**; kademe değeri geçerli olur. Pod log'undaki `JVM tier: ...` satırı hangi değerin kullanıldığını gösterir. Kendi değerinizin geçerli olmasını istiyorsanız ortam değişkenlerine `jvmOverride=true` ekleyin.
+
+:::
+
+### GC Seçimi
+
+GC seçimi her zaman kullanıcıya aittir ve `jvmOverride`'dan bağımsızdır:
+
+- `JAVA_OPTS` içinde bir GC belirtilmezse modülün varsayılanı kullanılır (Worker, Manager, Integration ve Portal için G1GC; Cache için ≥ 2 GB'ta ZGC).
+- `JAVA_OPTS` içinde G1 dışında bir GC (`-XX:+UseZGC`, `-XX:+UseSerialGC`, `-XX:+UseParallelGC`, `-XX:+UseShenandoahGC`) belirtilirse, kademe değerlerindeki G1'e özel parametreler (`G1HeapRegionSize`) otomatik çıkarılır.
+- Cache modülünde `JAVA_OPTS` içinde herhangi bir GC belirtilirse, kademenin GC parametreleri (`UseZGC`, `G1HeapRegionSize`, `AlwaysPreTouch`) çıkarılır.
+
+Cache modülünde kademe GC'yi açıkça belirlediği için bu temizleme, iki farklı GC parametresinin aynı anda verilip JVM'in başlamamasını önler. Diğer modüllerde kademe GC belirtmez; temizleme yalnızca G1'e özel parametrelerin uyarı üretmesini engeller.
 
 ## Garbage Collector Türleri
 
-Apinizer'ın kullandığı base image **Eclipse Temurin 25** olduğundan, aşağıdaki GC algoritmaları desteklenir:
-
-### Serial GC
-
-Tek thread'li, en basit GC algoritmasıdır. Küçük heap boyutlarında ek thread ve bellek yükü oluşturmaz.
-
-- **Ne zaman kullanılır**: ≤ 768 MB bellek, düşük trafikli ortamlar, test/geliştirme
-- **Avantaj**: Minimum CPU ve bellek overhead'i
-- **Dezavantaj**: GC sırasında uygulama tamamen durur (Stop-the-World)
-- **JVM parametresi**: `-XX:+UseSerialGC`
+Apinizer'ın kullandığı base image **Eclipse Temurin 25** olduğundan aşağıdaki GC algoritmaları desteklenir.
 
 ### G1GC (Garbage-First)
 
-Region tabanlı, paralel ve eş zamanlı çalışabilen GC'dir. Heap'i eşit bölgelere ayırarak çöp toplama süresini tahmin edilebilir kılar.
+Java 25'in varsayılan GC'sidir. Region tabanlı, paralel ve eş zamanlı çalışır; heap'i eşit bölgelere ayırarak çöp toplama süresini tahmin edilebilir kılar.
 
-- **Ne zaman kullanılır**: 769 MB – 1536 MB bellek, orta trafikli ortamlar
+- **Apinizer'da**: Worker, Manager, Integration ve Portal'ın tüm kademelerinde; Cache'in 1 GB kademesinde
 - **Avantaj**: Dengeli throughput ve düşük GC duraklaması
-- **Dezavantaj**: Serial GC'ye göre daha fazla CPU kullanır
-- **JVM parametreleri**: `-XX:+UseG1GC -XX:G1HeapRegionSize=1m`
+- **JVM parametresi**: Varsayılan olduğu için belirtmek gerekmez (`-XX:+UseG1GC`)
 
 ### ZGC (Z Garbage Collector)
 
 Düşük gecikmeli, ölçeklenebilir GC'dir. GC duraklamaları heap boyutundan bağımsız olarak genellikle 1 ms altındadır.
 
-- **Ne zaman kullanılır**: > 1536 MB bellek, yüksek trafikli production ortamları
-- **Avantaj**: Sabit ve çok düşük GC duraklaması (sub-millisecond), büyük heap'lerde mükemmel performans
-- **Dezavantaj**: Colored pointer ve multi-mapping nedeniyle daha fazla native bellek tüketir (~%15-20 ek yük)
-- **JVM parametreleri**: `-XX:+UseZGC -XX:+AlwaysPreTouch`
+- **Apinizer'da**: Cache modülünün 2 GB ve üzeri kademelerinde varsayılan
+- **Avantaj**: Sabit ve çok düşük GC duraklaması, büyük heap'lerde iyi performans
+- **Dezavantaj**: Colored pointer ve multi-mapping nedeniyle daha fazla native bellek tüketir
+- **JVM parametresi**: `-XX:+UseZGC`
 
-### Karşılaştırma Tablosu
+### Serial GC
 
-| Özellik | Serial GC | G1GC | ZGC |
-|---------|-----------|------|-----|
-| **GC Duraklaması** | Yüksek (heap ile orantılı) | Orta (tahmin edilebilir) | Çok düşük (< 1 ms) |
-| **Throughput** | Küçük heap'te iyi | Dengeli | Büyük heap'te iyi |
-| **Bellek Overhead** | Minimum | Orta | Yüksek (~%15-20 ek) |
-| **CPU Kullanımı** | Tek core | Multi-core | Multi-core |
-| **Uygun Heap Aralığı** | < 512 MB | 512 MB – 4 GB | > 1 GB |
-| **Apinizer Profil** | Low (≤ 768 MB) | Medium (769-1536 MB) | High (> 1536 MB) |
+Tek thread'li, en basit GC algoritmasıdır. Apinizer kademelerinde otomatik seçilmez; `JAVA_OPTS` ile elle seçilebilir.
+
+- **JVM parametresi**: `-XX:+UseSerialGC`
 
 ## ZGC Güvenlik Sınırı
 
-### Sorun
-
-ZGC, colored pointer ve multi-mapping mekanizmaları nedeniyle diğer GC'lere kıyasla önemli ölçüde daha fazla **native bellek** (heap dışı bellek) kullanır. Mevcut kurulumlardan upgrade yapıldığında, eski `MaxRAMPercentage=80.0` ayarı G1GC için güvenli olsa da ZGC için container OOM Kill'e neden olabilir.
-
-### Otomatik Cap Mekanizması
-
-Apinizer, bu durumu önlemek için bir güvenlik mekanizması uygular:
-
-- ZGC **otomatik** seçildiğinde ve kullanıcı `JAVA_OPTS`'da `MaxRAMPercentage` değerini **%70'in üzerinde** ayarlamışsa:
-  - Heap yüzdesi otomatik olarak **%70'e düşürülür**
-  - Pod log'larında aşağıdaki uyarı mesajı görünür:
+ZGC, diğer GC'lere kıyasla daha fazla **native bellek** (heap dışı bellek) kullanır. Bu nedenle Worker, Manager, Integration ve Portal modüllerinde, `JAVA_OPTS` içinde ZGC seçip `MaxRAMPercentage` değerini **%70'in üzerinde** verirseniz değer otomatik olarak %70'e düşürülür ve pod log'una şu uyarı yazılır:
 
 ```
-WARNING: MaxRAMPercentage=80% is too high for ZGC (needs extra native memory).
-         Capping heap to 70% to prevent container OOM kill.
-         To suppress this, explicitly set a GC in JAVA_OPTS (e.g. -XX:+UseG1GC).
+WARNING: MaxRAMPercentage=80% is too high for ZGC. Capping to 70%.
 ```
 
-### Devre Dışı Bırakma
+:::info
 
-Cap mekanizmasını devre dışı bırakmak için `JAVA_OPTS`'da GC'yi **açıkça** belirtin. Bu durumda otomatik GC seçimi ve güvenlik cap'i devreden çıkar:
-
-```yaml
-env:
-  - name: JAVA_OPTS
-    value: "-XX:+UseG1GC -XX:MaxRAMPercentage=80.0"
-```
-
-:::warning
-
-GC'yi kendiniz belirttiğinizde güvenlik cap'i devreden çıkar. ZGC ile `MaxRAMPercentage=80.0` kullanırsanız OOM Kill riski taşırsınız. ZGC için **%70'i aşmayın**.
+Cache modülünde bu sınır uygulanmaz; Cache'in ZGC kademeleri zaten %50–55 heap kullanır.
 
 :::
 
-## Modül Bazlı Öneriler
+## GC Logları
 
-### Worker (Gateway)
+Worker, GC olaylarını varsayılan olarak stdout'a yazar (`-Xlog:gc`, toplama başına yaklaşık bir satır). Bu loglar `kubectl logs` ile ve normal log toplama altyapınızla görülebilir; OOM veya yavaşlık incelemelerinde GC baskısını geriye dönük değerlendirmeyi sağlar.
 
-Gateway pod'ları yüksek eşzamanlı HTTP trafiği işler. Bellek yapılandırması trafik yoğunluğuna göre belirlenir.
+| Ortam Değişkeni | Varsayılan | Açıklama |
+|-----------------|-----------|----------|
+| `APINIZER_GC_LOG` | (tanımlı değil = açık) | `false` verilirse Worker GC logları kapatılır |
 
-**Düşük trafik (≤ 500 TPS):**
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik profil: Medium (G1GC, %60 heap)
-```
+:::info
 
-**Orta trafik (500 – 2000 TPS):**
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik profil: High (ZGC, %70 heap)
-```
-
-**Yüksek trafik (> 2000 TPS):**
-```yaml
-resources:
-  requests:
-    memory: "4Gi"
-  limits:
-    memory: "4Gi"
-# Otomatik profil: High (ZGC, %70 heap)
-```
-
-:::tip
-
-Gateway pod'larında yüksek eşzamanlı istek sayısı nedeniyle ZGC'nin sub-millisecond GC duraklaması özellikle faydalıdır. P99 latency değerlerinde belirgin iyileşme sağlar.
+OOM anında otomatik heap dump bilinçli olarak açılmaz: 4–16 GB'lık bir dump, container'ın geçici disk (ephemeral storage) limitini aşarak pod'un tahliye edilmesine yol açabilir. Heap dump almak için [Bellek Sızıntıları ve OOM Hataları](/tr/operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors) sayfasındaki diagnostics endpoint'lerini kullanın.
 
 :::
-
-### Cache (Hazelcast)
-
-Cache Server pod'ları büyük veri yapıları tutar ve uzun ömürlü nesnelere sahiptir. Büyük heap boyutlarında ZGC'nin düşük GC duraklaması, Hazelcast cluster iletişiminde timeout riskini azaltır.
-
-**Standart cache kullanımı:**
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik profil: High (ZGC, %70 heap)
-```
-
-**Büyük cache kapasitesi:**
-```yaml
-resources:
-  requests:
-    memory: "4Gi"
-  limits:
-    memory: "4Gi"
-# Otomatik profil: High (ZGC, %70 heap)
-```
-
-:::tip
-
-Hazelcast büyük heap kullandığında G1GC ile uzun GC duraklamaları cluster partition'a neden olabilir. ZGC bu riski ortadan kaldırır.
-
-:::
-
-### Manager
-
-Manager pod'ları web arayüzü ve konfigürasyon yönetimi sağlar. Yoğun trafik işlemez, standart otomatik profil yeterlidir.
-
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik profil: High (ZGC, %70 heap)
-```
-
-### Integration
-
-Integration pod'ları zamanlanmış görevleri çalıştırır. Standart otomatik profil yeterlidir.
-
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik profil: Medium (G1GC, %60 heap)
-```
-
-### Portal
-
-Portal modülü **sabit olarak ZGC** kullanır (otomatik profil sistemi yoktur). ZGC güvenlik cap'i uygulanır — `MaxRAMPercentage` %70'in üzerinde ayarlanırsa otomatik olarak %70'e düşürülür.
-
-```yaml
-resources:
-  requests:
-    memory: "512Mi"
-  limits:
-    memory: "512Mi"
-# Sabit: ZGC + AlwaysPreTouch
-```
 
 ## Yapılandırma Örnekleri
 
-### Otomatik Profil (Önerilen)
+### Otomatik Kademe (Önerilen)
 
-En basit kullanım — `JAVA_OPTS` boş bırakılır veya GC/heap dışı parametreler eklenir:
+`JAVA_OPTS` içine heap/GC parametresi eklemeyin; yalnızca container bellek limitini belirleyin:
 
-```yaml
-env:
-  - name: JAVA_OPTS
-    value: ""
-```
-
-Sistem container belleğine göre en uygun GC ve heap yüzdesini otomatik seçer.
-
-### Manuel GC Seçimi
-
-Belirli bir GC kullanmak istiyorsanız `JAVA_OPTS`'da belirtin. Otomatik GC seçimi devreden çıkar, ancak heap yüzdesi hala otomatik ayarlanır:
-
-```yaml
-env:
-  - name: JAVA_OPTS
-    value: "-XX:+UseG1GC"
-```
-
-### Manuel Heap Ayarı
-
-Heap yüzdesini kendiniz belirlemek istiyorsanız:
-
-```yaml
-env:
-  - name: JAVA_OPTS
-    value: "-XX:MaxRAMPercentage=65.0"
-```
-
-:::warning
-
-ZGC otomatik seçilecek ortamlarda (> 1536 MB bellek) `MaxRAMPercentage=70`'in üzerinde değer kullanmayın. Güvenlik cap'i devreye girer ve değer %70'e düşürülür.
-
-:::
-
-### Manuel Profil Seçimi (JVM_MEMORY_PROFILE)
-
-Otomatik algılamayı atlamak ve belirli bir profili zorlamak için:
-
-```yaml
-env:
-  - name: JVM_MEMORY_PROFILE
-    value: "medium"  # low, medium veya high
-```
-
-Bu, container bellek miktarından bağımsız olarak seçilen profilin GC ve heap ayarlarını uygular.
-
-### Tier Bazlı Hazır Şablonlar
-
-**Tier 1 — Geliştirme/Test (1 Core / 512 MB):**
-```yaml
-env:
-  - name: JVM_MEMORY_PROFILE
-    value: "low"
-resources:
-  requests:
-    memory: "512Mi"
-  limits:
-    memory: "512Mi"
-# Sonuç: SerialGC, %50 heap (256 MB), 512k stack
-```
-
-**Tier 2 — Staging (2 Core / 2 GB):**
-```yaml
-resources:
-  requests:
-    memory: "2Gi"
-  limits:
-    memory: "2Gi"
-# Otomatik: ZGC, %70 heap (~1.4 GB)
-```
-
-**Tier 3 — Production (4 Core / 4 GB):**
 ```yaml
 resources:
   requests:
     memory: "4Gi"
   limits:
     memory: "4Gi"
-# Otomatik: ZGC, %70 heap (~2.8 GB)
+# Worker sonucu: G1GC, %65 heap, direct 512m, metaspace 256m
 ```
 
-**Tier 4 — Yüksek Yük Production (8 Core / 8 GB):**
+### Kendi Heap Değerinizi Kullanma
+
 ```yaml
-resources:
-  requests:
-    memory: "8Gi"
-  limits:
-    memory: "8Gi"
-# Otomatik: ZGC, %70 heap (~5.6 GB)
+env:
+  - name: JAVA_OPTS
+    value: "-XX:MaxRAMPercentage=70.0"
+  - name: jvmOverride
+    value: "true"
 ```
+
+`jvmOverride=true` olmadan `MaxRAMPercentage` değeri kademe değeri tarafından ezilir.
+
+### Farklı Bir GC Seçme
+
+```yaml
+env:
+  - name: JAVA_OPTS
+    value: "-XX:+UseZGC"
+```
+
+GC seçimi `jvmOverride` gerektirmez. Heap yüzdesi kademe değerinden gelir; ZGC için %70 üst sınırını aşmayın.
 
 ## MaxRAMPercentage Güvenli Sınırlar Tablosu
+
+`jvmOverride=true` ile kendi heap değerinizi verecekseniz aşağıdaki üst sınırları aşmamanız önerilir:
 
 | GC Türü | Güvenli Maks Yüzde | Neden |
 |---------|-------------------|-------|
@@ -343,39 +222,27 @@ Bu sınırlar genel önerilerdir. Yoğun thread kullanımı, büyük native buff
 
 **Belirti**: Pod sürekli restart oluyor, `kubectl describe pod` çıktısında `OOMKilled` görünüyor.
 
-**Olası Nedenler ve Çözümler:**
-
 | Neden | Çözüm |
 |-------|-------|
-| ZGC ile yüksek `MaxRAMPercentage` | `JAVA_OPTS`'dan `MaxRAMPercentage` ayarını kaldırın (otomatik profil %70 kullanır) veya %70'in altına düşürün |
-| Container belleği yetersiz | `resources.limits.memory` değerini artırın |
-| Thread stack'leri çok fazla bellek tüketiyor | `-Xss512k` veya `-Xss256k` ekleyin |
+| `jvmOverride=true` ile yüksek `MaxRAMPercentage` | `jvmOverride`'ı kaldırarak kademe değerlerine dönün veya yüzdeyi yukarıdaki tablonun altına çekin |
+| ZGC ile yüksek `MaxRAMPercentage` | %70 veya altına düşürün |
+| Container belleği yetersiz | `resources.limits.memory` değerini artırın (Manager için en az 2 GB) |
 | Native bellek sızıntısı | [Bellek Sızıntıları ve OOM Hataları](/tr/operations/yaygin-sorunlar-cozumleri/memory-leaks-oom-errors) sayfasına bakın |
 
 ### Yüksek GC Duraklaması
 
 **Belirti**: Yanıt süreleri periyodik olarak artıyor, P99 latency yüksek.
 
-**Çözümler:**
-- **G1GC kullanıyorsanız**: Container belleğini > 1536 MB'a çıkarın (otomatik olarak ZGC seçilir) veya `JVM_MEMORY_PROFILE=high` ayarlayın
-- **Serial GC kullanıyorsanız**: Container belleğini artırın veya en az `medium` profile geçin
-- G1GC'de `-XX:MaxGCPauseMillis=200` parametresi eklenebilir
+- Worker GC loglarını (`kubectl logs`) inceleyerek toplama sıklığını ve sürelerini kontrol edin.
+- 4 GB ve üzeri kademelerde `MaxGCPauseMillis=100` otomatik uygulanır; daha küçük pod'larda belleği 4 GB'a çıkarmak duraklama hedefini devreye alır.
 
-### Log'da WARNING Mesajı
+### JAVA_OPTS Değerim Uygulanmıyor
 
-Pod log'larında aşağıdaki mesajı görüyorsanız:
+**Belirti**: `JAVA_OPTS` içinde verdiğiniz `MaxRAMPercentage` veya `MaxDirectMemorySize` etkisiz görünüyor.
 
-```
-WARNING: MaxRAMPercentage=80% is too high for ZGC (needs extra native memory).
-         Capping heap to 70% to prevent container OOM kill.
-```
+**Neden**: `jvmOverride` tanımlı değilken kademe değerleri son sözü söyler. Pod log'unda `jvmOverride not set: tier defaults will override JAVA_OPTS` (Cache'te `jvmOverride=false (default): tier defaults will override JAVA_OPTS`) satırı görünür.
 
-**Anlamı**: Ortam değişkenlerinde `MaxRAMPercentage=80` (veya %70'in üzerinde bir değer) ayarlanmış, ancak otomatik profil ZGC seçmiş. Güvenlik cap'i devreye girerek heap yüzdesini %70'e düşürmüştür.
-
-**Çözüm seçenekleri:**
-1. `JAVA_OPTS`'dan `MaxRAMPercentage` ayarını tamamen kaldırın — otomatik profil en uygun değeri seçer
-2. GC'yi açıkça belirtin: `-XX:+UseG1GC -XX:MaxRAMPercentage=80.0` (cap devreden çıkar)
-3. `MaxRAMPercentage` değerini %70 veya altına düşürün
+**Çözüm**: Ortam değişkenlerine `jvmOverride=true` ekleyin.
 
 ## İlgili Sayfalar
 
