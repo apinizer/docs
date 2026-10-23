@@ -254,6 +254,26 @@ import {Accordion} from '@site/src/components/Accordion';
   </Card>
 </CardGroup>
 
+### Yalnızca APIops İle Ayarlanabilen Parametreler
+
+Aşağıdaki üç alan Connection UI formunda **yer almaz**; yalnızca APIops (Connection DTO) üzerinden ayarlanabilir ve asenkron log yazım kuyruğunun davranışını belirler:
+
+| Parametre | Açıklama | Varsayılan |
+|-----------|----------|------------|
+| bulkBufferCapacity | Asenkron yazım kuyruğunun (bellek içi, `ArrayBlockingQueue`) kapasitesi | 50000 |
+| bulkFlushIntervalMs | Kuyruğun Elasticsearch'e ne sıklıkla flush edileceği | 100 (ms) |
+| bulkMaxBatchSize | Tek bir `_bulk` çağrısında gönderilecek maksimum kayıt sayısı | 2500 |
+
+### Asenkron Yazım ve Failover Davranışı
+
+Elasticsearch connection'ı log yazarken istek iş parçacığını bekletmez; yazım tamamen asenkron ilerler:
+
+- `index*` metodları, kaydı kapasitesi `bulkBufferCapacity` olan bellek içi bir kuyruğa (`ArrayBlockingQueue`) bırakıp hemen döner — isteği işleyen thread Elasticsearch'in yanıtını **beklemez**.
+- Kuyruktaki kayıtlar, adı `es-bulk-flusher-` ile başlayan ayrı bir zamanlanmış thread havuzu tarafından her `bulkFlushIntervalMs` milisaniyede bir, en fazla `bulkMaxBatchSize` kayıtlık `_bulk` çağrılarıyla Elasticsearch'e gönderilir.
+- Bu flusher **yalnızca Worker** sürecinde başlar. Manager sürecinde asenkron log yazımı yoktur; Manager'ın Elasticsearch çağrıları (rapor/sorgu ekranları) tamamen **senkrondur** ve Connection Timeout bu sorguların üst sınırını doğrudan belirler.
+- Sonuç olarak Connection Timeout, log yazan istek thread'ini değil; Worker'daki flusher thread'ini veya Manager'daki rapor sorgusunu bağlar.
+- **Failover:** Bulk çağrısı herhangi bir nedenle başarısız olursa (bağlantı kurulamaması, yanıt timeout'u, kuyruğun dolması vb.) kayıt otomatik olarak yapılandırılmış failover connector'a gönderilir. Failover **yalnızca "hiç bağlanamama" durumunda değil, timeout dahil her hata türünde** tetiklenir.
+
 ## Kullanım Senaryoları
 
 <CardGroup cols={2}>
@@ -403,10 +423,12 @@ Birden fazla host ekleyerek yüksek erişilebilirlik sağlayabilirsiniz.
         - **Administrate** toggle'ını bulun.
         - Template ve ILM yönetimi için toggle'ı **Aktif** konumuna getirin.
         - Administrate aktifse aşağıdaki alanlar görünür hale gelir:
-        - Template adı
-        - Shard sayısı
-        - Replica sayısı
-        - Refresh interval
+        - Template adı (varsayılan: `apinizer-log-apiproxy-template-default`)
+        - Shard sayısı (varsayılan: 1)
+        - Replica sayısı (varsayılan: 0)
+        - Refresh interval (varsayılan: `5s`)
+        - Sabit bitset filtrelerini önceden yükleme tercihi (varsayılan açık). Kapatmak Elasticsearch düğümlerinin heap kullanımını düşürür. Statik bir indeks ayarıdır: yalnız yeni indekslerde geçerlidir; kaydettikten sonra **Create Index Template** çalıştırılmalı ve bir sonraki rollover beklenmelidir.
+        - `bulkBufferCapacity`, `bulkFlushIntervalMs` ve `bulkMaxBatchSize` alanları bu UI formunda **görünmez**; yalnızca APIops üzerinden ayarlanabilir.
 
         **ILM Policy Yapılandırması:**
 
@@ -831,6 +853,15 @@ Bu adımda kullanıcı, mevcut connection'ları yedekleme, farklı ortamlara ta�
 
 
 ## Sorun Giderme (Troubleshooting)
+
+  <Accordion title="Asenkron Yazım Kuyruğu Doluyor">
+    **Olası nedenler:** `bulkBufferCapacity` trafiğe göre düşük kalmış, Elasticsearch cluster yavaş yanıt veriyor veya flusher kuyruğa yetişemiyor.
+
+    1. APIops ile `bulkBufferCapacity`/`bulkMaxBatchSize` değerlerini artırın.
+    2. Elasticsearch cluster sağlığını ve yanıt sürelerini kontrol edin.
+    3. Kayıtların failover connector'a düştüğünü doğrulayın (kuyruk dolması da failover'ı tetikler).
+    4. `apinizer_es_log_buffer_size` / `apinizer_es_log_buffer_capacity` metriklerini izleyin.
+  </Accordion>
 
 
   <Accordion title="Index Template Oluşmuyor">
