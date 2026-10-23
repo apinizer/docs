@@ -678,7 +678,6 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/credential-roles",
             "admin/identity-management/access-control",
             "admin/identity-management/api-proxy-acl",
-            "admin/identity-management/api-proxy-group-acl",
             "admin/identity-management/quota-usage-and-alerts"
           ]
         },

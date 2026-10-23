@@ -675,7 +675,6 @@ const sidebars: SidebarsConfig = {
             "admin/identity-management/kimlik-bilgisi-rolleri",
             "admin/identity-management/erisim-kontrolu",
             "admin/identity-management/api-proxy-acl",
-            "admin/identity-management/api-proxy-grup-acl",
             "admin/identity-management/kota-kullanimi-ve-uyarilar"
           ]
         },
