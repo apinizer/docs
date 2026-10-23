@@ -1109,7 +1109,8 @@ const sidebars: SidebarsConfig = {
                     "operations/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
                     "operations/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
-                    "operations/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
+                    "operations/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard",
+                    "operations/administrator-guides/gateway-metrics-integration/prometheus-remote-write-agent"
                   ]
                 },
                 {
@@ -1461,70 +1462,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "tutorials/how-to-guides/administrator-guides/api-manager-ldap-integration",
-            {
-              "type": "category",
-              "label": "Starting Apinizer Modules with SSL/TLS",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/how-to-guides/administrator-guides/api-manager-ssl"
-              ]
-            },
-            "tutorials/how-to-guides/administrator-guides/kubernetes-ingress-apinizer-access",
-            "tutorials/how-to-guides/administrator-guides/apinizer-pod-auto-scaling",
-            "tutorials/how-to-guides/administrator-guides/mongodb-automatic-backup",
-            "tutorials/how-to-guides/administrator-guides/pfx-to-jks-conversion",
             "operations/administrator-guides/component-ip-change-impact-and-remediation",
-            "tutorials/how-to-guides/administrator-guides/pod-thread-count-periodic-monitoring",
             "tutorials/how-to-guides/administrator-guides/manual-monitoring",
-            "tutorials/how-to-guides/administrator-guides/geolocation-city-based-access-control",
-            "tutorials/how-to-guides/administrator-guides/kibana-maps-geographic-visualization",
-            {
-              "type": "category",
-              "label": "Prometheus and Grafana Integration",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/how-to-guides/administrator-guides/prometheus-grafana-integration",
-                {
-                  "type": "category",
-                  "label": "Gateway Metrics Integration",
-                  "collapsed": true,
-                  "collapsible": true,
-                  "items": [
-                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-metrics-overview",
-                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-prometheus-scraping",
-                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-promql-examples",
-                    "tutorials/how-to-guides/administrator-guides/gateway-metrics-integration/gateway-grafana-dashboard"
-                  ]
-                },
-                {
-                  "type": "category",
-                  "label": "Cache Metrics Integration",
-                  "collapsed": true,
-                  "collapsible": true,
-                  "items": [
-                    "tutorials/how-to-guides/administrator-guides/cache-metrics-integration/cache-metrics-overview",
-                    "tutorials/how-to-guides/administrator-guides/cache-metrics-integration/cache-prometheus-scraping",
-                    "tutorials/how-to-guides/administrator-guides/cache-metrics-integration/cache-promql-examples",
-                    "tutorials/how-to-guides/administrator-guides/cache-metrics-integration/cache-grafana-dashboard"
-                  ]
-                },
-                "tutorials/how-to-guides/administrator-guides/grafana-prometheus-data-source"
-              ]
-            },
-            {
-              "type": "category",
-              "label": "Syslog Integration",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/how-to-guides/administrator-guides/syslog-integration",
-                "tutorials/how-to-guides/administrator-guides/traffic-logs-syslog-transfer",
-                "tutorials/how-to-guides/administrator-guides/system-logs-syslog-transfer"
-              ]
-            },
             {
               "type": "category",
               "label": "Apinizer Jenkins Pipeline Integration",

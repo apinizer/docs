@@ -1107,7 +1107,8 @@ const sidebars: SidebarsConfig = {
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
                     "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
-                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
+                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard",
+                    "operations/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/prometheus-remote-write-agent"
                   ]
                 },
                 {
@@ -1461,70 +1462,8 @@ const sidebars: SidebarsConfig = {
           "collapsed": true,
           "collapsible": true,
           "items": [
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/api-manager-ldap-entegrasyonu",
-            {
-              "type": "category",
-              "label": "SSL/TLS ile Apinizer Modüllerini Başlatma",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/api-manager-ssl"
-              ]
-            },
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/kubernetes-ingress-apinizer-erisimi",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/apinizer-pod-auto-scaling",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/mongodb-otomatik-yedekleme",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/pfx-jks-donusturme",
             "operations/yonetici-kilavuzlari/bilesen-ip-degisiminde-etkiler-ve-mudahale",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/pod-thread-sayisi-periyodik-izleme",
             "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/manual-monitoring",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/geolocation-sehir-bazli-erisim-kontrolu",
-            "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/kibana-maps-cografi-gorsellestirme",
-            {
-              "type": "category",
-              "label": "Prometheus ve Grafana Entegrasyonu",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/prometheus-grafana-entegrasyonu",
-                {
-                  "type": "category",
-                  "label": "Gateway Metrics Entegrasyonu",
-                  "collapsed": true,
-                  "collapsible": true,
-                  "items": [
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-metrics-genel-bakis",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-prometheus-scraping",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-promql-ornekleri",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/gateway-metrics-entegrasyonu/gateway-grafana-dashboard"
-                  ]
-                },
-                {
-                  "type": "category",
-                  "label": "Cache Metrics Entegrasyonu",
-                  "collapsed": true,
-                  "collapsible": true,
-                  "items": [
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/cache-metrics-entegrasyonu/cache-metrics-genel-bakis",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/cache-metrics-entegrasyonu/cache-prometheus-scraping",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/cache-metrics-entegrasyonu/cache-promql-ornekleri",
-                    "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/cache-metrics-entegrasyonu/cache-grafana-dashboard"
-                  ]
-                },
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/grafana-prometheus-data-source"
-              ]
-            },
-            {
-              "type": "category",
-              "label": "Syslog Entegrasyonu",
-              "collapsed": true,
-              "collapsible": true,
-              "items": [
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/syslog-entegrasyonu",
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/traffic-loglar-syslog-aktarma",
-                "tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/system-loglar-syslog-aktarma"
-              ]
-            },
             {
               "type": "category",
               "label": "Apinizer Jenkins Pipeline Entegrasyonu",
