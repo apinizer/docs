@@ -157,10 +157,10 @@ Alarm is a monitoring system that continuously checks specific conditions in you
 Determines when the alarm will be triggered. The trigger type picker is **searchable** and groups the
 types into three **categories**; each type is shown in lists with a **category badge**:
 
-- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk, MongoDB disk, Gateway
+- **Infrastructure**: Kubernetes pod/node health, K8S Node CPU, Elasticsearch health/CPU/disk/heap/shard usage, MongoDB disk, Gateway
   Thread Count, Gateway Heap Usage Percentage, Gateway Deadlock Count, Gateway Executor Pool Saturation
   Percentage, Gateway Connection Pool Usage Percentage, Gateway GC Time Percentage
-- **Platform**: Unsent Traffic Logs Exist in Database, SSL/JWK remaining duration, application log count
+- **Platform**: Unsent Traffic Logs Exist in Database, SSL/JWK/license remaining duration, application log count
 - **AI**: AI Gateway metrics (token usage, daily cost, guardrail/PII count, provider failover, quota,
   catalog drift, shadow AI). The percentage of **AI token usage** reads the monthly token limit of the [Token Rate Limit policy](/en/ai-gateway/token-quotas) for the LLM Gateway scope.
 
@@ -168,7 +168,9 @@ types into three **categories**; each type is shown in lists with a **category b
   <Card title="Infrastructure" icon="server">
     - Pod / Node Health Status
     - K8S Node CPU Percentage
-    - Elasticsearch Health / CPU / Disk Percentage
+    - Elasticsearch Health Status
+    - Elasticsearch CPU / Disk / Heap Percentage
+    - Elasticsearch Shard Usage Percentage
     - MongoDB Disk Percentage
     - Gateway Thread Count
     - Gateway Heap Usage Percentage
@@ -180,6 +182,7 @@ types into three **categories**; each type is shown in lists with a **category b
   <Card title="Platform" icon="database">
     - Unsent Traffic Logs Exist in Database
     - SSL / JWK Certificate Remaining Duration
+    - Remaining Expiration Days of License
     - Application Log Count
     - Identity Sync Failed
     - Identity Sync Unlinked User Percentage
@@ -210,7 +213,7 @@ types into three **categories**; each type is shown in lists with a **category b
     combination) separately. An optional **Environment** selector limits the check to one environment;
     when left blank, every published environment is checked. A pod or address that cannot be read is
     listed as *Warning* without a value and does not trigger the alarm by itself; the run is recorded as
-    *Error Occurred* only when no pod at all could be read (for example when every address is
+    *Evaluation Error* only when no pod at all could be read (for example when every address is
     unreachable, the environment has no management address, or the selected environment was deleted).
     Reads time out after 70 seconds. Does not require a connection definition, but the environment must
     have at least one Gateway Management API address.
@@ -261,9 +264,27 @@ types into three **categories**; each type is shown in lists with a **category b
 
     **Elasticsearch Disk Percentage**: Checks the disk usage percentage of every node in the Elasticsearch cluster separately. Alarm is triggered when the disk usage percentage of any node exceeds the threshold value; the alarm history and the Live check panel list one row per node, each labelled **Elasticsearch node**. Nodes that report no disk statistics (coordinating-only nodes) are skipped. Requires threshold value (e.g., 90 = 90%). Requires connection definition.
 
-    **Unsent Traffic Logs Exist in Database**: Checks whether traffic logs that could not be sent are waiting in the failover database of the log connectors. Alarm is triggered when such logs exist. Does not require threshold value. If the failover database of a log connector cannot be read, the run names that connector in its detail.
+    **Elasticsearch Heap Percentage**: Checks the heap usage of every node in the Elasticsearch cluster separately, as used heap divided by maximum heap × 100. Alarm is triggered when the heap usage of any node exceeds the threshold value; the alarm history and the Live check panel list one row per node, each labelled **Elasticsearch node**. Requires threshold value (e.g., 85 = 85%). Requires connection definition.
 
-    **When Elasticsearch cannot be checked**: for all four Elasticsearch trigger types, if the connection cannot be evaluated the run's result is **Error Occurred**, its summary states that the check **could not be checked**, and the reason is one of three: the connection is not defined or is disabled, the cluster could not be reached, or the cluster returned no node statistics. The summary and reason text — like the rest of the trigger history and Live check rows — is shown in the interface's current language.
+    **Elasticsearch Shard Usage Percentage**: Checks how much of the shard capacity of the Elasticsearch cluster is in use. The percentage is the number of shards of open indices divided by the shard limit of the cluster, × 100. The shard limit is the effective `cluster.max_shards_per_node` value multiplied by the number of data nodes.
+    - The effective value is the transient setting if one exists. Otherwise it is the persistent setting. Otherwise it is the default value that Elasticsearch reports.
+    - A node counts as a data node when it has the data, hot, warm, cold or content role. Frozen tier nodes are not counted because they have their own limit.
+    - Alarm is triggered when the percentage exceeds the threshold value. Requires threshold value (e.g., 80 = 80%). Requires connection definition.
+    - The history and the Live check panel show one row with the figures behind the percentage, for example `1200 open shards of 3000 (1000 per node × 3 data node(s))`.
+    - Manager reads all three figures on every run. If it cannot read one of them, the run result is **Evaluation Error**. It never assumes a limit.
+
+    **Unsent Traffic Logs Exist in Database**: Checks whether traffic logs that could not be sent are waiting in the failover database of the log connectors. Alarm is triggered when such logs exist. Does not require threshold value. Does not require connection definition.
+    - If the failover database of a log connector cannot be read, the connector is listed as *Warning*. If unsent logs exist elsewhere, the alarm is still triggered and the detail names the unreadable connectors. If no unsent logs exist and a failover database could not be read, the run result is **Evaluation Error**, because "nothing is waiting" was not measured there.
+    - A log connector that has no failover database is listed as **Not monitored**, with the environment name and the text `no failover database connector, so its unsent logs cannot be tracked`. Such a row is neither breached nor normal. If Manager cannot list these connectors, the alarm result is not affected.
+
+    **When Elasticsearch cannot be checked**: for the five Elasticsearch trigger types that use the Elasticsearch connection (Health Status, CPU, Disk, Heap and Shard Usage), if the connection cannot be evaluated the run's result is **Evaluation Error**, its summary states that the check **could not be checked**, and the reason is one of these:
+    - The connection is not defined or cannot be read.
+    - The connection is disabled. The alarm keeps running, and the detail names the connection. The alarm checks nothing until you enable the connection.
+    - The cluster could not be reached.
+    - The cluster returned no node statistics (CPU, Disk and Heap).
+    - The shard count, the shard limit per node or the data nodes could not be read (Shard Usage).
+
+    The summary and reason text — like the rest of the trigger history and Live check rows — is shown in the interface's current language.
   </Accordion>
 
   <Accordion title="MongoDB Trigger Types">
@@ -273,13 +294,26 @@ types into three **categories**; each type is shown in lists with a **category b
     - In a replica set, only the member that answers this connection is measured. The disks of the other members are not visible over it.
     - If the connection goes through a mongos, the history and the Live check panel list one row per shard. A shard that exceeds the threshold is named in the detail.
     - A row shows the used and total size of the disk, for example `MongoDB data disk · 40.0 GB of 100.0 GB used`.
-    - A member that reports no disk size is listed as *Warning* and never triggers the alarm. If no member reports a size, the run result is **Error Occurred** and the summary states that the disk usage **could NOT be checked**.
+    - A member that reports no disk size is listed as *Warning* and never triggers the alarm. If no member reports a size, the run result is **Evaluation Error** and the summary states that the disk usage **could NOT be checked**.
   </Accordion>
 
-  <Accordion title="Certificate Trigger Types">
-    **SSL Certificate Remaining Duration**: Checks the remaining duration of SSL certificates. Alarm is triggered when remaining duration is less than the threshold value. Requires threshold value (e.g., 30 = 30 days).
+  <Accordion title="Certificate and License Trigger Types">
+    **SSL Certificate Remaining Duration**: Checks the remaining duration of SSL certificates and of the entries of all key stores. Alarm is triggered when remaining duration is less than the threshold value. Requires threshold value (e.g., 30 = 30 days).
+
+    The check scans the key stores on every run:
+    - Each entry (alias) of a key store becomes its own row, named `key store name (alias)`. The detail shows the environment. The remaining duration comes from the validity end date of the entry.
+    - A key store whose password is a variable is listed as *Warning*, because only the gateway resolves that variable. The row says `not evaluated`.
+    - A key store that cannot be opened with its stored password and type is listed as *Warning*. The row says `not evaluated`.
+    - If Manager tries the key stores and none of them can be opened, the run result is **Evaluation Error**, and the detail names the key stores. If some key stores cannot be opened but others can, the unreadable ones stay as *Warning* rows.
+    - If the key store scan itself fails, the run result is **Evaluation Error**. The Manager log has the details.
+    - A key store environment that has no file is skipped.
 
     **JWK Certificate Remaining Duration**: Checks the remaining duration of JWK certificates. Alarm is triggered when remaining duration is less than the threshold value. Requires threshold value (e.g., 30 = 30 days).
+
+    **Remaining Expiration Days of License**: Checks the remaining days of the installed license. The day count is the same as on the license screen. The alarm shows one row named **License**. Alarm is triggered when the remaining days are fewer than the threshold value. Requires threshold value in days (e.g., 30 = 30 days). Does not require connection definition.
+    - If no license is installed, the run result is **No Data**.
+    - If the installed license has no end date, it does not expire, and the run result is **No Data**.
+    - If Manager cannot read the license, the run result is **Evaluation Error**. The Manager log has the details.
   </Accordion>
 
   <Accordion title="Identity and LDAP Trigger Types">
@@ -376,8 +410,11 @@ Threshold value determines when the alarm will be triggered. Different units are
 | Gateway GC Time Percentage | % | 5 | When the lifetime GC share of any pod exceeds 5% |
 | Elasticsearch CPU Percentage | % | 80 | When CPU usage exceeds 80% |
 | Elasticsearch Disk Percentage | % | 90 | When disk usage exceeds 90% |
+| Elasticsearch Heap Percentage | % | 85 | When heap usage of any node exceeds 85% |
+| Elasticsearch Shard Usage Percentage | % | 80 | When the shards in use exceed 80% of the shard limit |
 | SSL Certificate Remaining Duration | Days | 30 | When remaining duration is less than 30 days |
 | JWK Certificate Remaining Duration | Days | 30 | When remaining duration is less than 30 days |
+| Remaining Expiration Days of License | Days | 30 | When the license has fewer than 30 days left |
 | Application Log Count | Records | 10000 | When log count exceeds 10,000 |
 | Identity Sync Unlinked User Percentage | % | 20 | When unlinked users exceed 20% of a run |
 
@@ -399,13 +436,15 @@ Some trigger types require Elasticsearch connection:
 - Elasticsearch Health Status
 - Elasticsearch CPU Percentage
 - Elasticsearch Disk Percentage
+- Elasticsearch Heap Percentage
+- Elasticsearch Shard Usage Percentage
 
 **Trigger Types Not Requiring Connection:**
 - Kubernetes trigger types
 - Gateway diagnostics trigger types — Gateway Thread Count, Gateway Heap Usage Percentage, Gateway
   Deadlock Count, Gateway Executor Pool Saturation Percentage, Gateway Connection Pool Usage Percentage,
   Gateway GC Time Percentage (each requires a Gateway Management API address on the environment instead)
-- Certificate trigger types
+- Certificate and license trigger types
 - Application log trigger types
 - Identity and LDAP trigger types
 
@@ -438,6 +477,12 @@ Determine how frequently the alarm will be checked. Scheduling is done using **C
 - **Resource Monitoring**: Every 30 minutes
 
 :::
+
+#### Maintenance Window
+
+The **Maintenance window** fields next to the schedule are optional. Enter a start time and an end time in `HH:mm` format, and optionally a time zone: a region id such as `Europe/Istanbul` or an offset such as `+03:00`. If you leave the time zone empty, the server time zone applies. If you leave all fields empty, the alarm has no window.
+
+The window repeats every day. During the window, the alarm keeps evaluating and keeps recording results, but it sends no notification. A result that would have notified is recorded as **Suppressed**. The first result after the window reports its own state, whatever the Execution Mode is. On the View screen, the **Maintenance window** button changes the window without opening the Edit screen. The list and the header show **In maintenance until** while the window is open.
 
 ### Step 4: Notification Recipients
 
@@ -477,16 +522,33 @@ In an action template, `${NAME}` resolves only a variable of the project of the 
   </Accordion>
 
   <Accordion title="Notification Management">
-    **Notification Table Columns:**
-    - **Name**: Notification name
-    - **Type**: Notification type (Email, Webhook, Slack, etc.)
+    **Actions Table Columns:**
+    - **Name**: Action name
+    - **Type**: Action type (Email, Webhook, Slack, etc.)
+    - **Runs on**: The events the action runs on (read-only). See [Results, Events and Notifications](#results-events-and-notifications).
     - **Status**: Active/Passive status
-    - **Description**: Notification description
+    - **Description**: Action description
 
-    **Notification Operations:**
-    - **Edit**: Select "Edit" from the menu to update notification information
-    - **Delete**: Select "Delete" from the menu to remove the notification
-    - **Active/Passive**: You can activate/deactivate the notification with toggle
+    **Operations:**
+    - **Edit** (pencil icon): Update the action
+    - **Delete** (trash icon): Remove the action after you confirm the **Confirm delete operation** dialog
+    - **Active/Passive**: You can activate/deactivate the action with the toggle
+  </Accordion>
+
+  <Accordion title="Execution Mode">
+    Under the actions table, the **Execution Mode** switch decides how often the actions run for a continuing violation:
+    - **Execute for each violation**: The actions run on every violating run.
+    - **Execute once for same violation series**: The actions run when the violation starts, and not again until the alarm returns to Normal.
+
+    A new alarm starts with **Execute once for same violation series**. Alarms that existed before the upgrade keep **Execute for each violation**, except the AI Token Usage Percentage and AI Daily Cost Threshold (USD) alarms, which become **Execute once for same violation series**.
+  </Accordion>
+
+  <Accordion title="Advanced: If no data">
+    The closed **Advanced** section under the actions table has the **If no data** choice. It decides what a run that measured nothing (result **No Data**) does to the notification series:
+    - **Keep last state** (default): Nothing changes and no action runs.
+    - **Notify no data**: The notification actions (Email, Notification, SNMP) run. The other actions do not run.
+    - **Treat as violation**: The run counts as a violation and every action runs.
+    - **Treat as normal**: The run closes an open series and sends the Recovery.
   </Accordion>
 
 
@@ -505,65 +567,103 @@ After filling in all information:
 
 3. After the alarm is saved, you will be automatically redirected to the listing page
 
+## Results, Events and Notifications
+
+Every run of an alarm ends with one of five results:
+
+| Result | Meaning |
+|---|---|
+| **Threshold Exceeded** | Manager measured the value and it breaches the threshold. |
+| **Normal** | Manager measured the value and it is within the limits. |
+| **Evaluation Error** | Manager could not measure the value, for example because the Elasticsearch cluster cannot be read. A value that could not be read is never shown as 0. |
+| **No Data** | There is nothing to measure, for example the installed license has no end date. |
+| **Suppressed** | The result would have notified, but the run is inside the maintenance window. |
+
+The notification of a run follows the state of the series, not only the result:
+- A violating run is a **Violation**. An **Evaluation Error** run is an **Error**. A **No Data** run is **No data**, according to the **If no data** choice.
+- A run that measured **Normal** after an open Violation, Error or No data series sends a **Recovery**. Both Execution Modes send it.
+- With **Execute once for same violation series**, a Violation, an Error or a No data event is sent once per series.
+
+The **Runs on** column of the actions table shows which events each action runs on:
+
+| Action type | Runs on |
+|---|---|
+| Email, Notification, SNMP | Violation, Recovery, Error. Also No data, when **If no data** is **Notify no data**. |
+| API Call, Database, Script, Linux Script and the other actions | Violation, Error. |
+
 ## View and Results
 
-Clicking the alarm name — or selecting **"View"** from the operations menu (⋮) — opens the alarm's
-**single-page View** screen. It shows both the latest evaluation results and the configuration in one
-place; there is no separate history page.
+Clicking the alarm name — or selecting **"View"** from the operations menu (⋮) — opens the alarm's **View** screen. It has four tabs: **Overview**, **History**, **Configuration** and **Changes**.
 
 ### Header and Metric Cards
 
-The top bar has **Refresh**, **Activate/Deactivate**, **Back** and **Edit** buttons. Below it are 5
-summary metric cards:
+The header shows the alarm name, its last result with the time that result has lasted, the project, and a **Disabled** or **In maintenance until** label when it applies. The top bar has **Refresh**, **Maintenance window**, **Activate/Deactivate**, **Back** and **Edit** buttons.
+
+The **Overview** tab starts with 5 metric cards:
 
 - **Current value**: The value from the last evaluation (coloured by state)
-- **Threshold**: The alarm's threshold value
+- **Threshold**: The alarm's threshold value, with the check interval and the next run time
 - **Last fired**: Time of the most recent threshold breach
 - **Fires (24h)**: Number of times fired in the last 24 hours
 - **Actions**: Number of attached notification channels
 
+Below the cards, the **Status timeline** shows the recent runs.
+
 ### Tabs
 
 
-  <Accordion title="Matched records">
+  <Accordion title="Overview: Matched records">
     **Every object** evaluated on the last run (each Elasticsearch node, certificate, pod…), worst
     first. Each row shows the object name, value and a state badge:
-    - 🔴 **BREACHED**: Threshold exceeded
-    - 🟠 **WARNING**: Close to the threshold
-    - 🟢 **NORMAL**: Within safe limits
+    - 🔴 **Breached**: Threshold exceeded
+    - 🟠 **Warning**: Close to the threshold, or the object could not be read
+    - 🟢 **Normal**: Within safe limits
+    - ⚪ **Not monitored**: The object cannot be checked at all, for example a log connector that has no failover database
 
-    An "n of m breached" badge, an **"Only breached"** filter and pagination are provided.
+    An `n of m breached` badge, an **"Only breached"** filter and pagination are provided. When the list has **Not monitored** rows, the badge is followed by the number of such rows, for example `1 of 2 breached · 2 not monitored`. Not monitored rows are never counted in `m`, and they are never breached or normal.
   </Accordion>
 
-  <Accordion title="Trigger history">
-    The result of each evaluation — paginated table:
-    - **Evaluated at**: Evaluation date/time
+  <Accordion title="History">
+    The result of each evaluation — a paginated table with these filters and buttons:
+    - **Result** filter: Select one or more results to list.
+    - **All evaluations** switch: When off, the table lists only the state changes, that is, the evaluations that change the notification series. When on, it lists every stored evaluation.
+    - **Excel**: Exports the listed rows.
+    - **Delete All**: Deletes the whole history. Only a system admin can use it.
+
+    **Columns:**
+    - **Operation Date**: Evaluation date/time
+    - **Result Type**: 🔴 Threshold Exceeded · 🟢 Normal · 🟠 Evaluation Error · ⚪ No Data · Suppressed
+    - **Event**: What the evaluation told the recipients: Violation, Recovery, Error, No data, or one of the maintenance window events. Manager derives it from the stored results and the current settings. It is not a delivery record.
     - **Value**: The measured value. For Gateway Deadlock Count, the value is shown with its `deadlocks` unit suffix (for example "2 deadlocks"); other trigger types show a bare number.
-    - **Result**: 🟢 Threshold Not Exceeded · 🔴 Threshold Exceeded · 🟠 Error Occurred
     - **Summary**: Check summary
-    - **Detail**: shown under the summary when present — the longer explanation (for example which
-      pod/address could not be read, or how many objects breached)
+    - **Detail**: The longer explanation (for example which pod/address could not be read, or how many objects breached)
+
+    The eye icon opens the details of an evaluation. The trash icon deletes a row. Only a system admin sees the trash icon and **Delete All**.
   </Accordion>
 
   <Accordion title="Configuration">
     A **read-only** definition of the alarm:
     - **Alert definition**: Name, description and **Status**: Enabled / Disabled badge
-    - **Trigger**: Trigger type + category badge, threshold, connection, log type, AI scope
-    - **Schedule**: Cron expression
-    - **Actions**: Notification channels (type, name, status)
+    - **Trigger**: Trigger type + category badge, threshold, connection, environment, log type, AI scope
+    - **Schedule**: Cron expression and the maintenance window
+    - **Actions**: Execution mode, If no data choice, and the notification channels (type, name, **Runs on**, status)
+  </Accordion>
+
+  <Accordion title="Changes">
+    The audit records of the alarm. **Open in Audit Records** opens the Audit Records screen filtered by this alarm. You restore an older version on the **Audit and Rollback** tab of the Edit screen.
   </Accordion>
 
 
 ### Live Check Panel
 
-The **Live check** panel on the right of the View screen runs the alarm's condition **right now —
+The **Live check** panel on the **Overview** tab runs the alarm's condition **right now —
 without saving** — and shows whether the alarm would fire:
 
-- **Evaluate now**: Evaluates the condition immediately. This evaluation **writes a Trigger history
-  record** and updates the current value in the list view; it does **NOT** fire notifications/recipients.
-  The last evaluation time is shown below the button.
+- **Evaluate now**: Evaluates the condition immediately. The evaluation writes **no** record to the
+  History and runs **no** action. The panel states this with the text "Not saved to History. No action runs."
+  The last stored evaluation is shown above the button.
 - **Worst object**: The value of the currently worst object with a threshold-marked bar.
-- **Objects evaluated**: The evaluated objects and an "n of m breached" badge. For Elasticsearch CPU/Disk
+- **Objects evaluated**: The evaluated objects and an `n of m breached` badge. For Elasticsearch CPU/Disk/Heap
   triggers each object is one cluster node, labelled **Elasticsearch node**; for the health trigger it is
   the cluster itself, labelled with its real cluster name.
 - **Last 12 evaluations**: For triggers with a measured value, a line chart of recent evaluations with a
@@ -572,13 +672,6 @@ without saving** — and shows whether the alarm would fire:
   coloured status bar (breached/normal/error); hovering a bar shows that run's date and result.
 - **Result box**: "Condition met — the alert would fire" (red), "Condition not met" (green), or an
   evaluation error (amber).
-
-:::note
-
-When the page opens the condition is evaluated automatically in **read-only** mode (no history is
-written); only the **Evaluate now** button writes a history record.
-
-:::
 
 
 ## Alarm Management
@@ -605,14 +698,17 @@ On the alarm list page, you can view and manage all your alarms.
   </Accordion>
 
   <Accordion title="Table Columns">
-    - **Alert**: Status dot + alarm name (clickable, goes to the View page) + description + breach
-      summary ("N records breached · closest …")
-    - **Trigger type**: Trigger type + category badge (Infrastructure/Platform/AI)
+    - **Last result**: The result of the last run and the time it has lasted
+    - **Name**: Alarm name (clickable, goes to the View page) + description + breach
+      summary ("N record(s) breached · closest …")
+    - **Project**: The alarm's project
+    - **Trigger Type**: Trigger type + category badge (Infrastructure/Platform/AI)
     - **Condition**: The condition (e.g. `≥ 85 %`, `is not healthy`, `stops arriving`)
     - **Current value**: The value from the last evaluation (coloured) + threshold reference + bar
-    - **Every**: Check interval (e.g. 5m, 24h)
-    - **Project**: The alarm's project
-    - **Actions**: Notification channel chips
+    - **Recent runs**: The results of the last runs as a coloured strip
+    - **Last / next run**: Time of the last run and the next scheduled run, with the check interval
+    - **Actions**: The notification channels of the alarm
+    - **Status**: Firing, Healthy, Disabled, or In maintenance until a time
     - **⋮**: Operations menu
   </Accordion>
 
@@ -696,7 +792,7 @@ On the alarm list page, you can view and manage all your alarms.
 
   <Accordion title="How Long Are History Records Kept?">
     History records are kept until manually deleted. To clean old records:
-    - You can use the "Delete All" button on the history page
+    - You can use the **Delete All** button on the **History** tab
     - Or you can clean records regularly
 
     Only a system admin can delete alarm history. A user with the analyzer role can read the history but cannot delete it.
@@ -734,7 +830,7 @@ On the alarm list page, you can view and manage all your alarms.
     - Check threshold value
   </Accordion>
 
-  <Accordion title="All Results Are in 'Error Occurred' Status">
+  <Accordion title="All Results Are in 'Evaluation Error' Status">
     **Possible Causes:**
     1. Elasticsearch connection does not exist or is inaccessible
     2. Kubernetes cluster is inaccessible

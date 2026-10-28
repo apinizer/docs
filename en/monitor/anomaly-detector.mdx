@@ -355,7 +355,21 @@ Anomaly Detector supports 4 different types of conditions:
 
         :::note
 
-        If no request matches the query and filter in the window, a sum-based condition has nothing to add up. The result is **No Data**, not 0.
+        If no request matches the query and filter in the window, the condition has nothing to measure. For average, minimum, maximum, sum and percentile metrics the result is **No Data**, not 0. The run stays out of the baseline of the EMA and rate conditions, and a "below" threshold does not fire on it. Only the **Count Documents** metric reports a real 0 for a window with no request.
+
+        If Elasticsearch cannot be read, or rejects the query, the result is **Evaluation Error**. Manager never stores a 0 for an unreadable value.
+
+        :::
+
+        :::note
+
+        The metric list includes **95th percentile of** and **99th percentile of**. They work only with time and size fields. If you pick another field, the form refuses the percentile metric.
+
+        :::
+
+        :::note
+
+        For an AI token usage field, the condition uses the metric that you choose: sum, average or count of documents. Minimum and maximum are not supported for AI token usage, and a run that uses them ends as **Evaluation Error**.
 
         :::
 
@@ -400,7 +414,7 @@ Anomaly Detector supports 4 different types of conditions:
 
         A rate is a change relative to a previous value, so it cannot be calculated in two cases:
 
-        - **First run**: there is no earlier result to compare with, so no anomaly is reported.
+        - **First run**: there is no earlier result to compare with. The result is **No Data** and the page shows **Warming up** with `0 / 1`. No action runs, and the run does not change the notification series. The measured value becomes the baseline of the next run.
         - **Baseline is zero**: if the previous values are all `0` and the current value is also `0`,
           nothing changed and no anomaly is reported. This is the expected behaviour for a detector
           that watches an API with no traffic in the selected window.
@@ -446,6 +460,8 @@ Anomaly Detector supports 4 different types of conditions:
         - EMA calculates an average value based on historical data
         - Upper and lower bands are created using standard deviation
         - Anomaly is detected when current value goes outside these bands
+        - Until the detector has collected the data points that you chose, the result is **No Data** and the page shows **Warming up** with `n / m` collected data points. No action runs during the warm-up.
+        - A run that fails does not restart the warm-up. The last valid window stays.
 
         **Sensitivity Levels:**
         - **High Sensitivity (0.5-1.0)**: Detects more anomalies (more sensitive)
@@ -480,11 +496,28 @@ Anomaly Detector supports 4 different types of conditions:
         | **90** | Specifies the value to be compared with the metric. |
         | **for ... time** | Specifies that this condition must be met in ... consecutive analyses, the current analysis included. |
 
+        :::note
+
+        If no request matches the filter in the window, the rate has no denominator. The result is **No Data**, not 0%.
+
+        :::
+
         **Example Scenario:**
         - Query/Filter Rate: 90%
         - Operator: Above
         - Repeat Count: 3
         - **Meaning**: Anomaly is detected when the ratio of query results to filter results exceeds 90% in 3 consecutive analyses, the current analysis included.
+    </Accordion>
+
+
+    <Accordion title="Evaluate conditions for">
+        This choice decides how many series the detector tracks:
+        - **Whole scope** (default): All traffic in the scope is one series. The detector reports one anomaly, one notification and one recovery.
+        - **Each API Proxy**: Every API Proxy in the scope is its own series with its own baseline. Anomaly, notification and recovery are tracked separately for each API Proxy.
+
+        A run evaluates at most 200 API Proxies, the busiest ones. An API Proxy with an open series is always measured, so a series that still breaches does not close with a false recovery.
+
+        In the notification, the detector name carries the API Proxy name after a `·` sign. The Detail page shows the **State by API Proxy** table, an **API Proxy** column in the History, and an **API Proxy** selector for the chart.
     </Accordion>
 
 
@@ -521,6 +554,30 @@ For detailed information about actions, see the [Connectors](/en/integrations/co
         In an action template, `${NAME}` resolves only a variable of the project of the detector or a variable of the admin project. A variable of another project stays as written.
 
         :::
+    </Accordion>
+
+    <Accordion title="Actions Table, Execution Mode and If no data">
+        The actions table has the columns **Name**, **Type**, **Runs on**, **Status** and **Description**. **Runs on** shows the events that the action runs on:
+        - Email, Notification and SNMP actions run on Violation, Recovery and Error. They also run on No data when **If no data** is **Notify no data**.
+        - The other actions, such as API Call, Database and Script, run on Violation only.
+
+        The **Execution Mode** switch has two choices: **Execute for each anomaly event** and **Execute once for same anomaly series**. A new detector starts with the second choice.
+
+        A run that measures **Stable** after an open Anomaly, Error or No data series sends a **Recovery**.
+
+        The closed **Advanced** section has the **If no data** choice:
+        - **Keep last state** (default): A No Data run changes nothing and no action runs.
+        - **Notify no data**: The notification actions run.
+        - **Treat as violation**: The run counts as an anomaly and every action runs.
+        - **Treat as normal**: The run closes an open series and sends the Recovery.
+
+        A run that is only warming up never changes the series, whatever you choose.
+    </Accordion>
+
+    <Accordion title="Maintenance Window">
+        The **Maintenance window** fields hold a start time and an end time in `HH:mm` format and an optional time zone: a region id such as `Europe/Istanbul` or an offset such as `+03:00`. If you leave the time zone empty, the server time zone applies. If you leave all fields empty, the detector has no window.
+
+        The window repeats every day. During the window, the detector keeps evaluating and keeps recording results, but it sends no notification. A result that would have notified is recorded as **Suppressed**. The first result after the window reports its own state. The **Maintenance window** button on the Detail page changes the window without opening the Edit screen.
     </Accordion>
 
 
@@ -597,8 +654,8 @@ Links to the old `/:id/view` screen no longer work.
 
 ### Header and Summary Cards
 
-The top bar has **Back**, **Activate/Deactivate**, **Edit** and **Refresh** buttons, plus a date-range
-selector. Opening **Edit** from this page returns you to this same Detail page — on both **Back** and
+The header shows the detector name, its last result with the time that result has lasted, and a **Disabled** or **In maintenance until** label when it applies. The top bar has **Back**, **Activate/Deactivate**, **Edit**, **Maintenance window** and **Refresh** buttons, plus a date-range
+selector with quick ranges (1h, 6h, 24h, 7d). Range and filter changes apply when you click **Search**. Opening **Edit** from this page returns you to this same Detail page — on both **Back** and
 **Save** — instead of the detector list; **Edit** opened from the list still returns to the list.
 
 Below it are 5 summary cards:
@@ -630,30 +687,54 @@ EMA chart with bands) with its condition sentence shown above it.
 
 ### Tabs
 
+The Detail page has four tabs: **Overview**, **History**, **Configuration** and **Changes**. Opening a link with `?tab=history` shows the History tab directly.
+
+The **Overview** tab holds the 5 summary cards, the **State by API Proxy** table (only for a detector that evaluates each API Proxy), the **Metric vs. expected range** chart, and the **Anomalies** table.
+
 
     <Accordion title="Anomalies">
         A table of anomalies detected in the selected date range: value + expected range, severity,
         deviation, and time detected.
     </Accordion>
 
-    <Accordion title="Execution History">
-        Table showing detailed results of each analysis run:
+    <Accordion title="State by API Proxy">
+        Shown on the **Overview** tab when the detector evaluates **Each API Proxy**. One row for each API Proxy with an own series:
+        - **API Proxy**: The API Proxy name
+        - **Result Type**: The current result of that API Proxy. An EMA condition that is still collecting data shows **Warming up** with `n / m` collected data points.
+        - **Value**: The last measured value
+        - **Since**: When the API Proxy reached this result
+        - **Last event**: The last event of its series
+
+        The **API Proxy** selector above the chart chooses the series that the chart draws.
+    </Accordion>
+
+    <Accordion title="History">
+        Table showing the result of each analysis run in the selected date range. The filters and buttons are:
+        - **Result** filter: Select one or more results to list.
+        - **All evaluations** switch: When off, the table lists only the state changes, that is, the runs that change the notification series. When on, it lists every stored run.
+        - **Excel**: Exports the listed rows.
+        - **Delete All**: Deletes all results of the detector.
 
         **Columns:**
-        - **Date/Time**: Date and time when the analysis run was performed
-        - **Result**: 🟢 **Not Met** (normal) · 🔴 **Met** (anomaly detected) · 🟠 **Error**
+        - **Execution Time**: Date and time when the analysis run was performed
+        - **Result Type**: 🟢 **Stable** (no anomaly) · 🔴 **Anomaly Detected** · 🟠 **Evaluation Error** · ⚪ **No Data** · **Suppressed**. A run that is still collecting data for an EMA condition shows **Warming up**.
+        - **Event**: What the run told the recipients: Violation, Recovery, Error, No data, or one of the maintenance window events. Manager derives it from the stored results and the current settings. It is not a delivery record.
+        - **API Proxy**: The API Proxy of the result, or **Whole scope**
         - **Value**: The metric value evaluated
-        - **Execution time**: How long the analysis run took
-        - **Error message**: Error summary, if any
+        - **Total Time**: How long the analysis run took
+        - **Error Message**: Error summary, if any
         - **⋮**: Menu button
 
         From the menu you can:
         - **View Error Message**: View errors that occurred during analysis
-        - **View Condition Results**: View detailed results of each condition
-        - **View Action Results**: View notification sending status
+        - **Condition Log Results**: View detailed results of each condition
+        - **Action Log Results**: View notification sending status
+        - **Open in Traffic**: Open the traffic of this run. See [Open in Traffic](#open-in-traffic).
         - **Delete**: Delete the result
 
         Only a system admin or a role with **Monitoring → Manage** in the project of the detector can delete results. A user with the analyzer role can read the results but cannot delete them.
+
+        A page can list at most the newest 50,000 rows of the date range. If the range has more rows, a note asks you to narrow the date range.
     </Accordion>
 
     <Accordion title="Configuration">
@@ -664,12 +745,21 @@ EMA chart with bands) with its condition sentence shown above it.
         name, date range and result types. The scope (which API proxies are covered) is also shown.
 
         **Conditions & schedule**: Each condition's plain-language sentence (e.g. "average of API Proxy
-        total time is above 1000 for 3 times") and the schedule (cron expression). Rate conditions show
+        total time is above 1000 for 3 times"), **Evaluate conditions for**, and the schedule (cron expression). Rate conditions show
         their threshold as a percentage.
 
-        A third card lists the **Actions** — whether they run once per anomaly event or in another mode,
-        and the attached notification channels with their type and enabled/disabled status.
+        A third card lists the **Actions**: the **Execution Mode**, the **If no data** choice, the **Maintenance window**, and the attached notification channels with their type, **Runs on** events and enabled/disabled status.
     </Accordion>
+
+    <Accordion title="Changes">
+        The audit records of the detector. **Open in Audit Records** opens the Audit Records screen filtered by this detector.
+    </Accordion>
+
+### Open in Traffic
+
+**Open in Traffic** in the History menu opens the Traffic screen with the query of the detector and the time window that the detector read in that run. If the filter has a relative date range, such as the last 5 minutes, Traffic gets the exact window of that run. A detector with an AI condition opens the AI traffic.
+
+A note at the top of Traffic shows where you came from, for example `Opened from anomaly detector Response Time Anomaly Detection.`, and the window. The note also says that the current query and filter are applied and that they may differ from the ones that produced the original result. **Back to results** returns to the History tab of the detector. The tab opens on the time around that run and highlights its row. If the run no longer exists, the tab opens on the last hour.
 
 
 ## Anomaly Detector Management
@@ -844,10 +934,10 @@ All Detections tabs).
         **Behavior from version 2026.09.3 on:**
 
         A run in which the measured metric and its baseline are both zero — and, more generally, an EMA
-        run in which the band has no width and the metric sits exactly on it — is recorded as **Not Met**
-        instead of **Anomaly**. A rate condition's very first run, where no previous value exists to
-        compare against yet, is likewise recorded as **Not Met** rather than as an anomaly; EMA conditions
-        already behaved this way. The application log carries an `INFO` line stating why the condition was
+        run in which the band has no width and the metric sits exactly on it — is recorded as **Stable**
+        instead of **Anomaly Detected**. A rate condition's very first run, where no previous value exists to
+        compare against yet, is recorded as **No Data** (warming up) rather than as an anomaly; EMA conditions
+        behave in the same way. The application log carries an `INFO` line stating why the condition was
         not met, so a quiet detector can be told apart from a broken one.
 
         Real changes are unaffected. Traffic appearing after a quiet period still raises an anomaly, and
