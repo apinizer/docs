@@ -1,0 +1,150 @@
+---
+title: "Run Saved Query on Traffic Log"
+description: "Runs a saved Query (Analytics > Queries) of a project on the traffic log of an environment and returns the matching records as JSON, paged."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/reports/saved-queries/{queryName}/search
+```
+
+The saved Query runs on the traffic log through the same search the Traffic screen uses. The search covers the API and AI gateway traffic of the project in the path. Nothing is saved or changed.
+
+## Authentication
+
+Requires a Personal API Access Token whose user holds **View** permission on **Analytics**, **AI Analytics** or **Monitoring** in the project named in the path (the permission **Try it** on the Queries screen needs). A project the caller cannot see answers `404`.
+
+A platform-scoped (administration) token has no project to read and is refused with `400 malformedRequest`.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+Content-Type: application/json
+```
+
+## Request
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Name of the project |
+| queryName | string | Yes | Name of the saved Query |
+
+### Query Parameters
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| page | integer | No | 0 | Zero-based page index |
+| size | integer | No | 20 | Rows per page. At most 200 |
+| sort | string | No | `timestamp,desc` | `timestamp,asc` or `timestamp,desc`. `timestamp` is the only sort field |
+
+`(page + 1) * size` must not be more than the result window (10,000 records). A request beyond it answers `400`; the page is never cut short silently. To read further, narrow `from` and `to`.
+
+### Request Body
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| environmentName | string | Yes | - | Name of the environment whose traffic log is searched. The environment must belong to the project or be shared with all projects |
+| from | string | No | `now-24h` | Start of the time range. ISO-8601 (`2026-10-27T08:00:00Z`, an offset date-time or a date) or Elasticsearch date math (`now-1h`) |
+| to | string | No | `now` | End of the time range. Same formats as `from` |
+| fields | array[string] | No | Default set | Columns to return. See [Columns](#columns) |
+
+```json
+{
+  "environmentName": "prod",
+  "from": "now-1h",
+  "to": "now",
+  "fields": ["timestamp", "statusCode", "apiProxyName", "totalMs"]
+}
+```
+
+### Columns
+
+Allowed values of `fields`: `timestamp`, `apiType`, `statusCode`, `apiProxyName`, `endpoint`, `httpMethod`, `remoteAddress`, `consumer`, `routingAddress`, `serverName`, `serverPort`, `requestPipelineMs`, `routingMs`, `responsePipelineMs`, `totalMs`, `requestBytes`, `responseBytes`, `source`.
+
+When `fields` is omitted, every column except `consumer` is returned. `consumer` holds the identity the client presented, so ask for it by name. An unknown column name answers `400`.
+
+### Notes
+
+- A Query of the project and a global Query (shared by the whole installation) are found by name. A global Query still sees only the traffic of the project in the path.
+- A personal Query is not available through this API. It answers `404`, like an unknown name.
+- Request and response bodies, headers and credentials are never returned, whatever `fields` asks for.
+- Each call writes a log search record (`LOG_SEARCHED`) to the audit records. The record holds the project, environment, time range, Query name, columns, page and result count.
+
+## Response
+
+### Success Response (200 OK)
+
+```json
+{
+  "status": "SUCCESS",
+  "items": [
+    {
+      "timestamp": "2026-10-28T09:14:52.310Z",
+      "statusCode": 200,
+      "apiProxyName": "PetstoreProxy",
+      "totalMs": 42
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 1,
+  "totalPages": 1,
+  "sort": ["timestamp,desc"],
+  "queryName": "Slow requests",
+  "queryScope": "PROJECT",
+  "totalRelation": "eq",
+  "resultWindow": 10000
+}
+```
+
+### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| status | string | `SUCCESS` |
+| items | array[object] | Traffic records of this page. Only the selected columns are present; a column the record has no value for is omitted |
+| page | integer | Zero-based index of this page |
+| size | integer | Rows per page as applied |
+| totalElements | integer | Exact number of matching records. It can be more than `resultWindow` |
+| totalPages | integer | Number of pages at the applied `size` |
+| sort | array[string] | Ordering applied |
+| queryName | string | Name of the Query that ran |
+| queryScope | string | `PROJECT` for a Query of the project, `GLOBAL` for a Query shared by the whole installation |
+| totalRelation | string | `eq`: `totalElements` is exact |
+| resultWindow | integer | Deepest `(page + 1) * size` a search can reach (10,000). When `totalElements` is higher, narrow `from` and `to` to read the rest |
+
+### Record Fields (`items`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| timestamp | string | When the gateway handled the request (UTC) |
+| apiType | string | API type of the proxy, for example `REST` |
+| statusCode | integer | HTTP status code returned to the client. `0` when no status was recorded |
+| apiProxyName | string | Name of the API proxy that served the request |
+| endpoint | string | Endpoint (method name or path) that was called |
+| httpMethod | string | HTTP method of the request |
+| remoteAddress | string | Client address of the request |
+| consumer | string | Identity the client presented (user name or client key). Returned only when asked for |
+| routingAddress | string | Backend address the request was routed to |
+| serverName | string | Gateway host name the request arrived on |
+| serverPort | integer | Gateway port the request arrived on |
+| requestPipelineMs | integer | Milliseconds spent in the request pipeline |
+| routingMs | integer | Milliseconds spent in routing (the backend call) |
+| responsePipelineMs | integer | Milliseconds spent in the response pipeline |
+| totalMs | integer | Total milliseconds the gateway spent on the request. Omitted when the record has no total time |
+| requestBytes | integer | Request size in bytes |
+| responseBytes | integer | Response size in bytes |
+| source | string | API proxy group the request came through. Omitted for a direct call |
+
+## Error Responses
+
+| Status | Description |
+|--------|-------------|
+| 400 | Platform-scoped token, missing `environmentName`, unknown column in `fields`, `from` or `to` in an unknown format, `page` and `size` beyond the result window, or a saved Query with an incomplete condition |
+| 401 | Missing or invalid token |
+| 404 | Unknown project, environment the project cannot see, unknown Query, or personal Query |
+| 503 | The traffic log cannot be read (for example the environment has no Elasticsearch connection, or the search failed). An empty list is never returned in this case. The reason stays in the Manager log |
