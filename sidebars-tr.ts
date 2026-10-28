@@ -217,6 +217,7 @@ const sidebars: SidebarsConfig = {
   "surumler": [
     "release-notes/genel-bakis",
     "release-notes/degisiklik-gunlugu",
+    "release-notes/surum-notlari-2027",
     "release-notes/surum-notlari-2026",
     "release-notes/surum-notlari-2025",
     "release-notes/surum-notlari-2024",

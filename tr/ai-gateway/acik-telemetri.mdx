@@ -24,7 +24,7 @@ Native dışa aktarımın iki katmanı vardır. İlki dışa aktarımı açtığ
 | Katman | Ne alırsınız | Gereksinim |
 | --- | --- | --- |
 | **Her zaman açık** | İstek başına bir SERVER span, backend denemesi başına bir CLIENT span (retry/failover adımları dahil), istek/yanıt pipeline span'leri ve — AI trafiği için — GenAI inference span'i + deneme-başına failover adımları + kullanım/maliyet/gecikme öznitelik ve metrikleri | Export Modu = `NATIVE` |
-| **Live Trace'e bağlı** | Politika/koruma çalıştırma span'leri, istek span'inin INTERNAL çocukları olarak (semantik önbellek, korumalar, RAG adımları vb.) | Export Modu = `NATIVE` **ve** o istek için Live Trace aktif |
+| **Live Trace'e bağlı** | Politika/koruma çalıştırma span'leri, istek span'inin INTERNAL çocukları olarak (semantik önbellek, korumalar, RAG adımları vb.) ve koşullu rota kararı | Export Modu = `NATIVE` **ve** o istek için Live Trace aktif |
 | **İçerik yakalama (opt-in)** | Prompt/yanıt metni, span özniteliği olarak | Export Modu = `NATIVE` **ve** içerik-yakalama ayarı açıkça etkinleştirilmiş |
 
 İki kapılı katmanı bir kısıt olarak değil, **bilinçli olarak açılan özellikler** olarak düşünün — her-zaman-açık katman, dışa aktarımı açmanın ötesinde hiçbir yapılandırma gerektirmeden tam RED (rate/error/duration) görünürlüğü ve maliyet/gecikme muhasebesi verir; Live Trace ve içerik yakalama, aktif olarak hata ayıkladığınız istekler için giderek daha fazla ayrıntı ekler.
@@ -79,6 +79,22 @@ Vendor'a özgü öznitelikler, OpenTelemetry'nin bilinen-vendor-namespace kural�
 | `apinizer.ai.trace_id` | AI Trace kaydına çapraz referans ([Korelasyon](#korelasyon)a bakın) |
 | `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | Aşağıdaki her span tipiyle paylaşılan kimlik alanları |
 
+### Yönlendirme Kararı Span'i
+
+İstek için [Live Trace](/tr/ai-gateway/izleme-ve-tekrar-oynatma) aktifse ve hedefi koşullu bir rota belirlediyse AI çıkarım span'i `ai.routing.decision` adlı bir INTERNAL çocuk span alır. Span, isteğin başında kararın alındığı anı işaretler.
+
+| Öznitelik | Anlamı |
+| --- | --- |
+| `apinizer.ai.routing.type` | Her zaman `conditional` |
+| `apinizer.ai.routing.selected_index` | Seçilen rotanın sırası; hiçbir rota eşleşmediyse `-1` |
+| `apinizer.ai.routing.matched` | Bir rota seçildiyse `true` |
+| `apinizer.ai.routing.provider_ref` | Seçilen rota bir sağlayıcı adlandırıyorsa o sağlayıcı |
+| `gen_ai.request.model` | Seçilen rota bir model adlandırıyorsa o model |
+| `apinizer.ai.routing.target_pool` | Seçilen rotanın hedef havuzu olup olmadığı |
+| `apinizer.ai.routing.classifier_used` | Bu karar için LLM sınıflandırıcının çalışıp çalışmadığı |
+
+Yalnız sonuç dışa aktarılır. Her rotanın kural ayrıntıları ile sınıflandırıcının girdisi ve çıktısı hiçbir zaman span özniteliği olmaz.
+
 ### Genel Trafik Öznitelikleri
 
 SERVER ve deneme-başına CLIENT span'leri ayrıca her proxy tipinin paylaştığı genel HTTP/routing özniteliklerini (metod, durum, `url.path`, faz-başına ağ zamanlaması vb.) taşır — bunlar platform referansında tek yerde belgelenmiştir: [OpenTelemetry Dışa Aktarımı: Öznitelik Referansı](/tr/develop/izleme-analiz/opentelemetry-disa-aktarimi#öznitelik-referansı).
@@ -131,6 +147,8 @@ Prometheus `apinizer_ai_*` ailesini OTLP `gen_ai.*`/`apinizer.ai.client.*` histo
 
 ## Bilinen Sınırlar
 
+- **Prompt içeriği yalnız içerik yakalama açıkken dışa aktarılır.** **AI Prompt/Yanıt İçeriğini Yakala** kapalıyken prompt ve yanıt öznitelikleri çıkarım span'ine yazılmaz. Yönlendirme kararı span'i ayardan bağımsız olarak prompt içeriği taşımaz.
+- **Ulaşılamayan toplayıcı istekleri etkilemez.** Span'ler kuyruğa alınır ve arka planda dışa aktarılır. Dışa aktarım hatası yutulur. Kuyruk dolarsa span'ler istek yolunu yavaşlatmak yerine atılır.
 - **Streaming yanıtlar hiçbir zaman içerik-yakalanmaz.** Streaming çıktı, tek bir "yanıt gövdesi" olmadan parça parça gelir — içerik yakalama etkin olsa bile streaming isteklerde `gen_ai.output.messages` hiç ayarlanmaz.
 - **Politika/koruma span'leri Live Trace gerektirir.** Semantik önbellek, korumalar ve RAG adımları için INTERNAL çocuk span'ler yalnız o istek için Live Trace aktifken vardır — her-zaman-açık dışa aktarım tek başına bunları üretmez.
 - **WebSocket/gRPC sunucu-tarafı span alır, W3C yayılımı almaz.** WS/gRPC trafiği için diğer her istek gibi bir SERVER span üretilir, ama gelen `traceparent`'ın çıkarılması ve backend'e yayılması şu an yalnız HTTP/SOAP'tadır; bir WS/gRPC isteği çağıranın trace'ini devam ettirmek yerine daima yeni bir trace başlatır.

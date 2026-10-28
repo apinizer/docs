@@ -60,11 +60,59 @@ AI Gateway traffic additionally emits GenAI-specific OTLP metric histograms (tok
 :::note Spans cover every proxy type; OTLP metrics do not
 The split is deliberate and worth knowing before you plan your dashboards. **Spans** are emitted for every proxy type — REST, SOAP, AI, MCP, A2A alike. **OTLP metrics** are emitted only for AI Gateway traffic, because the GenAI histograms describe quantities (tokens, model cost) that have no counterpart on a plain REST proxy. Rate, error and duration for proxies other than LLM Gateways are not pushed over OTLP.
 
-That does not leave you without gateway RED metrics. Pick whichever fits your stack:
+That does not leave you without gateway RED metrics. This applies to the gateway. Manager and Integration export their own request and job duration metrics over OTLP, as described in [Manager and Integration](#manager-and-integration). Pick whichever fits your stack:
 
 - **Scrape the Prometheus endpoint.** The `apinizer_*` series are complete for every proxy type and are unaffected by OTLP export.
 - **Derive them from the spans.** Point the collector's `spanmetrics` connector at the Apinizer spans; because every request produces a SERVER span carrying `http.response.status_code`, `error.type` and duration, rate/error/duration series come out of the traces themselves. This is the usual choice for an OTLP-only deployment that does not scrape Prometheus at all.
 :::
+
+## Cache Calls in Traces
+
+The Cache has no OpenTelemetry SDK. The gateway records every call it makes to the Cache as a CLIENT span in the trace of the request that caused it.
+
+- The span shows the operation, the cache name, and the outcome of the call.
+- Cache keys and values are never written to a span.
+- Cache calls from asynchronous policies and from A2A and MCP background tasks appear under the trace of the request that started them.
+- A cache call that happens outside a request, for example in a background job, starts its own trace.
+- The spans follow the **Emit Client Span** setting of the environment. Turn it off to stop recording them.
+
+To collect Cache metrics, add the Cache metrics endpoint (port `9091`, path `/metrics`) to the Prometheus receiver of your OpenTelemetry Collector. See [Collecting Cache Metrics with an OpenTelemetry Collector](/en/operations/administrator-guides/cache-metrics-integration/cache-prometheus-scraping#collecting-cache-metrics-with-an-opentelemetry-collector).
+
+## Manager and Integration
+
+Manager and Integration can export traces and metrics over OTLP. They do not belong to an environment, so you choose the environment whose OpenTelemetry settings they follow.
+
+<Steps>
+  <Step title="Prepare the environment">
+    Configure **Export Mode** `NATIVE` and an **OTLP Collector** on the environment, as described in [Configuration](#configuration).
+  </Step>
+  <Step title="Set the environment variable">
+    Set the `APINIZER_OTEL_ENVIRONMENT` environment variable on the Manager and Integration deployments. Use the **name** of the environment as the value.
+  </Step>
+  <Step title="Restart the components">
+    Restart Manager and Integration. They read the variable at startup.
+  </Step>
+</Steps>
+
+- If the variable is not set, export stays off.
+- If no environment has the given name, or its **Export Mode** is not `NATIVE`, export stays off. The reason is written to the component log.
+- The components follow the collector, sampling, and content settings of that environment. They read the environment again every 60 seconds. A changed collector or sampling ratio applies without a restart.
+- The `service.name` resource attribute is `manager` or `integration`. The `service.namespace` attribute is the environment name.
+- If a javaagent is attached to the JVM, native export stays off, as for the gateway.
+
+| What | Appears as |
+| --- | --- |
+| REST requests to Manager and Integration | A SERVER span for each request, named with the HTTP method and the route template |
+| Scheduled jobs | One root span for each run |
+| Task-flow runs | One span for the run and one child span for each step |
+
+Spans use their own instrumentation scope: `com.apinizer.manager` for Manager and `com.apinizer.integration` for Integration. Gateway spans keep `com.apinizer.gateway`. Use the scope name to filter by component.
+
+Manager and Integration also export OTLP metrics for the duration of HTTP requests, scheduled jobs, and task-flow runs. They do not provide a Prometheus endpoint for these metrics.
+
+## Unreachable Collector
+
+If the collector cannot be reached, the gateway keeps handling requests normally. Export runs in the background with a bounded queue. When the queue is full, the exporter drops spans and writes a warning to the log. Run **Test Connection** on the connector to find connection problems before you deploy.
 
 ## Configuration
 

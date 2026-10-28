@@ -60,11 +60,59 @@ AI Gateway trafiği ayrıca GenAI'a özgü OTLP metrik histogramları üretir (t
 :::note Span'ler her proxy türünü kapsar, OTLP metrikleri kapsamaz
 Bu ayrım bilinçlidir ve dashboard'larınızı planlamadan önce bilmeniz gerekir. **Span'ler** her proxy türü için üretilir — REST, SOAP, AI, MCP, A2A fark etmeksizin. **OTLP metrikleri** ise yalnız AI Gateway trafiği için üretilir; çünkü GenAI histogramları düz bir REST proxy'sinde karşılığı olmayan büyüklükleri (token, model maliyeti) ölçer. AI olmayan proxy'lerin hız, hata ve süre değerleri OTLP üzerinden gönderilmez.
 
-Bu, gateway RED metriklerinden yoksun kaldığınız anlamına gelmez. Yığınınıza uyanı seçin:
+Bu, gateway RED metriklerinden yoksun kaldığınız anlamına gelmez. Bu durum gateway için geçerlidir. Manager ve Integration kendi istek ve iş süresi metriklerini OTLP ile dışa aktarır; bkz. [Manager ve Integration](#manager-ve-integration). Yığınınıza uyanı seçin:
 
 - **Prometheus uç noktasını toplayın.** `apinizer_*` serileri her proxy türü için eksiksizdir ve OTLP dışa aktarımından etkilenmez.
 - **Span'lerden türetin.** Toplayıcınızın `spanmetrics` connector'ını Apinizer span'lerine yöneltin; her istek `http.response.status_code`, `error.type` ve süre taşıyan bir SERVER span ürettiği için hız/hata/süre serileri doğrudan trace'lerden çıkar. Prometheus'u hiç toplamayan, yalnız OTLP kullanan kurulumlarda olağan tercih budur.
 :::
+
+## Trace'lerde Cache Çağrıları
+
+Cache'te OpenTelemetry SDK'sı yoktur. Gateway, Cache'e yaptığı her çağrıyı, çağrıya neden olan isteğin trace'inde bir CLIENT span olarak kaydeder.
+
+- Span; işlemi, cache adını ve çağrının sonucunu gösterir.
+- Cache anahtarları ve değerleri hiçbir zaman span'e yazılmaz.
+- Asenkron politikalardan ve A2A ile MCP arka plan görevlerinden gelen Cache çağrıları, onları başlatan isteğin trace'i altında görünür.
+- İstek dışında oluşan bir Cache çağrısı kendi trace'ini başlatır. Örnek olarak bir arka plan işi verilebilir.
+- Span'ler ortamın **Client Span Üret** ayarına uyar. Kaydı durdurmak için ayarı kapatın.
+
+Cache metriklerini toplamak için Cache metrik uç noktasını (port `9091`, yol `/metrics`) OpenTelemetry Collector'ınızın Prometheus alıcısına ekleyin. Bkz. [Cache Metriklerini Prometheus ile Toplama](/tr/tutorials/nasil-yapilir-kilavuzlari/yonetici-kilavuzlari/cache-metrics-entegrasyonu/cache-prometheus-scraping).
+
+## Manager ve Integration {#manager-ve-integration}
+
+Manager ve Integration, trace ve metrikleri OTLP ile dışa aktarabilir. Bir ortama ait değillerdir. Bu yüzden OpenTelemetry ayarlarını izleyecekleri ortamı siz seçersiniz.
+
+<Steps>
+  <Step title="Ortamı hazırlayın">
+    Ortamda [Yapılandırma](#yapılandırma) bölümünde anlatıldığı gibi **Dışa Aktarım Modu**'nu `NATIVE` yapın ve bir **OTLP Toplayıcı** seçin.
+  </Step>
+  <Step title="Ortam değişkenini ayarlayın">
+    Manager ve Integration dağıtımlarında `APINIZER_OTEL_ENVIRONMENT` ortam değişkenini ayarlayın. Değer olarak ortamın **adını** yazın.
+  </Step>
+  <Step title="Bileşenleri yeniden başlatın">
+    Manager ve Integration'ı yeniden başlatın. Bileşenler değişkeni başlangıçta okur.
+  </Step>
+</Steps>
+
+- Değişken ayarlı değilse dışa aktarım kapalı kalır.
+- Verilen ada sahip bir ortam yoksa ya da ortamın **Dışa Aktarım Modu** `NATIVE` değilse dışa aktarım kapalı kalır. Neden bileşen loguna yazılır.
+- Bileşenler o ortamın toplayıcı, örnekleme ve içerik ayarlarını izler. Ortamı her 60 saniyede bir yeniden okurlar. Değişen toplayıcı ya da örnekleme oranı yeniden başlatma olmadan uygulanır.
+- `service.name` kaynak özniteliği `manager` ya da `integration` olur. `service.namespace` özniteliği ortam adıdır.
+- JVM'e bir javaagent bağlıysa native dışa aktarım gateway'deki gibi kapalı kalır.
+
+| Ne | Nasıl görünür |
+| --- | --- |
+| Manager ve Integration'a gelen REST istekleri | Her istek için bir SERVER span; adı HTTP metodu ve rota şablonudur |
+| Zamanlanmış işler | Her çalıştırma için bir kök span |
+| Task flow çalıştırmaları | Çalıştırma için bir span, her adım için bir çocuk span |
+
+Span'lerin kendi enstrümantasyon kapsamı vardır: Manager için `com.apinizer.manager`, Integration için `com.apinizer.integration`. Gateway span'leri `com.apinizer.gateway` kapsamını korur. Bileşene göre süzmek için kapsam adını kullanın.
+
+Manager ve Integration ayrıca HTTP isteklerinin, zamanlanmış işlerin ve task flow çalıştırmalarının süresi için OTLP metrikleri dışa aktarır. Bu metrikler için Prometheus uç noktası sunmazlar.
+
+## Ulaşılamayan Toplayıcı
+
+Toplayıcıya ulaşılamazsa gateway istekleri normal şekilde işlemeye devam eder. Dışa aktarım arka planda, sınırlı bir kuyrukla çalışır. Kuyruk dolunca dışa aktarıcı span'leri atar ve loga uyarı yazar. Bağlantı sorunlarını dağıtımdan önce bulmak için connector'da **Bağlantıyı Test Et**'i çalıştırın.
 
 ## Yapılandırma
 

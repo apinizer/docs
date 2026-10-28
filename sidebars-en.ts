@@ -216,6 +216,7 @@ const sidebars: SidebarsConfig = {
   "versions": [
     "release-notes/overview",
     "release-notes/change-log",
+    "release-notes/release-notes-2027",
     "release-notes/release-notes-2026",
     "release-notes/release-notes-2025",
     "release-notes/release-notes-2024",

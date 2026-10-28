@@ -24,7 +24,7 @@ Native export has two layers. The first is always on the moment you turn export 
 | Layer | What you get | Requires |
 | --- | --- | --- |
 | **Always-on** | SERVER span per request, one CLIENT span per backend attempt (retry/failover legs included), request/response pipeline spans, and — for AI traffic — the GenAI inference span plus per-attempt failover legs and usage/cost/latency attributes and metrics | Export mode = `NATIVE` |
-| **Live Trace-gated** | Policy/guardrail execution spans as INTERNAL children of the request span (semantic cache, guardrails, RAG steps, etc.) | Export mode = `NATIVE` **and** Live Trace active for that request |
+| **Live Trace-gated** | Policy/guardrail execution spans as INTERNAL children of the request span (semantic cache, guardrails, RAG steps, etc.) and the conditional-route decision | Export mode = `NATIVE` **and** Live Trace active for that request |
 | **Content capture (opt-in)** | Prompt/response text as span attributes | Export mode = `NATIVE` **and** the content-capture setting explicitly enabled |
 
 Treat the two gated layers as **features to turn on deliberately**, not limitations — always-on gives you full RED (rate/errors/duration) visibility and cost/latency accounting with zero configuration beyond turning export on; Live Trace and content capture add progressively more detail for the requests you're actively debugging.
@@ -79,6 +79,22 @@ Vendor-specific attributes live under Apinizer's own namespace rather than neste
 | `apinizer.ai.trace_id` | Cross-reference to the AI Trace record (see [Correlation](#correlation)) |
 | `apinizer.correlation_id` / `apinizer.project.id` / `apinizer.api_proxy.id` / `apinizer.api_proxy.name` | Identity fields shared with every span kind below |
 
+### Routing Decision Span
+
+When [Live Trace](/en/ai-gateway/tracing-and-replay) is active for the request and a conditional route decided the target, the AI inference span gets an INTERNAL child span named `ai.routing.decision`. It marks the moment the decision was taken, at the start of the request.
+
+| Attribute | Meaning |
+| --- | --- |
+| `apinizer.ai.routing.type` | Always `conditional` |
+| `apinizer.ai.routing.selected_index` | Index of the selected route; `-1` when no route matched |
+| `apinizer.ai.routing.matched` | `true` when a route was selected |
+| `apinizer.ai.routing.provider_ref` | Provider of the selected route, when it names one |
+| `gen_ai.request.model` | Model of the selected route, when it names one |
+| `apinizer.ai.routing.target_pool` | Whether the selected route is a target pool |
+| `apinizer.ai.routing.classifier_used` | Whether an LLM classifier ran for this decision |
+
+Only the outcome is exported. The rule details of each route and the classifier input and output never become span attributes.
+
 ### Generic Traffic Attributes
 
 The SERVER and per-attempt CLIENT spans also carry the generic HTTP/routing attributes (method, status, `url.path`, per-phase network timing, and so on) shared by every proxy type — documented once in the platform reference, [OpenTelemetry Export: Attribute Reference](/en/develop/monitoring-analysis/opentelemetry-export#attribute-reference).
@@ -131,6 +147,8 @@ A ready-to-import Grafana dashboard combining the Prometheus `apinizer_ai_*` fam
 
 ## Known Limits
 
+- **Prompt content is exported only when content capture is on.** With **Capture AI Prompt/Response Content** off, the prompt and response attributes are not set on the inference span. The routing decision span never carries prompt content, whatever the setting.
+- **An unreachable collector does not affect requests.** Spans are queued and exported in the background, and an export error is swallowed. When the queue is full, spans are dropped instead of slowing the request path.
 - **Streaming responses are never content-captured.** Streaming output arrives as a sequence of chunks with no single "response body" to attach to a span — `gen_ai.output.messages` is simply not set for streaming requests, even with content capture enabled.
 - **Policy/guardrail spans require Live Trace.** The INTERNAL child spans for semantic cache, guardrails, and RAG steps only exist when Live Trace is active for that request — always-on export alone does not produce them.
 - **WebSocket/gRPC get server-side spans, not W3C propagation.** A SERVER span is produced for WS/gRPC traffic like any other request, but incoming `traceparent` extraction and outgoing propagation to the backend are currently HTTP/SOAP-only; a WS/gRPC request always starts a new trace rather than continuing one from the caller.
