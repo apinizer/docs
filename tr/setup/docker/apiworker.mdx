@@ -1,0 +1,202 @@
+---
+title: "Worker (Gateway) — Docker"
+description: "Apinizer Worker (Gateway) modülünü Docker konteyneri olarak çalıştırın. İmaj, brotli4j gereksinimi nedeniyle Ubuntu noble (glibc) tabanlı Eclipse Temurin 25 ile cgroup-aware JVM tuning kullanır."
+---
+
+Bu rehber Apinizer **Worker**'ın (API Gateway runtime) Docker konteyneri olarak nasıl çalıştırılacağını anlatır. Worker HTTP / HTTPS / gRPC / WebSocket isteklerini sonlandırır, deploy edilmiş proxy policy pipeline'larını çalıştırır ve trafik log'u yazar.
+
+:::info
+
+Worker imajı **Ubuntu noble (glibc)** üzerine kuruludur, Alpine **değil** — çünkü `brotli4j` native compression library'sinin musl build'i yok. Alpine üzerinde custom build yapmayın.
+
+:::
+
+## Gereksinimler
+
+- Docker Engine 24+ kurulu bir Linux x86-64 host
+- Manager'ın kullandığı **aynı** MongoDB
+- Manager UI'da kayıtlı bir **Environment** girdisi (Server Management → Environments)
+- Quota, OIDC session, circuit breaker kullanılıyorsa erişilebilir bir Apinizer **Cache** cluster
+- Boş TCP portları:
+  - `8091/tcp` — HTTP gateway listener
+  - `8443/tcp` — HTTPS gateway listener (Environment'ta HTTPS açıksa)
+
+## 1. İmajı çekin
+
+```bash
+VERSION=<APINIZER_VERSION>
+docker pull apinizercloud/worker:${VERSION}
+```
+
+## 2. Yapılandırma
+
+Zorunlu:
+
+| Değişken | Açıklama |
+| --- | --- |
+| `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
+| `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı adı |
+| `APINIZER_ENVIRONMENT_NAME` | Environment adı. Manager UI'daki bir Environment ile **tam eşleşmeli** (case-sensitive). |
+| `WORKER_TIMEZONE` | Log timestamp'leri için timezone offset (örn. `+03:00`) |
+
+Önerilen:
+
+| Değişken | Varsayılan | Açıklama |
+| --- | --- | --- |
+| `JAVA_OPTS` | boş | Üretim için: `"-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"` |
+
+Opsiyonel (Undertow / gateway tuning):
+
+| Değişken | Varsayılan | Açıklama |
+| --- | --- | --- |
+| `tuneWorkerThreads` | `1024` | XNIO worker pool |
+| `tuneWorkerMaxThreads` | `4096` | Worker pool hard cap |
+| `tuneIoThreads` | `4` | XNIO I/O selectors (vCPU sayısına eşitleyin) |
+| `tuneBufferSize` | `16384` | Read/write buffer boyutu (bayt) |
+| `tuneDirectBuffers` | `true` | Off-heap buffer (GC baskısını azaltır) |
+| `tuneBacklog` | `10000` | Kernel TCP listen backlog |
+| `APINIZER_WORKER_NODE_IP` | otomatik | Node IP override (çok NIC'li host'lar için) |
+
+## 3. Konteyneri çalıştır
+
+```bash
+docker run -d \
+  --name apinizer-worker \
+  -p 8091:8091 \
+  -p 8443:8443 \
+  --memory=8g \
+  --cpus=4 \
+  -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
+  -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
+  -e APINIZER_ENVIRONMENT_NAME='prod-dc1' \
+  -e WORKER_TIMEZONE='+03:00' \
+  -e JAVA_OPTS='-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true' \
+  -v apinizer-worker-logs:/app/logs \
+  --restart unless-stopped \
+  --ulimit nofile=1048576:1048576 \
+  apinizercloud/worker:${VERSION}
+```
+
+:::tip
+
+Worker throughput-sensitive: yüksek eşzamanlı bağlantı sayısı için `--ulimit nofile=1048576:1048576` kritik.
+
+:::
+
+## 4. docker-compose
+
+```yaml
+services:
+  worker:
+    image: apinizercloud/worker:<APINIZER_VERSION>
+    container_name: apinizer-worker
+    restart: unless-stopped
+    mem_limit: 8g
+    cpus: 4
+    ports:
+      - "8091:8091"
+      - "8443:8443"
+    environment:
+      SPRING_DATA_MONGODB_DATABASE: apinizer
+      APINIZER_ENVIRONMENT_NAME: prod-dc1
+      WORKER_TIMEZONE: "+03:00"
+      JAVA_OPTS: "-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"
+      tuneWorkerThreads: "1024"
+      tuneIoThreads: "4"
+    env_file:
+      - ./secrets/worker.env
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - worker-logs:/app/logs
+    healthcheck:
+      test: ["CMD-SHELL", "command -v curl >/dev/null 2>&1 && curl -fsS http://127.0.0.1:8091/apinizer/management/health | grep -q OK || { command -v wget >/dev/null 2>&1 && wget -qO- http://127.0.0.1:8091/apinizer/management/health | grep -q OK; } || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  worker-logs:
+```
+
+## 5. Doğrulama
+
+```bash
+curl -fsS http://127.0.0.1:8091/apinizer/management/health
+```
+
+Deploy edilmiş bir proxy üzerinden test isteği:
+
+```bash
+curl -fsS http://127.0.0.1:8091/echo -H 'X-Trace: 1'
+```
+
+Beklenen boot log'u:
+
+```
+ApiGateway standalone=true (env: prod-dc1)
+HTTP listener bound: 0.0.0.0:8091
+HTTPS listener bound: 0.0.0.0:8443    (Environment HTTPS açıksa)
+Loaded N proxies for environment prod-dc1
+```
+
+## 6. Operasyon
+
+| Eylem | Komut |
+| --- | --- |
+| Durum | `docker ps --filter name=apinizer-worker` |
+| Log | `docker logs -f apinizer-worker` |
+| Yeniden başlat | `docker restart apinizer-worker` |
+| Durdur (drain) | `docker stop -t 60 apinizer-worker` |
+
+:::warning
+
+Cömert stop timeout kullanın (`docker stop -t 60`) — in-flight HTTP / gRPC / WebSocket istekleri drain olabilsin. `-t` vermezseniz Docker 10 saniye sonra SIGKILL atar.
+
+:::
+
+## 7. Ağ
+
+**Inbound**
+
+| Port | Amaç |
+| --- | --- |
+| `8091` | HTTP gateway |
+| `8443` | HTTPS gateway |
+
+**Outbound**
+
+- MongoDB (proxy config + trafik log yazımı)
+- Cache cluster `5701/tcp` (Hazelcast wire) ve `8090/tcp` (REST), quota/OIDC/CB kullanılıyorsa
+- Deploy edilmiş her proxy'nin bağlandığı backend servisleri
+
+## 8. Çoklu Worker (yatay ölçeklendirme)
+
+Aynı imajı **aynı** `APINIZER_ENVIRONMENT_NAME` ile her replikada çalıştırın. Quota sayaçları, OIDC session'ları ve circuit-breaker durumu **Apinizer Cache** (Hazelcast) üzerinden paylaşılır. Cache paylaşılmazsa her Worker'ın kendi sayaçları olur.
+
+## 9. Kaynak
+
+| Yük | `mem_limit` | `cpus` |
+| --- | --- | --- |
+| Smoke / staging (&lt;200 rps) | 2 GB | 2 |
+| Üretim (Worker başına 1–3 krps) | 4–6 GB | 4 |
+| Yüksek throughput (5+ krps) | 8 GB | 4–8 |
+
+JVM bayraklarını değiştirmeden önce hedef donanımda yük testi yapın.
+
+## Sorun Giderme
+
+### `APINIZER_ENVIRONMENT_NAME` uyuşmazlığı → konteyner başlıyor ama proxy yüklenmiyor
+
+İsim Manager UI'daki bir Environment ile case-sensitive eşleşmiyorsa proxy snapshot çekilmez ve her istek 404 döner. Çözüm: env var'ı düzeltin veya Environment oluşturun.
+
+### `UnsatisfiedLinkError: brotli`
+
+Alpine üzerinde custom build çalıştırıyorsunuz. Resmi `apinizercloud/worker` (Ubuntu noble) imajına geri dönün.
+
+### `EMFILE: too many open files`
+
+`docker run`'a `--ulimit nofile=1048576:1048576` ekleyin. Host tarafında `/etc/security/limits.conf` / daemon'un `LimitNOFILE` değerinin de izin verdiğinden emin olun.
