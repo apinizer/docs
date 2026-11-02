@@ -442,9 +442,77 @@ Security configuration can be made with Additional Variables:
    - Weak algorithms (RC4, DES, 3DES) should be disabled
    - Key sizes should be at an adequate security level (at least 2048 bits for RSA, at least 224 bits for EC)
 
-3. Performance Impact:
-   - The order of encryption suites can affect performance
-   - Disabling too many encryption suites may cause compatibility issues with legacy systems
+    3. Performance Impact:
+       - The order of encryption suites can affect performance
+       - Disabling too many encryption suites may cause compatibility issues with legacy systems
+
+:::
+
+## JVM options (JAVA_OPTS) and environment variables {#jvm-opts-and-environment-variables}
+
+Two mechanisms in Gateway Engine configuration are often confused: **`JAVA_OPTS`**, used when starting the JVM, and **environment variables** written to the pod (the `tune*`, `logLevel`, `jvmOverride`, and similar keys in the Additional Variables table below).
+
+:::info
+
+**`JAVA_OPTS` (JVM launch arguments)**
+
+    `JAVA_OPTS` is the option string the container entrypoint passes to the `java` command (`-Xmx`, `-XX:MaxRAMPercentage`, `-XX:+UseG1GC`, `-D...`, and so on). The entrypoint applies [memory tiers](/en/operations/administrator-guides/jvm-garbage-collector-tuning#automatic-memory-tiers) from the container memory limit; read that together with the tier (W1–W8) summary under [Basic Settings](#basic-settings) and the [Capacity Planning](/en/concepts/deployment/capacity-planning) benchmark guide.
+
+    `-Dfoo=bar` sets a **Java system property** (`System.getProperty("foo")`). That is **not** the same as pod environment variable `foo=bar` (`System.getenv("foo")`); whichever API the Worker reads wins. Do not treat them as interchangeable.
+
+**Additional Variables → Kubernetes pod environment**
+
+    Names you set in Additional Variables in the Manager—such as `tuneWorkerMaxThreads`, `logLevel`, `METRICS_ENABLED`, or `jvmOverride`—become **container environment variables** on the Gateway pod after publish. The Worker reads them at startup to configure application behavior (thread pools, log level, metrics, and so on); they are not JVM arguments.
+
+    For performance tuning, see [Gateway Performance Tuning](/en/operations/administrator-guides/gateway-performance-tuning).
+
+:::
+
+### Gateway runtime substitution
+
+**`${...}`** and **`#{...}`** in policies, routing, and error templates must not be confused with Linux/Kubernetes **process environment**:
+
+| Syntax | Meaning | Relation to pod env |
+|--------|---------|---------------------|
+| `${key}` | Apinizer **Environment Variable** — resolved at deploy time | Comes from Environment Variable definitions in the Manager; not the same namespace as `tune*` or `JAVA_OPTS` |
+| `#{key}` | **Context Variable** — resolved on each request | Request context / script; not a pod environment variable |
+
+Example: in routing address `https://${api.hostname}/v1/users/#{userId}`, `${api.hostname}` is fixed after deploy; `#{userId}` changes per request. Defining a pod env var named `api.hostname` does **not** automatically populate that substitution.
+
+Details: [Dynamic Variables](/en/concepts/core-concepts/dynamic-variables), [Variables](/en/concepts/core-concepts/variable) (Runtime Context Variable section).
+
+### Summary table
+
+| Key | Mechanism | What it does |
+|-----|-----------|--------------|
+| `JAVA_OPTS` | JVM launch arguments | Heap/GC and `-D` system properties; how this combines with tiers is in [JAVA_OPTS and jvmOverride](/en/operations/administrator-guides/jvm-garbage-collector-tuning#java_opts-and-jvmoverride) |
+| `jvmOverride` | Pod environment variable | When `true`, memory parameters in `JAVA_OPTS` that conflict with tier defaults take effect; when unset, tier values win |
+| `tuneWorkerMaxThreads` | Pod environment variable | Maximum Worker thread count (default: CPU × 16; tiers: W1=256 … W8=3072) |
+| `logLevel` | Pod environment variable | Application log level (ERROR, WARNING, INFO, DEBUG, TRACE, OFF) |
+| `METRICS_ENABLED` | Pod environment variable | Whether metric collection is enabled (default: false) |
+
+:::warning
+
+**Entrypoint heap and `JAVA_OPTS`**
+
+    Apinizer's entrypoint automatically configures JVM heap values based on tier and container memory limit:
+    - **W1 / W2** (2 GB): `MaxRAMPercentage=60` — heap ~1.2 GB
+    - **W4** (4 GB): `MaxRAMPercentage=65` — heap ~2.6 GB
+    - **W8** (8 GB): `MaxRAMPercentage=65` — heap ~5.2 GB
+
+    `UseContainerSupport` is enabled by default. When `-Xmx` / `-Xms` values are provided, automatic sizing is **disabled** — use these only if you have a specific requirement. G1GC is used as the garbage collector.
+
+    For how tiers combine with `JAVA_OPTS` and `jvmOverride`, see [JAVA_OPTS and jvmOverride](/en/operations/administrator-guides/jvm-garbage-collector-tuning#java_opts-and-jvmoverride).
+
+:::
+
+:::warning
+
+**Sensitive values and masked display**
+
+    Additional Variables write values as **plain container environment variables** on the Kubernetes Deployment/StatefulSet. The **Secret** / masked display model on the Manager Environment Variable screen does **not** apply here: do not put passwords, API keys, or tokens in `JAVA_OPTS` as `-D...` or as plain Additional Variables—they can appear via `kubectl describe pod`, cluster RBAC, and log flows.
+
+    For sensitive configuration, use [Environment Variable — Secret and non-Secret](/en/concepts/core-concepts/environment-variable), Secret Manager, and policy identity providers.
 
 :::
 
@@ -456,7 +524,7 @@ Default and optional variables and their values to be run in the pod are defined
 
 | Variable | Target Environment | Description |
 |----------|-------------|----------|
-| `JAVA_OPTS` | All | Sets JVM Heap values |
+| `JAVA_OPTS` | All | JVM launch arguments (heap, GC, `-D` system properties). Not the same as pod env `tune*` settings; see [JVM options (JAVA_OPTS) and environment variables](#jvm-opts-and-environment-variables) |
 | `WORKER_TIMEZONE` | All | Sets the JVM default time zone for the Worker process. Accepts IANA zone IDs (e.g. `Europe/Istanbul`) or fixed offsets (e.g. `+03:00`). When unset, the container falls back to the system time zone (typically UTC). Affects time-based variable evaluation, scheduled limits, and any field that does not carry its own zone information. |
 | `tuneWorkerThreads` | HTTP Worker, HTTP+Websocket, Management API | Minimum Worker thread count of the server. Default: CPU × 8. Tier values: W1=128, W2=256, W4=512, W8=1536 |
 | `tuneWorkerMaxThreads` | HTTP Worker, HTTP+Websocket, Management API | Maximum Worker thread count of the server. Default: CPU × 16. Tier values: W1=256, W2=512, W4=1024, W8=3072 |
@@ -556,16 +624,9 @@ The following values are optimal settings validated through wrk2 load tests; fin
 
 :::
 
-:::warning
+:::note
 
-**Java Options Warning:**
-
-Apinizer's entrypoint automatically configures JVM heap values based on tier and container memory limit:
-- **W1 / W2** (2 GB): `MaxRAMPercentage=60` — heap ~1.2 GB
-- **W4** (4 GB): `MaxRAMPercentage=65` — heap ~2.6 GB
-- **W8** (8 GB): `MaxRAMPercentage=65` — heap ~5.2 GB
-
-`UseContainerSupport` is enabled by default. When `-Xmx` / `-Xms` values are provided, automatic sizing is **disabled** — use these only if you have a specific requirement. G1GC is used as the garbage collector.
+**JVM heap and `JAVA_OPTS`:** For entrypoint tier heap percentages, `jvmOverride` behavior, and `-Xmx`/`-Xms` guidance, see [JVM options (JAVA_OPTS) and environment variables](#jvm-opts-and-environment-variables).
 
 :::
 
