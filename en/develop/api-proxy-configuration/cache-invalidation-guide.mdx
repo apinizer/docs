@@ -1,81 +1,86 @@
 ---
 title: "Cache Invalidation Guide"
-description: "You can learn how response cache, policy cache, and related mechanisms differ in Apinizer, and compare how invalidation works on each surface as documented."
+description: "Learn how the API Proxy, API Proxy Group, endpoint, API Call policy, and Cache policy caches are kept apart, and how each one is invalidated."
 ---
 
-This guide collects cache types and invalidation paths in one place. See the source pages for full detail; only information that appears in the current documentation is summarized here.
+Apinizer has several caches, and each one is kept in its own cache set. Clearing one cache does not affect the others. This guide summarizes, in one place, what each cache stores, how its key is built, and how it is invalidated.
 
 ## Cache types
 
-- **[API Proxy — Settings (general response cache)](/en/develop/api-proxy-configuration/settings#cache-settings):** Caching successful responses from the API Proxy so client requests can be answered from cache without calling the Backend API. Only successful responses below status code `400` are cached; the general response cache does not apply to AI, MCP, and A2A type API Proxies.
-- **[API Proxy — Endpoint (REST method/endpoint cache)](/en/develop/api-proxy-configuration/endpoint-configuration):** When **Cache Settings** is enabled, per-method/endpoint cache; key type, capacity, TTL, and invalidation fields are defined on the endpoint form.
-- **[API Call policy cache](/en/develop/policies/api-call):** Stores the response of the external REST call made by the policy; enabled on the **CACHE** tab with **Apply By (Cache By)**, capacity, TTL, and storage type.
-- **[Cache policy](/en/develop/policies/cache):** Standalone **LOOKUP**, **POPULATE**, and **INVALIDATE** in the policy chain; unlike the API Call policy’s built-in cache, you explicitly control when values are read, written, and deleted in the flow.
-- **[API Proxy Group — Cache Settings](/en/concepts/core-concepts/api-proxy-group):** Group-level cache settings applied to group members. API Proxy-level settings take precedence over group-level settings.
-- **[Settings — Idempotency](/en/develop/api-proxy-configuration/settings#idempotency-settings):** Records in the distributed cache using `Idempotency-Key` to return stored responses on duplicate requests — not the same mechanism as the general response cache.
-- **[Deploy / Redeploy](/en/develop/deployment-and-version-management):** Not a cache entry type; reflects loaded API Proxy configuration in the environment. Changes take effect at runtime after **Redeploy**; redeploy is performed without interruption and subsequent requests are handled with the new settings.
+| Cache | Where it is configured | Cache set (name in Cache Dashboard) | What is stored |
+|-------|------------------------|-------------------------------------|----------------|
+| API Proxy response cache | [Settings — Cache Settings](/en/develop/api-proxy-configuration/settings#cache-settings) | `api-proxy-response` | Successful response returned to the client |
+| Endpoint (method) response cache | [Endpoint configuration](/en/develop/api-proxy-configuration/endpoint-configuration) | `api-proxy-method-response` | Successful response of that endpoint |
+| API Proxy Group response cache | [API Proxy Group](/en/concepts/core-concepts/api-proxy-group) — Cache Settings | `api-proxy-group-response` | Successful response of requests that come through the group |
+| API Call policy cache | [API Call policy](/en/develop/policies/api-call) — CACHE tab | `api-call-response` | Response of the external call the policy makes |
+| Cache policy | [Cache policy](/en/develop/policies/cache) | `generic-cache` | Variable value written with POPULATE in the policy chain |
+| Idempotency records | [Settings — Idempotency Settings](/en/develop/api-proxy-configuration/settings#idempotency-settings) | `idempotency-record` | Response stored under an `Idempotency-Key` |
 
-## Comparison matrix
+## Which response cache is used?
 
-| Surface | What is cached | TTL / key | Manual invalidation | Deploy effect |
-| --- | --- | --- | --- | --- |
-| **Settings — general response cache** | Successful responses from the API Proxy (error responses with status `400` and above are never cached) | **TTL (seconds)** required; **Cache Key Type:** query parameters or **Create Custom Key** + variable list; **Capacity**; **Storage Type:** Local or Distributed | Request **Cache-Control** header with `no-cache`, `no-store`, or `max-age=0`; depends on **Invalidation Requires Authn** and **Handling Action** | Documentation does not state that existing response cache entries are cleared on deploy/redeploy; redeploy updates configuration at runtime |
-| **Endpoint — method/endpoint cache** | Successful responses for the enabled method/endpoint (same key and invalidation field model as Settings) | **TTL (seconds)**; **Cache Key Type** (Query / Custom Key + **Variable List**); **Capacity** | Endpoint docs describe **Invalidation Requires Authn** and unauthorized handling; Cache-Control values are described the same way as on Settings | — |
-| **API Proxy Group — Cache Settings** | Cache configuration defined at group level (applied to members) | No field-level detail on the concept page; member proxy endpoint/settings precedence applies | — | Group deployment is documented; clearing of group cache entries on deploy (to be verified in review) |
-| **Cache policy** | **Source Variable** value (POPULATE); variable read/write in the policy chain | Key: **Key Prefix** and/or **Key Variables** (joined with `\|`); POPULATE **TTL**, **Capacity**; **Storage Type:** Local or Distributed | **INVALIDATE** operation deletes the entry for the same key | Policy deploy/usage: [Policy Management](/en/develop/api-proxy-configuration/policy-management); effect of deploy on shared cache entries (to be verified in review) |
-| **API Call policy — CACHE** | Response of the REST call made by the policy | **Apply By (Cache By)** variable; **Capacity**; **TTL**; **Cache Storage Type:** DISTRIBUTED or LOCAL; optional Dynamic TTL | Documented manual clear: **INVALIDATE** via [Cache policy](/en/develop/policies/cache) (API Call FAQ). Entries expire when TTL ends | After the policy is bound to APIs, deploy via [Policy Management](/en/develop/api-proxy-configuration/policy-management); clearing cache entries on deploy (to be verified in review) |
+For a request, **only one** of the API Proxy, endpoint, and group response caches is used. The gateway checks them in this order and picks the first one that is enabled:
 
-## API Proxy — Settings response cache
+1. **API Proxy Group cache** — when the request comes through the group, or group settings are applied to the API Proxies in the group, and the group cache is enabled.
+2. **API Proxy cache** — when cache is enabled on the Settings tab.
+3. **Endpoint cache** — when cache is enabled on that endpoint.
 
-**Cache Settings** on the [Settings](/en/develop/api-proxy-configuration/settings) tab manage proxy-wide response caching. Client requests can be served from cache when key match and TTL conditions are met, without reaching the Backend.
+:::note
 
-Notable rules:
+The cache key starts with the ID of the selected level (group, API Proxy, or endpoint ID). As a result, the same query parameters on different API Proxies or different endpoints never map to the same entry.
 
-- Only successful responses are cached (`4xx/5xx` with status `400` and above are not cached).
-- **Cache only HTTP Get Requests** can limit caching to GET responses.
-- Invalidation: **Cache-Control** on the request with `no-cache`, `no-store`, or `max-age=0`; optional authentication requirement.
-
-On AI, MCP, and A2A proxy types the setting is ignored; for semantic caching see [Semantic Cache](/en/ai-gateway/semantic-cache).
-
-## API Proxy Group
-
-[API Proxy Group](/en/concepts/core-concepts/api-proxy-group) includes **Cache Settings** at group level together with CORS, Idempotency, and Maintenance Mode for shared configuration across members.
-
-:::info
-
-Each API Proxy in the group can also define its own settings; **API Proxy-level settings take precedence over group-level settings.**
+The **Cache only HTTP Get Requests** option applies to the API Proxy and group caches. When endpoint cache is enabled, it works regardless of that endpoint's HTTP method.
 
 :::
 
-Treat the group row in the matrix as a separate management surface from proxy/endpoint cache; the concept page summarizes group cache; technical fields are assumed parallel to Settings/Endpoint.
+## Invalidation methods
 
-## API Call policy
+| Cache | Invalidate from a request | Delete from Cache Dashboard | Expiry | Deploy / Redeploy |
+|-------|---------------------------|-----------------------------|--------|-------------------|
+| API Proxy / Endpoint / Group response cache | `Cache-Control: no-cache`, `no-store`, or `max-age=0` header; only the entry for that request's key is deleted | **Delete Key** or **Delete All** | **TTL** | Does **not** delete entries |
+| API Call policy cache | None | **Delete Key** or **Delete All** (`api-call-response`) | **TTL** (optional Dynamic TTL) | Does **not** delete entries |
+| Cache policy | **INVALIDATE** operation in the policy chain, with the same key | **Delete Key** or **Delete All** (`generic-cache`) | **TTL** set in POPULATE | Does **not** delete entries |
+| Idempotency records | None | **Delete Key** or **Delete All** (`idempotency-record`) | Retention period (days) | Does **not** delete entries |
 
-The **API Call** policy cache stores only the response of the external call that policy targets. When cache is enabled, the request goes through cache lookup first; a successful response is written to cache ([working principle](/en/develop/policies/api-call#working-principle)).
+The **Cache Dashboard** is described on the [Distributed Cache](/en/admin/server-management/distributed-cache#cache-dashboard) page. Deletions cannot be undone.
 
-Difference from the **Cache policy**:
+:::warning[Deploy does not clear the cache]
 
-| | API Call — CACHE | Cache policy — INVALIDATE |
-| --- | --- | --- |
-| **Scope** | In-policy REST call response | Key/value you define in the policy chain |
-| **Removal** | TTL; documentation recommends **Cache Policy** (INVALIDATE) for manual clear | **INVALIDATE** in the flow deletes by key |
-| **Key** | **Cache By** variable | **Key Prefix** + **Key Variables** (project/environment/proxy not added automatically) |
+Redeploying an API Proxy resets routing and load-balancing state, but it does not touch response cache entries. If you changed cache settings or the backend response, old entries can keep being returned until their TTL expires. To clear them right away, use the Cache Dashboard or send the request with `Cache-Control: no-cache`.
 
-**Settings** response cache targets the final response returned to the client; API Call cache targets the intermediate outbound call — none replaces the others.
+:::
+
+## API Proxy, Endpoint, and Group response cache
+
+- Only successful responses are cached; responses with status `400` or above are not.
+- The general response cache does not apply to AI, MCP, and A2A API Proxies; see [Semantic Cache](/en/ai-gateway/semantic-cache) for those.
+- If a request sends `Cache-Control` with `no-cache`, `no-store`, or `max-age=0`, the entry for that request's key is deleted and the response is fetched from the backend.
+- When **Invalidation Requires Authn** is selected, this header is honored only on authenticated requests. **Handling Action** decides what happens on unauthenticated ones: **Continue** ignores the header, **Stop** returns an error.
+
+## API Call policy vs. Cache policy
+
+The two policies use **different cache sets**. The Cache policy's **INVALIDATE** operation deletes from `generic-cache`; it cannot reach entries in the API Call policy's `api-call-response` set.
+
+| | API Call policy cache | Cache policy |
+|--|-----------------------|--------------|
+| **Scope** | Response of the external call the policy makes | Value you write in the policy chain |
+| **Key** | **Apply By (Cache By)** variable | **Key Prefix** and/or **Key Variables** (project, environment, or proxy are not added automatically) |
+| **Removal** | TTL expiry or Cache Dashboard | INVALIDATE, TTL expiry, or Cache Dashboard |
 
 :::warning
 
-Invalidating the **general response cache** with **Cache-Control** on the request does not automatically clear a **Cache policy INVALIDATE** step or **API Call** policy cache. **Idempotency** records use a separate cache (`Idempotency-Key`, retention in days).
-
-Quota, authentication token, and session data are outside the response/policy cache invalidation methods described on these pages; do not confuse them with the proxy response cache.
+The Cache policy's INVALIDATE operation cannot be used to clear an API Call policy's cache from within the flow. Keep the TTL low for short-lived data; for an urgent cleanup, use the `api-call-response` set in the Cache Dashboard.
 
 :::
+
+## What is outside the response cache
+
+Quota counters, authentication tokens, and session data are also kept on the cache server, but they are not response cache. Do not delete them to clear the response cache; deleting them changes quota and session behavior.
 
 ## Related pages
 
 - [Settings — Cache Settings](/en/develop/api-proxy-configuration/settings#cache-settings)
-- [Endpoint configuration — Cache Settings](/en/develop/api-proxy-configuration/endpoint-configuration)
+- [Endpoint configuration](/en/develop/api-proxy-configuration/endpoint-configuration)
 - [Cache policy](/en/develop/policies/cache)
 - [API Call policy](/en/develop/policies/api-call)
 - [API Proxy Group](/en/concepts/core-concepts/api-proxy-group)
-- [Deployment and Version Management](/en/develop/deployment-and-version-management)
+- [Distributed Cache — Cache Dashboard](/en/admin/server-management/distributed-cache#cache-dashboard)
