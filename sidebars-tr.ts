@@ -404,7 +404,8 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-konfigurasyonu/politika-yonetimi",
             "develop/api-proxy-konfigurasyonu/api-trafik-log-ayarlari",
             "develop/api-proxy-konfigurasyonu/yukleme-ve-tanim-dosyasi-bilgileri",
-            "develop/api-proxy-konfigurasyonu/client-route"
+            "develop/api-proxy-konfigurasyonu/client-route",
+            "develop/api-proxy-konfigurasyonu/onbellek-gecersiz-kilma-rehberi"
           ]
         }
       ]

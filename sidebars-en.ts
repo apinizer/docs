@@ -400,6 +400,7 @@ const sidebars: SidebarsConfig = {
             "develop/api-proxy-configuration/design",
             "develop/api-proxy-configuration/endpoint-configuration",
             "develop/api-proxy-configuration/client-route",
+            "develop/api-proxy-configuration/cache-invalidation-guide",
             "develop/api-proxy-configuration/soap-method-configuration",
             "develop/api-proxy-configuration/policy-management",
             "develop/api-proxy-configuration/api-traffic-log-settings",
