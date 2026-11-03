@@ -806,6 +806,7 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/database",
         "integrations/baglanti-yonetimi/email",
         "integrations/baglanti-yonetimi/elasticsearch",
+        "integrations/baglanti-yonetimi/external-vault",
         "integrations/baglanti-yonetimi/ldap-active-directory",
         "integrations/baglanti-yonetimi/kafka",
         "integrations/baglanti-yonetimi/rabbitMQ",
