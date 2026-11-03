@@ -1,100 +1,148 @@
-# REST'ten SOAP'a: Neden ve ne zaman?
+# SOAP Servislerini REST API Olarak Sunmak: REST to SOAP Dönüşümü
 
-> **Taslak — APNZ-2647.** Ürün dokümantasyonu değildir; yayın öncesi editoryal kontrol gerekir.
+Kurumlarda istemci ekipleri REST ve JSON ile çalışırken, arka plandaki birçok servis hâlâ WSDL ile tanımlı SOAP uç noktaları sunar. Bu yazı, bu iki dünya arasında neden bir köprüye ihtiyaç duyulduğunu, ne zaman mantıklı olduğunu ve Apinizer'ın bu dönüşümü nasıl yaptığını anlatıyor.
 
-Kurumsal entegrasyonlarda istemci ekipleri REST ve JSON ile çalışmaya alışırken, arka plandaki servisler hâlâ WSDL ile tanımlı SOAP uç noktaları sunmaya devam eder. Bu yazı, neden böyle bir köprüye ihtiyaç duyulduğunu, hangi koşullarda mantıklı olduğunu ve Apinizer dokümantasyonunda anlatılan akışla bunun nasıl ele alınabileceğini özetler.
+## REST to SOAP dönüşümü nedir?
 
-## Kısa tanım
+**REST to SOAP**, istemciye REST/JSON bir arayüz sunulurken arkadaki SOAP servisinin değiştirilmeden kullanılmasıdır. Gateway üç iş yapar:
 
-**REST-to-SOAP** (Apinizer’da Rest2Soap tipi API Proxy), istemciye REST/JSON sözleşmesi sunarken gateway’in isteği SOAP/XML biçimine dönüştürüp backend SOAP servisine iletmesini ve yanıtı tekrar istemcinin beklediği forma getirmesini ifade eder. Kaynak sözleşme genellikle **WSDL** (ve ilişkili **XSD** şemaları) üzerinden API Proxy oluşturulurken tanımlanır; istemci tarafında ise OpenAPI benzeri REST uç noktaları ve JSON gövdeler kullanılır.
+1. İstemciden gelen JSON isteği, SOAP servisinin beklediği XML zarfına (envelope) çevirir.
+2. SOAP isteğini backend servise iletir.
+3. Gelen SOAP yanıtını, hata (fault) yanıtları dahil, JSON'a çevirip istemciye döner.
 
-Bu model, backend’i aynı gün SOAP’tan REST’e taşımadan yeni kanalları (mobil uygulama, B2B partner, mikro servis) açmak istediğinizde sık görülür. Amaç “SOAP’ı bitirmek” değil, **erişim katmanını modernleştirmek** olabilir; backend yaşam döngüsü ayrı bir karar olarak kalır.
+Apinizer'da bu, **Rest2Soap** tipinde bir API Proxy ile yapılır. API Proxy bir WSDL'den oluşturulur; WSDL'deki her operasyon bir REST endpoint'ine karşılık gelir.
 
-## Tipik zorluklar
+## Neden ihtiyaç duyulur?
 
-Abartılı iddialar yerine, dokümantasyonda ve sahadaki entegrasyonlarda tekrar eden pratik konular:
+- **İstemci tarafında SOAP zahmetlidir.** SOAP istemcisi yazmak için WSDL'den kod üretmek, zarf yapısını ve namespace'leri doğru kurmak gerekir. Mobil ve web uygulamalarında JSON ile çalışmak çok daha yaygındır.
+- **Backend'i değiştirmek her zaman mümkün değildir.** SOAP servisi başka bir ekibe veya dış kuruma ait olabilir, ya da yeniden yazılması uzun sürebilir. Erişim katmanını modernleştirmek, backend'in yaşam döngüsünden bağımsız bir karar olarak alınabilir.
+- **Yeni kanallar daha hızlı açılır.** Mobil uygulama, iş ortağı veya mikroservis gibi yeni istemciler, SOAP servisinin değişmesini beklemeden REST arayüzü üzerinden bağlanabilir.
+- **Güvenlik ve trafik yönetimi tek yerde toplanır.** Kimlik doğrulama, yetkilendirme, kota ve loglama, her istemcide ayrı ayrı değil, gateway'de yapılandırılır.
 
-- **WSDL ve XSD erişimi:** WSDL HTTPS üzerinden açılsa bile iç referanslar HTTP’de kalabilir; dosya çözümleme hataları oluşabilir. Bu durumda tanım dosyasını düzeltme imkânı yoksa **dosya yükleme** (WSDL + XSD’lerin aynı seviyede ZIP içinde) devreye girer. Ayrıntılar: [Çoklu Schema Port WSDL](/tr/develop/api-proxy-olusturma/coklu-schema-port-wsdl).
+Bu, SOAP'ın kötü bir teknoloji olduğu anlamına gelmez. Amaç, farklı protokolleri bilinçli olarak bir arada yönetmektir.
 
-- **Çoklu port ve şema:** Tek WSDL içinde birden fazla port veya şema olabilir; Apinizer varsayılan olarak ilk portu kullanır. Diğer portlar için WSDL’in yalnızca ilgili portu içerecek şekilde ayrıştırılıp ayrı API Proxy oluşturulması gerekebilir.
+## Apinizer dönüşümü nasıl yapıyor?
 
-- **Sözleşme güncellemeleri:** Backend WSDL’i değiştiğinde (yeni operasyon, şema revizyonu) proxy’yi sıfırdan kurmak yerine **Yeniden Ayrıştır (Reparse)** ile mevcut tanım güncellenebilir; routing adresinin otomatik değişmediği unutulmamalıdır.
+JSON ile SOAP arasında dönüşüm yapmanın yaygın bir yolu, her alan için eşleme kuralı veya XSLT yazmaktır. Bu yöntem çalışır, ancak her yeni operasyon ve her şema değişikliği yeni bir eşleme işi demektir.
 
-- **JSON ↔ XML eşlemesi:** İstemci JSON gönderir; gateway SOAP envelope ve şema kurallarına uygun XML üretir. Alan adları, namespace’ler ve zorunlu elemanlar WSDL/XSD ile uyumlu olmalıdır. İstek tarafında şema doğrulama politikaları bu uyumu erken aşamada yakalayabilir.
+Apinizer eşlemeyi doğrudan WSDL sözleşmesinden çıkarır:
 
-- **Yanıt sadeleştirme:** SOAP yanıtı geniş bir XML ağacı olabilir; istemciye yalnızca bir alt küme (örneğin ad/soyad) dönülmesi ek dönüşüm veya script gerektirebilir.
+1. **WSDL okunur.** API Proxy oluşturulurken WSDL ve bağlı XSD şemaları ayrıştırılır; her operasyon için, doğru namespace önekleriyle örnek bir SOAP istek şablonu hazırlanır.
+2. **JSON, XML'e çevrilir.** Gelen JSON gövdesindeki alanlar aynı adlı XML elemanlarına dönüştürülür.
+3. **Namespace'ler şablondan eklenir.** Her elemanın öneki, operasyonun şablonundaki aynı adlı elemandan alınır. İstemcinin namespace bilmesine gerek kalmaz.
+4. **Gövde zarfa yerleştirilir.** Oluşan XML, şablondaki operasyon elemanının içine konur ve SOAP servisine gönderilir.
+5. **Yanıt JSON'a çevrilir.** SOAP yanıtının ilgili bölümü alınır, namespace'ler temizlenir ve JSON'a dönüştürülür. SOAP fault yanıtları da aynı şekilde JSON'a çevrilir.
 
-Bu maddeler SOAP’ın “her zaman kötü” olduğu anlamına gelmez; farklı protokol ve sözleşme katmanlarını **bilinçli olarak bir arada yönetmek** zorunludur.
+Böylece yeni bir operasyon için alan alan eşleme yazmak gerekmez. WSDL değiştiğinde **Yeniden Ayrıştır (Reparse)** ile şablonlar güncellenir.
 
-## Apinizer'da akış
+## Örnek: JSON → SOAP → JSON
 
-Dokümantasyondaki tipik yol şu bileşenlerden oluşur:
+*Örnekteki servis ve alan adları hayalidir.*
 
-1. **SOAP tanımını Apinizer’a taşımak**  
-   WSDL URL’si veya ZIP içinde WSDL + XSD dosyaları ile SOAP API Proxy / REST-to-SOAP proxy oluşturma. Çoklu port, XSD referansları ve reparse adımları için: [Çoklu Schema Port WSDL](/tr/develop/api-proxy-olusturma/coklu-schema-port-wsdl).
+Bir müşteri servisi WSDL'inde `GetCustomer` operasyonu tanımlı olsun. Mobil istemci bu operasyonu REST üzerinden şöyle çağırır:
 
-2. **İstemci sözleşmesini REST/JSON’da netleştirmek**  
-   İstek gövdesinin JSON şemasına uygunluğu **JSON Schema Validation** politikası ile kontrol edilebilir. REST-to-SOAP tipinde bir proxy üzerinde adım adım örnek: [JSON Schema Validation — REST-to-SOAP](/tr/tutorials/api-proxy-senaryolari/json-schema-validation-rest-to-soap).
+**1. İstemcinin gönderdiği JSON:**
 
-3. **İstek/yanıt dönüşümü ve backend çağrısı**  
-   Gateway, Rest2Soap dönüşüm kurallarına göre JSON isteği SOAP isteğine çevirir, backend’e iletir ve yanıtı istemci formatına geri dönüştürür. Routing ve SOAP action/namespace düzeltmeleri proxy yapılandırmasının parçasıdır (HTTP yönlendirme ve SOAP proxy oluşturma dokümanlarıyla birlikte düşünülmelidir).
+```http
+POST /customer-api/GetCustomer
+Content-Type: application/json
 
-4. **Yanıtı işlemek (isteğe bağlı)**  
-   Backend’den dönen JSON/XML yanıtı istemci için sadeleştirmek veya boş yanıtta anlamlı HTTP durum kodu dönmek için response hattında Groovy script kullanılabilir. Örnek akış: [JsonSlurper ile Rest2Soap yanıt işleme](/tr/tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/jsonslurper-rest2soap-yanit-isleme).
+{
+  "customerId": "CUS-1001",
+  "includeOrders": true,
+  "segment": null
+}
+```
 
-5. **Yaşam döngüsü**  
-   WSDL güncellendiğinde reparse sihirbazı operasyonları karşılaştırır; XSD şemalarının güncellenip güncellenmeyeceği ve WS-Addressing gibi seçenekler adım adım seçilir. Üretim routing adresinin korunması bilinçli bir güvenlik/operasyon tercihidir.
+**2. Gateway'in backend'e gönderdiği SOAP isteği:**
 
-Özetle: **WSDL → REST yüzeyi → (doğrulama) → JSON↔SOAP dönüşümü → (isteğe bağlı yanıt zenginleştirme/sadeleştirme)**.
+```xml
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:cus="http://example.com/customer">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <cus:GetCustomer>
+      <cus:customerId>CUS-1001</cus:customerId>
+      <cus:includeOrders>true</cus:includeOrders>
+      <cus:segment xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+    </cus:GetCustomer>
+  </soapenv:Body>
+</soapenv:Envelope>
+```
 
-## Örnek senaryo
+`cus:` önekini istemci göndermedi; gateway bunu WSDL'den üretilen şablondan aldı. JSON'daki `null` değeri, ilgili seçenek açıksa `xsi:nil="true"` olarak gönderilir.
 
-*Hayali isimler; gerçek kurum veya ürün referansı değildir.*
+**3. Backend'in döndüğü SOAP yanıtı:**
 
-**NovaPay Mobil** ekibi, **Merkezi Adres ve Kimlik Doğrulama Servisi (MAKDS)** adlı legacy SOAP servisini doğrudan çağırmak istemiyor: mobil istemci yalnızca HTTPS + JSON biliyor. MAKDS WSDL’i çoklu XSD import’u içeriyor ve test ortamında XSD adresleri erişilemiyor.
+```xml
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:cus="http://example.com/customer">
+  <soapenv:Body>
+    <cus:GetCustomerResponse>
+      <cus:name>Ayşe Yılmaz</cus:name>
+      <cus:orders>
+        <cus:order><cus:id>ORD-1</cus:id></cus:order>
+        <cus:order><cus:id>ORD-2</cus:id></cus:order>
+      </cus:orders>
+    </cus:GetCustomerResponse>
+  </soapenv:Body>
+</soapenv:Envelope>
+```
 
-Entegrasyon ekibi Apinizer’da WSDL ve XSD’leri aynı dizin seviyesinde ZIP’leyerek yükler, REST-to-SOAP proxy oluşturur. İstemci `POST /v1/kimlik-sorgula` ile aşağıdaki gibi JSON gönderir:
+**4. İstemciye dönen JSON:**
 
 ```json
 {
-  "Sorgula": {
-    "kriterListesi": {
-      "OrnekKimlikSorguKriteri": {
-        "DogumAy": 3,
-        "DogumGun": 15,
-        "DogumYil": 1985,
-        "ReferansNo": "REF-00001234"
-      }
-    }
+  "name": "Ayşe Yılmaz",
+  "orders": {
+    "order": [
+      { "id": "ORD-1" },
+      { "id": "ORD-2" }
+    ]
   }
 }
 ```
 
-Gateway, JSON Schema Validation ile alanları (örneğin referans numarası uzunluğu) doğrular; geçerli istek SOAP operasyonuna dönüştürülür. Yanıt XML ağacından yalnızca `ad` ve `soyad` alanları istemciye JSON olarak döner; backend boş veya anlamsız bir yanıt verdiğinde response script ile uygun HTTP durum kodu ve sadeleştirilmiş gövde üretilir — tutorial’daki JsonSlurper örneğiyle aynı mantık.
+Namespace'ler temizlenir; tekrar eden `order` elemanları JSON dizisi olur.
 
-Backend ekibi aynı yıl WSDL’e yeni bir operasyon eklediğinde, mobil uygulama sürümü beklemeden gateway tarafında **Yeniden Ayrıştır** ile yeni operasyon proxy’ye alınır; routing URL’si bilerek aynı bırakılır.
+**5. Hata durumu:** Backend bir SOAP fault dönerse istemci yine JSON alır:
+
+```json
+{
+  "Fault": {
+    "faultcode": "soapenv:Client",
+    "faultstring": "Customer not found"
+  }
+}
+```
+
+İstemcinin hiçbir aşamada XML veya namespace ile uğraşması gerekmez. JSON çıktısının tam biçimi, operasyonun dönüşüm ayarlarına (yanıtın hangi bölümünün alınacağı, null/nil seçeneği) göre değişir; yukarıdaki çıktılar açıklama amaçlıdır.
+
+> **Yayın öncesi:** Bu örnekler bir test API Proxy'si üzerinde çalıştırılıp gerçek çıktılarla güncellenmelidir.
+
+## Sahada karşılaşılan konular
+
+- **WSDL ve XSD erişimi:** WSDL HTTPS üzerinden açılsa bile içindeki XSD referansları erişilemeyen adreslere işaret edebilir. Bu durumda WSDL ve XSD dosyaları aynı seviyede bir ZIP içinde yüklenebilir. Ayrıntılar: [Çoklu Schema Port WSDL](/tr/develop/api-proxy-olusturma/coklu-schema-port-wsdl).
+- **Çoklu port:** Bir WSDL'de birden fazla port varsa Apinizer ilkini kullanır. Diğer portlar için WSDL'in yalnızca o portu içerecek şekilde ayrılıp ayrı bir API Proxy oluşturulması gerekir.
+- **Sözleşme güncellemeleri:** Backend WSDL'i değiştiğinde (yeni operasyon, şema değişikliği) API Proxy'yi baştan kurmak yerine **Yeniden Ayrıştır** kullanılır. Bu işlem backend adresini otomatik değiştirmez.
+- **İstek doğrulama:** Hatalı JSON isteklerinin SOAP servisine ulaşmadan reddedilmesi için **JSON Schema Validation** politikası kullanılabilir: [JSON Schema Validation — REST-to-SOAP](/tr/tutorials/api-proxy-senaryolari/json-schema-validation-rest-to-soap).
+- **Yanıtı sadeleştirme:** SOAP yanıtı istemcinin ihtiyacından büyükse, yanıt hattında bir Groovy script ile yalnızca gerekli alanlar dönülebilir: [JsonSlurper ile Rest2Soap yanıt işleme](/tr/tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/jsonslurper-rest2soap-yanit-isleme).
 
 ## Güvenlik
 
-REST-to-SOAP dönüşümü **tek başına güvenlik sağlamaz**. Apinizer’da kimlik doğrulama, yetkilendirme, mesaj imzalama, IP kısıtlama, şema/doğrulama ve trafik politikaları **proxy veya politika zincirinde ayrı** yapılandırılır.
+Protokol dönüşümü tek başına güvenlik sağlamaz. Güvenlik ayarları API Proxy'nin politika zincirinde ayrıca yapılandırılır:
 
-Pratikte:
+- İstemci tarafı kimlik doğrulama ve yetkilendirme, REST arayüzüne uygulanan politikalarla yapılır.
+- SOAP servisinin beklediği WS-Security, mTLS veya özel başlıklar, yönlendirme ve ilgili politikalarla tanımlanır.
+- Yanıttan gereksiz alanları çıkarmak veri paylaşımını azaltır. Hassas alanların loglara düşmemesi için log ayarları ayrıca gözden geçirilmelidir.
+- Test ve üretim WSDL'leri karıştırılmamalıdır. Reparse backend adresini değiştirmez; doğru ortam adresinin yönetimi sizin sorumluluğunuzdadır.
 
-- JSON Schema Validation, hatalı veya eksik isteklerin backend SOAP katmanına ulaşmadan reddedilmesine yardımcı olur; bu, uygulama güvenliğinin yerine geçmez.
-- SOAP tarafında WS-Security, mTLS veya kurum içi header kuralları routing ve ilgili politikalarla tanımlanmalıdır.
-- Test ve üretim WSDL/reparse kaynakları karıştırılmamalı; reparse sırasında servis adresinin otomatik değişmemesi üretim yanlış yönlendirmelerini önler, ancak doğru ortam URL’sinin bilinçli yönetimi sizin sorumluluğunuzdadır.
-- Response script ile dönen alanları kıstıklamak veri minimizasyonuna katkı sağlar; hassas alanların log/trace’e düşmemesi için log politikaları ayrıca gözden geçirilmelidir.
+## Sonuç
 
-Güvenlik gereksinimlerini “REST yüzeyi açtık, bitti” diye daraltmayın; gateway katmanında hangi politikanın hangi akışta (request/response/error) devreye girdiğini dokümante edin.
+REST to SOAP dönüşümü, SOAP servisini değiştirmeden ona modern bir REST arayüzü kazandırır. Backend kısa vadede değişmeyecekse ve istemci çeşitliliği artıyorsa iyi bir seçenektir.
 
-## Sonuç + CTA
-
-REST’ten SOAP’a geçiş tek bir “dönüştürücü” kararı değil, **erişim katmanını REST/JSON’a taşırken backend sözleşmesini SOAP/WSDL’de tutma** stratejisidir. Ne zaman mantıklı? Backend kısa vadede değişmeyecek, istemci çeşitliliği artacak ve entegrasyon ekibi sözleşmeyi gateway’de yönetebilecekse.
-
-Apinizer tarafında WSDL’i sağlam şekilde içeri almak, REST-to-SOAP proxy tanımlamak, JSON doğrulamak ve gerektiğinde yanıtı sadeleştirmek için aşağıdaki dokümanlarla devam edebilirsiniz:
+Apinizer bu dönüşümü WSDL sözleşmesini okuyarak yapar: namespace'ler ve zarf yapısı şablondan gelir, alan alan eşleme yazmak gerekmez. Başlamak için:
 
 - [Çoklu Schema Port WSDL — WSDL/XSD yükleme, çoklu port, reparse](/tr/develop/api-proxy-olusturma/coklu-schema-port-wsdl)
 - [JSON Schema Validation — REST-to-SOAP API Proxy senaryosu](/tr/tutorials/api-proxy-senaryolari/json-schema-validation-rest-to-soap)
 - [JsonSlurper ile Rest2Soap yanıt işleme (Groovy)](/tr/tutorials/nasil-yapilir-kilavuzlari/develop-kilavuzlari/groovy-kullanimi/jsonslurper-rest2soap-yanit-isleme)
-
-İlk proxy’nizi oluşturduktan sonra test konsolu ve deploy adımlarını ürün dokümantasyonundaki ilgili geliştirme bölümlerinden tamamlayın; bu taslak yalnızca REST/SOAP köprüsünün “neden ve nasıl” çerçevesini verir.

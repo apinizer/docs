@@ -1,100 +1,148 @@
-# REST to SOAP: Why and when?
+# Exposing SOAP Services as REST APIs: REST to SOAP Transformation
 
-> **Draft — APNZ-2647.** Not product documentation; editorial review required before publication.
+In many organizations, client teams work with REST and JSON, while many backend services still expose SOAP endpoints defined by WSDL. This post explains why a bridge between the two is needed, when it makes sense, and how Apinizer performs the transformation.
 
-In enterprise integration, client teams often standardize on REST and JSON, while backends still expose SOAP endpoints defined by WSDL. This post outlines why a bridge is needed, when it makes sense, and how Apinizer documentation describes the flow.
+## What is REST to SOAP transformation?
 
-## Short definition
+**REST to SOAP** means offering clients a REST/JSON interface while the SOAP service behind it stays unchanged. The gateway does three things:
 
-**REST-to-SOAP** (Rest2Soap API Proxy type in Apinizer) means the gateway exposes a REST/JSON contract to clients while converting requests to SOAP/XML for the backend and mapping responses back to the client format. The source contract is usually defined from **WSDL** (and related **XSD** schemas) when the API Proxy is created; clients use REST endpoints and JSON bodies.
+1. It converts the client's JSON request into the XML envelope the SOAP service expects.
+2. It forwards the SOAP request to the backend service.
+3. It converts the SOAP response, including fault responses, back to JSON for the client.
 
-This pattern appears when you want to open new channels (mobile, B2B partners, microservices) without migrating the backend from SOAP overnight. The goal may be to **modernize the access layer**, not to “eliminate SOAP”; backend lifecycle remains a separate decision.
+In Apinizer, this is done with an API Proxy of type **Rest2Soap**. The API Proxy is created from a WSDL; each operation in the WSDL becomes a REST endpoint.
 
-## Typical challenges
+## Why is it needed?
 
-Practical topics that recur in documentation and integration work—without claiming SOAP is inherently unsafe or inferior:
+- **SOAP is hard on the client side.** Writing a SOAP client means generating code from the WSDL and building the envelope and namespaces correctly. Mobile and web applications work with JSON far more often.
+- **Changing the backend is not always possible.** The SOAP service may belong to another team or an external organization, or rewriting it may take a long time. Modernizing the access layer can be decided independently of the backend's lifecycle.
+- **New channels open faster.** New clients such as mobile apps, partners, or microservices can connect through the REST interface without waiting for the SOAP service to change.
+- **Security and traffic management live in one place.** Authentication, authorization, quotas, and logging are configured on the gateway rather than in every client.
 
-- **WSDL and XSD access:** A WSDL may be served over HTTPS while internal references still point to HTTP, causing resolution errors. When the definition cannot be fixed at source, **file upload** (WSDL plus XSD files in a flat ZIP) is the documented path. Details: [Multiple Schema Port WSDL](/en/develop/api-proxy-creation/multiple-schema-port-wsdl).
+This does not mean SOAP is a bad technology. The goal is to manage different protocols side by side, on purpose.
 
-- **Multiple ports and schemas:** One WSDL can contain several ports or schemas; Apinizer uses the first port by default. Other ports may require a trimmed WSDL and a separate API Proxy per port.
+## How does Apinizer do the transformation?
 
-- **Contract updates:** When backend WSDL changes (new operations, schema revisions), **Reparse** can update the existing proxy instead of rebuilding from scratch; remember that the routing service URL is not changed automatically.
+A common way to convert between JSON and SOAP is to write a mapping rule or XSLT for each field. That works, but every new operation and every schema change means more mapping work.
 
-- **JSON ↔ XML mapping:** Clients send JSON; the gateway builds SOAP envelopes and XML that match WSDL/XSD rules. Field names, namespaces, and required elements must align. Request-side schema validation policies can catch mismatches early.
+Apinizer derives the mapping directly from the WSDL contract:
 
-- **Response shaping:** SOAP responses can be large XML trees; returning only a subset (for example first and last name) may need extra transformation or scripting.
+1. **The WSDL is read.** When the API Proxy is created, the WSDL and its XSD schemas are parsed, and a sample SOAP request template with the correct namespace prefixes is prepared for each operation.
+2. **JSON is converted to XML.** Fields in the incoming JSON body become XML elements with the same names.
+3. **Namespaces come from the template.** Each element's prefix is taken from the element with the same name in the operation's template. The client does not need to know any namespaces.
+4. **The body is placed in the envelope.** The resulting XML is placed inside the operation element of the template and sent to the SOAP service.
+5. **The response is converted to JSON.** The relevant part of the SOAP response is taken, namespaces are removed, and it is converted to JSON. SOAP fault responses are converted to JSON the same way.
 
-These points do not mean SOAP is “always bad”; they mean you must **manage protocol and contract layers deliberately**.
+As a result, a new operation does not need field-by-field mapping. When the WSDL changes, **Reparse** updates the templates.
 
-## Flow in Apinizer
+## Example: JSON → SOAP → JSON
 
-The documented path typically includes:
+*The service and field names in this example are fictional.*
 
-1. **Bring the SOAP definition into Apinizer**  
-   Create a SOAP or REST-to-SOAP proxy from a WSDL URL or a ZIP of WSDL and XSD files. Multi-port, XSD references, and reparse: [Multiple Schema Port WSDL](/en/develop/api-proxy-creation/multiple-schema-port-wsdl).
+Suppose a customer service WSDL defines a `GetCustomer` operation. A mobile client calls it over REST like this:
 
-2. **Clarify the client contract in REST/JSON**  
-   **JSON Schema Validation** can verify request bodies. Step-by-step on a REST-to-SOAP proxy: [JSON Schema Validation — REST-to-SOAP](/en/tutorials/api-proxy-scenarios/json-schema-validation-rest-to-soap).
+**1. JSON sent by the client:**
 
-3. **Request/response transformation and backend call**  
-   The gateway converts JSON to SOAP per Rest2Soap rules, calls the backend, and maps the response back. Routing and SOAP action/namespace correction are part of proxy configuration (see HTTP routing and SOAP proxy creation docs in the product tree).
+```http
+POST /customer-api/GetCustomer
+Content-Type: application/json
 
-4. **Process the response (optional)**  
-   To simplify the payload to clients or return a meaningful HTTP status when the backend body is empty, use a Groovy script on the response flow. Example: [JsonSlurper Rest2Soap response processing](/en/tutorials/how-to-guides/developer-guides/groovy-usage/jsonslurper-rest2soap-response-processing).
+{
+  "customerId": "CUS-1001",
+  "includeOrders": true,
+  "segment": null
+}
+```
 
-5. **Lifecycle**  
-   When WSDL changes, the reparse wizard compares operations; you choose whether to refresh XSD definitions and options such as WS-Addressing. Keeping the production routing URL unchanged is an intentional operational safeguard.
+**2. SOAP request the gateway sends to the backend:**
 
-In short: **WSDL → REST surface → (validation) → JSON↔SOAP conversion → (optional response shaping)**.
+```xml
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:cus="http://example.com/customer">
+  <soapenv:Header/>
+  <soapenv:Body>
+    <cus:GetCustomer>
+      <cus:customerId>CUS-1001</cus:customerId>
+      <cus:includeOrders>true</cus:includeOrders>
+      <cus:segment xsi:nil="true" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"/>
+    </cus:GetCustomer>
+  </soapenv:Body>
+</soapenv:Envelope>
+```
 
-## Example scenario
+The client did not send the `cus:` prefix; the gateway took it from the template generated from the WSDL. A JSON `null` is sent as `xsi:nil="true"` when the related option is enabled.
 
-*Fictional names; not references to real organizations or products.*
+**3. SOAP response returned by the backend:**
 
-The **NovaPay Mobile** team does not want to call the **Central Address and Identity Verification Service (CAIVS)** SOAP API directly: the mobile client only speaks HTTPS and JSON. The CAIVS WSDL imports multiple XSDs, and XSD URLs are unreachable in the test environment.
+```xml
+<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+                  xmlns:cus="http://example.com/customer">
+  <soapenv:Body>
+    <cus:GetCustomerResponse>
+      <cus:name>Jane Doe</cus:name>
+      <cus:orders>
+        <cus:order><cus:id>ORD-1</cus:id></cus:order>
+        <cus:order><cus:id>ORD-2</cus:id></cus:order>
+      </cus:orders>
+    </cus:GetCustomerResponse>
+  </soapenv:Body>
+</soapenv:Envelope>
+```
 
-The integration team uploads a ZIP with WSDL and XSDs at the same directory level, creates a REST-to-SOAP proxy, and exposes `POST /v1/identity-query`. The client sends JSON such as:
+**4. JSON returned to the client:**
 
 ```json
 {
-  "Sorgula": {
-    "kriterListesi": {
-      "SampleIdentityQueryCriteria": {
-        "DogumAy": 3,
-        "DogumGun": 15,
-        "DogumYil": 1985,
-        "ReferansNo": "REF-00001234"
-      }
-    }
+  "name": "Jane Doe",
+  "orders": {
+    "order": [
+      { "id": "ORD-1" },
+      { "id": "ORD-2" }
+    ]
   }
 }
 ```
 
-The gateway validates fields (for example reference number length) with JSON Schema Validation, then transforms a valid request into the SOAP operation. Only `ad` and `soyad` fields are returned to the client as JSON; if the backend returns an empty or unusable payload, a response script sets an appropriate HTTP status and body—same idea as the JsonSlurper tutorial.
+Namespaces are removed; repeated `order` elements become a JSON array.
 
-When the backend team adds a new operation to the WSDL, the gateway team applies **Reparse** without waiting for a mobile release; the routing URL stays unchanged on purpose.
+**5. Error case:** If the backend returns a SOAP fault, the client still receives JSON:
+
+```json
+{
+  "Fault": {
+    "faultcode": "soapenv:Client",
+    "faultstring": "Customer not found"
+  }
+}
+```
+
+At no point does the client have to deal with XML or namespaces. The exact JSON shape depends on the operation's transformation settings (which part of the response is taken, the null/nil option); the outputs above are illustrative.
+
+> **Before publishing:** Run these examples on a test API Proxy and update them with the real outputs.
+
+## Common issues in practice
+
+- **WSDL and XSD access:** Even when the WSDL is served over HTTPS, its XSD references may point to unreachable addresses. In that case, upload the WSDL and XSD files in a ZIP at the same level. Details: [Multiple Schema Port WSDL](/en/develop/api-proxy-creation/multiple-schema-port-wsdl).
+- **Multiple ports:** If a WSDL has more than one port, Apinizer uses the first one. For other ports, split the WSDL so it contains only that port and create a separate API Proxy.
+- **Contract updates:** When the backend WSDL changes (a new operation, a schema change), use **Reparse** instead of rebuilding the API Proxy. Reparse does not change the backend address automatically.
+- **Request validation:** Use the **JSON Schema Validation** policy to reject invalid JSON requests before they reach the SOAP service: [JSON Schema Validation — REST-to-SOAP](/en/tutorials/api-proxy-scenarios/json-schema-validation-rest-to-soap).
+- **Simplifying the response:** If the SOAP response is larger than the client needs, a Groovy script on the response pipeline can return only the required fields: [Processing Rest2Soap responses with JsonSlurper](/en/tutorials/how-to-guides/developer-guides/groovy-usage/jsonslurper-rest2soap-response-processing).
 
 ## Security
 
-REST-to-SOAP transformation **does not provide security by itself**. In Apinizer, authentication, authorization, message signing, IP restrictions, schema validation, and traffic policies are **configured separately** on the proxy or policy chain.
+Protocol transformation does not provide security by itself. Security settings are configured separately in the API Proxy's policy chain:
 
-In practice:
+- Client-side authentication and authorization are done with policies applied to the REST interface.
+- WS-Security, mTLS, or custom headers the SOAP service expects are defined with routing and the related policies.
+- Removing unneeded fields from the response reduces data exposure. Review log settings separately so sensitive fields do not end up in logs.
+- Do not mix test and production WSDLs. Reparse does not change the backend address; managing the correct environment address is your responsibility.
 
-- JSON Schema Validation helps reject malformed requests before they hit the SOAP backend; it is not a substitute for application security.
-- WS-Security, mTLS, or internal header rules on the SOAP side must be defined via routing and the relevant policies.
-- Do not mix test and production WSDL/reparse sources; reparse not auto-updating the service URL prevents accidental production misrouting, but correct environment URLs remain your responsibility.
-- Trimming fields in a response script supports data minimization; review log and trace policies so sensitive data does not leak.
+## Conclusion
 
-Do not treat “we exposed REST” as the end of security; document which policy runs on which flow (request/response/error).
+REST to SOAP transformation gives a SOAP service a modern REST interface without changing it. It is a good option when the backend will not change in the short term and the variety of clients is growing.
 
-## Conclusion + CTA
+Apinizer performs this transformation by reading the WSDL contract: namespaces and the envelope structure come from the template, so no field-by-field mapping is needed. To get started:
 
-Moving from REST to SOAP—in the integration sense—is not a single converter switch but a strategy to **keep the backend on SOAP/WSDL while modernizing the access layer to REST/JSON**. It makes sense when the backend will not change soon, client diversity is growing, and your team can govern the contract at the gateway.
-
-To import WSDL reliably, define a REST-to-SOAP proxy, validate JSON, and shape responses in Apinizer, continue with:
-
-- [Multiple Schema Port WSDL — upload, multi-port, reparse](/en/develop/api-proxy-creation/multiple-schema-port-wsdl)
-- [JSON Schema Validation — REST-to-SOAP scenario](/en/tutorials/api-proxy-scenarios/json-schema-validation-rest-to-soap)
-- [JsonSlurper Rest2Soap response processing (Groovy)](/en/tutorials/how-to-guides/developer-guides/groovy-usage/jsonslurper-rest2soap-response-processing)
-
-After creating your first proxy, complete test console and deploy steps from the relevant development sections in the product docs; this draft only frames the “why and how” of the REST/SOAP bridge.
+- [Multiple Schema Port WSDL — WSDL/XSD upload, multiple ports, reparse](/en/develop/api-proxy-creation/multiple-schema-port-wsdl)
+- [JSON Schema Validation — REST-to-SOAP API Proxy scenario](/en/tutorials/api-proxy-scenarios/json-schema-validation-rest-to-soap)
+- [Processing Rest2Soap responses with JsonSlurper (Groovy)](/en/tutorials/how-to-guides/developer-guides/groovy-usage/jsonslurper-rest2soap-response-processing)
