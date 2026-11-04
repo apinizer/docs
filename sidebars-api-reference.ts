@@ -577,6 +577,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "consumer-organizations/consumer-organizations",
+            "consumer-organizations/actions",
             {
               "type": "category",
               "label": "CRUD Operations",
