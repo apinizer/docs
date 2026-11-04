@@ -5,12 +5,12 @@ description: "Read a project's consumers and applications through the Management
 
 ## Overview
 
-This page covers two owner-centric surfaces of the Management API: **Consumers** (the platform's credential-based identities) and **Applications** (API Portal applications). Both expose bounded listing, one-record reads, and two sub-resources of a single owner — its API clients and its limit assignments — in the portable form the rest of the Management API uses. Applications also have a write surface of their own — create, update, delete, **suspend**/**resume** (also reachable as **disable**/**enable**), **archive**, access, secret material and token settings — described in [Application writes](#application-writes) below. Both owners expose the move to another organization of the same project — see [Transfer to another organization](#transfer-to-another-organization) below.
+This page covers two owner-centric surfaces of the Management API: **Consumers** (the platform's credential-based identities) and **Applications** (API Portal applications). Both expose bounded listing, one-record reads, and two sub-resources of a single owner — its API clients and its limit assignments — in the portable form the rest of the Management API uses. Applications also have a write surface of their own — create, update, delete, **suspend**/**resume** (also reachable as **disable**/**enable**), **archive** (also reachable as **revoke**), access, secret material and token settings — described in [Application writes](#application-writes) below. Both owners expose the move to another organization of the same project — see [Transfer to another organization](#transfer-to-another-organization) below.
 
 Every address on this page is under `/apiops/projects/{projectName}` and follows the shared [Common Contract](/api-reference/apiops-common-contract): the stable error envelope, correlation IDs, and bounded pagination. A caller outside the project's scope always gets `404 resourceNotFound`, never `403`. The two surfaces treat the admin (platform) project differently:
 
 - **Consumers** are project-owned, so a call on the admin project is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`).
-- **Applications** are reachable on the admin project's path. It lists the administration project's own applications and every `PORTAL` application, because a portal application belongs to no project. Only a system administrator passes that path; any other caller gets `404 resourceNotFound`. On an ordinary project the path lists that project's own `INTERNAL` applications.
+- **Applications** are reachable on the admin project's path. It lists the administration project's own applications and every `PORTAL` application, because a portal application belongs to no project. Three roles pass that path: System Administrator, Portal Business and Portal Manager. The two portal roles reach `PORTAL` applications and their API clients only; a System Administrator reaches all of them. Portal Developer and every other caller get `404 resourceNotFound`. On an ordinary project the path lists that project's own `INTERNAL` applications. See [Administration path and portal roles](#administration-path-and-portal-roles).
 
 References on this surface are **portable** — no Mongo id ever crosses the boundary. A consumer is addressed by its `consumerKey`, an application by its `applicationKey`; organizations, API clients and limit-assignment references are all echoed back in the stable, name-based form the rest of the Management API uses.
 
@@ -40,6 +40,9 @@ The `/entitlements` sub-resources of earlier versions are removed. Access is def
 | `GET` | `/consumers/{consumerKey}/api-clients` | Summary rows of the API clients owned by the consumer |
 | `GET` | `/consumers/{consumerKey}/limit-assignments` | Every limit assignment whose subject is the consumer |
 | `POST` | `/consumers/{consumerKey}/actions/transfer-organization` | Move the consumer to another organization of the same project |
+| `POST` | `/consumers/{consumerKey}/actions/suspend` | Disable the consumer, reversibly; the same step as `actions/disable` |
+| `POST` | `/consumers/{consumerKey}/actions/resume` | Enable the consumer again; the same step as `actions/enable` |
+| `POST` | `/consumers/{consumerKey}/actions/revoke` | End the consumer permanently and keep its record (one-way) |
 
 `GET /consumers?organizationCode&enabledOnly&search&page&size&sort` sorts by `username,asc` by default; `sort` may also name `fullName` or `enabled`. `search` is a case-insensitive contains-match against username and full name.
 
@@ -60,6 +63,7 @@ The `/entitlements` sub-resources of earlier versions are removed. Access is def
 | `POST` | `/applications/{applicationKey}/actions/enable` | The same step as `actions/resume` |
 | `POST` | `/applications/{applicationKey}/actions/disable` | The same step as `actions/suspend` |
 | `POST` | `/applications/{applicationKey}/actions/archive` | End the application and keep its record (one-way) |
+| `POST` | `/applications/{applicationKey}/actions/revoke` | The same step as `actions/archive` |
 | `GET` | `/applications/{applicationKey}/access` | The API proxies and API proxy groups the application may call |
 | `POST` | `/applications/{applicationKey}/access` | Grant access to API proxies and API proxy groups |
 | `POST` | `/applications/{applicationKey}/access/actions/revoke` | Revoke access |
@@ -70,6 +74,20 @@ The `/entitlements` sub-resources of earlier versions are removed. Access is def
 | `GET` / `PUT` / `DELETE` | `/applications/{applicationKey}/token-settings` | Read, set or reset the token settings |
 
 `GET /applications?organizationCode&status&search&page&size&sort` sorts by `name,asc` by default; `sort` may also name `appStatus`. `status` is one of `ACTIVE`, `SUSPENDED`, `PENDING_DELETION`, `ARCHIVED`. `search` is a case-insensitive contains-match against the application name.
+
+### Consumer suspend, resume and revoke {#consumer-lifecycle}
+
+Three actions change the lifecycle of a consumer. None takes a request body, and each answers `200` with a [write response](/api-reference/apiops-common-contract#write-responses): `result` is the consumer and `runtimeDeployment` reports the gateway push.
+
+- **Suspend** is the same step as `actions/disable`. It is reversible: the consumer and the tokens it was issued stay as they are, and traffic passes again after a resume.
+- **Resume** is the same step as `actions/enable`.
+- **Revoke** is **one-way**. It disables the consumer, withdraws it from the gateways and re-pushes its API clients as revoked, so the tokens issued before the revoke stop working. The record stays and can still be read and deleted. A revoked consumer answers `409 lifecycleConflict` (`params.reason = consumerRevoked`) to `actions/enable`, `actions/resume` and `PUT`. Repeating the revoke is safe.
+
+A revoked consumer shows `"revoked": true` on `GET /consumers/{consumerKey}` and on the list. The field is absent on every other consumer, so a revoked consumer is not mistaken for a suspended one (`enabled` is `false` in both cases).
+
+:::note The Manager screen differs
+Revoke on the Manager screen of a consumer stays reversible. Only the Management API action is permanent.
+:::
 
 ### Suspend and resume
 
@@ -109,9 +127,9 @@ The write step is the same one the consumer endpoints call, so a field, a status
 
 A new application starts with the `client_credentials` grant type. `POST` answers `201` with a `Location` header and a [write response](/api-reference/apiops-common-contract#write-responses) whose `result` is the application.
 
-**Status.** `enable` and `disable` repeat `resume` and `suspend`; `PUT` with `enabled` does the same. An application pending deletion is `409 lifecycleConflict` (`params.reason = applicationStatusNotSwitchable`) on `enable`, `disable` and `PUT` with `enabled`: the deletion approval flow decides.
+**Status.** `enable` and `disable` repeat `resume` and `suspend`; `PUT` with `enabled` does the same. On an application pending deletion, each of these steps (`enable`, `disable`, `actions/resume`, `actions/suspend`, `PUT` with `enabled`) settles the deletion request: the request is cleared and the application takes the status you asked for. They do not answer `409`. The Management API has no endpoint to approve a deletion request.
 
-**Archive.** `actions/archive` disables and withdraws the application's credentials, ends its subscriptions and re-pushes its API clients as revoked, so tokens already issued stop working. It is **one-way**: an archived application takes no later status change or write (`409 lifecycleConflict`, `params.reason = applicationArchived`), only a read or a delete. Use it for an application that cannot be deleted because it was promoted. It answers with the application and `runtimeDeployment`, like suspend.
+**Archive.** `actions/archive` disables and withdraws the application's credentials, ends its subscriptions and re-pushes its API clients as revoked, so tokens already issued stop working. It is **one-way**: an archived application takes no later status change or write (`409 lifecycleConflict`, `params.reason = applicationArchived`), only a read or a delete. Use it for an application that cannot be deleted because it was promoted. `actions/revoke` is the same step as `actions/archive`. It answers with the application and `runtimeDeployment`, like suspend.
 
 **Delete.** `DELETE` removes the application with its access rows and answers a write response. A promoted application is `409 dependencyConflict` (`params.reason = notDeletable`); archive it instead. An application that still has related records is `409 dependencyConflict` with the blocker in `params.reason`.
 
@@ -124,6 +142,20 @@ A **portal** application's targets may be in any project. Each of its rows there
 #### Secret material and token settings
 
 Setting a material points the application at the named object of the project (or, when the project has none by that name, of the administration project) and re-pushes its API clients; an unknown name is `404`. Removing one detaches the reference; an application that has none is `404 resourceNotFound` (`params.reason = materialNotAssigned`). `GET /secrets` returns only names and scopes (`PROJECT` or `ADMIN`), never the material. `PUT /token-settings` sets the fields in the body (a null field keeps its value) and switches the application to secret-manager authentication; `DELETE` restores the defaults (`client_credentials` grant, tokens never expire, no refresh tokens, `RS256`). The request and response shapes are the ones of the [consumer secret material](/api-reference/consumers/secrets/get-consumer-secrets) and [token settings](/api-reference/consumers/token-settings/get-consumer-token-settings) pages.
+
+### Administration path and portal roles {#administration-path-and-portal-roles}
+
+A portal application belongs to no project, so it is filed under the administration project and addressed on `/apiops/projects/admin/...`. The roles that pass there are the ones the Manager asks of a portal application:
+
+| Caller | Applications and their API clients on the `admin` path |
+|---|---|
+| System Administrator | Every application, `INTERNAL` and `PORTAL` |
+| Portal Business, Portal Manager | `PORTAL` applications and their API clients only. An `INTERNAL` application, or a client it owns, answers `404 resourceNotFound` |
+| Portal Developer and every other caller | `404 resourceNotFound` |
+
+Two things stay with the System Administrator on that path: creating an application, and the access rows of an application (read and write). They follow the **Identity** permission of the Manager screen, which the portal roles do not extend. Every other read, write and lifecycle action in this section is open to the three roles above.
+
+The [API Clients API](/api-reference/api-clients#administration-path) answers on the same path for the clients of a `PORTAL` application. The [organization actions](/api-reference/consumer-organizations/actions#administration-project-and-portal-roles) have their own rule.
 
 ### Transfer to another organization {#transfer-to-another-organization}
 
@@ -164,6 +196,7 @@ If the target organization is suspended, traffic for the owner (and, for an appl
 | `email` | string | |
 | `description` | string | |
 | `enabled` | boolean | |
+| `revoked` | boolean | `true` once the consumer was revoked with [`actions/revoke`](#consumer-lifecycle). Absent on every other consumer, also on the list |
 | `organizationCode` | string | The consumer's organization, by code — absent when the consumer belongs to none |
 | `expireDate` | timestamp | |
 | `trafficLogDisabled` | boolean | The consumer's traffic is not written to any traffic log connector. Read here; write it with [Create](/api-reference/consumers/crud/create-consumer) or [Update Consumer](/api-reference/consumers/crud/update-consumer). Absent on a record where it was never set. |
@@ -199,7 +232,7 @@ A consumer counts as silenced when **either** its own flag **or** its applicatio
 | `roleNames` | array of string | Names of the roles of the application |
 | `metadata` | array | Metadata entries. A secret entry carries its key and flags but no value |
 
-Writes other than the status actions return the application as `result` of a [write response](/api-reference/apiops-common-contract#write-responses); suspend, resume, enable, disable and archive return the application itself with `runtimeDeployment`.
+Writes other than the status actions return the application as `result` of a [write response](/api-reference/apiops-common-contract#write-responses); suspend, resume, enable, disable, archive and revoke return the application itself with `runtimeDeployment`.
 
 ### API client summary (sub-resource) — `200`, array
 
@@ -248,7 +281,8 @@ Every error follows the [Common Contract's error envelope](/api-reference/apiops
 | `resourceNotFound` | An unknown `consumerKey` / `applicationKey`, an unknown `organizationCode` (as a list filter, a create target or a transfer target), or an unknown access target, secret material, role or project (`params.reason = projectNotFound`); also a removal with nothing to remove (`materialNotAssigned`) or an edit of a target with no direct grant (`accessNotGranted`) |
 | `unsupportedSortField` | `sort` named a field this surface does not sort on |
 | `lifecycleConflict` | A transfer was refused: `params.reason` is one of `transfer.syncManaged`, `transfer.applicationTerminal`, `transfer.sameOrganization`, `transfer.targetOrganizationTombstoned`, `transfer.organizationDeleteInProgress`, or `deleteInProgress` (a delete of the owner itself is in progress) — see [Transfer to another organization](#transfer-to-another-organization) above |
-| `lifecycleConflict` (application writes) | `params.reason` is `applicationArchived` (the application is archived), `applicationStatusNotSwitchable` (it is pending deletion) or `accessAlreadyGranted` |
+| `lifecycleConflict` (application writes) | `params.reason` is `applicationArchived` (the application is archived) or `accessAlreadyGranted` |
+| `lifecycleConflict` (consumer writes) | `params.reason` is `consumerRevoked`: the consumer was revoked, and `actions/enable`, `actions/resume` and `PUT` refuse it |
 | `dependencyConflict` | An application delete was refused: `notDeletable` for a promoted application, otherwise the blocker in `params.reason` |
 | `permissionDenied` | Authenticated, but the caller lacks the **Identity** permission at **View** (reads) or **Manage** (every write) |
 
@@ -258,7 +292,7 @@ See [Common Contract → Error keys](/api-reference/apiops-common-contract#error
 
 - Reads (`GET`) require the **Identity** permission at **View**; every write on this page — the application writes, the lifecycle actions and the transfer action on either owner — requires it at **Manage**.
 - No license module is required for anything on this page.
-- Consumers are project-scoped: the admin (platform) project is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`). Applications also answer on the admin project's path, where a system administrator reaches the administration project's applications and every `PORTAL` application; any other caller gets `404 resourceNotFound` there.
+- Consumers are project-scoped: the admin (platform) project is refused with `400 malformedRequest` (`params.reason = platformScopeNotSupported`). Applications also answer on the admin project's path, where a System Administrator reaches the administration project's applications and every `PORTAL` application, and Portal Business and Portal Manager reach `PORTAL` applications; any other caller gets `404 resourceNotFound` there. Creating an application and the access rows stay with the System Administrator on that path. See [Administration path and portal roles](#administration-path-and-portal-roles).
 - A project outside the caller's authorized scope is always `404 resourceNotFound`, never `403` — see [Common Contract → Telling 402, 403 and 404 apart](/api-reference/apiops-common-contract#telling-402-403-and-404-apart).
 
 ## Example
@@ -294,7 +328,11 @@ curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications"
 curl -X POST "https://apinizer.example.com/apiops/projects/finance/applications/app_2d7e9b/actions/archive" \
   -H "Authorization: Bearer $TOKEN"
 
-# 7. Move a consumer to another organization of the same project
+# 7. Revoke a consumer for good (one-way)
+curl -X POST "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/actions/revoke" \
+  -H "Authorization: Bearer $TOKEN"
+
+# 8. Move a consumer to another organization of the same project
 curl -X POST "https://apinizer.example.com/apiops/projects/finance/consumers/con_8f3a1c/actions/transfer-organization" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
