@@ -254,6 +254,26 @@ Values below 1000 ms fall to 0 on the server side due to integer division (ms / 
   </Card>
 </CardGroup>
 
+### Parameters Only Configurable via APIops
+
+The following three fields do **not** appear in the Connection UI form; they can only be set through APIops (Connection DTO), and they govern the behavior of the asynchronous log-writing queue:
+
+| Parameter | Description | Default |
+|-----------|----------|------------|
+| bulkBufferCapacity | Capacity of the asynchronous write queue (in-memory `ArrayBlockingQueue`) | 50000 |
+| bulkFlushIntervalMs | How often the queue is flushed to Elasticsearch | 100 (ms) |
+| bulkMaxBatchSize | Maximum number of records sent in a single `_bulk` call | 2500 |
+
+### Asynchronous Write and Failover Behavior
+
+The Elasticsearch connection does not block the request thread while writing logs; writes are fully asynchronous:
+
+- The `index*` methods place the record into an in-memory queue (`ArrayBlockingQueue`) whose capacity is `bulkBufferCapacity`, then return immediately — the thread handling the request does **not** wait for a response from Elasticsearch.
+- Records in the queue are sent to Elasticsearch by a separate scheduled thread pool (thread names start with `es-bulk-flusher-`) every `bulkFlushIntervalMs` milliseconds, via `_bulk` calls of at most `bulkMaxBatchSize` records each.
+- This flusher only starts **in the Worker process**. There is no asynchronous log writing in the Manager process; the Manager's Elasticsearch calls (report/query screens) are entirely **synchronous**, and Connection Timeout directly bounds those queries.
+- As a result, Connection Timeout does not bind the request thread that writes logs — it bounds the flusher thread on the Worker, or the report query on the Manager.
+- **Failover:** If a bulk call fails for any reason (connection failure, response timeout, queue full, etc.), the record is automatically sent to the configured failover connector. Failover is triggered **on any type of error, including timeouts — not only when a connection cannot be established at all**.
+
 ## Usage Scenarios
 
 <CardGroup cols={2}>
@@ -403,10 +423,12 @@ You can provide high availability by adding multiple hosts.
         - Find the **Administrate** toggle.
         - Set the toggle to **Active** position for template and ILM management.
         - When Administrate is active, the following fields become visible:
-        - Template name
-        - Shard count
-        - Replica count
-        - Refresh interval
+        - Template name (default: `apinizer-log-apiproxy-template-default`)
+        - Shard count (default: 1)
+        - Replica count (default: 0)
+        - Refresh interval (default: `5s`)
+        - Preference for loading fixed bitset filters eagerly (enabled by default). Turning it off lowers heap usage on the Elasticsearch nodes. It is a static index setting: it applies only to new indices; after saving, run **Create Index Template** and wait for the next rollover.
+        - The `bulkBufferCapacity`, `bulkFlushIntervalMs`, and `bulkMaxBatchSize` fields do **not** appear in this UI form; they can only be set through APIops.
 
         **ILM Policy Configuration:**
 
@@ -814,6 +836,15 @@ In this step, users can export (export) existing connections for backup, moving 
 
 
 ## Troubleshooting
+
+  <Accordion title="Asynchronous Write Queue Filling Up">
+    **Possible causes:** `bulkBufferCapacity` is too low for traffic, the Elasticsearch cluster is responding slowly, or the flusher cannot keep up with the queue.
+
+    1. Increase `bulkBufferCapacity`/`bulkMaxBatchSize` via APIops.
+    2. Check Elasticsearch cluster health and response times.
+    3. Verify records are reaching the failover connector (a full queue also triggers failover).
+    4. Monitor the `apinizer_es_log_buffer_size` / `apinizer_es_log_buffer_capacity` metrics.
+  </Accordion>
 
 
   <Accordion title="Index Template Not Created">

@@ -53,14 +53,21 @@ Bu sayfa, Apinizer platformunun bileşenleri arasındaki ağ bağlantılarını 
 
 ### Internal Trafik (Bileşenler Arası)
 
-#### Manager ↔ Worker
+#### Manager ↔ Worker (Gateway)
 
 | Kaynak | Hedef | Port | Protokol | Açıklama | Yön |
 |--------|-------|------|----------|----------|-----|
-| Manager | Worker | 8080 | HTTP | Deployment işlemleri | Manager → Worker |
-| Manager | Worker | 8080 | HTTP | Health check | Manager → Worker |
-| Worker | Manager | 8080 | HTTP | Konfigürasyon alımı | Worker → Manager |
-| Worker | Manager | 8080 | HTTP | Status raporlama | Worker → Manager |
+| Manager | Worker (Gateway) | 8091 veya K8s NodePort 30080/30090 | HTTP | Deploy (`/apinizer/deployment/*`), yönetim ve health (`/apinizer/management/*`) | Manager → Worker |
+| Manager | Worker (Gateway) | 8443 | HTTPS | Gateway HTTPS (Environment'ta açıksa) | Manager → Worker |
+| Worker | Manager | 8080 veya K8s NodePort 32080 | HTTP | Manager UI / REST API | Worker → Manager |
+| Operatör | Manager | 8080 veya K8s NodePort 32080 | HTTP | Yönetim konsolu | Inbound (LAN) |
+
+#### Manager ↔ Integration (Quartz)
+
+| Kaynak | Hedef | Port | Protokol | Açıklama | Yön |
+|--------|-------|------|----------|----------|-----|
+| Manager | Integration | 8092 | HTTP | Task-flow scheduler REST, health (`/apinizer/management/health`) | Manager → Integration |
+| Integration | MongoDB | 25080 | TCP | Quartz job store | Integration → MongoDB |
 
 #### Worker ↔ Database (MongoDB)
 
@@ -82,8 +89,10 @@ Bu sayfa, Apinizer platformunun bileşenleri arasındaki ağ bağlantılarını 
 
 | Kaynak | Hedef | Port | Protokol | Açıklama | Yön |
 |--------|-------|------|----------|----------|-----|
-| Worker | Cache | 5701 | TCP | Cache erişimi | Worker → Cache |
+| Worker | Cache | 5701 | TCP | Hazelcast wire (quota/OIDC/CB) | Worker → Cache |
+| Worker | Cache | 8090 | HTTP | Cache REST API | Worker → Cache |
 | Manager | Cache | 5701 | TCP | Cache yönetimi | Manager → Cache |
+| Manager | Cache | 8090 | HTTP | Cache REST / diagnostic | Manager → Cache |
 | Cache | Cache | 5701 | TCP | Cluster iletişimi | Cache ↔ Cache |
 
 #### Kubernetes İletişimi
@@ -98,16 +107,16 @@ Bu sayfa, Apinizer platformunun bileşenleri arasındaki ağ bağlantılarını 
 
 ### DMZ Zone Portları
 
-**Worker Nodes:**
+**Worker Nodes (Gateway):**
 * **443/80**: İstemci erişimi (Load Balancer'dan)
-* **8080**: Manager'dan deployment işlemleri
-* **5701**: Cache cluster erişimi (LAN'dan)
+* **8091 / 8443** (container) veya **30080 / 30090** (K8s NodePort): API Gateway HTTP/HTTPS
+* **5701 / 8090**: Cache (Hazelcast + REST) erişimi (LAN'dan)
 * **25080**: MongoDB erişimi (LAN'dan)
 * **9200**: Elasticsearch erişimi (LAN'dan)
 
 **Load Balancer:**
 * **443/80**: Internet erişimi
-* **8080**: Worker'lara trafik yönlendirme
+* **8091 / 8443** veya **30080 / 30090**: Worker gateway backend'ine yönlendirme
 
 ### LAN Zone Portları
 
@@ -125,7 +134,11 @@ Bu sayfa, Apinizer platformunun bileşenleri arasındaki ağ bağlantılarını 
 * **9300**: Transport protocol (cluster içi)
 
 **Cache (Hazelcast):**
-* **5701**: Cache erişimi (Worker ve Manager'dan)
+* **5701**: Hazelcast cluster (Worker ve Manager'dan)
+* **8090**: Cache REST / diagnostic HTTP
+
+**Integration (Quartz):**
+* **8092**: Scheduler REST (Manager'dan)
 
 ## Firewall Kuralları Özeti
 
@@ -139,8 +152,8 @@ VPN → Load Balancer: 22 (opsiyonel)
 
 **Outbound:**
 ```
-Load Balancer → Worker: 8080
-Worker → Manager: 8080
+Load Balancer → Worker: 8091 / 8443 (veya NodePort 30080 / 30090)
+Worker → Manager: 8080 (veya NodePort 32080)
 Worker → MongoDB: 25080
 Worker → Elasticsearch: 9200
 Worker → Cache: 5701
@@ -160,10 +173,11 @@ VPN → Manager: 22, 8080
 
 **Outbound:**
 ```
-Manager → Worker: 8080
+Manager → Worker: 8091 / 8443 (veya NodePort 30080 / 30090)
+Manager → Integration: 8092
 Manager → MongoDB: 25080
 Manager → Elasticsearch: 9200
-Manager → Cache: 5701
+Manager → Cache: 5701, 8090
 Manager → External Services: 443, 25, 587
 ```
 
@@ -173,20 +187,22 @@ Manager → External Services: 443, 25, 587
 
 
   <Accordion title="Client-Facing Ports">
-    * **443**: HTTPS API erişimi
+    * **443**: HTTPS API erişimi (LB sonlandırması)
     * **80**: HTTP API erişimi (redirect için)
-    * **8080**: Management API (Manager'dan)
+    * **8091 / 8443**: Gateway HTTP/HTTPS (container varsayılanları)
+    * **30080 / 30090**: Kubernetes NodePort (ortama göre)
   </Accordion>
   
   <Accordion title="Backend Communication Ports">
     * **443/80**: Backend API çağrıları (outbound)
     * **25080**: MongoDB erişimi (outbound)
     * **9200**: Elasticsearch log gönderimi (outbound)
-    * **5701**: Cache erişimi (outbound)
+    * **5701 / 8090**: Cache erişimi (outbound)
   </Accordion>
   
   <Accordion title="Internal Ports">
-    * **8080**: Manager ile iletişim (bidirectional)
+    * **8080**: Manager REST (Worker → Manager)
+    * **8091**: Manager deploy/yönetim (Manager → Worker gateway)
     * **Dynamic**: Kubernetes service discovery
   </Accordion>
 
@@ -245,7 +261,7 @@ Internet
 ┌──────────────┐
 │Load Balancer │
 └──────┬───────┘
-       │ (8080)
+       │ (8091 veya 30080)
        ▼
 ┌──────────────┐
 │ Worker Node  │
@@ -253,7 +269,7 @@ Internet
        │
        ├───► (25080) MongoDB
        ├───► (9200) Elasticsearch
-       ├───► (5701) Cache
+       ├───► (5701/8090) Cache
        ├───► (8080) Manager
        └───► (443) Backend API
 ```

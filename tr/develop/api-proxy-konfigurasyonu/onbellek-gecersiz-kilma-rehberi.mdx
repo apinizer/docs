@@ -1,0 +1,86 @@
+---
+title: "Önbellek Geçersiz Kılma Rehberi"
+description: "API Proxy, API Proxy Group, endpoint, API Call politikası ve Cache politikası önbelleklerinin birbirinden nasıl ayrıldığını ve her birinin nasıl geçersiz kılındığını öğrenebilirsiniz."
+---
+
+Apinizer'da birden fazla önbellek vardır ve her biri ayrı bir cache setinde tutulur. Bir önbelleği temizlemek diğerlerini etkilemez. Bu rehber, her önbelleğin neyi sakladığını, anahtarının nasıl oluştuğunu ve nasıl geçersiz kılındığını tek yerde toplar.
+
+## Önbellek türleri
+
+| Önbellek | Nerede ayarlanır | Cache seti (Cache Dashboard'daki ad) | Ne saklanır |
+|----------|------------------|--------------------------------------|-------------|
+| API Proxy yanıt önbelleği | [Settings — Önbellek Ayarları](/tr/develop/api-proxy-konfigurasyonu/settings#önbellek-ayarları) | `api-proxy-response` | İstemciye dönen başarılı yanıt |
+| Endpoint (metot) yanıt önbelleği | [Endpoint konfigürasyonu](/tr/develop/api-proxy-konfigurasyonu/endpoint-konfigurasyonu) | `api-proxy-method-response` | İlgili endpoint'in başarılı yanıtı |
+| API Proxy Group yanıt önbelleği | [API Proxy Group](/tr/concepts/temel-kavramlar/api-proxy-group) — Cache Settings | `api-proxy-group-response` | Grup üzerinden gelen isteklerin başarılı yanıtı |
+| API Call politikası önbelleği | [API Çağrısı politikası](/tr/develop/politikalar/api-cagrisi) — CACHE sekmesi | `api-call-response` | Politikanın yaptığı harici çağrının yanıtı |
+| Cache politikası | [Önbellekleme politikası](/tr/develop/politikalar/onbellekleme) | `generic-cache` | Politika zincirinde POPULATE ile yazılan değişken değeri |
+| Idempotency kayıtları | [Settings — Idempotency Ayarları](/tr/develop/api-proxy-konfigurasyonu/settings#idempotency-ayarları) | `idempotency-record` | `Idempotency-Key` ile saklanan yanıt |
+
+## Hangi yanıt önbelleği kullanılır?
+
+Bir istek için API Proxy, endpoint ve grup yanıt önbelleklerinden **yalnızca biri** kullanılır. Gateway sırayla şunlara bakar ve etkin olan ilk önbelleği seçer:
+
+1. **API Proxy Group önbelleği** — istek grup üzerinden geldiyse ya da grup ayarları gruptaki API Proxy'lere uygulanıyorsa ve grupta önbellek açıksa.
+2. **API Proxy önbelleği** — Settings sekmesinde önbellek açıksa.
+3. **Endpoint önbelleği** — ilgili endpoint'te önbellek açıksa.
+
+:::note
+
+Önbellek anahtarı, seçilen seviyenin kimliğiyle (grup, API Proxy veya endpoint ID'si) başlar. Bu nedenle aynı sorgu parametreleri farklı API Proxy'lerde veya farklı endpoint'lerde aynı kayda denk gelmez.
+
+**Sadece HTTP Get İsteklerini Önbelleğe Al** seçeneği API Proxy ve grup önbelleğinde geçerlidir. Endpoint önbelleği açıldığında o endpoint'in metodu ne olursa olsun çalışır.
+
+:::
+
+## Geçersiz kılma yöntemleri
+
+| Önbellek | İstekle geçersiz kılma | Cache Dashboard'dan silme | Süre dolumu | Deploy / Redeploy |
+|----------|------------------------|---------------------------|-------------|-------------------|
+| API Proxy / Endpoint / Grup yanıt önbelleği | `Cache-Control: no-cache`, `no-store` veya `max-age=0` başlığı; yalnızca o isteğin anahtarına ait kayıt silinir | **Delete Key** veya **Delete All** | **TTL** | Kayıtları **silmez** |
+| API Call politikası önbelleği | Yok | **Delete Key** veya **Delete All** (`api-call-response`) | **TTL** (isteğe bağlı Dinamik TTL) | Kayıtları **silmez** |
+| Cache politikası | Politika zincirinde **INVALIDATE** işlemi, aynı anahtarla | **Delete Key** veya **Delete All** (`generic-cache`) | POPULATE'teki **TTL** | Kayıtları **silmez** |
+| Idempotency kayıtları | Yok | **Delete Key** veya **Delete All** (`idempotency-record`) | Saklama süresi (gün) | Kayıtları **silmez** |
+
+**Cache Dashboard**, [Dağıtık Cache](/tr/admin/server-management/dagitik-cache#cache-dashboard) sayfasında anlatılır. Silme işlemleri geri alınamaz.
+
+:::warning[Deploy önbelleği temizlemez]
+
+API Proxy'yi yeniden yüklemek (redeploy) yönlendirme ve yük dengeleme durumunu sıfırlar, ancak yanıt önbelleğindeki kayıtlara dokunmaz. Önbellek ayarlarını veya backend yanıtını değiştirdiyseniz eski kayıtlar TTL dolana kadar dönmeye devam edebilir. Hemen temizlemek için Cache Dashboard'u kullanın ya da ilgili isteği `Cache-Control: no-cache` ile gönderin.
+
+:::
+
+## API Proxy, Endpoint ve Grup yanıt önbelleği
+
+- Yalnızca başarılı yanıtlar önbelleğe alınır; durum kodu `400` ve üzeri olan yanıtlar alınmaz.
+- AI, MCP ve A2A tipindeki API Proxy'lerde genel yanıt önbelleği uygulanmaz; bunlar için [Semantik Önbellek](/tr/ai-gateway/semantik-onbellek) sayfasına bakın.
+- İstekte `Cache-Control` başlığına `no-cache`, `no-store` veya `max-age=0` yazılırsa o isteğin anahtarına ait kayıt silinir ve yanıt backend'den alınır.
+- **Önbellek Geçersizleme İçin Yetki Gerekir** seçiliyse bu başlık yalnızca kimliği doğrulanmış isteklerde dikkate alınır. Yetkisiz isteklerde ne olacağını **Yetkisiz İsteklerin Ele Alınması** belirler: **DEVAM ET** başlığı yok sayar, **DUR** hata döner.
+
+## API Call politikası ve Cache politikası farkı
+
+İki politika **farklı cache setleri** kullanır. Cache politikasındaki **INVALIDATE** işlemi `generic-cache` setinden siler; API Call politikasının `api-call-response` setindeki kayıtlara ulaşamaz.
+
+| | API Call politikası önbelleği | Cache politikası |
+|--|-------------------------------|------------------|
+| **Kapsam** | Politikanın yaptığı harici çağrının yanıtı | Politika zincirinde sizin yazdığınız değer |
+| **Anahtar** | **Apply By (Cache By)** değişkeni | **Anahtar Öneki** ve/veya **Anahtar Değişkenleri** (proje, ortam veya proxy otomatik eklenmez) |
+| **Silme** | TTL dolumu veya Cache Dashboard | INVALIDATE, TTL dolumu veya Cache Dashboard |
+
+:::warning
+
+Bir API Call politikasının önbelleğini akış içinden temizlemek için Cache politikasının INVALIDATE işlemi kullanılamaz. Kısa ömürlü veriler için TTL'yi düşük tutun; acil temizlik için Cache Dashboard'da `api-call-response` setini kullanın.
+
+:::
+
+## Önbellek dışında kalan durumlar
+
+Kota sayaçları, kimlik doğrulama token'ları ve oturum verileri de cache sunucusunda tutulur, ancak yanıt önbelleği değildir. Yanıt önbelleğini temizlemek için bu kayıtları silmeyin; silinmeleri kota ve oturum davranışını değiştirir.
+
+## İlgili sayfalar
+
+- [Settings — Önbellek Ayarları](/tr/develop/api-proxy-konfigurasyonu/settings#önbellek-ayarları)
+- [Endpoint konfigürasyonu](/tr/develop/api-proxy-konfigurasyonu/endpoint-konfigurasyonu)
+- [Önbellekleme (Cache) politikası](/tr/develop/politikalar/onbellekleme)
+- [API Çağrısı politikası](/tr/develop/politikalar/api-cagrisi)
+- [API Proxy Group](/tr/concepts/temel-kavramlar/api-proxy-group)
+- [Dağıtık Cache — Cache Dashboard](/tr/admin/server-management/dagitik-cache#cache-dashboard)

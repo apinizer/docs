@@ -17,15 +17,15 @@ Backend API'ye gönderilen istekler zaman aşımı, bağlantı hataları veya ge
 
 | Parametre | Açıklama |
 |-----------|----------|
-| **Yeniden Deneme Sayısı (Retry Count)** | Backend API'ye gönderilen istek başarısız olduğunda, bu parametre kadar tekrar deneme yapılır. Değer 0 ise retry yapılmaz. |
-| **Retry Delay** | Her retry denemesi arasında bekleme süresi. Exponential backoff veya sabit delay kullanılabilir. |
+| **Yeniden Deneme Sayısı (Retry Count)** | Backend API'ye gönderilen istek başarısız olduğunda, bu parametre kadar tekrar deneme yapılır. Değer 0 ise retry yapılmaz. Varsayılan: 0. |
+| **Retry Delay** | Her retry denemesi arasında bekleme stratejisi: **Gecikme Yok** (varsayılan), **Sabit Gecikme** (varsayılan 500 ms) veya **Üstel Bekleme** (başlangıç 500 ms, en fazla 10000 ms, çarpan 2.0). |
 
 ### Retry Akışı
 
 Retry mekanizması şu durumlarda devreye girer:
 
 - **Zaman Aşımı:** Bağlantı zaman aşımı veya okuma zaman aşımı oluştuğunda
-- **Hata Kodları:** Backend'den HTTP hata kodları (4xx, 5xx) döndüğünde
+- **Hata Kodları:** Varsayılan **Hata İşleme Türü**'nde backend'den HTTP durum kodu >= 400 döndüğünde. Hata İşleme Türü durum kodu listesi veya gelişmiş koşul olarak ayarlanmışsa, hata kararı o ayara göre verilir
 - **Bağlantı Hataları:** UnknownHostException, MalformedURLException gibi bağlantı hatalarında
 
 Retry mekanizması şu adımlarla çalışır:
@@ -35,7 +35,7 @@ Retry mekanizması şu adımlarla çalışır:
    - İstek başarısızsa: Retry mekanizmasına geçilir
 
 2. **Retry mekanizması**:
-   - Retry count 0 ise: Hata döndürülür
+   - Retry count 0 ise: Failover kontrolüne geçilir
    - Retry count 0'dan büyükse: Retry döngüsüne girilir
 
 3. **Retry döngüsü** (i = 1'den retry count'a kadar):
@@ -55,12 +55,24 @@ Failover mekanizması basit ve net bir mantıkla çalışır:
 
 1. **İlk İstek:** PRIMARY adreslere gönderilir (load balancing ile)
 2. **Başarısızlık Durumu:** İlk istek başarısız olursa ve `failoverOnlyEnabled=true` ise
-3. **Failover Adresleri:** FAILOVER tipindeki adreslere sırayla istek gönderilir
+3. **Failover Adresleri:** FAILOVER_ONLY (Sadece Failover) tipindeki sağlıklı adreslere sırayla istek gönderilir
 4. **Failover Retry:** Her failover adresi için `failoverRetryCount` kadar deneme yapılır
 
 :::warning
 
 `failoverOnlyEnabled=false` veya `null` ise failover mekanizması devreye girmez. Bu durumda retry mekanizması tamamlandıktan sonra istemciye hata döndürülür.
+
+:::
+
+:::warning
+
+**Hata Durumunda Deneme Sayısı** (Failover Retry Count) varsayılan olarak 0'dır. Bu değer 0 iken **Failover Aktifleştir** açık olsa bile failover adreslerine hiç istek gönderilmez; failover için bu değer en az 1 olmalıdır.
+
+:::
+
+:::note
+
+Sağlıklı (health check ve circuit breaker açısından) hiç PRIMARY adres yoksa ve failover etkinse, PRIMARY adresler denenmeden doğrudan FAILOVER_ONLY adreslerine geçilir.
 
 :::
 
@@ -74,9 +86,9 @@ Failover mekanizması şu adımlarla çalışır:
 
 2. **Failover kontrolü**:
    - `failoverOnlyEnabled = false` veya `null` ise: Hata döndürülür
-   - `failoverOnlyEnabled = true` ise: FAILOVER adreslerine geçilir
+   - `failoverOnlyEnabled = true` ise: FAILOVER_ONLY adreslerine geçilir
 
-3. **FAILOVER adresleri** (sırayla denenir):
+3. **FAILOVER_ONLY adresleri** (sırayla denenir):
    - İlk failover adresi seçilir
    - Failover retry count kadar deneme yapılır
    - İstek başarılıysa: İşlem tamamlanır
@@ -92,7 +104,7 @@ Failover mekanizması şu adımlarla çalışır:
 | Adres Tipi | Açıklama |
 |------------|----------|
 | **PRIMARY** | Normal trafik için kullanılan backend adresleri. İlk istek bu adreslere gönderilir. |
-| **FAILOVER** | Sadece failover durumunda kullanılan adresler. `failoverOnlyEnabled=true` olduğunda devreye girer. |
+| **FAILOVER_ONLY** | Ekranda **Sadece Failover** olarak görünür. Sadece failover durumunda kullanılan adresler. `failoverOnlyEnabled=true` (**Failover Aktifleştir**) olduğunda devreye girer. |
 | **CANARY** | Canary release için kullanılan adresler. Failover mekanizmasına dahil edilmez. |
 | **MIRROR** | Traffic mirroring için kullanılan adresler. Failover mekanizmasına dahil edilmez. |
 
@@ -104,11 +116,11 @@ Failover mekanizması şu adımlarla çalışır:
 
 | Parametre | Açıklama |
 |-----------|----------|
-| **Health Path** | Backend'in health check endpoint'i. Tam URL olarak belirtilmelidir (örn: `https://backend.example.com/health`). |
+| **Health Path** | Backend'in health check endpoint'i. Tam URL (örn: `https://backend.example.com/health`) ya da göreli path (örn: `/health`) olarak girilebilir; göreli path backend adresinin sonuna eklenir. |
 | **Interval (Saniye)** | Health check'lerin ne sıklıkla yapılacağı. Varsayılan: 30 saniye. |
 | **Timeout (Saniye)** | Health check isteğinin zaman aşımı süresi. Varsayılan: 5 saniye. |
 | **Fail Threshold** | Backend'in unhealthy olarak işaretlenmesi için gereken ardışık başarısızlık sayısı. Varsayılan: 3. |
-| **Pass Threshold** | Backend'in healthy olarak işaretlenmesi için gereken ardışık başarı sayısı. Varsayılan: 3. |
+| **Pass Threshold** | Backend'in healthy olarak işaretlenmesi için gereken ardışık başarı sayısı. Varsayılan: 2. |
 
 :::info
 
