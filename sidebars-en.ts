@@ -216,7 +216,6 @@ const sidebars: SidebarsConfig = {
   "versions": [
     "release-notes/overview",
     "release-notes/change-log",
-    "release-notes/release-notes-2027",
     "release-notes/release-notes-2026",
     "release-notes/release-notes-2025",
     "release-notes/release-notes-2024",
@@ -809,7 +808,6 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/database",
         "integrations/connection-management/email",
         "integrations/connection-management/elasticsearch",
-        "integrations/connection-management/external-vault",
         "integrations/connection-management/ldap-active-directory",
         "integrations/connection-management/kafka",
         "integrations/connection-management/rabbitMQ",

@@ -217,7 +217,6 @@ const sidebars: SidebarsConfig = {
   "surumler": [
     "release-notes/genel-bakis",
     "release-notes/degisiklik-gunlugu",
-    "release-notes/surum-notlari-2027",
     "release-notes/surum-notlari-2026",
     "release-notes/surum-notlari-2025",
     "release-notes/surum-notlari-2024",
@@ -810,7 +809,6 @@ const sidebars: SidebarsConfig = {
         "integrations/baglanti-yonetimi/database",
         "integrations/baglanti-yonetimi/email",
         "integrations/baglanti-yonetimi/elasticsearch",
-        "integrations/baglanti-yonetimi/external-vault",
         "integrations/baglanti-yonetimi/ldap-active-directory",
         "integrations/baglanti-yonetimi/kafka",
         "integrations/baglanti-yonetimi/rabbitMQ",
