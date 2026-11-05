@@ -245,10 +245,6 @@ const sidebars: SidebarsConfig = {
             "setup/docker/genel-bakis",
             "setup/docker/all-in-one",
             "setup/docker/docker-compose",
-            "setup/docker/apimanager",
-            "setup/docker/apiworker",
-            "setup/docker/apicache",
-            "setup/docker/apiintegration",
             "setup/docker/apiportal"
           ]
         },
