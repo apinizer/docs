@@ -1,0 +1,186 @@
+---
+title: "Change a Model ID of an LLM Provider"
+description: "Changes the model ID of a model on an AI Gateway LLM provider, moves every reference to the new ID, deploys again what was running, and removes the old model when nothing can still call it."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/llm-providers/{providerName}/rename-model/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+| providerName | string | Yes | LLM provider name |
+
+### Request Body
+
+```json
+{
+  "from": "gpt-4o-mini",
+  "to": "gpt-4o-mini-2026"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| from | string | Yes | The current model ID on the provider |
+| to | string | Yes | The new model ID. It must differ from `from` |
+
+## Response
+
+### Success Response (200 OK)
+
+The call also returns 200 when the old model is kept. Read `completed` and `leftovers` to see the outcome.
+
+```json
+{
+  "completed": true,
+  "moved": [
+    "API Proxy: chat-gateway",
+    "Policy Group: shared-guards",
+    "Limit Plan: engineering-daily"
+  ],
+  "redeployed": [
+    "API Proxy: chat-gateway"
+  ],
+  "leftovers": [],
+  "unreachedEnvironments": [],
+  "warnings": {
+    "refs": ["API Proxy: chat-gateway", "Policy Group: shared-guards"],
+    "drafts": [],
+    "conditionValues": [],
+    "knowledgeBases": [],
+    "limits": ["Limit Plan: engineering-daily"]
+  }
+}
+```
+
+A response where the old model is kept:
+
+```json
+{
+  "completed": false,
+  "moved": [
+    "API Proxy: chat-gateway"
+  ],
+  "redeployed": [
+    "API Proxy: chat-gateway"
+  ],
+  "leftovers": [
+    { "label": "API Proxy: batch-gateway", "reason": "DRAFT" },
+    { "label": "Limit Assignment: team-a", "reason": "LIMIT_TARGET" }
+  ],
+  "unreachedEnvironments": ["test-env"],
+  "warnings": {
+    "refs": ["API Proxy: chat-gateway", "API Proxy: batch-gateway"],
+    "drafts": ["API Proxy: batch-gateway"],
+    "conditionValues": [],
+    "knowledgeBases": [],
+    "limits": ["Limit Assignment: team-a"]
+  }
+}
+```
+
+#### Response Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| completed | boolean | `true` when the new model is listed, all references moved, and the old model is removed. `false` when the old model is kept; `leftovers` says why |
+| moved | array of string | The records that now name the new ID, for example `API Proxy: chat-gateway` |
+| redeployed | array of string | The API proxies and proxy groups that were running and were deployed again |
+| leftovers | array of object | The records that stop the removal of the old model |
+| leftovers[].label | string | The record, for example `API Proxy: batch-gateway` |
+| leftovers[].reason | string | Why the record stops the removal. See the table below |
+| unreachedEnvironments | array of string | Environments that the change could not reach and that do not run the model. They do not stop the change. They appear as failed in Deployment Results |
+| warnings | object | What the change moves, as the Manager screen shows it before the change |
+| warnings.refs | array of string | Where the model is named |
+| warnings.drafts | array of string | API proxies and proxy groups with undeployed changes |
+| warnings.conditionValues | array of string | Conditional routes that compare the `model` text with the old ID. They are not changed |
+| warnings.knowledgeBases | array of string | Knowledge bases that name the model. The stored vectors are not computed again |
+| warnings.limits | array of string | Limit plans and assignments. The running limit window may start again |
+
+#### Leftover Reasons
+
+| Reason | Meaning | What to do |
+|--------|---------|------------|
+| PROVIDER_DEPLOY_FAILED | The provider could not be sent to the gateways | Resolve the deploy error, then repeat the call |
+| DRAFT | The proxy or group has undeployed changes, so it was not deployed. It runs the old ID | Deploy it, then repeat the call |
+| DEPLOY_FAILED | The deploy failed. It runs the old ID | Deploy it again, then repeat the call |
+| LIMIT_TARGET | A limit assignment targets this model. A target cannot change | End the assignment and create one for the new model |
+| LIMIT_NOT_WRITTEN | The limit could not be written, for example a managed plan | Change the limit by hand |
+| NOT_WRITTEN | The record could not be written | Repeat the call. Change the record by hand if it fails again |
+| REFERENCE_REMAINS | The record still names the old ID. For example, an entry of another provider has no model of its own and takes its ID from a target that would move | Change the record by hand |
+
+### Error Response (400 Bad Request)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Model 'gpt-4o-mini' is not listed in this LLM provider"
+}
+```
+
+A `400` also comes when `from` or `to` is empty, when the two IDs are equal, when the provider is not found, and when you lack the permission for an affected asset. In the last case, nothing is written and the message names the assets.
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/llm-providers/openai-primary/rename-model/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"from":"gpt-4o-mini","to":"gpt-4o-mini-2026"}'
+```
+
+## Permissions
+
+- User must have **`AI_DEVELOPMENT` + `MANAGE`** permission in the project
+- User must have the permission to change every affected asset: API proxies, policy groups, global policies, proxy groups, knowledge bases and limit plans, and to deploy the proxies and groups that were running. If one is missing, nothing is written.
+
+## Notes and Warnings
+
+- **Order of steps**: The call adds the new model and deploys the provider, moves the references, deploys again what was running, and removes the old model last.
+- **Repeat is safe**: Repeat the same call after you resolve the `leftovers`. Each step looks at what is stored, and the call finishes the rest. A repeat after the old model was removed only deploys the provider again.
+- **Undeployed changes**: A proxy or group with undeployed changes is not deployed. It runs the old ID until its owner deploys it. Repeat the call after that.
+- **Conditions are not changed**: A condition on the `model` text of the client keeps its value. A client that sends the old ID still matches it and reaches the new ID.
+- **Knowledge bases**: The call changes the model ID that a knowledge base names. It does not compute the stored vectors again.
+- **Name-based**: The provider is addressed by `providerName`. The records in the response are named, never identified by internal ID.
+
+## Related Documentation
+
+- [Update LLM Provider](/api-reference/llm-providers/update-llm-provider) - Update a provider and its model list
+- [Get LLM Provider](/api-reference/llm-providers/get-llm-provider) - Read a provider
+- [Changing a Model ID](/en/ai-gateway/llm-providers#changing-a-model-id) - The same change in the Manager screen
+- [LLM Providers API](/api-reference/llm-providers) - Resource overview and permissions
