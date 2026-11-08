@@ -113,7 +113,7 @@ Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext enviro
 
     ## 2. Yapılandırma
 
-    Zorunlu environment variable'lar (boş bırakılırsa konteyner başlangıçta exit eder):
+    Zorunlu environment variable'lar (imaj bunları başlamadan önce denetlemez; eksik ya da yanlış değer `docker logs` içinde MongoDB bağlantı hatası olarak görünür):
 
     | Değişken | Açıklama |
     | --- | --- |
@@ -143,7 +143,6 @@ Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext enviro
       -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e SPRING_PROFILES_ACTIVE=prod \
-      -v apinizer-apimanager-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/apimanager:${VERSION}
     ```
@@ -171,17 +170,12 @@ Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext enviro
           JAVA_OPTS: "-XX:+ExitOnOutOfMemoryError"
         env_file:
           - ./secrets/apimanager.env       # SPRING_DATA_MONGODB_URI=… içerir
-        volumes:
-          - apimanager-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 90s
-
-    volumes:
-      apimanager-logs:
     ```
 
     Başlatma:
@@ -209,6 +203,8 @@ Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext enviro
     | Durdur | `docker stop apinizer-apimanager` |
     | Shell | `docker exec -it apinizer-apimanager sh` |
 
+    İmajlar logları konteyner konsoluna yazar; log volume'u gerekmez. Logları `docker logs` ile okuyun. Spring Boot ayrıca Manager ve Portal konteynerlerinde `/tmp/spring.log` adlı dönen bir dosyaya yazar; bu dosya kalıcı değildir.
+
     ## 7. Ağ
 
     - **Inbound**: yalnızca `8080/tcp` Portal node'larından ve admin kullanıcılarından erişilebilir olmalı.
@@ -227,9 +223,9 @@ Hassas değerler (MongoDB URI, secret'lar) Docker akışında **plaintext enviro
 
     ## Sorun Giderme
 
-    ### Konteyner `URI is not set` veya `DATABASE is not set` ile exit oluyor
+    ### Konteyner başlangıçta MongoDB bağlantı hatası veriyor
 
-    Zorunlu env var boş. Değerleri verip yeniden oluşturun. `?replicaSet=…&authSource=…` shell quoting'ine dikkat — `-e SPRING_DATA_MONGODB_URI="…"` çift tırnaklı veya env-file ile geçirin.
+    İmaj `SPRING_DATA_MONGODB_URI` ve `SPRING_DATA_MONGODB_DATABASE` değişkenlerini başlamadan önce denetlemez. Biri boş ya da yanlışsa hata `docker logs` içinde görünür. İki değişkeni de verip konteyneri yeniden oluşturun. `?replicaSet=…&authSource=…` shell quoting'ine dikkat — `-e SPRING_DATA_MONGODB_URI="…"` çift tırnaklı veya env-file ile geçirin.
 
     ### Health endpoint `503 OUT_OF_SERVICE` dönüyor
 
@@ -270,6 +266,8 @@ Worker imajı **Ubuntu noble (glibc)** üzerine kuruludur, Alpine **değil** —
     - Boş TCP portları:
       - `8091/tcp` — HTTP gateway listener
       - `8443/tcp` — HTTPS gateway listener (Environment'ta HTTPS açıksa)
+      - `8094/tcp` — gRPC gateway listener (isteğe bağlı; yalnız Environment gRPC protokolünü kullanıyorsa)
+      - `9091/tcp` — Prometheus metrikleri (isteğe bağlı; yalnız `METRICS_ENABLED=true` ise)
 
     ## 1. İmajı çekin
 
@@ -287,12 +285,12 @@ Worker imajı **Ubuntu noble (glibc)** üzerine kuruludur, Alpine **değil** —
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı adı |
     | `APINIZER_ENVIRONMENT_NAME` | Environment adı. Manager UI'daki bir Environment ile **tam eşleşmeli** (case-sensitive). |
-    | `WORKER_TIMEZONE` | Log timestamp'leri için timezone offset (örn. `+03:00`) |
 
     Önerilen:
 
     | Değişken | Varsayılan | Açıklama |
     | --- | --- | --- |
+    | `WORKER_TIMEZONE` | container saat dilimi | Worker JVM'inin saat dilimi: IANA zone ID veya offset (örn. `+03:00`). Önerilir. Boşsa container saat dilimi kullanılır. |
     | `JAVA_OPTS` | boş | Üretim için: `"-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"` |
 
     Opsiyonel (Undertow / gateway tuning):
@@ -321,11 +319,12 @@ Worker imajı **Ubuntu noble (glibc)** üzerine kuruludur, Alpine **değil** —
       -e APINIZER_ENVIRONMENT_NAME='prod-dc1' \
       -e WORKER_TIMEZONE='+03:00' \
       -e JAVA_OPTS='-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true' \
-      -v apinizer-worker-logs:/app/logs \
       --restart unless-stopped \
       --ulimit nofile=1048576:1048576 \
       apinizercloud/worker:${VERSION}
     ```
+
+    İsteğe bağlı portlar: Environment gRPC protokolünü kullanıyorsa `-p 8094:8094`, Prometheus metriklerini açmak için `-e METRICS_ENABLED=true -p 9091:9091` ekleyin.
 
     :::tip
 
@@ -346,6 +345,8 @@ Worker throughput-sensitive: yüksek eşzamanlı bağlantı sayısı için `--ul
         ports:
           - "8091:8091"
           - "8443:8443"
+          # - "8094:8094"   # isteğe bağlı: gRPC gateway (Environment gRPC protokolünü kullanıyorsa)
+          # - "9091:9091"   # isteğe bağlı: Prometheus metrikleri (METRICS_ENABLED=true gerekir)
         environment:
           SPRING_DATA_MONGODB_DATABASE: apinizer
           APINIZER_ENVIRONMENT_NAME: prod-dc1
@@ -359,17 +360,12 @@ Worker throughput-sensitive: yüksek eşzamanlı bağlantı sayısı için `--ul
           nofile:
             soft: 1048576
             hard: 1048576
-        volumes:
-          - worker-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8091 && printf \"GET /apinizer/management/health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q OK <&3'"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 60s
-
-    volumes:
-      worker-logs:
     ```
 
     ## 5. Doğrulama
@@ -402,6 +398,8 @@ Worker throughput-sensitive: yüksek eşzamanlı bağlantı sayısı için `--ul
     | Yeniden başlat | `docker restart apinizer-worker` |
     | Durdur (drain) | `docker stop -t 60 apinizer-worker` |
 
+    İmajlar logları konteyner konsoluna yazar; log volume'u gerekmez. Logları `docker logs` ile okuyun.
+
     :::warning
 
 Cömert stop timeout kullanın (`docker stop -t 60`) — in-flight HTTP / gRPC / WebSocket istekleri drain olabilsin. `-t` vermezseniz Docker 10 saniye sonra SIGKILL atar.
@@ -416,6 +414,8 @@ Cömert stop timeout kullanın (`docker stop -t 60`) — in-flight HTTP / gRPC /
     | --- | --- |
     | `8091` | HTTP gateway |
     | `8443` | HTTPS gateway |
+    | `8094` | gRPC gateway (isteğe bağlı) |
+    | `9091` | Prometheus metrikleri (isteğe bağlı, `METRICS_ENABLED=true`) |
 
     **Outbound**
 
@@ -470,6 +470,7 @@ Standalone modu **otomatik tespit edilir**: konteynerde Kubernetes service-accou
     - Boş TCP portları:
       - `5701/tcp` — Hazelcast wire protocol (member-to-member)
       - `8090/tcp` — Spring Boot HTTP (Worker → Cache REST)
+      - `9091/tcp` — Prometheus metrikleri (isteğe bağlı)
     - Çoklu node cluster için: Cache node'ları arasında çift yönlü `5701/tcp` erişimi
 
     ## 1. İmajı çekin
@@ -487,12 +488,12 @@ Standalone modu **otomatik tespit edilir**: konteynerde Kubernetes service-accou
     | --- | --- |
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı (Manager/Worker ile aynı) |
-    | `CACHE_QUOTA_TIMEZONE` | Quota window timezone offset (örn. `+03:00`). Worker ve Manager ile **birebir eşleşmeli**. |
 
     Önerilen:
 
     | Değişken | Varsayılan | Açıklama |
     | --- | --- | --- |
+    | `CACHE_QUOTA_TIMEZONE` | container saat dilimi | Quota pencerelerinin saat dilimi (örn. `+03:00`). Önerilir; Worker ve Manager ile aynı değeri verin. Boşsa container saat dilimi kullanılır. |
     | `HAZELCAST_CLUSTER_NAME` | `apnz-hz-cluster` | Logical cluster adı. Aynı LAN'da birden fazla bağımsız Apinizer kurulumu varsa override edin. **Cache node'ları arasında uyumsuzluk → sessiz split-brain.** |
     | `APINIZER_CACHE_CLUSTER_MEMBERS` | boş | Çoklu node TCP/IP discovery için comma-separated peer listesi |
     | `SERVER_PORT` | `8090` | Spring Boot HTTP portu |
@@ -508,10 +509,11 @@ Standalone modu **otomatik tespit edilir**: konteynerde Kubernetes service-accou
       -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e CACHE_QUOTA_TIMEZONE='+03:00' \
-      -v apinizer-cache-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/cache:${VERSION}
     ```
+
+    İsteğe bağlı port: Prometheus metriklerini açmak için `-p 9091:9091` ekleyin.
 
     Beklenen boot log'u:
 
@@ -626,6 +628,8 @@ TCP/IP discovery **simetriktir** — host B host A'yı listelemiyorsa, A B'ye er
     | Yeniden başlat | `docker restart apinizer-cache` |
     | Durdur (drain) | `docker stop -t 30 apinizer-cache` |
 
+    İmajlar logları konteyner konsoluna yazar; log volume'u gerekmez. Logları `docker logs` ile okuyun.
+
     ## 8. Kaynak
 
     | Yük | `mem_limit` |
@@ -681,12 +685,12 @@ Integration **MongoDB dışında stateless'tır**: tüm Quartz lock'lar, trigger
     | --- | --- |
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string — Manager'ın kullandığı aynı instance |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB veritabanı adı — Manager DB ile aynı olmalı |
-    | `INTEGRATION_TIMEZONE` | IANA zone id (örn. `Europe/Istanbul`). Manager ve Worker timezone ile eşleşmeli. |
 
     Opsiyonel:
 
     | Değişken | Varsayılan | Açıklama |
     | --- | --- | --- |
+    | `INTEGRATION_TIMEZONE` | container saat dilimi | IANA zone ID (örn. `Europe/Istanbul`). Önerilir; Manager ve Worker ile aynı saat dilimini kullanın. Boşsa container saat dilimi kullanılır. |
     | `SERVER_PORT` | `8092` | Spring Boot HTTP portu |
     | `SPRING_PROFILES_ACTIVE` | `prod` | Üretimde böyle kalsın |
     | `JAVA_OPTS` | boş | Ek JVM bayrakları |
@@ -704,7 +708,6 @@ Integration **MongoDB dışında stateless'tır**: tüm Quartz lock'lar, trigger
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e INTEGRATION_TIMEZONE='Europe/Istanbul' \
       -e SPRING_PROFILES_ACTIVE=prod \
-      -v apinizer-integration-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/integration:${VERSION}
     ```
@@ -743,17 +746,12 @@ Integration **MongoDB dışında stateless'tır**: tüm Quartz lock'lar, trigger
           SPRING_PROFILES_ACTIVE: prod
         env_file:
           - ./secrets/integration.env
-        volumes:
-          - integration-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8092/apinizer/management/health | grep -q OK || exit 1"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 60s
-
-    volumes:
-      integration-logs:
     ```
 
     ## 5. Çoklu node / HA
@@ -797,6 +795,8 @@ Zamana duyarlı scheduled flow'larınız varsa en az iki Integration konteyneri 
     | Log | `docker logs -f apinizer-integration` |
     | Yeniden başlat (Quartz drain) | `docker restart -t 120 apinizer-integration` |
     | Durdur (Quartz drain) | `docker stop -t 120 apinizer-integration` |
+
+    İmajlar logları konteyner konsoluna yazar; log volume'u gerekmez. Logları `docker logs` ile okuyun.
 
     ## 9. Kaynak
 

@@ -113,7 +113,7 @@ Sensitive values (MongoDB URI, secrets) are passed as **plaintext environment va
 
     ## 2. Configure
 
-    Required environment variables (the container exits at startup if they are empty):
+    Required environment variables (the image does not check them before start; a missing or wrong value shows up as a MongoDB connection error in `docker logs`):
 
     | Variable | Description |
     | --- | --- |
@@ -143,7 +143,6 @@ Sensitive values (MongoDB URI, secrets) are passed as **plaintext environment va
       -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e SPRING_PROFILES_ACTIVE=prod \
-      -v apinizer-apimanager-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/apimanager:${VERSION}
     ```
@@ -171,17 +170,12 @@ The `--memory=4g` cap is also read by the JVM tier auto-tuner — without it the
           JAVA_OPTS: "-XX:+ExitOnOutOfMemoryError"
         env_file:
           - ./secrets/apimanager.env       # contains SPRING_DATA_MONGODB_URI=…
-        volumes:
-          - apimanager-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/management/health | grep -q '\"status\":\"UP\"'"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 90s
-
-    volumes:
-      apimanager-logs:
     ```
 
     Start:
@@ -209,6 +203,8 @@ The `--memory=4g` cap is also read by the JVM tier auto-tuner — without it the
     | Stop | `docker stop apinizer-apimanager` |
     | Shell | `docker exec -it apinizer-apimanager sh` |
 
+    The images write logs to the container console, so no log volume is needed. Read them with `docker logs`. Spring Boot also writes a rolling `/tmp/spring.log` inside the Manager and Portal containers; that file is not persisted.
+
     ## 7. Networking
 
     - **Inbound**: only `8080/tcp` needs to be reachable by Portal nodes and admin users.
@@ -227,9 +223,9 @@ The `--memory=4g` cap is also read by the JVM tier auto-tuner — without it the
 
     ## Troubleshooting
 
-    ### Container exits with `URI is not set` or `DATABASE is not set`
+    ### Container fails at start with a MongoDB connection error
 
-    A required env var is empty. Recreate the container with the variables populated. Watch out for shell quoting around `?replicaSet=…&authSource=…` — pass via `-e SPRING_DATA_MONGODB_URI="…"` quoted or via an env-file.
+    The image does not check `SPRING_DATA_MONGODB_URI` and `SPRING_DATA_MONGODB_DATABASE` before start. If one is empty or wrong, the error shows in `docker logs`. Recreate the container with both variables set. Watch out for shell quoting around `?replicaSet=…&authSource=…` — pass via `-e SPRING_DATA_MONGODB_URI="…"` quoted or via an env-file.
 
     ### Health endpoint returns `503 OUT_OF_SERVICE`
 
@@ -270,6 +266,8 @@ The Worker image is built on **Ubuntu noble (glibc)** — *not* Alpine — becau
     - Free TCP ports on the host:
       - `8091/tcp` — HTTP gateway listener
       - `8443/tcp` — HTTPS gateway listener (when enabled in the Environment)
+      - `8094/tcp` — gRPC gateway listener (optional; only when the Environment uses the gRPC communication protocol)
+      - `9091/tcp` — Prometheus metrics (optional; only when `METRICS_ENABLED=true`)
 
     ## 1. Pull the image
 
@@ -287,12 +285,12 @@ The Worker image is built on **Ubuntu noble (glibc)** — *not* Alpine — becau
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB database name |
     | `APINIZER_ENVIRONMENT_NAME` | Environment name. **Must exactly match** an Environment in the Manager UI. |
-    | `WORKER_TIMEZONE` | Timezone offset for log timestamps (e.g. `+03:00`) |
 
     Recommended:
 
     | Variable | Default | Description |
     | --- | --- | --- |
+    | `WORKER_TIMEZONE` | container time zone | Time zone of the Worker JVM: IANA zone ID or offset (e.g. `+03:00`). Recommended. If empty, the container time zone is used. |
     | `JAVA_OPTS` | empty | `"-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true"` for production |
 
     Optional (Undertow / gateway tuning):
@@ -321,11 +319,12 @@ The Worker image is built on **Ubuntu noble (glibc)** — *not* Alpine — becau
       -e APINIZER_ENVIRONMENT_NAME='prod-dc1' \
       -e WORKER_TIMEZONE='+03:00' \
       -e JAVA_OPTS='-server -XX:MaxRAMPercentage=75.0 -Dhttp.maxConnections=4096 -Dlog4j.formatMsgNoLookups=true' \
-      -v apinizer-worker-logs:/app/logs \
       --restart unless-stopped \
       --ulimit nofile=1048576:1048576 \
       apinizercloud/worker:${VERSION}
     ```
+
+    Optional ports: add `-p 8094:8094` if the Environment uses the gRPC protocol, and `-e METRICS_ENABLED=true -p 9091:9091` to expose Prometheus metrics.
 
     :::tip
 
@@ -346,6 +345,8 @@ The Worker is throughput-sensitive: it benefits from `--ulimit nofile=1048576:10
         ports:
           - "8091:8091"
           - "8443:8443"
+          # - "8094:8094"   # optional: gRPC gateway (Environment uses the gRPC protocol)
+          # - "9091:9091"   # optional: Prometheus metrics (needs METRICS_ENABLED=true)
         environment:
           SPRING_DATA_MONGODB_DATABASE: apinizer
           APINIZER_ENVIRONMENT_NAME: prod-dc1
@@ -359,17 +360,12 @@ The Worker is throughput-sensitive: it benefits from `--ulimit nofile=1048576:10
           nofile:
             soft: 1048576
             hard: 1048576
-        volumes:
-          - worker-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8091 && printf \"GET /apinizer/management/health HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q OK <&3'"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 60s
-
-    volumes:
-      worker-logs:
     ```
 
     ## 5. Verify
@@ -402,6 +398,8 @@ The Worker is throughput-sensitive: it benefits from `--ulimit nofile=1048576:10
     | Restart | `docker restart apinizer-worker` |
     | Stop (drain) | `docker stop -t 60 apinizer-worker` |
 
+    The images write logs to the container console, so no log volume is needed. Read them with `docker logs`.
+
     :::warning
 
 Use a generous stop timeout (`docker stop -t 60`) so in-flight HTTP / gRPC / WebSocket requests can drain. Without `-t`, Docker kills with SIGTERM after 10 s.
@@ -416,6 +414,8 @@ Use a generous stop timeout (`docker stop -t 60`) so in-flight HTTP / gRPC / Web
     | --- | --- |
     | `8091` | HTTP gateway |
     | `8443` | HTTPS gateway |
+    | `8094` | gRPC gateway (optional) |
+    | `9091` | Prometheus metrics (optional, `METRICS_ENABLED=true`) |
 
     **Outbound**
 
@@ -470,6 +470,7 @@ Standalone mode is **auto-detected**: when the container does not have a Kuberne
     - Free TCP ports on the host:
       - `5701/tcp` — Hazelcast wire protocol (member-to-member)
       - `8090/tcp` — Spring Boot HTTP (Worker and Manager → Cache REST)
+      - `9091/tcp` — Prometheus metrics (optional)
     - For multi-node clusters: bidirectional reachability between Cache nodes on `5701/tcp`
 
     ## 1. Pull the image
@@ -487,12 +488,12 @@ Standalone mode is **auto-detected**: when the container does not have a Kuberne
     | --- | --- |
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB database (same as Manager/Worker) |
-    | `CACHE_QUOTA_TIMEZONE` | Quota window timezone offset (e.g. `+03:00`). **Must match** Worker and Manager. |
 
     Recommended:
 
     | Variable | Default | Description |
     | --- | --- | --- |
+    | `CACHE_QUOTA_TIMEZONE` | container time zone | Time zone of the quota windows (e.g. `+03:00`). Recommended; set the same value as on the Worker and Manager. If empty, the container time zone is used. |
     | `HAZELCAST_CLUSTER_NAME` | `apnz-hz-cluster` | Logical cluster name. Override only if you run multiple independent Apinizer installs on the same LAN. **Mismatch between Cache nodes → silent split-brain.** |
     | `APINIZER_CACHE_CLUSTER_MEMBERS` | empty | Comma-separated peer list for multi-node TCP/IP discovery |
     | `SERVER_PORT` | `8090` | Spring Boot HTTP port |
@@ -508,10 +509,11 @@ Standalone mode is **auto-detected**: when the container does not have a Kuberne
       -e SPRING_DATA_MONGODB_URI='mongodb://user:pass@mongo:25080/?authSource=admin' \
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e CACHE_QUOTA_TIMEZONE='+03:00' \
-      -v apinizer-cache-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/cache:${VERSION}
     ```
+
+    Optional port: add `-p 9091:9091` to expose Prometheus metrics.
 
     Expected boot log:
 
@@ -626,6 +628,8 @@ TCP/IP discovery is **symmetric** — if host B does not list host A, B will not
     | Restart | `docker restart apinizer-cache` |
     | Stop (drain) | `docker stop -t 30 apinizer-cache` |
 
+    The images write logs to the container console, so no log volume is needed. Read them with `docker logs`.
+
     ## 8. Resources
 
     | Workload | `mem_limit` |
@@ -681,12 +685,12 @@ The Integration is **stateless beyond MongoDB**: every Quartz lock, trigger, cal
     | --- | --- |
     | `SPRING_DATA_MONGODB_URI` | MongoDB connection string — same instance the Manager uses |
     | `SPRING_DATA_MONGODB_DATABASE` | MongoDB database name — must match the Manager database |
-    | `INTEGRATION_TIMEZONE` | IANA zone id (e.g. `Europe/Istanbul`). Must match Manager and Worker timezone. |
 
     Optional:
 
     | Variable | Default | Description |
     | --- | --- | --- |
+    | `INTEGRATION_TIMEZONE` | container time zone | IANA zone ID (e.g. `Europe/Istanbul`). Recommended; use the same time zone as the Manager and Worker. If empty, the container time zone is used. |
     | `SERVER_PORT` | `8092` | Spring Boot HTTP port |
     | `SPRING_PROFILES_ACTIVE` | `prod` | Keep on production hosts |
     | `JAVA_OPTS` | empty | Extra JVM flags |
@@ -704,7 +708,6 @@ The Integration is **stateless beyond MongoDB**: every Quartz lock, trigger, cal
       -e SPRING_DATA_MONGODB_DATABASE='apinizer' \
       -e INTEGRATION_TIMEZONE='Europe/Istanbul' \
       -e SPRING_PROFILES_ACTIVE=prod \
-      -v apinizer-integration-logs:/app/logs \
       --restart unless-stopped \
       apinizercloud/integration:${VERSION}
     ```
@@ -743,17 +746,12 @@ Use `--stop-timeout=120` (or `stop_grace_period: 120s` in compose). Quartz is co
           SPRING_PROFILES_ACTIVE: prod
         env_file:
           - ./secrets/integration.env
-        volumes:
-          - integration-logs:/app/logs
         healthcheck:
           test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8092/apinizer/management/health | grep -q OK || exit 1"]
           interval: 30s
           timeout: 5s
           retries: 5
           start_period: 60s
-
-    volumes:
-      integration-logs:
     ```
 
     ## 5. Multi-node / HA
@@ -797,6 +795,8 @@ Run at least two Integration containers when you have time-critical scheduled fl
     | Logs | `docker logs -f apinizer-integration` |
     | Restart (drain Quartz) | `docker restart -t 120 apinizer-integration` |
     | Stop (drain Quartz) | `docker stop -t 120 apinizer-integration` |
+
+    The images write logs to the container console, so no log volume is needed. Read them with `docker logs`.
 
     ## 9. Resources
 
