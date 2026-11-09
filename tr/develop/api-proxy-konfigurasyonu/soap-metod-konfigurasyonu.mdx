@@ -1,6 +1,6 @@
 ---
 title: "API Proxy SOAP Metod Konfigürasyonu"
-description: "SOAP tipindeki API Proxy'lerde metod güncelleme, silme ve geçici olarak kullanımdan kaldırma işlemlerini gerçekleştirebilirsiniz. SOAP metodlarını test edebilir, WS-Addressing ve önbellek ayarlarını yapılandırabilirsiniz."
+description: "SOAP tipindeki API Proxy'lerde metod güncelleme, silme ve geçici olarak kullanımdan kaldırma işlemlerini gerçekleştirebilirsiniz. SOAP metodlarını test edebilir, WS-Addressing, MTOM ek ve önbellek ayarlarını yapılandırabilirsiniz."
 ---
 
 import {Card, CardGroup} from '@site/src/components/Card';
@@ -89,6 +89,61 @@ SOAP metodlarına ait ayarlar, REST metod ayarlarından farklıdır. Aşağıda 
 | **Capacity** | Önbellekte tutulabilecek maksimum yanıt sayısı. |
 | **TTL** | Önbellek geçerlilik süresi (saniye). |
 | **Cache Null Value** | Boş yanıtların önbelleğe alınmasını sağlar. |
+
+### MTOM / Ekler Ayarları {#mtom-ekler}
+
+Metot ayarları penceresi dört bölümden oluşur: **Genel**, **WS-Addressing**, **MTOM / Ekler** ve **Önbellek**. **MTOM / Ekler** bölümü, MTOM biçimindeki (`multipart/related`; dosya gibi ikili parçaları olan SOAP mesajı) istek ve yanıtları denetler. Bölüm yalnız SOAP tipindeki API Proxy'lerde görünür. Ayarları değiştirmediğiniz sürece davranış öncekiyle aynı kalır.
+
+| Alan | Açıklama |
+|---|---|
+| **İlk ayraçtan önceki metni (MIME preamble) sil** | Varsayılan olarak kapalıdır. Bazı istemciler MTOM gövdesinde ilk ayraçtan önce bir MIME başlık bloğu yazar ve bazı backend'ler bu bloğu okuyamaz. Ayar açıkken ilk ayraçtan önceki metin istekten silinir, kalan byte'lar değişmez. Ayraç gövdenin ilk 32 KB'ında aranır. Ayraç bulunamazsa gövde olduğu gibi gider. Gövdeyi imzalayan istemcilerde bu ayarı açmayın. |
+| **MTOM Zorunluluğu** | Metodun hangi istekleri kabul ettiğini belirler. **Hepsi** (varsayılan): düz SOAP ve MTOM istekler. **MTOM zorunlu**: `multipart/related` olmayan istek ERR-320 hatasını (HTTP 400) alır. **MTOM reddet**: `multipart/related` istek ERR-321 hatasını (HTTP 400) alır. Kontrol, istemcinin isteği üzerinde ve istek politikalarından önce çalışır. |
+| **MTOM İstek İşleme** | Gateway'in istek gövdesine ne yapacağını belirler: **Koru** (varsayılan), **Çöz (MTOM → düz SOAP)** veya **Kodla (düz SOAP → MTOM)**. |
+| **MTOM Yanıt İşleme** | Gateway'in backend yanıt gövdesine ne yapacağını belirler: **Koru** (varsayılan), **Çöz (MTOM → düz SOAP)** veya **Kodla (düz SOAP → MTOM)**. |
+| **Ek Olarak Gönderilecek Elemanlar (XPath, her satıra bir tane)** | **Kodla** için kullanılır. Her satır, Base64 metni ek olacak bir elemanın XPath'idir. En az bir XPath girin. |
+| **En Küçük Ek Boyutu (byte)** | **Kodla** için kullanılır. Çözülmüş boyutu bu değerden küçük olan eleman, mesajın içinde Base64 metin olarak kalır. Boş veya 0: seçilen her eleman ek olur. |
+
+#### Koru
+
+Mesaj olduğu gibi gider. Hiçbir politikanın değiştirmediği gövde orijinal byte'larıyla gönderilir; böylece ikili parçalar bozulmaz. Bu kural sıkıştırılmış (gzip, deflate, br, zstd) gövdeler için de geçerlidir. XSLT, WS-Security veya gövdeyi değiştiren script gibi gövdeyi değiştiren bir politika, gövdeyi metin olarak yazar. Gövdeyi XML olarak okuyan politikalar MTOM paketini okuyamaz. Bu politikalar için **Çöz** seçeneğini seçin.
+
+#### Çöz (MTOM → düz SOAP)
+
+Gateway, MTOM mesajını tek parça düz SOAP mesajına çevirir. Her `xop:Include` elemanını ekin Base64 metniyle değiştirir. Bundan sonra XML Schema Validation, XSLT, WS-Security ve script gibi XML politikaları normal XML okur.
+
+- İstekte Çöz, istek politikalarından önce çalışır. Yanıtta, yanıt politikalarından önce çalışır.
+- Yeni Content-Type, UTF-8 karakter setiyle `text/xml` veya `application/soap+xml` olur.
+- MTOM olmayan mesaj değişmeden devam eder.
+- Gateway paketi doğrular. Her Content-ID benzersiz olmalı, her `cid:` referansı paketteki bir parçayı göstermeli ve kök parça geçerli XML olmalıdır. Sonucun boyutu gateway'in en büyük açılmış gövde boyutu ayarıyla sınırlanır.
+- Doğrulama başarısız olursa istek ERR-322 hatasını (HTTP 400) alır. Backend yanıtı ERR-323 hatasını (HTTP 502) alır.
+- [Maksimum Mesaj Boyutu](/tr/develop/politikalar/max-mesaj) politikasının limitleri istemcinin orijinal isteğinden okunur; bu yüzden Çöz bu limitleri aşmaz.
+
+#### Kodla (düz SOAP → MTOM)
+
+Gateway, düz SOAP mesajında seçilen Base64 elemanlarını MTOM eklerine çevirir.
+
+- İstekte Kodla, istek politikalarından sonra ve gateway isteği backend'e göndermeden önce çalışır. Yanıtta, yanıt politikalarından sonra çalışır.
+- Yalnız metni kanonik Base64 olan (boşluk veya satır sonu içermeyen) ve çözülmüş boyutu en küçük boyuta ulaşan eleman taşınır. Diğer elemanlar mesajın içinde kalır.
+- Zaten MTOM olan mesaj değişmez.
+- Mesaj XML değilse veya bir XPath çalışmazsa gateway loga uyarı yazar ve mesajı değiştirmeden gönderir. Base64 metinli düz SOAP mesajı geçerli bir mesajdır.
+- XPath listesi boşsa veya metotta WS-Addressing açıksa **Kodla** seçeneğini kaydedemezsiniz.
+
+:::note XPath ifadeleri
+
+Bu XPath ifadelerinde namespace önekleri tanımlı değildir. `local-name()` veya `Q{namespace}ad` biçimini kullanın. Örnek: `//*[local-name()='Content']`.
+
+:::
+
+#### Bilinen sınırlar
+
+- **Koru** seçeneğinde, gövdeyi XML olarak okuyan politikalar (XML Schema Validation, XSLT, WS-Security ve gövdeyi değiştiren script) MTOM paketini okuyamaz. Bu metotlarda **Çöz** seçeneğini seçin.
+- **Çöz**, hiçbir `xop:Include` elemanının göstermediği parçayı (SOAP with Attachments parçası) atar.
+- **Koru** seçeneğinde yanıt önbelleğinden gelen yanıt, ekin ikili byte'larını korumaz. Destek 2027.01.0 sürümü için planlanmıştır.
+- WS-Addressing ve MTOM birlikte çalışmaz. WS-Addressing ayarları başlıklarını MTOM paketine ekleyemez ve WS-Addressing açıkken **Kodla** seçeneği kaydedilemez.
+- **Çöz** ve **Kodla**, stream veya indirme olarak gönderilen yanıtta uygulanmaz.
+- Backend'in MTOM yanıtı geçerli değilse istemci ERR-323 metnini alır. HTTP durum kodu backend'in kodu olarak kalır.
+
+Hata kodları için [Hata Mesajları](/tr/admin/system-settings/hata-mesajlari) sayfasına bakın. Trafik logundaki MTOM kayıtları için [API Trafiği](/tr/analytic/api-trafigi) sayfasına bakın.
 
 ## SOAP Metod Silme
 
