@@ -181,13 +181,18 @@ Not every connection type supports every endpoint, and not every provider gets a
 |---|---|---|---|---|
 | OpenAI, Azure OpenAI, Custom OpenAI-Compatible, vLLM, Ollama | ✅ | ✅ | ✅ | ✅ |
 | Mistral, Zhipu (GLM), Qwen (DashScope), Together AI, Google AI Studio | ✅ | ✅ | ✅ | ❌ |
-| DeepSeek, Groq, Moonshot (Kimi), xAI, Fireworks AI, Cerebras, Hugging Face, OpenRouter, Perplexity, NVIDIA NIM | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | ❌ |
+| DeepSeek, Moonshot (Kimi), Fireworks AI, Cerebras, Hugging Face, Perplexity, NVIDIA NIM | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | ❌ |
+| OpenRouter | ✅ | ✅ | ✅ | ❌ |
+| Groq | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | Speech-to-text and text-to-speech only |
+| xAI | ✅ | ✅ | ❌ (chat-only, no first-party embeddings endpoint) | Image generation only |
 | Cohere | ✅ | ✅ | ❌ (not yet — needs a dedicated adapter) | ❌ |
 | Voyage AI | — (embedding-only provider) | — | ✅ | ❌ |
 | Anthropic | ✅ (native translation) | ✅ (native translation) | ❌ (no embeddings endpoint at all — connect a Voyage AI provider instead, see Built-in Templates below) | ❌ |
 | Google Vertex AI (Gemini) | ✅ (native translation) | ✅ (native translation, SSE) | ❌ (not yet) | ❌ |
 | AWS Bedrock — Anthropic models | ✅ (native translation) | ❌ (see warning above) | ❌ (not yet) | ❌ |
 | AWS Bedrock — Titan, Llama, Mistral, Nova | ✅ (forwarded as an OpenAI-shaped body; native translation isn't implemented for these families yet) | ❌ | ❌ (not yet) | ❌ |
+
+The Responses API (`/responses`) is served by OpenAI, Azure OpenAI, Custom OpenAI-Compatible, vLLM, Ollama, Groq, xAI, OpenRouter, Hugging Face and Fireworks AI. Apinizer does not translate between the Responses API and chat completions. A request to another provider type gets an error before any provider call. If your provider serves an endpoint that its type does not offer by default, write its path in the matching path field of the **Endpoint** card on the provider. See [Effective Endpoint Paths](#effective-endpoint-paths).
 
 TypeSafe Jev and TEI Classifier are not in this table. They make decisions only and do not serve chat, embedding, audio, or image traffic. A TypeSafe Jev provider serves the `/systemone` endpoint. See [Decision-Only Providers](#decision-only-providers).
 
@@ -202,13 +207,13 @@ An AI API proxy serves four more client paths. The gateway checks the provider t
 | `POST /images/edits` | Edits an image (multipart upload) | OpenAI, Azure OpenAI, Custom OpenAI-Compatible |
 | `POST /systemone` | Structured decision call | TypeSafe Jev; another provider type only when you add `/systemone` to its **Additional Endpoints** |
 
-These endpoints return one answer. They do not stream. A multipart request (`/images/edits`) does not fail over to another provider.
+`/rerank`, `/images/edits` and `/systemone` return one answer. `/completions` streams when the client asks for it with `"stream": true`; the **Streaming (SSE)** switch of the proxy does not turn it on. A multipart request (`/images/edits`) does not fail over to another provider.
 
 :::warning A file upload is refused when a content policy is active
 A multipart upload cannot be read by a content policy. If the proxy has an active request policy that inspects content (PII Mask, DLP Guard, Topic Guard or Prompt Guard), the gateway refuses an `/images/edits` request, or a request to a multipart additional endpoint, with HTTP 400. The error type is `content_policy_uninspectable` and the error code is **ERR-314**. You can change the message of ERR-314 on the **Error Messages** screen. Audio transcription uploads are not affected. A multipart body with more than one `model` field is also refused with HTTP 400.
 :::
 
-A ❌ on Embeddings or Audio/Image means Apinizer rejects the request before contacting the provider — nothing is attempted, and nothing is billed.
+A ❌ on Embeddings or Audio/Image means Apinizer rejects the request before contacting the provider — nothing is attempted, and nothing is billed. If your provider serves that endpoint anyway, write its path in the matching path field of the **Endpoint** card (see [Effective Endpoint Paths](#effective-endpoint-paths)). A path written on the provider turns the endpoint on.
 
 ### Native Translation vs. Pass-Through
 
@@ -583,25 +588,37 @@ On the **Advanced** tab, the **Endpoint** card holds the paths. Three paths were
 
 ### Additional Endpoints {#additional-endpoints}
 
-Use the **Additional Endpoints** card on the **Advanced** tab when your provider has an endpoint that Apinizer does not know, for example `/score` or a vendor-specific path. Each row has these fields:
+Use the **Additional Endpoints** card on the **Advanced** tab when your provider has an endpoint that Apinizer does not know, for example `/score`, Ollama `/api/tags`, vLLM `/health` or a vendor-specific path. Each row has these fields:
 
 | Field | Description |
 |---|---|
-| **Client Path** | The path suffix that the gateway matches in the client request, for example `/score`. |
-| **Provider Path** | The path sent to the provider. If you leave it empty, the gateway uses the client path. |
+| **Client Path** | The path suffix that the gateway matches in the client request, for example `/score` or `/models/{name}`. |
+| **Provider Path** | The path sent to the provider. If you leave it empty, the gateway uses the client path. It can use the names of the client path, for example `/api/show/{name}`. |
 | **Method** | `POST`, `GET`, `PUT`, `PATCH` or `DELETE`. |
 | **Body** | **JSON**, **Multipart (file upload)** or **No body**. |
+| **Address Base** | **Endpoint** adds the provider path to the endpoint address of the provider, for example `http://vllm:8000/v1` + `/score`. **Server root** adds it to the scheme, host and port of the endpoint, outside its API prefix, for example `http://ollama:11434` + `/api/tags`. The default is **Endpoint**. |
 | **Description** | A free text note. |
 
-The gateway sends the body and the answer as they are. Authentication, model access control, policies, logging and cost still apply.
+The gateway sends the body, the query string and the answer as they are. Authentication, model access control, policies, logging and cost still apply. For the streaming and policy rules of the answer, see [Answers of Additional Endpoints](/en/ai-gateway/routing-and-failover#additional-endpoint-answers).
+
+How a request finds its row:
+
+- The gateway compares the last segments of the client path with the client path of the row, segment by segment. `/score` matches `/v1/score`. It does not match `/v1/rescore`.
+- A segment in curly braces, for example `{name}`, takes any one segment of the request path. The provider path can use the same name. With the row `/models/{name}` → `/api/show/{name}`, the request `GET /v1/models/llama3` goes to `/api/show/llama3`. A value that is a dot segment, or that holds a backslash, an encoded slash, an encoded dot or an encoded null character, is refused with HTTP 400.
+- The method of the request must be the method of the row.
+- If more than one row matches, the row with more segments wins. With the same number of segments, the row with more plain segments wins, for example `/models/list` over `/models/{id}`.
+- A row for a path that the gateway lists as not served, such as `/files`, opens that path. See [Which Paths the Gateway Serves](/en/ai-gateway/routing-and-failover#served-paths).
+- When a provider of the proxy has a row for `GET /models/{name}`, the gateway sends that request to the provider. Without such a row, the gateway answers it from the model list of the proxy.
 
 Apinizer checks each row when you save:
 
-- A path has plain segments only: letters, digits, `.`, `_`, `~` and `-`. A path cannot contain `..`, a query string or a variable.
+- A path has plain segments and names in curly braces. A plain segment can hold letters, digits, `.`, `_`, `~`, `:` and `-`. A path cannot contain `..` or a query string.
+- A path needs at least one plain segment. A path of names alone is refused, because it would match every request.
+- A name is used once in a path. The provider path can use only the names of the client path.
 - You cannot list a path that the gateway already serves as a built-in endpoint.
 - You cannot list the same path and method twice.
 
-A request path that is not a built-in endpoint and is not listed here still goes to chat completions, as in earlier versions.
+A request path that is not a built-in endpoint and is not listed here still goes to chat completions when it is a `POST`, as in earlier versions. Another method gets HTTP 404.
 
 ### Using variables in paths {#variables-in-paths}
 
@@ -620,7 +637,7 @@ where you expected) — identical to how the endpoint address behaves.
 Two more rules apply once `endpoint` + path is turned into the address a request is actually sent to:
 
 - **A query string already embedded in the endpoint moves to the end.** If the endpoint value itself carries a query string, it no longer lands ahead of the path in the final address — the path is inserted first and the original query string is appended after it, so the address stays well-formed instead of being split in two.
-- **Azure OpenAI connections get `api-version` appended automatically.** When **API Version** is filled in, it's added to the request URL as an `api-version` query parameter — unless the URL already contains one, in which case it isn't added a second time. No other provider type gets **API Version** appended to the URL this way; on an Anthropic connection, for example, the same field is sent as the `anthropic-version` header instead and never touches the URL.
+- **Azure OpenAI connections get `api-version` appended automatically.** When **API Version** is filled in, it's added to the request URL as an `api-version` query parameter — unless the URL already contains one, in which case it isn't added a second time. No other provider type gets **API Version** appended to the URL this way; on an Anthropic connection, for example, the same field is sent as the `anthropic-version` header instead and never touches the URL. On an Azure OpenAI v1 endpoint (an endpoint that ends in `/openai/v1`), Apinizer adds it only when the value is `preview` or `latest`. The v1 API rejects a dated version, so the gateway leaves it out.
 
 **AWS Bedrock and Google Vertex AI connections don't go through this endpoint + path combination at all** — their request address is computed entirely by provider-specific code (AWS SigV4 signing for Bedrock; project, location, and an OAuth2 token for Vertex), so neither rule above, nor the paths described earlier in this section, apply to them.
 

@@ -356,7 +356,7 @@ Unset values keep the previous behavior: overwrite the model when the client sen
 :::
 
 :::note Azure OpenAI: "Use the client's model" Is Not Honored
-Gemini, Vertex, and Bedrock take the *effective* model from the gateway and write it into the URL themselves, so attribution and the model that actually answers always agree. An Azure OpenAI deployment endpoint is the exception: the deployment is fixed in the endpoint the operator configured, so the body's `model` field cannot change which model answers — it could only change **attribution**, meaning which model's entry rate limits, quota, semantic cache, cost calculation, and traffic logs are booked against.
+Gemini, Vertex, and Bedrock take the *effective* model from the gateway and write it into the URL themselves, so attribution and the model that actually answers always agree. An Azure OpenAI deployment endpoint (`/openai/deployments/<name>`) is the exception (an Azure v1 endpoint, `/openai/v1`, takes the model in the body like OpenAI and is not affected): the deployment is fixed in the endpoint the operator configured, so the body's `model` field cannot change which model answers — it could only change **attribution**, meaning which model's entry rate limits, quota, semantic cache, cost calculation, and traffic logs are booked against.
 
 Letting the client move that attribution would let it be billed and counted at a cheaper model's rate than the deployment that actually served the call. Apinizer therefore does **not** apply **Use the client's model** on such a provider: the effective model stays the configured routing model and no model check is run against the client's value (the client's model is never called, so an unlisted value is not an error either). The request Apinizer sends to Azure carries the configured routing model in its body, exactly as it does under **Overwrite with the routing model** — what the client sent simply stops being a reason to reject the request. **Overwrite with the routing model**, **Reject the request**, and every option on the "no model field" axis behave exactly as described above.
 :::
@@ -514,7 +514,7 @@ This setting decides what the gateway does with the `stream` value that the clie
 | **Overwrite with the proxy setting** | The **Streaming (SSE)** switch decides for every request. The client's value is replaced. With the switch off, a request with `stream: true` still gets a single response. |
 
 - A new LLM Gateway starts with **Use the client's value**. An existing LLM Gateway that has no stored value works as **Overwrite with the proxy setting**, exactly as before.
-- The setting applies to chat completion and Responses requests. Embedding, audio and image requests keep the proxy setting.
+- The setting applies to chat completion, Responses and additional endpoint requests. Text completions (`/completions`) follow only the client's `stream` field: they stream when the client sends `stream: true`, whatever the proxy setting is. Embedding, audio and image requests keep the proxy setting.
 - A client can switch streaming **on** only when the LLM Gateway has no policy that works only on a single response. If the LLM Gateway has such a policy and the client sends `stream: true`, the proxy setting applies and the client gets a single response. These policies are: Groundedness Guard; MCP Call (LLM) and A2A Call (LLM) on the response side; PII Mask that restores masked values inline, or that decodes encoded content on the response side; Topic Guard and DLP Guard both in buffer mode; and a DLP Guard, Topic Guard or PII Mask policy on the response side that uses an external guardrail engine. A client can always switch streaming **off**.
 - The semantic cache keeps separate entries for streaming and single-response requests when the setting is **Use the client's value**.
 
@@ -557,13 +557,40 @@ sequenceDiagram
 
 A [Limit Plan](/en/ai-gateway/limit-plans) or the [Token Rate Limit policy](/en/ai-gateway/token-quotas) can use the overflow action **Failover**. The request then goes to the backup provider. A backup whose own limit is full is not called; the request moves to the next backup in the chain. If no backup can be called, Apinizer rejects the request with HTTP `429`. It does not send the request to the over-budget primary.
 
+### Failover on Streaming Requests {#stream-failover}
+
+A streaming request moves to the next target in the same cases as a single-response request, but only before the first byte reaches the client:
+
+- The gateway could not open the connection to the target, or the connection was lost before the gateway sent the request.
+- The target answered with an HTTP error that starts a failover, before it sent any content. By default these are 5xx, 408 and 429; the **Trigger status codes** field changes the list.
+
+The gateway does not move to another target in these cases:
+
+- The target already sent the request content and then timed out or dropped the connection. The target may have processed the request, so the gateway does not send it again.
+- The stream has started. The status of the answer cannot change after the first byte.
+
+Other rules for a streaming request:
+
+- The order of targets, the failover strategy, the open circuits, the Limit Plan budgets, the context window and the cost cap work as they do for a single-response request. With **Priority Strict**, the gateway moves to the next target only when it cannot reach the current one.
+- The gateway tries each target once. A stream does not retry on the same target.
+- Each attempt has its own row in the traffic log. See [Traffic Log of an AI Request](#traffic-log).
+- The policies that run when a stream ends run once, after the last attempt.
+- When the last target fails before it starts, the client receives the real HTTP status of that target. A single-response request in the same case receives the exhausted-targets answer (HTTP 502 by default). A known provider error keeps its own text in both cases. See [Errors From the LLM Provider](#provider-errors).
+
+### Circuit Breaker {#circuit-breaker}
+
+The circuit breaker of the AI routing is off by default. You turn it on with the Management API. See [Update AI Routing](/api-reference/api-proxies/settings/update-ai-routing). The breaker is separate for each provider record and endpoint address.
+
+- The breaker counts connection errors and HTTP statuses that start a failover. A client error such as 400 does not open a circuit. A client that sends bad requests cannot open the circuit of a healthy server.
+- The breaker works for single-response and streaming requests. It skips a target whose circuit is open. For a stream, it records the connection and the HTTP status once. It does not record what happens after the first byte.
+
 ### Response Headers When Every Target Fails {#exhausted-headers}
 
-When the primary and all backup targets fail, the client gets an error response. The response status and body follow your Error Message settings. Apinizer also adds these response headers:
+When the primary and all backup targets fail, the client gets an error response. The response status and body follow your Error Message settings. If the last answer of a provider is a known provider error, that error's own text is used instead. See [Errors From the LLM Provider](#provider-errors). Apinizer also adds these response headers:
 
 | Header | Value | When it is sent |
 |---|---|---|
-| `X-Apinizer-AI-Exhausted` | `true` | The chain is exhausted for a non-streaming request. |
+| `X-Apinizer-AI-Exhausted` | `true` | The chain is exhausted for a non-streaming request, or a streaming request has no target left to try because the circuit breaker is open on every remaining target or the cost cap leaves every remaining target out. Other reasons for leaving every target out have their own answers (see What the Client Receives). |
 | `X-Apinizer-AI-Exhausted-Reason` | One reason code (see below) | Together with `X-Apinizer-AI-Exhausted`, when Apinizer could classify the last failed attempt. If it could not, only `X-Apinizer-AI-Exhausted` is sent. |
 
 The reason code describes only the last failed attempt:
@@ -577,16 +604,114 @@ The reason code describes only the last failed attempt:
 | `connection_refused` | The provider refused the connection. |
 | `transport_error` | Another network failure. |
 | `upstream_status` | The provider answered with an error status. |
+| `circuit_open` | Every remaining target of a streaming request was skipped because its circuit is open. |
 
-The headers carry no provider message, address or body. The error body and status that the client receives do not change. Apinizer does not send these two headers for a streaming request.
+The headers carry no provider message, address or body. A streaming request whose last target fails after a request was sent does not get these headers. It gets the real status of that target.
 
 If every attempt to the provider (primary, retries and failover) fails on TLS, the traffic log records the error type `POLICY_ROUTING_SSLHANDSHAKE`. It records `POLICY_ROUTING_SSLEXPIRED` when all attempts failed because the certificate is expired or not yet valid. Apinizer does not record a TLS connection that is cut during the handshake as an SSL error. If the failures are mixed (for example TLS and timeout), the error type stays `POLICY_ROUTING_AI_PROVIDER_EXHAUSTED`. The client response, including the `tls_error` reason header, does not change.
+
+## Errors From the LLM Provider {#provider-errors}
+
+### What the Client Receives
+
+| Situation | The client receives |
+|---|---|
+| A single-response request, and the provider answers with an error that does not start a failover (by default a 4xx other than 408 and 429, such as 400, 401 or 404) | The status and the body of the provider, as the provider sent them |
+| A single-response request, and every target failed | The text of a known provider error if Apinizer recognizes the last answer. Otherwise the exhausted-targets text (HTTP 502 by default, **ERR-250**) |
+| A streaming request, and the last target answers with an HTTP error before its first chunk | The text of a known provider error if Apinizer recognizes the answer. Otherwise the provider-error text (**ERR-251**) with the real status of the provider |
+| A streaming request, and no target is left to try because the circuit breaker is open on every remaining target, or the cost cap (or a mix of the two) leaves every remaining target out | The exhausted-targets text (HTTP 502 by default) |
+| A streaming request, and every target is left out for another reason | The answer of that reason: the context window gives HTTP 400 with **ERR-311**, a stream policy gives HTTP 400 with **ERR-312**, and the budget of a Limit Plan gives HTTP 429 |
+
+The first row has two details. In **Standard** mode, if the client and the provider speak different API families (for example a Messages client and an OpenAI-format server), the body is put in the envelope of the client's family. The text stays the same. In **Pass-through** mode the body is never changed.
+
+### Known Provider Errors {#known-provider-errors}
+
+In the cases where the gateway writes its own text, Apinizer recognizes these provider errors. It reads the HTTP status first and the message of the provider second.
+
+| Provider error | Status | Error code | Error type in the body |
+|---|---|---|---|
+| The request does not fit the context window of the model | 400 | **ERR-311** | `context_length_exceeded` |
+| The model server does not accept tool calls (tool calling is off) | 400 | **ERR-316** | `tools_not_enabled` |
+| The model is not found on the provider | 404 | **ERR-317** | `model_not_found` |
+| The provider refused the key that the gateway holds (401 or 403) | 502 | **ERR-318** | `provider_auth_failed` |
+| The provider rate limit was reached (429) | 429 | **ERR-319** | `rate_limit_exceeded` |
+
+- **ERR-311** also covers a context overflow that the provider reports. Before, only the check of the gateway itself used it. See [Context Window](#context-window).
+- A provider 401 or 403 becomes **ERR-318** only when the gateway holds the provider key. If the client brings its own key, the 401 or 403 of the provider stays as it is.
+- On a 429, Apinizer sends the `Retry-After` header of the provider to the client, so that the client SDK waits and retries.
+- An error that matches none of these keeps the text of ERR-251 or ERR-250.
+- You can change the text, the status code and the error code of each type on the **Error Messages** screen. The default text never contains the message of the provider.
+
+:::warning If you changed ERR-250 or ERR-251
+The new types come as new records. A text that you wrote for ERR-250 or ERR-251 does not apply to them. Write the same text for ERR-316, ERR-317, ERR-318 and ERR-319 if you want it for the recognized errors too. ERR-311 now also covers the context overflow that the provider reports.
+:::
+
+### Error Format of the Client {#error-format}
+
+The default error text is written in the format of the API that the client uses.
+
+| Client | Format |
+|---|---|
+| Anthropic Messages (for example Claude Code) | `{"type":"error","error":{"type":"…","message":"…"}}` |
+| Chat completions and Responses | `{"error":{"code":…,"message":"…","type":"…"}}` |
+
+- For a Messages client, the text of a context overflow starts with `prompt is too long:`. Claude Code recognizes this text.
+- The `code` value in the default text is the status that the answer is sent with. For example, a request to a method that the gateway does not serve gets `405` in `code`.
+- A text that you wrote on the **Error Messages** screen is sent as written. Apinizer does not change its format.
+- When a stream reaches the limit of **Max Response Bytes** or **Max Chunks**, the stream ends with an error event. A Messages client receives it in the Anthropic format.
+
+### Show the Answer of the Provider {#provider-answer-variables}
+
+The default error text hides the message of the provider. If you want the client to see it, use two template variables in the text of an AI error on the **Error Messages** screen:
+
+| Variable | Value |
+|---|---|
+| `#{aiProviderErrorBody}` | The body of the provider's last error answer |
+| `#{aiProviderStatus}` | The HTTP status of that answer |
+
+Both are empty when the provider did not answer, for example after a connection error.
+
+To send the answer of the provider as it is:
+
+1. Open the error type on the **Error Messages** screen. Use the provider-error type (**ERR-251**), the exhausted-targets type (**ERR-250**) or one of the known types above.
+2. In **Error Response Rules**, click **Add Rule**.
+3. Leave the **Status Code** of the rule empty. An empty status means the real status of the provider.
+4. Write `#{aiProviderErrorBody}` as the template.
+5. Save the rule.
+
+The provider-error type (**ERR-251**) is also used for errors that do not come from the provider, for example a gateway configuration error (HTTP 400) or a failed model discovery. The variables are empty for these errors. A rule on ERR-251 with no status and only `#{aiProviderErrorBody}` as the template would therefore send an empty body for them. Give the rule a condition on the status, or use the variable inside a fuller template, for example a text that also names the status.
+
+:::warning The answer of the provider can leak information
+The message of a provider can contain parts of the prompt, internal host names or version details. With these variables, this information reaches the client. The **Error Messages** screen shows the same warning on every AI error. Use the variables only for a provider that you trust.
+:::
+
+### Tokens of an Error Answer
+
+An error answer books only the usage that the provider reported. If the provider reported none, the booked usage is 0, and the token reservation is released. The estimate of the gateway is not booked for an error.
+
+## Traffic Log of an AI Request {#traffic-log}
+
+The detail drawer of a record in the AI traffic view shows each hop of the request. See [Reports and Analytics](/en/ai-gateway/reports).
+
+| Tab | What it shows |
+|---|---|
+| **Request from Client** | The request as the client sent it, with the key of the client. |
+| **Request to Target API** | The request that the gateway really sent to the provider: the address parameters, the headers and the body. A binary body shows the download marker. |
+| **Response from Target API** | The answer of the provider as it came: the status, the headers and the body, before the gateway translated it. For a stream that fails before its first chunk, this is the error answer of the provider. |
+| **Response to Client** | The answer that the client received. |
+
+- The key of the provider is always masked in **Request to Target API**. This covers the header and the query parameter that carry the key of each target, and a user name and password in the address. A target with a different key header, for example in a failover chain, is masked by its own header name.
+- The key that the client sends is visible in **Request from Client**. This is expected.
+- Each attempt of a failover has its own row, with its own request and its own answer. A connection error does not show the answer of the earlier attempt.
+- **Response from Target API** shows the answer of the provider even when the client received a different text, for example the default text of ERR-251. The provider answer is therefore available in the log without the template variables in [Show the Answer of the Provider](#provider-answer-variables).
+- The size of the log body follows the log settings of the connector.
+- The response size of a streaming request is the number of bytes written to the client. The size is also counted when the client disconnects.
 
 ## Load Balancing Across Equal-Priority Primaries
 
 Instead of a single primary connection, you can define a **pool** of equal-priority primaries and let Apinizer choose which one handles each request. This choice is made once, before the request is attempted — a different, earlier stage than the failover chain below, which only activates once the chosen primary has already failed. A pool member that isn't selected still becomes a failover sibling, tried ahead of the explicit Provider Failover Chain if the selected member fails.
 
-Configure the pool from **Target Selection → Load Balancing** on the routing screen. Seven algorithms are available:
+Configure the pool from **Target Selection → Load Balancing** on the routing screen. Seven algorithms are available. The notes after the cards describe how each one behaves.
 
 Every pool entry must name a provider. Its model is optional and inherits the default target's model when left blank — the same rule applies to failover chain entries, and an entry with no model of its own is rejected when there is no default model to inherit. An entry with no provider is skipped by the gateway at request time, so saving one is rejected rather than left on screen as configuration that never runs.
 
@@ -597,22 +722,22 @@ These checks run when you save the routing configuration itself — from the Rou
     Distributes requests evenly across the pool, in turn.
   </Card>
   <Card title="Weighted" icon="scale">
-    Distributes requests proportionally to a configured weight per pool member — a higher weight receives more traffic.
+    Distributes requests proportionally to a configured weight per pool member — a higher weight receives more traffic. The members receive their requests in runs, not alternately.
   </Card>
   <Card title="Random" icon="shuffle">
-    Picks a pool member at random for each request.
+    Picks a pool member at random for each request. The weight of a member does not count.
   </Card>
   <Card title="Least Recently Used (LRU)" icon="history">
-    Sends the request to whichever member has gone the longest without being selected.
+    Sends the request to whichever member has been selected the fewest times. It behaves like Round Robin.
   </Card>
   <Card title="Least Cost" icon="dollar-sign">
-    Picks the member whose model has the lowest price, weighted as input price + output price × the configurable output ratio (default `0.25`, reflecting that a typical chat workload generates far more input tokens than output). A member whose model has no price is excluded from the comparison; if none of the pool has a known price, the pool falls back to Round Robin.
+    Picks the member whose model has the lowest price, weighted as input price + output price × the configurable output ratio (default `0.25`, reflecting that a typical chat workload generates far more input tokens than output). A member whose model has no price is excluded from the comparison; if none of the pool has a known price, the pool falls back to Round Robin. Members with the same lowest price share the traffic in turn.
   </Card>
   <Card title="Least Latency" icon="gauge">
-    Picks the fastest-responding member. The signal is prioritized: real traffic (an exponentially-weighted moving average of measured time-to-first-token for streaming requests, or total latency for unary requests) is used whenever at least one member has a recent sample; otherwise Apinizer falls back to the periodic health-check probe; with no signal at all, it falls back to Round Robin.
+    Picks the member that is expected to answer fastest, from the measurements of real traffic. A streaming request uses the time to the first token. A single-response request uses the time per output token. Each member has its own value for each kind of request. The choice also counts the requests that are running on a member now. The details are in [Least Latency](#least-latency-details). With no measurement for any member, Apinizer uses the periodic health-check result, and then Round Robin.
   </Card>
   <Card title="Prefix Affinity (Sticky)" icon="link">
-    Routes the same conversation to the same pool member every time, to keep that member's prompt/KV cache warm on a self-hosted LLM farm (vLLM, SGLang, Ollama). The affinity key is the value of a configurable request header (default `session_id`) when present, otherwise a hash of the system message plus the first user message; if neither is available, falls back to Round Robin.
+    Routes the same conversation to the same pool member every time, to keep that member's prompt/KV cache warm on a self-hosted LLM farm (vLLM, SGLang, Ollama). The affinity key is the value of a configurable request header (default `session_id`) when present, otherwise a digest of the whole system message plus the first user message; if neither is available, falls back to Round Robin.
   </Card>
 </CardGroup>
 
@@ -626,7 +751,20 @@ A pool member is skipped when its provider is deleted or disabled, or when it ha
 
 When you save the Default Target Group drawer from the screen, the screen clears the older proxy-level single default provider and model (the one shown with the **Single default** badge). The pool is then the only default target, so removing the last member leaves the group empty and routing goes to the failover chain. If a conditional route, pool member, or failover entry has an empty provider or model and used the cleared single default, the save is rejected: give that route or entry its own model. A routing written with APIops can still keep the single default. Then it is used as described above.
 
-**Bounded-load protection**: for Prefix Affinity, if the target member's current load exceeds the pool average by more than the configurable **Bounded Load Factor** (default `1.25`), the request shifts to the next member instead — this keeps one popular conversation from overloading a single pool member.
+**Bounded-load protection**: for Prefix Affinity, if the target member's current load exceeds the pool average by more than the configurable **Bounded Load Factor** (default `1.25`), the request shifts to the next member instead — this keeps one popular conversation from overloading a single pool member. The load is the number of requests that are running on the member now.
+
+### Least Latency {#least-latency-details}
+
+- Apinizer measures each attempt from the moment it starts. The time that the request spent before the attempt, for example in policies or in an earlier attempt, does not count.
+- A member has a separate value for streaming and single-response requests. A request uses the value of its own kind. A value that is older than 10 minutes counts as no measurement.
+- Only a successful attempt gives a measurement. When a member fails to connect or times out, its value rises to the double of the current value, with a lower bound of 60 seconds for a stream and 1 second per token for a single-response request. This penalty ends after 60 seconds. A client that cancels its request does not cause a penalty.
+- The cost of a member is its value multiplied by the number of requests that are running on it, plus one. A fast member with many running requests can cost more than a slower idle member.
+- A member without a measurement gets the same score as the best member. It receives requests, and so it gets its own measurement.
+- Members within 10 percent of the lowest cost are equal. Apinizer picks one of them at random.
+
+### Pool Members and Failover Order
+
+With the **Sequential** and **Conditional** strategies, the members of the pool that were not selected are tried as failover targets before the explicit failover chain. Their order is shuffled for each request, and the weight of a member makes it more likely to come first. The order of the explicit chain does not change. With **Priority Strict**, a pool member is tried only like a backup: when the selected target cannot be reached. An error answer such as 503 is returned to the client.
 
 ### Try the Other Pool Targets {#try-the-other-pool-targets}
 
@@ -639,7 +777,7 @@ The **Try the other pool targets** switch is in the **Error path** (Failover) dr
 
 If the switch was never saved, it is on.
 
-Apinizer moves to the next step in these cases: a connection error, a timeout, a failover status code, or by default a 5xx, 408 or 429 response. This list does not change. A model access denial or a 4xx client error does not move to the next step. This walk applies to non-streaming requests. A streaming request does not move to another target on an error; the client gets the error.
+Apinizer moves to the next step in these cases: a connection error, a timeout, a failover status code, or by default a 5xx, 408 or 429 response. This list does not change. A model access denial or a 4xx client error does not move to the next step. A streaming request follows the same walk until its first byte, with the limits in [Failover on Streaming Requests](#stream-failover).
 
 Retries on the same target are a separate setting.
 
@@ -658,7 +796,7 @@ These strategies control how Apinizer iterates the **Provider Failover Chain** o
     The primary handles all traffic. Backups are used only when the primary cannot be reached (connection failure or open circuit); an error response from the primary is returned as is.
   </Card>
   <Card title="Conditional" icon="git-branch">
-    Also fails over when a successful response is slower than the latency threshold. If no other connection answers faster, the slow response is returned.
+    Also fails over when a successful response is slower than the latency threshold. If no other connection answers faster, the slow response is returned. This strategy can send a second, billed request: the slow but successful answer is kept, and the request goes to the next connection. The client waits for both calls. Choose **Sequential** to return a slow answer at once.
   </Card>
 </CardGroup>
 
@@ -738,7 +876,7 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192
 
 ### Limits on Messages Requests
 
-- **PII masking** on a Messages stream works on text deltas. Thinking deltas and tool input deltas are not masked.
+- **PII masking** and **DLP Guard** on a Messages stream mask the text, the tool call input and the thinking text. See [Tool Calls and Reasoning in Streams](/en/ai-gateway/advanced-guardrails#stream-tool-reasoning).
 - A chat client that reaches a provider whose **Chat Completion Path** is `/messages`, with a PII masking policy and `"stream":true`, is refused with the error type `stream_policy_unsupported` (**ERR-312**).
 - The **context window** action does not run on Messages requests.
 - **Semantic cache** is off for Messages requests.
@@ -755,11 +893,41 @@ The **Request Handling** card on the Routing tab decides how the gateway treats 
 In **Pass-through** mode:
 
 - The client `model` field and `stream` field are sent as they are. The client model settings and the **Streaming (SSE)** switch are not applied.
-- The gateway forwards only the built-in endpoints and the [additional endpoints](/en/ai-gateway/llm-providers#additional-endpoints) of the provider.
+- The path of the request selects the endpoint, as in **Standard** mode. See [Which Paths the Gateway Serves](#served-paths).
 - Failover uses only providers with the same wire format.
 - A streaming chat request works in this mode only on providers that use the OpenAI format.
 
 A new proxy and an existing proxy use **Standard**.
+
+### Which Paths the Gateway Serves {#served-paths}
+
+The path after the address of the proxy selects the endpoint. The rule is the same in **Standard** and **Pass-through** mode. The gateway makes no call to a provider for a request that it does not serve.
+
+| Request | Result |
+|---|---|
+| A built-in endpoint with its method: `POST` to `/chat/completions`, `/completions`, `/messages`, `/messages/count_tokens`, `/embeddings`, `/audio/transcriptions`, `/audio/speech`, `/images/generations`, `/images/edits`, `/rerank`, `/systemone` or `/responses`; `GET` to `/models` | The gateway serves it. |
+| The calls on a stored response: `GET` or `DELETE` on `/responses/{id}`, `GET` on `/responses/{id}/input_items`, `POST` to `/responses/{id}/cancel`, `/responses/compact` or `/responses/input_tokens`; `GET` on `/models/{id}` | The gateway serves it. |
+| A path and method in the **Additional Endpoints** table of the provider | The gateway serves it. See [Additional Endpoints](/en/ai-gateway/llm-providers#additional-endpoints). |
+| Another path with the `POST` method | The request goes to chat completions. |
+| A built-in endpoint with another method, for example `GET` on `/chat/completions` | HTTP 405 with an `Allow` header |
+| Another path with another method, for example `GET` or `DELETE` | HTTP 404 |
+| A known API path that the gateway does not serve: `/files`, `/batches`, `/moderations`, `/uploads`, `/vector_stores`, `/conversations`, `/fine_tuning`, `/assistants`, `/threads`, `/realtime`, `/containers`, `/evals`, `/videos`, `/chatkit`, `/audio/translations`, `/images/variations`, `/chat/completions/{id}` | HTTP 404, also for `POST` |
+
+A row in the **Additional Endpoints** table of the provider opens a path of the last row. The 404 and 405 answers use the error type with code **ERR-315**. You can change its text on the **Error Messages** screen.
+
+A `POST` to the address of the proxy itself goes to chat completions, as before. Another method gets 404.
+
+### Answers of Additional Endpoints {#additional-endpoint-answers}
+
+The gateway sends the body, the query string and the method of the client to the provider and returns the answer as it is. It does not translate the answer.
+
+- **Streaming:** The decision is the same as for chat. In **Standard** mode the [Client "stream" field](#client-stream-field) setting and the **Streaming (SSE)** switch decide. In **Pass-through** mode the `stream` field in the body decides. When the decision is streaming, the gateway relays the answer as it arrives, with the `Content-Type` of the provider. When the decision is single response, the gateway reads the whole answer first, even if the provider streams it.
+- **Response policies:** A proxy with any active response policy, or with a request-side Personal Data Masking policy that restores the masked values in the answer, cannot relay the answer piece by piece, because the format of the answer is not known. The gateway reads the whole answer, and the policies work on it. This applies to text answers such as `application/json`, `text/event-stream`, `application/x-ndjson`, `application/xml` and `text/*`. An answer of a binary type (image, audio, video, `application/pdf`, `application/zip` and `application/octet-stream`) goes to the client unchanged.
+- **Accept header:** The gateway sends the `Accept` header of the client to the provider. Without one, it sends `application/json`.
+- **Limits:** The **Max Response Bytes** limit and the **Stream Idle Timeout** of the [Streaming card](#streaming-card) apply, as for a chat stream.
+- **Errors:** An error answer of the provider goes to the client as it came, in a streaming request too.
+- **Usage:** If the answer contains the usage of the provider, the gateway books it. If a complete answer contains no usage, the gateway books 0, as for a single-response request. If the answer is cut because the client or the provider disconnected, or because a limit was reached, the gateway books an estimate from the request and the bytes it read.
+- **Redirects:** A streaming request follows HTTP redirects, as a chat stream does. A header that carries the provider key under a custom name is not removed when the request follows a redirect. Use a provider address that does not redirect.
 
 :::warning A file upload is refused when a content policy is active
 The gateway refuses a multipart upload with HTTP 400 (error type `content_policy_uninspectable`, error code **ERR-314**) when the proxy has an active request content policy: PII Mask, DLP Guard, Topic Guard or Prompt Guard. The policy cannot read the file. See [Text Completions, Rerank, Image Edit and System One](/en/ai-gateway/llm-providers#more-endpoints).
