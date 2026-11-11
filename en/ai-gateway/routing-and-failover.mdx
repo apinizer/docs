@@ -575,7 +575,7 @@ A streaming request moves to the next target in the same cases as a single-respo
 The gateway does not move to another target in these cases:
 
 - The target already sent the request content and then timed out or dropped the connection. The target may have processed the request, so the gateway does not send it again.
-- The stream has started. The status of the answer cannot change after the first byte.
+- The stream has started. The status of the answer cannot change after the first byte. If the provider breaks the stream after it started, the client receives one error event in its own format (the Anthropic format for a Messages client).
 
 Other rules for a streaming request:
 
@@ -624,17 +624,17 @@ If every attempt to the provider (primary, retries and failover) fails on TLS, t
 
 | Situation | The client receives |
 |---|---|
-| A single-response request, and the provider answers with an error that does not start a failover (by default a 4xx other than 408 and 429, such as 400, 401 or 404) | The status and the body of the provider, as the provider sent them |
+| A single-response request, and the provider answers with an error that does not start a failover (by default a 4xx other than 408 and 429, such as 400, 401 or 404) | The text of a known provider error if Apinizer recognizes the answer. Otherwise the status and the body of the provider, as the provider sent them |
 | A single-response request, and every target failed | The text of a known provider error if Apinizer recognizes the last answer. Otherwise the exhausted-targets text (HTTP 502 by default, **ERR-250**) |
 | A streaming request, and the last target answers with an HTTP error before its first chunk | The text of a known provider error if Apinizer recognizes the answer. Otherwise the provider-error text (**ERR-251**) with the real status of the provider |
 | A streaming request, and no target is left to try because the circuit breaker is open on every remaining target, or the cost cap (or a mix of the two) leaves every remaining target out | The exhausted-targets text (HTTP 502 by default) |
 | A streaming request, and every target is left out for another reason | The answer of that reason: the context window gives HTTP 400 with **ERR-311**, a stream policy gives HTTP 400 with **ERR-312**, and the budget of a Limit Plan gives HTTP 429 |
 
-The first row has two details. In **Standard** mode, if the client and the provider speak different API families (for example a Messages client and an OpenAI-format server), the body is put in the envelope of the client's family. The text stays the same. In **Pass-through** mode the body is never changed.
+The first row has two details. In **Standard** mode, if the client and the provider speak different API families (for example a Messages client and an OpenAI-format server), the body of an error that Apinizer does not recognize is put in the envelope of the client's family. The text stays the same. In **Pass-through** mode and for an additional endpoint, the answer is never changed.
 
 ### Known Provider Errors {#known-provider-errors}
 
-In the cases where the gateway writes its own text, Apinizer recognizes these provider errors. It reads the HTTP status first and the message of the provider second.
+Apinizer recognizes these provider errors on every path except **Pass-through** mode and additional endpoints. It reads the HTTP status first and the message of the provider second.
 
 | Provider error | Status | Error code | Error type in the body |
 |---|---|---|---|
@@ -927,6 +927,13 @@ A row in the **Additional Endpoints** table of the provider opens a path of the 
 
 A `POST` to the address of the proxy itself goes to chat completions, as before. Another method gets 404.
 
+A stored response can be read again with `GET /responses/{id}`:
+
+- With `?stream=true`, the gateway relays the stored response as SSE, as the provider sends it. It books no token usage, because the original request already booked it.
+- If the proxy has an active response policy, for example PII Mask, a request with `?stream=true` is refused with HTTP 400.
+- Without `stream`, the answer is one JSON answer and goes through the response policies.
+- If the stream breaks after it started, the client receives an SSE error event.
+
 ### Answers of Additional Endpoints {#additional-endpoint-answers}
 
 The gateway sends the body, the query string and the method of the client to the provider and returns the answer as it is. It does not translate the answer.
@@ -951,17 +958,28 @@ Below the decision-chain sections, the Routing tab lists an **Endpoints** panel:
 The panel lists every environment defined in the installation, not just the ones the proxy has actually been deployed to. Running **Test** against a row for an environment the proxy hasn't been deployed to returns an error from the gateway — the proxy isn't running there to answer the request.
 :::
 
-Each row also has a **Test** button that opens the [Test Console](/en/develop/test-debug-tools/test-console) pre-filled with a ready-to-send request against that row's address: `POST` to the address with `/v1/chat/completions` appended, and a JSON body containing the proxy's primary route model, a single `ping` user message, and `max_tokens: 16`.
+Each row also has a **Test** button that opens the [Test Console](/en/develop/test-debug-tools/test-console) pre-filled with a ready-to-send `POST` request against that row's address. The request fits the **Model Type** of the routed model:
+
+| Model type | Path | Body |
+|---|---|---|
+| Chat or empty | `/v1/chat/completions` | The model, a single `ping` user message and `max_tokens: 16` |
+| Embedding | `/v1/embeddings` | The model and a sample text |
+| Rerank | `/v1/rerank` | The model, a sample query and two sample documents |
+| Image | `/v1/images/generations` | The model and a sample image prompt |
+| Audio, text to speech | `/v1/audio/speech` | The model, a sample text and the voice `alloy` |
+| Audio, speech to text | `/v1/audio/transcriptions` | A multipart form with the `model` field. Add the audio file in the `file` field |
+
+For an audio model, a model id that contains `tts` or `speech` gets the text-to-speech request. Another audio model gets the speech-to-text request.
 
 :::warning This test call reaches your real LLM provider
 Sending the pre-filled request from a row's **Test** button goes to the actual configured LLM provider, the same way a real client request would — and consumes cost/quota accordingly. `max_tokens` is kept at 16 to keep a test call cheap, but it is not free, and a cost/quota warning is shown both on the panel and in the test dialog.
 :::
 
-The **Develop** tab of an LLM Gateway has the same shortcut. Its address list shows one row per environment, with a **Test Endpoint** button next to the address of every environment the proxy is deployed to. The button opens the same pre-filled request in a **Test Endpoint** dialog and is available to users who may run tests. The dialog carries the same warning: the call goes to the actual LLM provider and consumes cost and quota, and the minimal request (`max_tokens: 16`) is pre-filled to keep it low.
+The **Develop** tab of an LLM Gateway has a similar shortcut. Its address list shows one row per environment, with a **Test Endpoint** button next to the address of every environment the proxy is deployed to. The button always opens the chat request (`/v1/chat/completions` with `ping` and `max_tokens: 16`) in a **Test Endpoint** dialog and is available to users who may run tests. The dialog carries the same warning: the call goes to the actual LLM provider and consumes cost and quota, and the minimal request (`max_tokens: 16`) is pre-filled to keep it low.
 
 The panel is hidden when the proxy is embedded in an A2A agent (its traffic doesn't go through `/v1/chat/completions`), and the **Test** button is disabled unless you hold manage permission on the proxy.
 
-Testing a streaming response, a token/cost summary for the test call, and ready-made request templates for embedding, audio, or image requests are not covered by this panel — use a full API client for those.
+Testing a streaming response and a token/cost summary for the test call are not covered by this panel — use a full API client for those.
 
 ## Next Steps
 
