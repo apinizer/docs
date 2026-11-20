@@ -1,0 +1,247 @@
+---
+title: "Do You Need llm-d When You Have Apinizer?"
+sidebar_label: "Do You Need llm-d When You Have Apinizer?"
+description: "We compared Apinizer AI Gateway's replica selection algorithms with llm-d on the same vLLM replicas and the same conversations: conversation stickiness, load distribution, latency, and where llm-d belongs if you add it."
+---
+
+import {Frame} from '@site/src/components/Frame';
+
+Short answer: in most cases, no. And when you do need it, you don't put llm-d in place of Apinizer; you add it behind Apinizer. This article shows how we reached that answer with numbers, including the one scenario where llm-d comes out ahead.
+
+**At a glance** (measured on Apinizer 2026.10.4):
+
+- **2,970 requests** across 27 runs, **0 errors**.
+- **98–100 out of 100** follow-up turns went to the same replica with Prefix Affinity. llm-d: 96–100.
+- **2.8 s vs. 4.1+ s** p95 time to first token when long and short answers are mixed: llm-d is ahead here, and we explain why below.
+
+Test environment: Kubernetes, 3 + 3 vLLM replicas (llm-d-inference-sim v1.1.0), llm-d v1.0, 2 gateway pods.
+
+:::note
+The charts in this article come from the original Turkish publication; their labels are in Turkish. The captions and the text give the same figures in English.
+:::
+
+A customer that runs its own vLLM servers asked us this week: **"Should we integrate llm-d with Apinizer?"**
+
+It's a fair question. llm-d is an open-source inference scheduler built for Kubernetes. When a model has several vLLM replicas, it decides which replica receives each request. To make that decision, it looks at each replica's queue, its KV-cache usage, and which replica already has the prompt in its cache.
+
+A large share of the cost of serving an LLM comes from that decision. If the next turn of a conversation goes to the replica that holds the previous turn's cache, the first token arrives almost immediately. If it lands on another replica, the whole conversation is computed again from scratch.
+
+Apinizer AI Gateway already has an algorithm for this job: **Prefix Affinity**, routing that keeps a conversation pinned to the same replica. Saying "you don't need it" would have been easy. We chose to measure first.
+
+We sent the same conversations from the same gateway to the same vLLM replicas along two paths. On one path Apinizer chose the replica; on the other, llm-d did. We repeated the measurements across three release candidates. The results in this article were taken with the released **Apinizer 2026.10.4**. One of the results favors llm-d, and we report it as it is.
+
+## They Don't Sit in the Same Layer
+
+"llm-d or Apinizer?" sounds like a natural question, but it is framed wrong. The two products work in different layers.
+
+**llm-d is a replica picker.** It sits in front of a single model pool and answers the question "which of these 3 replicas should this request go to?"
+
+**Apinizer AI Gateway is a control layer.** Authentication, quotas, token budgets, guardrails, PII masking, logging, cost tracking, and model-based routing all happen here. This is also where the provider, the model, and the pool are chosen. Replica selection is only one of this layer's jobs.
+
+So the real question is: **Is the gateway's target pool enough for replica selection, or do you need a separate scheduler behind the pool?** That's what we measured.
+
+## How We Measured
+
+We made the test setup as fair as we could; the only difference between the two paths is who picks the replica.
+
+<Frame caption="Both paths go through the same gateway and the same conditional route rule. Only the target differs.">
+  <img
+    src="/images/articles/apinizer-llm-d/02.png"
+    alt="Test setup: the client calls Apinizer AI Gateway; Path A goes through the target pool directly to 3 vLLM replicas, Path B goes through llm-d (Envoy + EPP) to a second pool of 3 replicas"
+    width="1024"
+    height="636"
+  />
+</Frame>
+
+**Infrastructure.** We set up two separate model pools on Kubernetes, each with 3 vLLM replicas. The replicas run the llm-d project's own vLLM simulator (llm-d-inference-sim v1.1.0) with KV-cache simulation turned on.
+
+Both pools have identical settings:
+
+- At most 4 concurrent requests per replica. We kept capacity tight on purpose; once replicas fill up, the cost of a bad routing decision becomes visible.
+- About 32K tokens of cache per replica.
+- Every prompt token that is not in the cache adds to time to first token (TTFT).
+- A busy replica answers 2× slower.
+
+llm-d runs as v1.0 with its Envoy and EPP (endpoint picker) components. Apinizer AI Gateway 2026.10.4 runs on 2 pods.
+
+**Routing.** Both paths go through the same gateway and the same conditional route rule, which matches the `model` field in the request body:
+
+- **Path A:** The route's target pool lists the 3 replicas, and Apinizer's algorithm picks the replica.
+- **Path B:** The route's only target is llm-d, and llm-d picks the replica.
+
+**Workload.** There are 3 applications, each with a shared 1,200-token system prompt. Each conversation lasts 6 turns: every turn sends a question of about 100 tokens, and an answer of about 200 tokens is added to the history. Conversations are generated from a fixed seed, so exactly the same conversations are sent for every release and every algorithm. The client runs inside the cluster, so internet latency does not affect the measurements.
+
+| Scenario | Conversations | Requests | Characteristics |
+|---|---|---|---|
+| **Heavy** | 24 | 144 | Short answers, high concurrency |
+| **Mixed** | 24 | 144 | 6 conversations ask for long answers; latency is measured on the short-answer requests |
+| **Light** | 9 | 54 | Low concurrency |
+
+**What we measured.**
+
+- **Conversation stickiness:** We counted a follow-up turn as "went to the same replica" if at least 90% of the previous turn's prompt came from the cache. We report it as "how many out of 100 turns." This is not a success rate. Round Robin and Least Latency are not designed for conversation stickiness, so low numbers are expected for them.
+- **Requests per replica:** The gateway doesn't show which replica answered. So we read each replica's own vLLM counter before and after the test.
+- **TTFT p50 and p95:** Measured on the client side.
+
+On the final release we sent **2,970 requests across 27 runs**. **Not a single request returned an error.**
+
+## Result 1: On Par With llm-d for Conversation Stickiness
+
+<Frame caption="Follow-up turns (out of 100) that went to the replica whose cache was already warm. Round Robin reference: 42–52.">
+  <img
+    src="/images/articles/apinizer-llm-d/04.png"
+    alt="Routing accuracy chart: across heavy, mixed, and light load, llm-d sends 96–100, Prefix Affinity (with session_id and without a header) 98–100, and Least Latency 38–53 follow-up turns to the replica with a warm cache"
+    width="1024"
+    height="668"
+  />
+</Frame>
+
+Prefix Affinity works in two ways. If the client sends a `session_id` header, it recognizes the conversation by that ID. If there is no header, it derives a key from the system message and the first user message.
+
+In all three scenarios, with both variants, 98–100 out of 100 follow-up turns went to the replica with the warm cache. For llm-d the number is 96–100.
+
+For comparison: Least Latency, which doesn't aim for stickiness, scored 38–53, and Round Robin 42–52.
+
+**So you don't need a separate scheduler for KV-cache locality.** The gateway's algorithm does the job with the same accuracy.
+
+## Result 2: Load Distribution, Failover, and Algorithm Variety
+
+Stickiness is half the job. The other half is making sure no replica sits idle and none gets overwhelmed.
+
+**Least Latency used the replicas evenly.** Requests per replica were 44 / 48 / 52 under heavy load and 33 / 51 / 60 under mixed load. Under light load, two back-to-back runs gave 9 / 21 / 24 and 15 / 19 / 20; no replica was left idle.
+
+**Prefix Affinity distributes by conversation key.** That's why under mixed load the work split as 18 / 60 / 66 and 24 / 53 / 67. Because llm-d places a new conversation on the least busy replica, it distributed the same load as 48 / 48 / 48. The latency gap in Result 3 comes from exactly this.
+
+**Failover worked without issues.** We added a fourth pool member that refuses connections. With Round Robin, Least Latency, and Prefix Affinity, 48 of 48 requests each returned successfully from the other members; the client didn't see a single error.
+
+**Two routes on the same proxy didn't affect each other.** The first matching route won, and the routes didn't corrupt each other's counters. The Round Robin route split requests evenly as 17 / 18 / 19. The Prefix Affinity route kept 100 of the turns on the same replica.
+
+**Aliased models were tracked correctly too.** When the client sent the model under an alias, the algorithms still saw the traffic. The distributions stayed in the same range as traffic sent with the full name.
+
+On the previous release candidate, we also tested every algorithm separately with about 100 requests each (17 conversations × 6 turns, 3-replica pool). These numbers are not part of the 2,970 requests above.
+
+| Algorithm | Requests per replica | Expected behavior |
+|---|---|---|
+| **Round Robin** | 35 / 34 / 33 | ✓ Even distribution |
+| **LRU** | 35 / 34 / 33 | ✓ Even distribution |
+| **Random** | 28 / 34 / 40 | ✓ Roughly even |
+| **Weighted** (3 : 2 : 1) | 53 / 33 / 16 | ✓ Follows the weights |
+| **Least Cost** (2 cheap, 1 expensive replica) | 51 / 51 / 0 | ✓ No work goes to the expensive replica |
+| **Least Latency** | 41 / 36 / 25 | ✓ No idle replica |
+| **Prefix Affinity** (with and without header) | — | ✓ 100 out of 100 turns on the same replica |
+
+llm-d solves one problem: replica selection. In the gateway, routing by cost, weight, and latency lives in the same place. Rules like "send this model to the expensive replica only when needed" are defined there too.
+
+## Result 3: Latency. Here's the Exception
+
+<Frame caption="p95 time to first token on short-answer requests. Each panel has its own scale.">
+  <img
+    src="/images/articles/apinizer-llm-d/06.png"
+    alt="p95 time to first token: heavy load llm-d 1.19 s, Prefix Affinity with session_id 1.73 s, without header and Least Latency 1.26 s; mixed load llm-d 2.82 s, with session_id 14.87 s, without header 8.54 s, Least Latency 4.07–6.10 s; light load llm-d 0.62 s, with session_id 0.45 s, without header 0.75 s, Least Latency 1.14–1.20 s"
+    width="1024"
+    height="505"
+  />
+</Frame>
+
+**With short answers, there's no difference.**
+
+- In the heavy scenario, llm-d is at 1.19 s; Prefix Affinity (no header) and Least Latency at 1.26 s. Prefix Affinity with `session_id` is at 1.73 s.
+- In the light scenario, the fastest is Prefix Affinity with `session_id`: 0.45 s. llm-d: 0.62 s.
+
+**When long and short answers mix, llm-d is ahead.**
+
+- In the mixed scenario, the p95 for short requests is 2.82 s with llm-d.
+- In Apinizer, Least Latency gives the best result: 4.07–6.10 s across five runs sent with the same name. Across four runs sent with an alias, the range widened to 5.3–14.9 s.
+- With Prefix Affinity, the figure is 8.54 s (no header) and 14.87 s (`session_id`).
+
+The reason is simple:
+
+- llm-d reads every vLLM replica's queue depth and KV usage from vLLM metrics and places a new conversation on an idle replica. **(We've added this capability to our roadmap.)**
+- The gateway can't see inside the replica. It looks at the latency it measures itself and the number of requests currently in flight on the replica. It knows how many requests there are, but not whether they are short or long.
+- With Prefix Affinity, heavy conversations also stay pinned to their replicas. Short requests that land on the same replica wait behind them.
+
+**There's a real trade-off between locality and load balance.** llm-d resolves it by seeing inside the replica.
+
+:::note[Two notes]
+- The p95 in the mixed scenario varies considerably from run to run; the same algorithm under the same load can give 4 seconds in one run and 15 in another. The llm-d and Prefix Affinity values come from a single run. Read them as a directional signal, not a precise measurement.
+- We separately measured the time the gateway itself adds, on the previous release candidate. We ran the same replica selection with and without the gateway; under light load the difference was 0.02–0.08 seconds.
+:::
+
+## How Routing Changed in 2026.10.4
+
+We didn't set this up as a one-off comparison but as part of our release process. After every release candidate, we ran the same conversations on the same setup again. The routing improvements in 2026.10.4 came out of these measurements:
+
+- **Every conversation gets its own key.** When there's no header, the key is now derived from the full system message and the full first user message. Long shared system prompts no longer pile conversations onto a single replica.
+- **Hot-spot protection looks at current load.** Prefix Affinity's load limit now uses the number of requests currently in flight on the replica. A small margin is left so conversations aren't moved needlessly under light load. The limit still looks at request count, not answer length. That's why the latency gap under mixed load remains (Result 3).
+- **Least Latency spreads load evenly.** A replica that hasn't been measured for a while and is sitting idle gets retried now and then. That way an old slow measurement doesn't keep the replica out permanently.
+- **Aliases map to the real model.** Requests that arrive under an alias are measured against the pool member's real model ID. The algorithms see this traffic too.
+
+<Frame caption="2026.10.3 measurements were taken with the client outside the cluster; workload and replica capacity are the same.">
+  <img
+    src="/images/articles/apinizer-llm-d/07.png"
+    alt="2026.10.3 vs. 2026.10.4: Least Latency requests per replica under heavy load move from 0/62/82 to 44/48/52; Prefix Affinity (no header) turns staying on the same replica rise from 48 to 100 under mixed load and from 67 to 100 under light load"
+    width="1024"
+    height="598"
+  />
+</Frame>
+
+The difference is clearest in two places:
+
+- **Least Latency, heavy load:** Requests per replica went from 0 / 62 / 82 to 44 / 48 / 52.
+- **Prefix Affinity (no header):** The number of follow-up turns (out of 100) that stayed on the same replica rose from 48 to 100 under mixed load and from 67 to 100 under light load.
+
+One of the release candidates again left a replica idle under light load (0 / 25 / 29). We caught it before release. The released version distributed the same load as 9 / 21 / 24 and 15 / 19 / 20 in two separate runs.
+
+**Throughout this process, llm-d wasn't a competitor for us; it was the reference we measured our own algorithms against.**
+
+## If You Decide to Add llm-d, Where Does It Go?
+
+In some environments llm-d is a sensible choice. In that case, the right place is behind the gateway:
+
+- **Route target:** On the relevant model's route, the target becomes llm-d, and llm-d picks the replica.
+- **What stays in the gateway:** Authentication, quotas, token budgets, PII masking, logging, and model-based routing.
+- **Failover:** The old direct vLLM addresses remain in the pool as backups. If llm-d goes down, traffic falls back directly to the replicas.
+- **Where to install:** If the gateway already runs on Kubernetes, a separate namespace in the same cluster is enough. No separate server, GPU, or installation on the vLLM servers is needed.
+- **If your vLLMs run outside Kubernetes:** llm-d reads the replica list from a file. Kubernetes-specific automatic discovery is disabled, and removing a dead replica from the list falls to the operations team. Factor this in before you install it.
+
+Putting llm-d **in place of** the gateway, on the other hand, means losing the identity, budget, and governance layer. llm-d doesn't provide that layer, and it doesn't claim to.
+
+## The Verdict
+
+**Apinizer's target pool is enough if:**
+
+- You have a few replicas per model (we measured with 3),
+- Answer lengths are similar (chat, assistants, short generation),
+- You want conversation stickiness: use Prefix Affinity, and even better if your clients can send `session_id`.
+
+**Consider adding llm-d behind the pool if:**
+
+- Long and short answers are mixed (for example, reasoning models) and you have an SLO for tail latency. We measured this.
+
+The following points we did not measure. They are assessments drawn from llm-d's design and our own experience:
+
+- As the replica count goes beyond 4–5, queue visibility becomes more valuable.
+- If different users share long common context (RAG, agents), block-level prefix matching can make a difference.
+- If your vLLMs run on Kubernetes, llm-d's core capabilities, such as automatic discovery and prefill/decode disaggregation, come into play.
+
+Either way, identity, quotas, budgets, guardrails, and model routing stay in the gateway.
+
+## Limits of This Measurement
+
+- **Simulator:** The measurements were taken on llm-d's vLLM simulator, not on real GPUs. The simulator's tokenizer is not a real tokenizer, so llm-d's block-level prefix matching wasn't tested at full strength. Absolute timings vary with hardware. These results show the differences between algorithms and the accuracy of conversation stickiness.
+- **Scale:** The pools we measured had 3 replicas each.
+- **Repetitions:** Most results come from a single run. Stickiness and distribution stayed consistent across repetitions. The p95 under mixed load varies from run to run.
+
+## Closing
+
+There are two ways to answer "do we need a new infrastructure component?": by looking at its popularity, or by measuring. We measured.
+
+The result: we're on par with llm-d for conversation stickiness, and neck and neck under short-answer load. Where long and short answers mix, llm-d is ahead on tail latency; we acknowledge that, and we've shown how to add llm-d behind the gateway when you need it.
+
+We keep repeating these measurements on every release candidate.
+
+Where do you do replica selection for your LLM traffic: in the gateway, in a separate scheduler, or haven't you asked yourself that question yet?
+
+:::tip[Related documentation]
+For target pools, routing algorithms, and Prefix Affinity settings, see [Routing and Failover](/en/ai-gateway/routing-and-failover#target-pool-routes).
+:::

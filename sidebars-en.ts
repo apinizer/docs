@@ -1505,6 +1505,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-export"
           ]
         },
+        "articles/do-you-need-llm-d-when-you-have-apinizer",
         "articles/the-story-of-apinizer-ai-gateway",
         "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",
         "articles/keycloak-dpop-apinizer-jose-validation",
