@@ -11,7 +11,7 @@ API tipi WebSocket ise, bu sekme görünür.
 
 :::warning
 
-**SignalR** gibi düz WebSocket olmayan protokoller, önce HTTP üzerinden negotiate adımı ve kendi el sıkışma formatını gerektirdiği için Apinizer **WebSocket proxy** tipinde çalışmaz; bu tür uygulamalar için **Reverse Proxy** kullanılmalı ve upstream olarak doğrudan hub adresi (örn. `http://host/hub`) tanımlanmalıdır. Apinizer önündeki katmanın (Load Balancer, Ingress, Nginx vb.) WebSocket yükseltme başlıklarını (`Upgrade`, `Connection`) bozmadan arkaya iletmesi de gereklidir.
+**SignalR** istemcisi önce HTTP istekleri (negotiate) gönderir ve Server-Sent Events ya da long polling'e geçebilir. Bu istekleri taşımak için proxy'nin bağlantı ayarlarında **SignalR Uyumluluğu** seçeneğini seçin. Bkz. [SignalR Uyumluluğu](#signalr-uyumlulugu). Apinizer önündeki katmanın (Load Balancer, Ingress, Nginx vb.) WebSocket yükseltme başlıklarını (`Upgrade`, `Connection`) bozmadan arkaya iletmesi de gereklidir.
 
 :::
 
@@ -126,8 +126,64 @@ WebSocket Bağlantı ayarları konfigürasyonu için kullanılan parametreler a�
 | **Maksimum Yeniden Bağlanma Denemesi** *(Auto Reconnect Max Retries)* | İstemcinin bağlantı kesildikten sonra kaç kez yeniden bağlanmayı deneyeceğini belirler. |
 | **Yeniden Bağlanma Gecikmesi** *(Auto Reconnect Retry Delay)* | Her yeniden bağlanma denemesi arasında ne kadar süre bekleneceğini belirler. |
 | **Socket.IO Uyumluluğu** | Proxy'nin Socket.IO istemcilerinin HTTP long-polling isteklerini taşımasını sağlar. Varsayılan olarak kapalıdır. Seçtiğinizde aynı pencerede **Okuma Zaman Aşımı** alanı görünür. Bkz. [Socket.IO Uyumluluğu](#socketio-uyumlulugu). |
+| **SignalR Uyumluluğu** | Proxy'nin ASP.NET Core SignalR istemcilerinin HTTP isteklerini taşımasını sağlar. Varsayılan olarak kapalıdır. Seçtiğinizde aynı pencerede **Okuma Zaman Aşımı** alanı görünür. Bkz. [SignalR Uyumluluğu](#signalr-uyumlulugu). |
+| **İzin Verilen Alt Protokoller** | Proxy'nin kabul ettiği WebSocket alt protokolleri, örneğin `graphql-transport-ws` ya da `mqtt`. Varsayılan olarak boştur. Bkz. [İzin Verilen Alt Protokoller](#izin-verilen-alt-protokoller). |
 
 Bu ayarlar, WebSocket bağlantınızın yönetimi ve hatalara karşı nasıl tepki vereceği konusunda önemli bilgiler sağlar.
+
+## Birden Fazla Routing Adresine Dağıtım {#routing-adresi-dagitimi}
+
+WebSocket proxy'nin iki ya da daha çok PRIMARY routing adresi varsa proxy, istemcileri istemci IP adresine göre adreslere dağıtır. Bu, Socket.IO Uyumluluğu ve SignalR Uyumluluğu açık ya da kapalı olsa da geçerlidir.
+
+* Bir istemci IP adresi her zaman aynı adrese gider. Bu seçimde yönlendirme algoritması ve adres ağırlıkları kullanılmaz.
+* Sağlık kontrolünün sağlıksız gördüğü adres atlanır. Sağlık kontrolü yalnızca Health Monitoring açık ve Health Check Path tanımlı adrese uygulanır.
+* Hiçbir PRIMARY adres sağlıklı değilse bağlantı 1008 koduyla ve `No Healthy Address Found` metniyle kapatılır.
+* İletilen istemci IP başlığı yoksa tek bir kaynak adresin arkasındaki tüm istemciler tek adrese gider. Gateway'in önünde bir load balancer varsa Forwarded IP başlığını açın.
+* Otomatik yeniden bağlanma, bağlantının kullandığı adrese gider.
+* Tek adresli ya da tek PRIMARY adresli proxy o adresi eskisi gibi kullanır. Sağlığına bakılmaz.
+
+Bu davranıştan önce düz WebSocket proxy her bağlantıyı ilk adrese gönderirdi.
+
+## İzin Verilen Alt Protokoller {#izin-verilen-alt-protokoller}
+
+İstemci el sıkışmasında bir ya da daha çok alt protokol önerebilir. Bazı istemciler bir alt protokol ister, örneğin `graphql-transport-ws` ya da `mqtt`. Proxy'nin kabul ettiği alt protokolleri **İzin Verilen Alt Protokoller** alanına girin. Değerleri boşluk ya da virgülle ayırın. Boş ve tekrarlanan değerler atılır.
+
+* Gateway, istemcinin önerisinde listede bulunan ilk değerle istemciye yanıt verir. Backend'e yalnızca bu değeri önerir. Karşılaştırma büyük/küçük harfe duyarlıdır.
+* Liste boşsa, istemci öneri yapmamışsa ya da önerilen hiçbir değer listede yoksa alt protokol seçilmez.
+* Backend, gateway'in istemciye bildirdiği alt protokolden farklı birini seçerse ya da hiçbirini seçmezse istemci bağlantısı 1002 (protokol hatası) koduyla kapatılır. İstemcinin hiçbir mesajı backend'e ulaşmaz. Bağlantının trafik kaydı 1002 durumlu bir hatadır.
+
+APIops WebSocket ayarları çağrısında `allowedSubprotocols` alanı bulunur.
+
+## Boşta Kalma Süresi
+
+Boşta kalma süresi (`tuneWebsocketIdleTimeout`), yükseltilmiş WebSocket bağlantısına uygulanır. İki yönden birinde giden her mesaj (heartbeat dahil) süreyi yeniden başlatır. Yalnızca veri alan istemci, backend gönderdiği sürece bağlı kalır. İki tarafın da göndermediği bağlantı, süre dolunca kapanır. Gateway ping göndermez.
+
+Süreyi uygulama protokolünün heartbeat aralığından uzun tutun. 60 saniyelik varsayılan değer, Socket.IO 3 ve 4 varsayılanlarından (ping aralığı 25 saniye, ping zaman aşımı 20 saniye) uzundur. Bkz. [Gateway Ayarları](/tr/setup/gateway-ayarlari).
+
+## İstemciye Giden Kapatma Kodları
+
+Backend bağlantısı, kapatma çerçevesinde gönderilemeyen bir kodla biterse istemci, alabileceği bir kod alır. 1006 kodu (backend bağlantısı kapatma çerçevesi olmadan koptu) istemciye 1011 olarak gider. 1005 kodu 1000 olarak gider. 1015 kodu ile 1000-1003, 1007-1014 ve 3000-4999 aralıkları dışındaki her kod 1011 olarak gider. Backend tarafındaki trafik kaydı backend'in kodunu korur. Diğer kodlar önceki gibi gider.
+
+## SignalR Uyumluluğu {#signalr-uyumlulugu}
+
+ASP.NET Core SignalR istemcisi önce HTTP negotiate isteği gönderir ve Server-Sent Events (SSE) ya da long polling'e geçebilir. Proxy'nin istemcileri SignalR istemcisiyse bağlantı ayarları penceresinde **SignalR Uyumluluğu** seçeneğini seçin. Ayar varsayılan olarak kapalıdır. Proxy'nin export, import, deploy ve denetim verisinin parçasıdır.
+
+Ayar açıkken proxy şu istekleri de backend'e taşır:
+
+* Negotiate isteği: `/negotiate` ile biten yolda `POST`; CORS ön isteği için `OPTIONS`.
+* Bir bağlantının SSE, long polling, gönderme (`POST`) ve kapatma (`DELETE`) istekleri. Bu istekler `id=<token>` sorgusunu taşır.
+
+Bu istekler, Socket.IO polling isteklerinin yolundan geçer: proxy'nin istek ve yanıt politikaları ile Rate Limit Control List kuralları her biri için çalışır ve her biri bir trafik kaydı yazar. `PUT`, `id` içermeyen `GET` ve ayar kapalıyken her istek HTTP 404 ve `ERR-006` alır. Bu ayardan önce her SignalR HTTP isteği bu yanıtı alırdı.
+
+* SSE isteği (`Accept: text/event-stream` ile `GET`), backend'in gönderdiği gibi akıtılır. Akışın okuma zaman aşımı yoktur. Trafik kaydı akış bitince yazılır. Yanıt politikası akışı ancak gönderildikten sonra görür.
+* Diğer istekler tamponlanır ve backend'i **Okuma Zaman Aşımı** süresine kadar bekler. **Okuma Zaman Aşımı** alanı pencerede görünür. SignalR, long poll'u varsayılan olarak 90 saniyeye kadar tutar. **Okuma Zaman Aşımı** değerini bunun üzerinde tutun, örneğin 120 saniye; aksi hâlde bekleyen poll zaman aşımı hatasıyla biter.
+* Birden fazla PRIMARY adres varsa istemci IP adresi; negotiate isteğinin, WebSocket bağlantısının ve HTTP isteklerinin backend'ini seçer. Bağlantı token'ı, onu veren backend'e ulaşır. Bkz. [Birden Fazla Routing Adresine Dağıtım](#routing-adresi-dagitimi).
+
+APIops WebSocket ayarları çağrısında `signalREnabled` alanı bulunur. Bu alanı içermeyen çağrı kayıtlı değeri korur.
+
+### WebSocket Aktarımını Tercih Edin
+
+Apinizer üzerinden SignalR'ın WebSocket aktarımını tercih edin. Açık her SSE akışı ve bekleyen her long polling isteği, açık kaldığı sürece bir gateway worker thread'i tutar. Açık WebSocket bağlantısı thread tutmaz. İstemciler SSE ya da long polling kullanıyorsa worker thread sayısını (`tuneWorkerThreads`), olağan trafiğe ek olarak aynı anda bu şekilde bağlı istemci sayısına göre ayarlayın. Bkz. [Gateway Ayarları](/tr/setup/gateway-ayarlari).
 
 ## Socket.IO Uyumluluğu {#socketio-uyumlulugu}
 
@@ -162,7 +218,7 @@ Socket.IO Uyumluluğu açıkken ve proxy'nin birden fazla PRIMARY routing adresi
 
 * Sağlık süzgeci yalnız Sağlık İzleme açık ve Sağlık Kontrol Yolu dolu olan adreste çalışır. Proxy yolu, adresin `http` veya `https` karşılığına ekleyerek sorar.
 * Hiçbir PRIMARY adres sağlıklı değilse istek REST API proxy'deki gibi reddedilir: HTTP 503 ve `ERR-003`. WebSocket el sıkışması 1008 koduyla kapanır.
-* Tek PRIMARY adres varsa ya da Socket.IO Uyumluluğu kapalıysa proxy eskisi gibi ilk adresi kullanır.
+* Tek PRIMARY adres varsa proxy o adresi eskisi gibi kullanır. Socket.IO Uyumluluğu kapalıyken proxy istemcileri aynı şekilde dağıtır; bkz. [Birden Fazla Routing Adresine Dağıtım](#routing-adresi-dagitimi).
 
 İstemci IP'si oturum içinde değişirse (örneğin NAT veya mobil ağ) ya da bir adresin sağlık durumu değişirse oturum başka adrese geçer ve istemci yeniden bağlanır. Gateway'in önünde yük dengeleyici varsa Forwarded IP başlığını açın. Açmazsanız tüm istemciler tek adrese gider.
 
