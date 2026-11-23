@@ -19,9 +19,17 @@ export function useSingleLine(): SingleLineState | null {
   return useContext(SingleLineContext);
 }
 
-/** Pages where the extra code block buttons are active. */
+/**
+ * Pages where the extra code block buttons (single-line + always-visible word
+ * wrap) are active. Add a pattern here to enable them on another page.
+ */
+const SINGLE_LINE_PAGES: RegExp[] = [
+  /\/setup\/kubernetes\/?$/,
+  /\/setup\/mongodb\/ubuntu-mongodb\/?$/,
+];
+
 export function isSingleLinePage(pathname: string): boolean {
-  return /\/setup\/kubernetes\/?$/.test(pathname);
+  return SINGLE_LINE_PAGES.some((re) => re.test(pathname));
 }
 
 /** True when the code is a shell snippet that uses `\` line continuations. */
