@@ -1505,6 +1505,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-export"
           ]
         },
+        "articles/its-name-is-a2a-its-nature-is-soa",
         "articles/do-you-need-llm-d-when-you-have-apinizer",
         "articles/the-story-of-apinizer-ai-gateway",
         "articles/seeing-the-same-request-twice-from-mtls-to-dpop-from-retry-to-idempotency",

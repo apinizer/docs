@@ -1505,6 +1505,7 @@ const sidebars: SidebarsConfig = {
             "articles/apinizer-gateway-native-opentelemetry-disa-aktarim"
           ]
         },
+        "articles/adi-a2a-kendisi-soa",
         "articles/apinizer-varken-llm-d-ihtiyaciniz-var-mi",
         "articles/apinizer-ai-gatewayin-hikayesi",
         "articles/ayni-istegi-iki-kez-gorunce-mtls-ten-dpop-a-retry-dan-idempotency-ye",
