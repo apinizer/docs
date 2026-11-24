@@ -26,6 +26,10 @@ export function useSingleLine(): SingleLineState | null {
 const SINGLE_LINE_PAGES: RegExp[] = [
   /\/setup\/kubernetes\/?$/,
   /\/setup\/mongodb\/ubuntu-mongodb\/?$/,
+  /\/setup\/(kaldirma|uninstall)\/?$/,
+  /\/setup\/(sorun-giderme|troubleshooting)\/?$/,
+  /\/upgrade\/(apinizer-surum-yukseltme|apinizer-version-upgrade)\/?$/,
+  /\/upgrade\/(mongodb-surum-yukseltme|mongodb-version-upgrade)\/?$/,
 ];
 
 export function isSingleLinePage(pathname: string): boolean {
