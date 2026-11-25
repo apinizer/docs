@@ -762,9 +762,28 @@ const sidebars: SidebarsConfig = {
                 "mock-apis/crud",
                 "mock-apis/crud/list-mock-apis",
                 "mock-apis/crud/get-mock-api",
-                "mock-apis/crud/save-mock-api"
+                "mock-apis/crud/save-mock-api",
+                "mock-apis/crud/delete-mock-api"
               ]
             }
+          ]
+        },
+        {
+          "type": "category",
+          "label": "DB-2-API",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "db2apis/delete-db2api"
+          ]
+        },
+        {
+          "type": "category",
+          "label": "Script-2-API",
+          "collapsed": true,
+          "collapsible": true,
+          "items": [
+            "script2apis/delete-script2api"
           ]
         },
         {
@@ -904,7 +923,7 @@ const sidebars: SidebarsConfig = {
           "collapsible": true,
           "items": [
             "ai-gateway",
-            { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/rename-llm-provider-model", "llm-providers/test-llm-provider-connection"] },
+            { "type": "category", "label": "LLM Providers", "collapsed": true, "collapsible": true, "items": ["llm-providers", "llm-providers/list-llm-providers", "llm-providers/get-llm-provider", "llm-providers/create-llm-provider", "llm-providers/update-llm-provider", "llm-providers/delete-llm-provider", "llm-providers/rename-llm-provider-model", "llm-providers/test-llm-provider-connection", "llm-providers/discover-llm-provider-models", "llm-providers/test-llm-provider-inference"] },
             { "type": "category", "label": "VectorDB Connections", "collapsed": true, "collapsible": true, "items": ["vector-dbs", "vector-dbs/list-vector-dbs", "vector-dbs/get-vector-db", "vector-dbs/create-vector-db", "vector-dbs/update-vector-db", "vector-dbs/delete-vector-db", "vector-dbs/test-vector-db-connection"] },
             { "type": "category", "label": "Knowledge Bases", "collapsed": true, "collapsible": true, "items": ["knowledge-bases", "knowledge-bases/list-knowledge-bases", "knowledge-bases/get-knowledge-base", "knowledge-bases/create-knowledge-base", "knowledge-bases/update-knowledge-base", "knowledge-bases/delete-knowledge-base", "knowledge-bases/reindex-knowledge-base", { "type": "category", "label": "Documents", "collapsed": true, "collapsible": true, "items": ["knowledge-bases/documents/upload-document", "knowledge-bases/documents/list-documents", "knowledge-bases/documents/get-document", "knowledge-bases/documents/delete-document", "knowledge-bases/reindex-knowledge-document"] }] },
             "limit-plans",
@@ -934,6 +953,7 @@ const sidebars: SidebarsConfig = {
             "reports",
             "reports/api-report",
             "reports/organization-api-data-model-access-report",
+            "reports/consumer-access-report",
             "reports/inactive-clients-report",
             "reports/inactive-endpoints-report"
           ]

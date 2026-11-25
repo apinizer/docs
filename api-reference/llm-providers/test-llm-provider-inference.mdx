@@ -1,0 +1,188 @@
+---
+title: "Test LLM Provider Inference"
+description: "Sends one real call with a sample input to a model of an AI Gateway LLM provider and returns the outcome. The call proves the adapter, the request path and the model ID together, and it saves nothing."
+---
+
+## Endpoint
+
+```
+POST /apiops/projects/{projectName}/llm-providers/{providerName}/test-inference/
+```
+
+## Authentication
+
+Requires a Personal API Access Token.
+
+### Header
+
+```
+Authorization: Bearer YOUR_TOKEN
+```
+
+## Request
+
+### Headers
+
+| Header | Value | Required |
+|--------|-------|----------|
+| Authorization | Bearer \{token\} | Yes |
+| Content-Type | application/json | Yes |
+
+### Path Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| projectName | string | Yes | Project name |
+| providerName | string | Yes | LLM provider name (the provider must already exist) |
+
+### Request Body
+
+```json
+{
+  "modelId": "deepseek-chat",
+  "prompt": "Reply with the single word: OK",
+  "maxTokens": 32,
+  "stream": false,
+  "timeoutSeconds": 30
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| modelId | string | Yes | Model to call. It is matched against the `supportedModels` of the provider as the gateway matches it. An ID without a tag matches its one tagged row |
+| prompt | string | No | Sample input. Default: `Reply with the single word: OK` |
+| maxTokens | integer | No | Maximum output tokens |
+| stream | boolean | No | `true` tests a streamed answer |
+| timeoutSeconds | integer | No | Wait time for the answer, 5 to 300. Default 30 |
+| operation | string | No | `CHAT`, `EMBEDDING`, `RERANK`, `TTS`, `STT` or `IMAGE`. Default: from the modality of the model |
+| voice | string | No | Voice of a `TTS` call |
+| config | object | No | Provider override for this call. It replaces the whole stored connection. See the credential rule below |
+
+The call runs from the API Manager. It does not go through a gateway worker.
+
+#### Credentials in `config` {#credentials-in-config}
+
+A secret field that `config` leaves out (`apiKey`, `apiSecret`, `serviceAccountJson`) is taken from the stored provider only when the connection target is unchanged. When you change the endpoint, the authentication scheme, the header name, the provider type or the deployment type, send the credential again. Send `apiKey`, and also `"apiSecret": ""` and `"serviceAccountJson": ""` for the secrets that the provider does not use. Otherwise the call answers `400` with `credentialReentryRequired`. A `config` that leaves out `onlyListedModels` keeps the stored value.
+
+#### Which calls are refused
+
+The call answers `400` before any request goes to the provider when:
+
+- `modelId` is empty.
+- `modelId` matches more than one model. Send the exact ID.
+- The model is disabled.
+- The model is not in the list of the provider and the provider has `onlyListedModels` set to `true`.
+
+When the model is not in the list and `onlyListedModels` is `false`, the call goes to the provider as a gateway request does. You can test a model that you found with [Discover LLM Provider Models](/api-reference/llm-providers/discover-llm-provider-models), then add it.
+
+## Response
+
+### Success Response (200 OK)
+
+The example is shortened. The text in `detail` varies.
+
+```json
+{
+  "status": "SUCCESS",
+  "resultCount": 1,
+  "resultList": [
+    {
+      "success": true,
+      "detail": "OK",
+      "environmentName": "apimanager",
+      "modelId": "deepseek-chat",
+      "httpStatus": 200,
+      "latencyMs": 842,
+      "streamed": false,
+      "promptTokens": 14,
+      "completionTokens": 2,
+      "priced": false,
+      "operation": "CHAT",
+      "responseSnippet": "OK"
+    }
+  ]
+}
+```
+
+#### Result Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| success | boolean | `true` when the provider accepted the call |
+| detail | string | Short description of the outcome, or the reason of a failure |
+| environmentName | string | Always `apimanager` |
+| modelId | string | Model that was called |
+| httpStatus | integer | HTTP status of the provider answer. `0` means a network error |
+| latencyMs | integer | Duration of the call in milliseconds |
+| firstByteMs | integer | Time to the first byte, for a streamed call |
+| streamed | boolean | Whether the call was streamed |
+| promptTokens | integer | Input tokens, when the provider reports them |
+| completionTokens | integer | Output tokens, when the provider reports them |
+| priced | boolean | Whether the model has a price |
+| costUsd | number | Cost of the call in USD, when the model has a price |
+| wireProtocol | string | Protocol that the call used |
+| requestUrl | string | Address of the call. Masked |
+| responseSnippet | string | Start of the answer. Masked |
+| operation | string | The operation that was tested |
+| contentType, payloadBase64, payloadBytes, payloadTruncated | | Answer of a `TTS` call: the audio |
+| imageUrl | string | Answer of an `IMAGE` call |
+| embeddingDimensions | integer | Answer of an `EMBEDDING` call |
+
+Fields that do not apply to the operation are absent or `null`.
+
+A call that the provider refused or could not answer is still `200 OK`, with `success: false`, the reason in `detail` and in `resultMessage`, and the provider status in `httpStatus`. Check `success`.
+
+### Error Response (400 Bad Request)
+
+The model is not in the list of a provider that allows only listed models:
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Model (id: gpt-x) is not listed on LLM provider (name: deepseek-primary), which allows only listed models (onlyListedModels=true)! Enabled models: deepseek-chat. Add it to supportedModels first; discover-models lists the models the provider serves."
+}
+```
+
+The connection target changed and a secret was left out:
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Connection target changed — re-enter the credential before testing (credentialReentryRequired)"
+}
+```
+
+### Error Response (401 Unauthorized)
+
+```json
+{
+  "status": "FAILURE",
+  "resultMessage": "Token is not valid!"
+}
+```
+
+## cURL Example
+
+```bash
+curl -X POST \
+  "https://demo.apinizer.com/apiops/projects/MyProject/llm-providers/deepseek-primary/test-inference/" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"modelId": "deepseek-chat"}'
+```
+
+## Permissions
+
+- User must have **`AI_DEVELOPMENT` + `MANAGE`** permission in the project
+
+## Notes and Warnings
+
+- **Real call**: The provider handles the call like any other request. [Test LLM Provider Connection](/api-reference/llm-providers/test-llm-provider-connection) proves only the address and the credential.
+- **Nothing is saved**: The tested configuration is not stored.
+- **No secret in the answer**: The address and the answer snippet are masked, and the response never contains a credential.
+
+## Related Documentation
+
+- [Discover LLM Provider Models](/api-reference/llm-providers/discover-llm-provider-models) - List the models that the provider serves
+- [Test LLM Provider Connection](/api-reference/llm-providers/test-llm-provider-connection) - Check the address and the credential
+- [LLM Providers API](/api-reference/llm-providers) - Resource overview
