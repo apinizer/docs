@@ -1,6 +1,6 @@
 ---
 title: "TCP Connectivity Test"
-description: "You can test TCP and TLS/TCP connectivity from your Gateway Runtime environments to target servers, and monitor network reachability and DNS resolution step by step."
+description: "You can test TCP, TLS and HTTP connectivity from your Gateway Runtime environments to target servers. You can see which stage a connection is cut at, and which device on the path (WAF, load balancer, proxy) caused it."
 ---
 
 ## Overview
@@ -31,13 +31,35 @@ The environment from which the test is performed is selected in the **Environmen
 | **Host / IP Address** | The hostname or IP address of the target server. |
 | **Port** | The target server's port number (1–65535). |
 | **Protocol** | Connection protocol: **TCP** (plain connection) or **TLS/TCP** (encrypted connection). |
+| **HTTP path** | Optional. When set, one GET request is sent on the same connection after the TCP/TLS stage. |
+| **Run on all nodes** | Runs the same test from every gateway node of the selected environment. |
 | **Description** | A short note describing the purpose of the test. Saved to the audit log. |
 
-:::tip
+:::warning
 
-When **TLS/TCP** protocol is selected, the target server's certificate is validated. If the certificate cannot be verified, the connection is rejected.
+The **TLS/TCP** protocol performs a real TLS handshake. A target whose certificate is not trusted used to appear as successful. It now ends with "cut at the TLS stage".
 
 :::
+
+### HTTP Path
+
+The HTTP stage runs only when you enter an **HTTP path**.
+
+- The test sends one GET request on the same connection.
+- The request has no custom header and no body.
+- The test does not follow redirects.
+- The test adds `/` at the start if the path has none.
+- The test rejects a path that contains a space or a control character.
+
+The result shows the status line, the response headers and a body excerpt of at most 2 KB. The values of `Set-Cookie` headers are masked as `***`. The test skips 1xx interim responses.
+
+### Run on All Nodes
+
+Turn on **Run on all nodes** to run the test from every gateway node of the selected environment. Each node shows its own result card. Use this to find a firewall rule that is missing for only one node.
+
+### Test Duration
+
+The whole test takes at most 50 seconds, all stages together.
 
 ### Running the Test
 
@@ -47,26 +69,73 @@ Fill in the form fields and click the **Run Test** button. The test cannot be st
 
 When the test completes, a result panel appears showing the connection status, a step-by-step log stream, and summary metrics.
 
+### Stages
+
+The test runs these stages in order.
+
+| Stage | When it runs |
+|-------|--------------|
+| **DNS** | Always. |
+| **TCP** | Always. |
+| **TLS** | Only when the protocol is **TLS/TCP**. |
+| **HTTP** | Only when you enter an **HTTP path**. |
+
+Each stage shows its state and its duration. The state is **Passed**, **Failed** or **Not run**. A stage is **Not run** when an earlier stage failed, or when the stage does not apply to the test.
+
+When a stage fails, the result shows the title "cut at the *stage* stage". The **Diagnosis** text under it explains the probable cause and the next step.
+
 ### Connection Statuses
 
 | Status | Description |
 |--------|-------------|
-| **Successful** | Connection to the target server was established. |
+| **Successful** | All stages passed. |
 | **Timeout** | The connection received no response. Typically indicates the firewall is silently dropping packets. |
-| **Connection Refused** | The port is not open or the service is not running. |
-| **DNS Failed** | The hostname could not be resolved to an IP address. |
-| **Connection Reset** | The connection was reset by the remote host. |
+| **Refused** | The target answered with a reset. The port is not open, or a firewall rejects the connection. |
+| **Unreachable** | An ICMP unreachable came back. A firewall REJECT rule or a missing route blocks the target. |
+| **Connection reset** | The connection was reset or closed by the remote side. |
+| **TLS failed** | The TLS handshake failed. |
+| **DNS failed** | The hostname could not be resolved to an IP address. |
+| **Error** | The test could not be completed, for example because the HTTP path is not valid. |
+
+### TLS Details
+
+For a **TLS/TCP** test, the result shows these fields.
+
+| Field | Description |
+|-------|-------------|
+| **Protocol** and **Cipher** | The negotiated TLS protocol and cipher. |
+| **Trusted** | Whether the certificate chain is trusted. |
+| **Host name matches** | Whether the certificate matches the host name. |
+| **Subject**, **Issuer**, **Valid until** | Details of the certificate chain. The subject alternative names (SAN) are also shown. |
+
+The test uses the same trust store as the gateway traffic. A certificate that the gateway trusts is trusted here.
+
+A host name mismatch cuts the test only when **Enable Hostname Verification For Secure Connections** is on in [General Settings](/en/admin/system-settings/global-configuration). When the setting is off, the result shows a yellow warning and the test continues. Calls to this address fail if you turn the setting on later.
+
+### HTTP Response Details
+
+When the HTTP stage runs, the result shows the status line, the response headers and the **Body excerpt** (first 2 KB).
+
+### Recognised Devices
+
+The result lists the devices that the test recognises from the response or from the certificate. Each device has one of three labels.
+
+| Label | Description |
+|-------|-------------|
+| **Produced the response** | A device on the path blocked the request and produced this response, for example a WAF block page. Some pages carry a reference ID, for example the F5 ASM Support ID. Give this reference to the network team. They find the blocked request in the device log. |
+| **Generated the error page** | A reverse proxy or load balancer produced the error page (nginx, HAProxy, Envoy, Squid). This is often the application's own proxy, not a security device. |
+| **On the path** | A cookie or a `Server` header shows the device. The response can still come from the backend. |
+
+The test recognises these products from the response: F5 BIG-IP (ASM, LTM, APM), Imperva (Incapsula, SecureSphere), Fortinet (FortiWeb, FortiGate), Citrix NetScaler AppFirewall, Akamai, Cloudflare, AWS ELB / AWS WAF, ModSecurity, Barracuda WAF, Palo Alto Networks, Radware AppWall, Sophos UTM Web Protection, Istio / Envoy, HAProxy, nginx and Squid.
+
+The test also recognises two cases from the certificate:
+
+- **Ingress default certificate**: the target presents the default certificate of ingress-nginx or Traefik. The request reached an ingress that has no certificate for this host.
+- **SSL inspection**: the certificate is not trusted, and a security vendor's CA signed it. A device on the path replaces the backend certificate with its own.
 
 ### Step-by-Step Log
 
-Each test produces a four-phase log:
-
-| Phase | Description |
-|-------|-------------|
-| `INIT` | Test parameters and environment information |
-| `DNS` | Hostname-to-IP resolution process |
-| `TCP` | TCP (or TLS/TCP) connection setup |
-| `RESULT` | Final outcome and duration summary |
+The **Step log** lists each step of the test with its stage name: `INIT`, `DNS`, `TCP`, `TLS`, `HTTP` and `RESULT`.
 
 ### Summary Metrics
 
@@ -75,13 +144,22 @@ Each test produces a four-phase log:
 | **Status** | Successful / Failed |
 | **Total Duration** | Total elapsed time from start to finish (ms) |
 | **DNS Resolution** | Time taken to resolve the hostname to an IP (ms). Displays "Failed" if DNS resolution fails. |
-| **TCP Handshake** | Time taken to establish the TCP connection (ms). Displays "Failed" for unsuccessful connections. |
 
 :::info
 
 If DNS resolution succeeds but the TCP connection cannot be established, the issue is at the network layer (firewall rule, closed port, etc.).
 
 :::
+
+## Response Analysis
+
+Use the **Response Analysis** tab to analyse a response that a client already received.
+
+1. Open the **Response Analysis** tab.
+2. Paste the raw response that the client received: the status line, the headers and the body.
+3. Click **Analyze**.
+
+The same device matching runs on the pasted text. The analysis runs in your browser. The text is not sent to the server.
 
 ## Test History
 
@@ -102,7 +180,9 @@ The **Test History** tab provides access to all previously performed tests. Each
 | **Target** | `host:port` and resolved IP address |
 | **Protocol** | TCP or TLS/TCP |
 | **Description** | The note entered during the test |
-| **Result** | Successful / Timeout / Refused / DNS Failed / Connection Reset |
+| **Result** | Successful / Timeout / Refused / Unreachable / Connection reset / TLS failed / DNS failed / Error |
+
+Click the eye icon (**Show details**) on a row to open the result card of that old record.
 
 :::info
 
