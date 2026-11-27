@@ -955,7 +955,9 @@ const sidebars: SidebarsConfig = {
             "reports/organization-api-data-model-access-report",
             "reports/consumer-access-report",
             "reports/inactive-clients-report",
-            "reports/inactive-endpoints-report"
+            "reports/inactive-endpoints-report",
+            "reports/run-report-configuration",
+            "reports/search-saved-query"
           ]
         },
         {

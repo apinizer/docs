@@ -809,6 +809,7 @@ const sidebars: SidebarsConfig = {
         "integrations/connection-management/database",
         "integrations/connection-management/email",
         "integrations/connection-management/elasticsearch",
+        "integrations/connection-management/external-vault",
         "integrations/connection-management/ldap-active-directory",
         "integrations/connection-management/kafka",
         "integrations/connection-management/rabbitMQ",
