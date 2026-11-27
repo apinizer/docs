@@ -14,7 +14,7 @@ Overview:
 
 <img
     src="/images/develop/api-proxy-olusturma/client-route.png"
-    alt="Image 2024 9 9 15 35 35 Pn"
+    alt="Client Route section: Relative Paths, Methods, Hosts and Headers"
     width="1000"
     className="mr-auto"
 />
@@ -45,22 +45,20 @@ Before this feature was developed, only a single unique relative path could be d
 
 ## Routing Priority Order
 
-The Gateway evaluates incoming requests according to the following priority order:
+An API Proxy can be selected only if **all** criteria defined in its client route (host, header, path, method) match the request. When several API Proxies qualify, the Gateway decides in this order:
 
-<CardGroup cols={4}>
-  <Card title="1. Relative Path" icon="1">
-    Highest priority
-  </Card>
-  <Card title="2. Hosts" icon="2">
-    Host header check
-  </Card>
-  <Card title="3. Headers" icon="3">
-    Header check
-  </Card>
-  <Card title="4. Methods" icon="4">
-    Lowest priority
-  </Card>
-</CardGroup>
+1. **The proxy that defines more criteria wins.** For example, a proxy with a path and a host beats a proxy with only a path.
+2. **When the number of criteria is equal**, the order is **Host > Header > Relative Path > Method**.
+3. **When the set of criteria is the same**, the proxy whose path matches exactly comes first, then the proxy with the longest path.
+4. **If there is still a tie**, the order in which the proxies were loaded decides.
+
+:::warning
+
+The number of criteria comes before path length. For example, if Proxy A defines the path `/api` and the host `X`, and Proxy B defines only the path `/api/v1`, a request to `/api/v1` with `Host: X` is routed to Proxy A.
+
+:::
+
+If no API Proxy matches, the Gateway returns **404** (`ERR-002`).
 
 ## Matching Logic
 
@@ -84,17 +82,18 @@ When multiple headers are defined, it works with **AND** logic. That is, **all**
 Headers: testmode:true, test:true
 ```
 
-Both `testmode: true` and `test: true` headers must be present in the request.
+Both `testmode: true` and `test: true` headers must be present in the request. Header names and values are compared case-insensitively. A `Host` entry in the header list is ignored; use the **Hosts** field for the host.
 
 ### Path Matching
 
-* Relative path matching has the highest priority
-* More specific (longer) paths are evaluated before more general (shorter) paths
+* Among proxies with the same set of criteria, an exact path match comes first, then the longest prefix
 * If an exact match is not found, the closest parent path is used
+* A prefix matches only at a segment boundary: `/jokes` matches `/jokes/a` but not `/jokes1`
+* Path comparison is case-insensitive and a trailing `/` is ignored
 
 ### Method Matching
 
-* Method checking has the lowest priority
+* When the number of criteria is equal, the method is evaluated last
 * If not specified, all HTTP methods are accepted
 
 ## Wildcard Hostname Usage
@@ -106,8 +105,9 @@ Apinizer supports **wildcard (joker character)** usage to provide flexibility in
 :::warning
 
 **Wildcard Rules:**
-* Can contain only **one** asterisk (*) in the **leftmost** or **rightmost** label of the domain
-* Asterisk can be used at the beginning or end of the domain
+* `*` matches one or more characters and can span several labels, dots included
+* `*` is most often used at the start (`*.example.com`) or the end (`example.*`)
+* If a wildcard host has no port, any port is accepted
 
 :::
 
@@ -161,11 +161,11 @@ According to this configuration, incoming requests are routed as follows:
     GET https://<ACCESS_URL>/jokes
     ```
     
-    **Result:** Routed to Proxy 5 (default proxy since no condition is met)
+    **Result:** Routed to Proxy 5 (the only proxy whose conditions are all met)
     
     :::tip
 
-Path matched but host and header conditions were not met, so Proxy 5 with the simplest configuration is selected.
+The extra conditions of Proxy 1 and 2 (header and host) are not met, so Proxy 5, the only proxy whose conditions are all met, is selected.
 
 :::
   </Accordion>
@@ -181,7 +181,7 @@ Path matched but host and header conditions were not met, so Proxy 5 with the si
     
     :::tip
 
-Proxy 2 is selected because host has higher priority than header.
+The path and host conditions of Proxy 2 are met, and it defines more criteria than Proxy 5. Proxy 1 drops out because its header conditions are not met. So Proxy 2 is selected.
 
 :::
   </Accordion>
@@ -229,7 +229,7 @@ Proxy 1 is selected because all header conditions are met.
     
     :::tip
 
-Proxy 4 is selected because path has the highest priority and it has an exact matching path.
+The path of Proxy 1, 2 and 5 (`/jokes`) does not match `/jokes1`, because a prefix matches only at a segment boundary. Proxy 4, whose path matches exactly, is selected.
 
 :::
   </Accordion>
@@ -288,11 +288,11 @@ There is no exact match for `/jokes1/endpoint_y` path, so the parent path match 
     test: true
     ```
     
-    **Result:** Routed to Proxy 2 (host has higher priority than header)
+    **Result:** Routed to Proxy 2 (on a tie, host comes before header)
     
     :::tip
 
-Proxy 2 is selected because host has higher priority than header, so when host condition is met, header conditions are ignored.
+All conditions of Proxy 1 and 2 are met, and both define two criteria. When the number of criteria is equal, Host comes before Header, so Proxy 2 is selected.
 
 :::
   </Accordion>
@@ -306,11 +306,11 @@ Proxy 2 is selected because host has higher priority than header, so when host c
     test: true
     ```
     
-    **Result:** Routed to Proxy 4 (path has highest priority, host and headers are ignored)
+    **Result:** Routed to Proxy 4 (the path of Proxy 1 and 2 does not match)
     
     :::tip
 
-Proxy 4 is selected because path has the highest priority, so when path match is met, host and header conditions are ignored.
+The path of Proxy 1 and 2 (`/jokes`) does not match `/jokes1`, so these proxies drop out. Even though their host and header conditions are met, they cannot be selected because the path condition is not. Among the remaining proxies, Proxy 4, whose path matches, is selected.
 
 :::
   </Accordion>
@@ -330,7 +330,7 @@ The table below shows how the API Proxy is selected in different combinations:
 
 | #  | HOST      | PATH      | METHOD    | HEADER    | RESULT        | EXPLANATION                                                      |
 | -- | --------- | --------- | --------- | --------- | ------------ | ------------------------------------------------------------- |
-| 1  | None       | None       | None       | None       | ✓ SELECTED    | No criteria defined                                   |
+| 1  | None       | None       | None       | None       | ✗ INVALID     | At least one path, method, host or header is required |
 | 2  | None       | None       | None       | Matched   | ✓ SELECTED    | All defined criteria OK (HEADER)                             |
 | 3  | None       | None       | None       | Not Matched | ✗ REJECTED | Cannot route because HEADER did not match                     |
 | 4  | None       | None       | Matched   | None       | ✓ SELECTED    | All defined criteria OK (METHOD)                             |
@@ -450,9 +450,9 @@ When a published address has a host that is not in the **Hosts** list of the Cli
 
 
   <Accordion title="Path Matching">
-    * Relative path matching has the highest priority
-    * More specific (longer) paths are evaluated before more general (shorter) paths
-    * If an exact match is not found, the closest parent path is used
+    * A proxy that defines more criteria comes before path length
+    * Within the same set of criteria, an exact match comes first, then the longest prefix
+    * A prefix matches only at a segment boundary (`/jokes` does not match `/jokes1`)
   </Accordion>
   
   <Accordion title="Host Matching">
@@ -464,12 +464,12 @@ When a published address has a host that is not in the **Hosts** list of the Cli
   <Accordion title="Header Matching">
     * Multiple headers can be defined
     * Headers work with **AND** logic
-    * **All** headers defined in the request must be present
+    * All defined headers must be present in the request
     * In case of missing or incorrect headers, it moves to the next suitable proxy
   </Accordion>
   
   <Accordion title="Method Matching">
-    * Method checking has the lowest priority
+    * When the number of criteria is equal, the method is evaluated last
     * If not specified, all HTTP methods are accepted
   </Accordion>
 
